@@ -25,7 +25,6 @@ const touchIdPreferencePath = path.join(clientProfileRoot, "touch-id-preference.
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const {
   createClientProjectionStore,
-  readClientProviderInterfaceDescriptors,
 } = require("./clientDataSource.cjs");
 const {
   mutateApplicationPrivateConfiguration,
@@ -66,6 +65,7 @@ const { createProcessViewerManager } = require("./processViewer.cjs");
 const { createWorkerEnvironmentOperatorActions } = require("./workerEnvironmentActions.cjs");
 const { createWorkerEnvironmentFileReader } = require("./workerEnvironmentFiles.cjs");
 const { createOsFileStore } = require("./osFiles.cjs");
+const { createLabFileStore } = require("./labFiles.cjs");
 const {
   captureArtifactDelivery,
   handInArtifact,
@@ -153,6 +153,7 @@ let processViewerManager = null;
 let workerEnvironmentOperatorActions = null;
 let workerEnvironmentFileReader = null;
 let osFileStore = null;
+let labFileStore = null;
 let runtimeHost = null;
 let runtimeInitializationPromise = null;
 let runtimeInitializationComplete = false;
@@ -1059,6 +1060,19 @@ function getWorkerEnvironmentFileReader() {
     workerEnvironmentFileReader = createWorkerEnvironmentFileReader({ resolveSurface: resolveProjectedWorkerEnvironmentSurface });
   }
   return workerEnvironmentFileReader;
+}
+
+function getLabFileStore() {
+  labFileStore ??= createLabFileStore({
+    registryRoot: resolveLocalPackageRegistry,
+    workspaceFiles: () => getProjectionStore("lab").workspaceFiles(),
+    interfaceDescriptor: (interfaceId) => getProjectionStore("lab").interfaceDescriptor(interfaceId),
+  });
+  return labFileStore;
+}
+
+function osFileStoreFor(token) {
+  return getClientAccessController().requireSession(token).profile === "lab" ? getLabFileStore() : getOsFileStore();
 }
 
 function getOsFileStore() {
@@ -2865,7 +2879,20 @@ function publishRuntimeEvent(channel, payload) {
   return published;
 }
 
+function labRuntimeHostState(token) {
+  if (typeof token !== "string" || !token) return null;
+  return getClientAccessController().requireSession(token).profile === "lab"
+    ? getProjectionStore("lab").runtimeHostState()
+    : null;
+}
+
 function subscribeRuntimeEvents(event, token) {
+  const lab = labRuntimeHostState(token);
+  if (lab) {
+    runtimeEventSubscriptions.delete(event.sender.id);
+    event.sender.send("octopus:runtime-host-state", lab);
+    return { subscribed: true };
+  }
   requireRuntimeStateAccess(event, token);
   runtimeEventSubscriptions.set(event.sender.id, { sender: event.sender, token });
   event.sender.once("destroyed", () => {
@@ -2881,6 +2908,8 @@ function unsubscribeRuntimeEvents(event) {
 }
 
 async function runtimeBootStatusHandler(event, token) {
+  const lab = labRuntimeHostState(token);
+  if (lab) return lab;
   requireRuntimeStateAccess(event, token);
   return ensureRuntimeHost().probe();
 }
@@ -2899,7 +2928,7 @@ ipcMain.handle("octopus:transport-defaults", async (_event, token) => {
   const { profile } = getClientAccessController().requireSession(token);
   const octopusHome = resolveOctopusHome();
   return profile === "lab"
-    ? { endpoint: "lab://isolated", repoRoot: null, octopusHome: null, registryRoot: null, stateRoot: null, ledgerPath: null }
+    ? { endpoint: getProjectionStore("lab").runtimeHostState().endpoint, repoRoot: null, octopusHome: null, registryRoot: null, stateRoot: null, ledgerPath: null }
     : {
       endpoint: defaultRuntimeEndpoint(),
       repoRoot: resolveRepoRoot(),
@@ -3750,11 +3779,9 @@ ipcMain.handle("octopus:provider-interfaces", async (_event, token) => {
   const repoRoot = profile === "live" ? resolveRepoRoot() : "";
   const registryRoot = profile === "live" ? path.join(resolveOctopusHome(), "registry") : "";
   try {
-    const providers = profile === "live"
-      ? (await getProjectionStore(profile).read(projectionReadRequest(
-        "projection.operator.providers.list",
-      ))).providers
-      : await readClientProviderInterfaceDescriptors(profile, registryRoot);
+    const providers = (await getProjectionStore(profile).read(projectionReadRequest(
+      "projection.operator.providers.list",
+    ))).providers;
     const catalog = profile === "live" ? await getClientProviderMetadata().catalog(providers) : providers;
     getClientAccessController().requireSession(token, [profile]);
     if (profile === "live" && registryRoot !== path.join(resolveOctopusHome(), "registry")) {
@@ -3838,6 +3865,8 @@ ipcMain.handle("octopus:client-setup-resume", async (event, token, request) => {
 });
 
 ipcMain.handle("octopus:scheduled-interface-mutate", async (_event, token, request) => {
+  const { profile } = getClientAccessController().requireSession(token);
+  if (profile === "lab") return getProjectionStore("lab").mutateScheduledInterface(request);
   getClientAccessController().requireSession(token, ["live"]);
   await prepareLiveProjectionRead();
   const outcome = await mutateScheduledInterface(
@@ -4161,30 +4190,26 @@ ipcMain.handle("octopus:worker-environment-file-system-action", async (_event, t
 });
 
 ipcMain.handle("octopus:os-files-roots", async (_event, token) => {
-  getClientAccessController().requireSession(token, ["live"]);
-  return getOsFileStore().roots();
+  return osFileStoreFor(token).roots();
 });
 
 ipcMain.handle("octopus:os-files-list", async (_event, token, request) => {
-  getClientAccessController().requireSession(token, ["live"]);
-  return getOsFileStore().list(request);
+  return osFileStoreFor(token).list(request);
 });
 
 ipcMain.handle("octopus:os-file-read", async (_event, token, request) => {
-  getClientAccessController().requireSession(token, ["live"]);
-  return getOsFileStore().read(request);
+  return osFileStoreFor(token).read(request);
 });
 
 ipcMain.handle("octopus:os-file-write", async (_event, token, request) => {
-  getClientAccessController().requireSession(token, ["live"]);
-  return getOsFileStore().write(request);
+  return osFileStoreFor(token).write(request);
 });
 
 ipcMain.handle("octopus:os-file-system-action", async (_event, token, request) => {
-  getClientAccessController().requireSession(token, ["live"]);
+  const store = osFileStoreFor(token);
   const action = String(request?.action || "");
   if (!["resolve", "reveal", "open"].includes(action)) throw new Error("OS file system action is invalid");
-  const resolved = await getOsFileStore().resolvePath(request);
+  const resolved = await store.resolvePath(request);
   if (action === "reveal") shell.showItemInFolder(resolved.absolutePath);
   if (action === "open") {
     const result = await shell.openPath(resolved.absolutePath);
@@ -4342,6 +4367,20 @@ ipcMain.handle("octopus:composer-prediction", async (event, token, request) => {
 });
 
 ipcMain.handle("octopus:runtime-status", async (_event, token, request) => {
+  const lab = labRuntimeHostState(token);
+  if (lab) {
+    return {
+      up: lab.ready,
+      endpoint: lab.endpoint,
+      phase: lab.phase,
+      ownership: lab.ownership,
+      pid: lab.pid,
+      home: lab.home,
+      sourceRegistry: lab.sourceRegistry,
+      runtimeBinary: lab.runtimeBinary,
+      hostError: lab.error,
+    };
+  }
   getClientAccessController().requireSession(token, ["live"]);
   const endpoint = request && typeof request.endpoint === "string" && request.endpoint.trim()
     ? request.endpoint.trim()

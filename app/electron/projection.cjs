@@ -15134,6 +15134,8 @@ module.exports = {
   setupTriggerProof,
   armSetupTriggers,
   readProviderInterfaceDescriptors,
+  parseApplicationManifest,
+  readApplicationLogoAsset,
   DESCRIPTOR_REGISTRIES,
   stringValue,
   arrayValue,

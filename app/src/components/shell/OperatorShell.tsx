@@ -2356,7 +2356,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     : undefined;
 
   return (
-    <ScheduledWorkspaceProvider key={JSON.stringify([accessProfile, runtimeHost.home])} active={accessProfile === "live" && (activeSurface.id === "scheduled" || (secondaryPaneOpen && secondarySurfaceId === "scheduled"))}>
+    <ScheduledWorkspaceProvider key={JSON.stringify([accessProfile, runtimeHost.home])} active={activeSurface.id === "scheduled" || (secondaryPaneOpen && secondarySurfaceId === "scheduled")}>
       <FilesPaneDialogs />
       <AppShell
         accessProfile={accessProfile}

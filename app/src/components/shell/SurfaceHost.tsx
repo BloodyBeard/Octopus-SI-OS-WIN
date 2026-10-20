@@ -23,7 +23,7 @@ const Inspector = lazy(() => import("../Inspector").then((module) => ({ default:
 const ApplicationsView = lazy(() => import("../ApplicationsView").then((module) => ({ default: module.ApplicationsView })));
 const DriversView = lazy(() => import("../DriversView").then((module) => ({ default: module.DriversView })));
 const RegistryView = lazy(() => import("../RegistryView").then((module) => ({ default: module.RegistryView })));
-const ScheduledView = lazy(() => import("../ScheduledView").then((module) => ({ default: module.ScheduledView })));
+const ScheduledView = lazy(() => import("../scheduled/LiveScheduledView").then((module) => ({ default: module.LiveScheduledView })));
 const TopologyStage = lazy(() => import("../TopologyStage").then((module) => ({ default: module.TopologyStage })));
 const WorkerEnvironmentsView = lazy(() => import("../WorkerEnvironmentsView").then((module) => ({ default: module.WorkerEnvironmentsView })));
 const HomeSurface = lazy(() => import("./HomeSurface").then((module) => ({ default: module.HomeSurface })));
@@ -202,7 +202,7 @@ function renderSurface(
     case "builtin.voice":
       return <HomeSurface accessProfile={accessProfile} commandsActive={commandsActive} homeRunId={homeRunId} voiceSession={voiceSession} homeViewMode={homeViewMode} onHomeViewModeChange={onHomeViewModeChange} searchFocusTick={searchFocusTick} chatWorkspace={chatWorkspace} onOpenFiles={onOpenFiles} voiceSurfaces={voiceSurfaces} installedVoiceWidgetIds={installedVoiceWidgetIds} installedVoiceWidgetsReady={installedVoiceWidgetsReady} builtinVoiceWidgetSources={builtinVoiceWidgetSources} workerEnvironmentSurfaces={workerEnvironmentSurfaces} topology={topology} />;
     case "builtin.scheduled":
-      return <ScheduledView accessProfile={accessProfile} searchFocusTick={searchFocusTick} navigationInPane={paneRole === "secondary"} />;
+      return <ScheduledView searchFocusTick={searchFocusTick} navigationInPane={paneRole === "secondary"} />;
     case "builtin.worker_environments":
       return <WorkerEnvironmentsView accessProfile={accessProfile} chatRuns={chatWorkspace.runs} onOpenRun={onOpenRun} onSelect={onSelect} searchFocusTick={searchFocusTick} snapshot={topology} surfaces={workerEnvironmentSurfaces} />;
     case "custom.projection":

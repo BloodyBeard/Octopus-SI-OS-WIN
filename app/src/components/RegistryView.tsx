@@ -99,9 +99,6 @@ export function RegistryView({ accessProfile, onOpenFiles, query }: {
 
   useFloatingMenu(Boolean(fileMenu), fileMenuRef, () => setFileMenu(null), fileMenu ? { left: fileMenu.x, top: fileMenu.y } : null);
 
-  if (accessProfile !== "live") {
-    return <RuntimeEmpty title="Registry unavailable" detail="The Test profile cannot read the admitted Registry filesystem." />;
-  }
   if (!window.octopusTransport?.listOsFiles) {
     return <RuntimeEmpty title="Files bridge unavailable" detail="Registry is the admitted registry/ directory tree." />;
   }

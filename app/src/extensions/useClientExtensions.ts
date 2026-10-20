@@ -256,7 +256,9 @@ export function materializeClientExtensions(
       && lifecycle.receiptState === "valid"
       && lifecycle.desiredState === "installed"
       && sameRevision(lifecycle.sourceRevision ?? undefined, revision);
-    const installed = receiptInstalled && (builtin || admission === "reviewed");
+    const installed = accessProfile === "lab"
+      ? builtin && extension.manifest.default_installed
+      : receiptInstalled && (builtin || admission === "reviewed");
     const credentials = currentCredentials(extension, snapshot);
     const configured = (extension.manifest.sources ?? []).every((source) => (
       !source.required || sourceConfigured(source, sourceConfiguration[source.id], credentials)

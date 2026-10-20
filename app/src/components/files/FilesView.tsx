@@ -151,7 +151,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
 
   useLayoutEffect(() => {
     const workspace = workspaceRef.current;
-    if (!workspace || accessProfile !== "live") return;
+    if (!workspace) return;
     const updateMaximum = () => {
       const width = workspace.getBoundingClientRect().width;
       setTreeMaximum(Math.max(FILE_TREE_MINIMUM_WIDTH, Math.floor(width * 0.6)));
@@ -182,7 +182,6 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
   }, [active, activeTargetKey, dirty, incomingTargetKey, saving, target, locked]);
 
   useEffect(() => {
-    if (accessProfile !== "live") return;
     if (artifactTarget) {
       setRoots([]);
       setTreeError("");
@@ -523,10 +522,6 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
   function rememberView(view: FilesEditorViewState) {
     if (!hasFilesPane(paneKey) || paneLocked()) return;
     updateFilesPane(paneKey, (current) => current.view.scrollTop === view.scrollTop && current.view.scrollLeft === view.scrollLeft ? current : { ...current, view });
-  }
-
-  if (accessProfile !== "live") {
-    return <FilesUnavailable title="Files unavailable" detail="Direct filesystem editing is disabled in the isolated Test profile." />;
   }
 
   return (

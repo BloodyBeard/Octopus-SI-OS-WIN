@@ -1,108 +1,49 @@
+const crypto = require("node:crypto");
 const DAY_MS = 86_400_000;
 const { parseProjectionReadRequest } = require("./projectionReadContract.cjs");
 const { operatorActivityRows } = require("./operatorActivity.cjs");
+const { createLabCatalog } = require("./labCatalog.cjs");
 
 const FIXTURE_ROOT_EE_ID = "lab_ee_home";
 const FIXTURE_PRIMARY_PROJECT_ID = "lab_project_lumen";
 const FIXTURE_RESEARCH_PROJECT_ID = "lab_project_research";
 const FIXTURE_OPERATIONS_PROJECT_ID = "lab_project_operations";
 const FIXTURE_WORKSPACE_ROOT = "/workspace/lumen";
+const LAB_CONTEXT_WINDOW = 272_000;
+const LAB_RUNTIME_ENDPOINT = "lab://isolated";
+const LAB_CHAT_APPLICATIONS = {
+  lab_run_2: ["world_mcp_github"],
+  lab_run_4: ["world_slack", "world_cron"],
+  lab_run_5: ["world_slack"],
+};
+const LAB_DEFAULT_APPLICATIONS = {
+  [FIXTURE_PRIMARY_PROJECT_ID]: ["world_mcp_github"],
+  [FIXTURE_OPERATIONS_PROJECT_ID]: ["world_slack", "world_cron"],
+};
+const LAB_DRIVER_PROJECTS = {
+  browser_session: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_RESEARCH_PROJECT_ID],
+  process_session: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_OPERATIONS_PROJECT_ID],
+  web_search: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_RESEARCH_PROJECT_ID, FIXTURE_OPERATIONS_PROJECT_ID],
+};
+const LAB_DRIVER_HOST_SLOTS = {
+  browser_session: { browser_profile_root: "/workspace/.browser-profile" },
+  filesystem_workspace: { workspace_root: FIXTURE_WORKSPACE_ROOT },
+  git_worktree: { workspace_root: FIXTURE_WORKSPACE_ROOT },
+  process_session: { workspace_root: FIXTURE_WORKSPACE_ROOT },
+};
 
 const FIXTURE_CHAT_ACTIVITY = [
-  {
-    delay: 320,
-    suffix: "turn-started",
-    eventKind: "turn_started",
-    label: "turn.started",
-    text: "",
-    eventData: { lifecycle: "started" },
-  },
-  {
-    delay: 780,
-    suffix: "reasoning-1",
-    eventKind: "reasoning",
-    label: "model.reasoning",
-    text: "Inspecting the demo workspace",
-    eventData: { lifecycle: "completed", summary: [{ text: "Inspecting the demo workspace" }] },
-  },
-  {
-    delay: 1_180,
-    suffix: "list-started",
-    eventKind: "dynamic_tool",
-    label: "tool.call",
-    text: "",
-    eventData: { arguments: { path: "src" }, status: "started", tool: "coder.list_dir" },
-  },
-  {
-    delay: 1_720,
-    suffix: "list-completed",
-    eventKind: "dynamic_tool",
-    label: "tool.call",
-    text: "",
-    eventData: { result: { entries: ["components", "styles"] }, status: "completed", tool: "coder.list_dir" },
-    callSuffix: "list",
-  },
-  {
-    delay: 2_160,
-    suffix: "read-started",
-    eventKind: "dynamic_tool",
-    label: "tool.call",
-    text: "",
-    eventData: { arguments: { path: "src/components/ProjectHeader.tsx" }, status: "started", tool: "coder.read_file" },
-  },
-  {
-    delay: 2_760,
-    suffix: "read-completed",
-    eventKind: "dynamic_tool",
-    label: "tool.call",
-    text: "",
-    eventData: { result: { bytes: 1842 }, status: "completed", tool: "coder.read_file" },
-    callSuffix: "read",
-  },
-  {
-    delay: 3_240,
-    suffix: "reasoning-2",
-    eventKind: "reasoning",
-    label: "model.reasoning",
-    text: "Preparing a focused change",
-    eventData: { lifecycle: "completed", summary: [{ text: "Preparing a focused change" }] },
-  },
-  {
-    delay: 3_760,
-    suffix: "change",
-    eventKind: "file_change",
-    label: "file.change",
-    text: "Updated the project header",
-    eventData: {
-      changes: [{ added: 12, deleted: 3, kind: "update", path: "src/components/ProjectHeader.tsx" }],
-      status: "completed",
-    },
-  },
-  {
-    delay: 4_280,
-    suffix: "command-started",
-    eventKind: "dynamic_tool",
-    label: "tool.call",
-    text: "",
-    eventData: { arguments: { command: "npm test -- ProjectHeader" }, status: "started", tool: "coder.build" },
-  },
-  {
-    delay: 5_620,
-    suffix: "command-completed",
-    eventKind: "dynamic_tool",
-    label: "tool.call",
-    text: "",
-    eventData: { result: { output: "1 test passed" }, status: "completed", tool: "coder.build" },
-    callSuffix: "command",
-  },
-  {
-    delay: 6_120,
-    suffix: "turn-completed",
-    eventKind: "turn_completed",
-    label: "turn.completed",
-    text: "",
-    eventData: { lifecycle: "completed", duration_ms: 5_800 },
-  },
+  { delay: 320, suffix: "turn-started", kind: "turn_started" },
+  { delay: 780, suffix: "reasoning-1", kind: "reasoning", summary: ["**Inspecting the demo workspace**"] },
+  { delay: 980, suffix: "plan", kind: "commentary", text: "I'll read the header first, then make one focused change and run its check." },
+  { delay: 1_180, suffix: "list", kind: "tool", tool: "coder.list_dir", args: { path: "src" } },
+  { delay: 1_720, suffix: "list", kind: "tool", tool: "coder.list_dir", args: { path: "src" }, body: { entries: ["components", "styles"] } },
+  { delay: 2_160, suffix: "read", kind: "tool", tool: "coder.read_file", args: { path: "src/components/ProjectHeader.tsx" } },
+  { delay: 2_760, suffix: "read", kind: "tool", tool: "coder.read_file", args: { path: "src/components/ProjectHeader.tsx" }, body: { bytes: 1842 } },
+  { delay: 3_240, suffix: "reasoning-2", kind: "reasoning", summary: ["**Preparing a focused change**"] },
+  { delay: 3_760, suffix: "change", kind: "file_change", changes: [{ added: 12, deleted: 3, kind: "update", path: "src/components/ProjectHeader.tsx" }] },
+  { delay: 4_280, suffix: "command", kind: "tool", tool: "coder.build", args: { command: "npm test -- ProjectHeader" } },
+  { delay: 5_620, suffix: "command", kind: "tool", tool: "coder.build", args: { command: "npm test -- ProjectHeader" }, body: { output: "1 test passed" } },
 ];
 
 function freshenScheduledChats(chats) {
@@ -116,6 +57,26 @@ function freshenScheduledChats(chats) {
 
 function createFixtureProjectionStore(options = {}) {
   const data = buildFixtureProjection();
+  const catalog = createLabCatalog(options);
+  const openedAtMs = Date.now();
+  let appliedCatalog = null;
+
+  async function withCatalog() {
+    const lab = await catalog.load();
+    if (appliedCatalog !== lab) {
+      data.providers = lab.providers;
+      data.catalogErrors = lab.errors;
+      data.applications = labApplicationRows(lab.applications, data);
+      data.drivers = labDriverRows(lab.drivers, data);
+      const preferred = lab.providers[0];
+      for (const chat of data.chats) {
+        const provider = lab.providers.find((candidate) => candidate.id === chat.provider_interface_id) ?? preferred;
+        if (provider && !provider.models.some((model) => model.model === chat.provider_model)) chat.provider_model = provider.model;
+      }
+      appliedCatalog = lab;
+    }
+    return lab;
+  }
   const onChange = typeof options.onChange === "function" ? options.onChange : () => {};
   let generation = 1;
   const pendingChatReplies = new Map();
@@ -259,6 +220,7 @@ function createFixtureProjectionStore(options = {}) {
       case "projection.descriptors.ee.list":
         return { descriptors: limitRows(data.eeTemplates, params) };
       case "projection.operator.chats.list": {
+        await withCatalog();
         const chats = limitRows(freshenScheduledChats(data.chats), params);
         if (params.include_activity !== true) return { chats };
         const contexts = fixtureChatExecutionContexts(data);
@@ -301,25 +263,34 @@ function createFixtureProjectionStore(options = {}) {
         const home = data.chats.find((chat) => chat.client_surface_role === "home") ?? null;
         const rootEnvironment = data.eeInstances.find((environment) => environment.ee_id === FIXTURE_ROOT_EE_ID) ?? null;
         const projects = data.eeInstances.filter((environment) => environment.parent_ee_id === FIXTURE_ROOT_EE_ID);
+        const profiles = fixtureTaskAuthoringProfiles(data.eeInstances);
         return {
           status: home ? "ready" : "awaiting_home",
           root_ee_id: FIXTURE_ROOT_EE_ID,
           home_run_id: String(home?.run_id || ""),
           home_interface_id: String(home?.chat_interface_id || ""),
+          space_name: "Lab",
+          home_sidecar_digest: fixtureDigest("lab-home-sidecar"),
+          agent_catalog_path: "lab://client/agents/catalog.json",
+          agent_catalog_digest: "lab-agent-catalog",
           root_environment: rootEnvironment,
           projects,
           environments: data.eeInstances,
           ee_templates: data.eeTemplates,
           project_presentations: data.projectPresentations,
-          task_authoring_profiles: fixtureTaskAuthoringProfiles(data.eeInstances),
+          task_authoring_profiles: profiles,
           client_interface_ids: data.chats.map((chat) => chat.chat_interface_id),
           client_runs: data.chats.map((chat) => ({
             run_id: chat.run_id,
             ee_id: chat.ee_id,
+            record_path: `lab://state/runs/${chat.run_id}.json`,
+            record_digest: chat.record_digest,
             interface_id: chat.chat_interface_id,
             surface_role: chat.client_surface_role,
+            archived: chat.archived === true,
             provider_choice_interface: chat.provider_interface_id,
             worker_choice_interface: chat.worker_choice_interface_id,
+            authoring_profile: profiles.find((profile) => profile.ee_id === chat.ee_id) ?? null,
           })),
           read_only_runs: [],
           errors: [],
@@ -327,15 +298,19 @@ function createFixtureProjectionStore(options = {}) {
       }
       case "projection.operator.os.workspace_setup":
         return { status: "not_configured", receipt: null, errors: [] };
+      case "projection.operator.os.local_packages":
+        return (await withCatalog()).localPackages;
       case "projection.operator.os.applications":
+        await withCatalog();
         return {
           status: "ready",
           root_ee_id: FIXTURE_ROOT_EE_ID,
           applications: data.applications,
           projects: data.eeInstances.map(fixtureApplicationProject),
-          errors: [],
+          errors: data.catalogErrors,
         };
       case "projection.operator.os.drivers":
+        await withCatalog();
         return {
           status: "ready",
           root_ee_id: FIXTURE_ROOT_EE_ID,
@@ -350,6 +325,7 @@ function createFixtureProjectionStore(options = {}) {
         return fixtureRunActivityPage(runId, data.chatMessages[runId] || [], params);
       }
       case "projection.operator.chat.contexts":
+        await withCatalog();
         return {
           contexts: fixtureChatExecutionContexts(data),
           application_catalog: data.applications.map((application) => ({
@@ -362,10 +338,13 @@ function createFixtureProjectionStore(options = {}) {
             logo_dark_data_url: application.logo_dark_data_url,
             interfaces: application.interfaces,
             artifact_bindings: application.artifact_bindings,
+            task_capabilities: application.task_capabilities ?? {},
           })),
         };
       case "projection.operator.chat.messages":
         return { messages: data.chatMessages[requiredString(params.run_id, "run_id")] || [] };
+      case "projection.operator.providers.list":
+        return { providers: (await withCatalog()).providers };
       case "projection.operator.providers.status":
         return { providers: fixtureProviderStatus(data.chats) };
       case "projection.movements.list":
@@ -378,6 +357,21 @@ function createFixtureProjectionStore(options = {}) {
         return { home: params.home, run_id: params.run_id, interface_id: params.interface_id, actions: [] };
       case "projection.interface_artifacts.list":
         return { artifacts: [] };
+      case "projection.scheduled_interfaces.list":
+        return {
+          scheduled_interfaces: data.scheduledInterfaces,
+          scope_options: data.eeInstances.map((environment) => ({
+            ee_id: environment.ee_id,
+            name: data.projectPresentations.find((presentation) => presentation.ee_id === environment.ee_id)?.name
+              || (environment.ee_id === FIXTURE_ROOT_EE_ID ? "Home" : environment.goal),
+          })),
+        };
+      case "projection.operator.chat.search":
+        return fixtureChatSearch(data, params);
+      case "projection.artifact.bytes.read":
+        return labArtifactBytes(data, params);
+      case "projection.interface_media.read":
+        throw new Error("Test voice media is synthetic and keeps no recording.");
       default:
         throw new Error(`lab projection method is not implemented: ${method}`);
     }
@@ -386,7 +380,7 @@ function createFixtureProjectionStore(options = {}) {
   async function submitChatTurn(request) {
     const text = requiredString(request?.text, "text");
     const providerInterfaceId = requiredString(request?.providerInterfaceId, "providerInterfaceId");
-    if (!fixtureProviderInterfaceDescriptors().some((provider) => provider.id === providerInterfaceId)) {
+    if (!(await withCatalog()).providers.some((provider) => provider.id === providerInterfaceId)) {
       throw new Error(`Test provider does not exist: ${providerInterfaceId}`);
     }
     const now = Date.now();
@@ -412,7 +406,7 @@ function createFixtureProjectionStore(options = {}) {
         door_host_slots: request?.doorHostSlots || {},
         provider_interface_id: providerInterfaceId,
         provider_bound_interface_id: `${providerInterfaceId}_${runId}`,
-        provider_model: String(request?.providerModel || "gpt-5.6-codex"),
+        provider_model: String(request?.providerModel || data.providers?.[0]?.model || ""),
         provider_models_refreshable: false,
         reasoning_effort: String(request?.reasoningEffort || "medium"),
         created_at_ms: now,
@@ -430,24 +424,9 @@ function createFixtureProjectionStore(options = {}) {
     const messages = data.chatMessages[runId];
     const seq = nextFixtureChatSeq(data);
     const messageId = String(request?.messageId || `lab_message_${now.toString(36)}`);
-    messages.push(fixtureRow({
-      id: messageId,
-      run_id: runId,
-      role: "user",
-      label: "operator.message",
-      direction: "in",
-      text,
-      event_kind: "message",
-      event_data: { text, message_id: messageId },
-      created_at_ms: now,
-      movement_seq: seq,
-      artifact_id: messageId,
-      content_hash: `lab${messageId}`,
-      interface_id: chat.chat_interface_id,
-      attachments: fixtureChatAttachments(request?.attachments),
-      error: false,
-      terminal: true,
-    }));
+    const events = labChatEvents(chat);
+    const turnId = events.turnId(messageId);
+    messages.push(events.user({ id: messageId, text, createdAtMs: now, seq, attachments: fixtureChatAttachments(request?.attachments) }));
     chat.turn_open = true;
     chat.updated_at_ms = now;
     chat.message_count = messages.length;
@@ -457,33 +436,17 @@ function createFixtureProjectionStore(options = {}) {
       const timer = setTimeout(() => {
         if (!pendingChatReplies.has(runId)) return;
         const createdAtMs = Date.now();
-        const callSuffix = activity.callSuffix
-          || activity.suffix.split("-")[0];
-        messages.push(fixtureRow({
-          id: `${messageId}:${activity.suffix}`,
-          run_id: runId,
-          role: "assistant",
-          label: activity.label,
-          direction: "out",
-          event_kind: activity.eventKind,
-          event_data: {
-            ...activity.eventData,
-            ...(activity.eventKind === "dynamic_tool" ? { call_id: `${messageId}:${callSuffix}` } : {}),
-            ...(activity.eventKind === "turn_started" || activity.eventKind === "turn_completed"
-              ? { turn_id: `${messageId}:turn` }
-              : {}),
-            simulated: true,
-          },
-          text: activity.text,
-          created_at_ms: createdAtMs,
-          movement_seq: nextFixtureChatSeq(data),
-          artifact_id: `${messageId}:${activity.suffix}`,
-          content_hash: `lab${messageId}${activity.suffix}`,
-          interface_id: chat.provider_interface_id,
-          attachments: [],
-          error: false,
-          terminal: false,
-        }));
+        const id = `${messageId}-${activity.suffix}`;
+        const base = { id, turnId, createdAtMs, seq: nextFixtureChatSeq(data) };
+        messages.push(activity.kind === "turn_started"
+          ? events.turnStarted(base)
+          : activity.kind === "reasoning"
+            ? events.reasoning({ ...base, summary: activity.summary })
+            : activity.kind === "commentary"
+              ? events.commentary({ ...base, text: activity.text })
+              : activity.kind === "file_change"
+                ? events.fileChange({ ...base, changes: activity.changes })
+                : events.tool({ ...base, tool: activity.tool, args: activity.args, body: activity.body }));
         chat.updated_at_ms = createdAtMs;
         chat.message_count = messages.length;
         generation += 1;
@@ -496,26 +459,13 @@ function createFixtureProjectionStore(options = {}) {
       pendingChatReplies.delete(runId);
       const steers = messages.filter((message) => message.event_kind === "steering" && message.movement_seq > seq);
       const replyAt = Date.now();
-      messages.push(fixtureRow({
-        id: `${messageId}:reply`,
-        run_id: runId,
-        role: "assistant",
-        label: "interface.artifact.output",
-        direction: "out",
-        event_kind: "message",
-        event_data: { simulated: true, steering_messages: steers.length },
-        text: steers.length
-          ? `I incorporated ${steers.length} in-flight ${steers.length === 1 ? "message" : "messages"} and completed the demo change.`
-          : "Done. I inspected the demo workspace, updated `src/components/ProjectHeader.tsx`, and the focused check passes.",
-        created_at_ms: replyAt,
-        movement_seq: nextFixtureChatSeq(data),
-        artifact_id: `${messageId}:reply`,
-        content_hash: `lab${messageId}reply`,
-        interface_id: chat.chat_interface_id,
-        attachments: [],
-        error: false,
-        terminal: true,
-      }));
+      const finalText = steers.length
+        ? `I incorporated ${steers.length} in-flight ${steers.length === 1 ? "message" : "messages"} and completed the demo change.`
+        : "Done. I inspected the demo workspace, updated `src/components/ProjectHeader.tsx`, and the focused check passes.";
+      const previous = messages.findLast((message) => message.event_data?.context_window_usage);
+      const contextTokens = (Number(previous?.event_data?.context_window_usage?.used_tokens) || 18_000) + 7_400;
+      messages.push(events.finalAnswer({ id: `${messageId}-final`, turnId, text: finalText, createdAtMs: replyAt, seq: nextFixtureChatSeq(data), contextTokens, latencyMs: replyAt - now }));
+      messages.push(events.turnCompleted({ id: `${messageId}-turn-completed`, turnId, startedAtMs: now, finalId: `${messageId}-final`, finalText, createdAtMs: replyAt + 1, seq: nextFixtureChatSeq(data) }));
       chat.turn_open = false;
       chat.updated_at_ms = replyAt;
       chat.message_count = messages.length;
@@ -639,8 +589,112 @@ function createFixtureProjectionStore(options = {}) {
     };
   }
 
+  function mutateScheduledInterface(request) {
+    const action = requiredString(request?.action, "action");
+    const rows = data.scheduledInterfaces;
+    const find = (interfaceId) => {
+      const row = rows.find((candidate) => candidate.interface_id === interfaceId);
+      if (!row) throw new Error(`Test trigger does not exist: ${interfaceId}`);
+      return row;
+    };
+    const current = (row, digest) => {
+      if (row.activation_digest !== digest) throw new Error("This trigger changed since it was opened. Reopen it and try again.");
+    };
+    const fromDraft = (row, draft) => {
+      const schedule = draft.type === "interval"
+        ? { type: "interval", interval_seconds: Number(draft.intervalSeconds) }
+        : draft.type === "once"
+          ? { type: "once", due_at: String(draft.dueAt) }
+          : draft.type === "inactivity"
+            ? { type: "inactivity", seconds: Number(draft.inactivity?.seconds), interface_match: draft.inactivity?.interface_match ?? {}, exclude_interface_match: draft.inactivity?.exclude_interface_match ?? null, ...(draft.inactivity?.within_ee ? { within_ee: draft.inactivity.within_ee } : {}) }
+            : { type: "cron", cron: String(draft.cron) };
+      return labScheduledRow({
+        ...row,
+        status: row.status === "template" ? "enabled" : row.status,
+        template: false,
+        schedule,
+        timezone: String(draft.timezone || "UTC"),
+        fire_on_start: draft.fireOnStart === true,
+        instructions: String(draft.instructions ?? ""),
+        next_run_at_ms: Date.now() + DAY_MS,
+        next_run_source: "schedule",
+      });
+    };
+    let outcome;
+    if (action === "create") {
+      const source = find(requiredString(request.sourceInterfaceId, "sourceInterfaceId"));
+      current(source, request.sourceActivationDigest);
+      const interfaceId = requiredString(request.interfaceId, "interfaceId");
+      if (rows.some((row) => row.interface_id === interfaceId)) throw new Error(`Test trigger already exists: ${interfaceId}`);
+      const created = fromDraft({ ...source, interface_id: interfaceId, display_name: interfaceId.replace(/^lab_world_|^world_/, "").replace(/_/g, " "), deliveries: [] }, request.draft ?? {});
+      rows.push(created);
+      outcome = { action, interfaceId, activationDigest: created.activation_digest };
+    } else if (action === "update") {
+      const row = find(requiredString(request.interfaceId, "interfaceId"));
+      current(row, request.expectedDigest);
+      const updated = fromDraft(row, request.draft ?? {});
+      rows.splice(rows.indexOf(row), 1, updated);
+      outcome = { action, interfaceId: row.interface_id, activationDigest: updated.activation_digest };
+    } else if (action === "set_enabled") {
+      const row = find(requiredString(request.interfaceId, "interfaceId"));
+      current(row, request.expectedDigest);
+      const updated = labScheduledRow({ ...row, status: request.enabled === true ? "enabled" : "disabled", next_run_at_ms: Date.now() + DAY_MS, next_run_source: "schedule" });
+      rows.splice(rows.indexOf(row), 1, updated);
+      outcome = { action, interfaceId: row.interface_id, activationDigest: updated.activation_digest };
+    } else if (action === "delete") {
+      const row = find(requiredString(request.interfaceId, "interfaceId"));
+      current(row, request.expectedDigest);
+      rows.splice(rows.indexOf(row), 1);
+      outcome = { action, interfaceId: row.interface_id, deleted: true };
+    } else if (action === "undo_changes") {
+      const runId = requiredString(request.runId, "runId");
+      const delivery = rows.flatMap((row) => row.deliveries).find((candidate) => candidate.run_id === runId && candidate.journal);
+      if (!delivery || delivery.journal.digest !== request.expectedJournalDigest) throw new Error("This change journal changed since it was opened.");
+      delivery.journal = {
+        ...delivery.journal,
+        undone: true,
+        undoable: false,
+        changes: delivery.journal.changes.map((change) => change.kind === "file" ? { ...change, status: "undone" } : change),
+      };
+      outcome = { action, runId, restored: delivery.journal.changes.flatMap((change) => change.kind === "file" ? [change.path] : []) };
+    } else {
+      throw new Error(`Unsupported Test trigger action: ${action}`);
+    }
+    generation += 1;
+    onChange(generation);
+    return outcome;
+  }
+
+  function runtimeHostState() {
+    return {
+      phase: "ready",
+      ready: true,
+      ownership: "none",
+      pid: null,
+      home: "",
+      sourceRegistry: "",
+      runtimeBinary: "",
+      repoRoot: "",
+      launchCwd: "",
+      launchCommand: "",
+      launchEnv: {},
+      endpoint: LAB_RUNTIME_ENDPOINT,
+      error: null,
+      updatedAtMs: openedAtMs,
+    };
+  }
+
   return {
     read,
+    runtimeHostState,
+    interfaceDescriptor: (interfaceId) => {
+      const row = data.interfaces.find((candidate) => candidate.rule_id === interfaceId);
+      if (!row) return null;
+      const { projection_source: _source, artifact_transfer_protocol_status: _status, artifact_transfer_target_count: _count, artifact_transfer_ready_targets: _ready, artifact_transfer_target_reason: _reason, ...descriptor } = row;
+      return descriptor;
+    },
+    workspaceFiles: () => Object.fromEntries(fixtureWorkspaceEntries().filter((entry) => entry.kind === "file").map((entry) => [entry.path, entry.text])),
+    mutateScheduledInterface,
     submitChatTurn,
     submitChatSteer,
     updateChatPins,
@@ -746,8 +800,11 @@ function buildFixtureProjection() {
       ee_id: run.ee_id,
       worker: run.worker,
       checkpoint_id: `${run.run_id}:checkpoint:${(index % 2) + 1}`,
+      interface_id: "",
       artifact_id: artifacts[index % artifacts.length].artifact_id,
       created_at: at((index * 5) % 29, index % 12),
+      seq: 900 + index,
+      source: "ledger",
     });
   }).sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
 
@@ -895,8 +952,8 @@ function buildFixtureProjection() {
     fixtureRow({ ee_id: FIXTURE_RESEARCH_PROJECT_ID, name: "Research", icon: "globe", color: "teal" }),
     fixtureRow({ ee_id: FIXTURE_OPERATIONS_PROJECT_ID, name: "Operations", icon: "briefcase", color: "orange" }),
   ];
-  const applications = fixtureApplications(eeInstances);
-  const drivers = fixtureDrivers(eeInstances, workerEnvironments);
+  const applications = [];
+  const drivers = [];
   const hostRootRefs = {
     host_filesystem_root: "/",
     workspace_root: FIXTURE_WORKSPACE_ROOT,
@@ -912,7 +969,7 @@ function buildFixtureProjection() {
     { runId: "lab_run_5", title: "Compare onboarding patterns", surfaceRole: "task", eeId: FIXTURE_RESEARCH_PROJECT_ID, worker: "lab_system_worker_research", updatedDaysAgo: 1.4, createdDaysAgo: 5, nextScheduledAtMs: scheduledFollowup.getTime() },
     { runId: "lab_run_6", title: "Polish settings navigation", surfaceRole: "task", eeId: FIXTURE_PRIMARY_PROJECT_ID, worker: "lab_system_worker_coder", updatedDaysAgo: 2.1, createdDaysAgo: 8, nextScheduledAtMs: 0 },
     { runId: "lab_run_7", title: "Prepare release notes", surfaceRole: "task", eeId: FIXTURE_PRIMARY_PROJECT_ID, worker: "lab_system_worker_coder", updatedDaysAgo: 3.2, createdDaysAgo: 9, nextScheduledAtMs: 0 },
-    { runId: "lab_run_8", title: "Investigate preview reconnect", surfaceRole: "task", eeId: FIXTURE_PRIMARY_PROJECT_ID, worker: "lab_system_worker_coder", updatedDaysAgo: 4.1, createdDaysAgo: 11, nextScheduledAtMs: 0 },
+    { runId: "lab_run_8", title: "Investigate preview reconnect", surfaceRole: "task", eeId: FIXTURE_PRIMARY_PROJECT_ID, worker: "lab_system_worker_coder", updatedDaysAgo: 4.1, createdDaysAgo: 11, nextScheduledAtMs: 0, archived: true },
   ];
   const chats = chatSeeds.map((seed, index) => {
     const chatEnvironment = eeInstances.find((environment) => environment.ee_id === seed.eeId) ?? eeInstances[0];
@@ -928,9 +985,9 @@ function buildFixtureProjection() {
       ee_id: chatEnvironment.ee_id,
       ee_goal: chatEnvironment.goal,
       ee_template_name: chatEnvironment.template_name,
-      provider_interface_id: "lab_world_provider_codex",
-      provider_bound_interface_id: `lab_world_provider_codex_${seed.runId}`,
-      provider_model: "gpt-5.6-codex",
+      provider_interface_id: "world_provider_codex",
+      provider_bound_interface_id: `world_provider_codex_${seed.runId}`,
+      provider_model: "",
       provider_models_refreshable: false,
       worker_interface_id: seed.worker,
       worker_choice_interface_id: seed.worker,
@@ -941,13 +998,16 @@ function buildFixtureProjection() {
       next_scheduled_at_ms: seed.nextScheduledAtMs || 0,
       message_count: 0,
       pinned_artifact_ids: [],
-      connected_application_ids: index === 1
-        ? ["lab_application_project_files"]
-        : index === 3
-          ? ["lab_application_calendar"]
-          : index === 4
-            ? ["lab_application_web_search"]
-            : [],
+      pinned_context_items: [],
+      continued_from: {},
+      archived: seed.archived === true,
+      voice_context: seed.surfaceRole === "home"
+        ? { control_interface_id: "lab_world_voice_control", provider_id: "world_provider_realtime", delegation_interface_id: "lab_world_voice_delegation", run_id: "lab_run_voice" }
+        : null,
+      service_tier: null,
+      record_digest: fixtureDigest(`lab-run-record:${seed.runId}`),
+      ...fixtureChatAgent(chatEnvironment.ee_id, projectPresentations),
+      connected_application_ids: LAB_CHAT_APPLICATIONS[seed.runId] ?? [],
     });
   });
   let chatMovementSeq = 1;
@@ -975,6 +1035,26 @@ function buildFixtureProjection() {
       : {};
     return [chat.run_id, messages];
   }));
+  const badge = chats.find((chat) => chat.run_id === "lab_run_2");
+  const badgeAnswer = chatMessages.lab_run_2?.findLast((message) => message.event_kind === "message" && message.terminal && message.role === "assistant");
+  const excerpt = "Reused the existing `StatusBadge` component and semantic tones.";
+  if (badge && badgeAnswer && badgeAnswer.text.includes(excerpt)) {
+    const start = badgeAnswer.text.indexOf(excerpt);
+    const pinnedId = `operator.pinned_excerpt:lab-${badgeAnswer.artifact_id}-${start}-${start + excerpt.length}`;
+    badge.pinned_artifact_ids = [pinnedId];
+    badge.pinned_context_items = [{
+      artifact_id: pinnedId,
+      source_artifact_id: badgeAnswer.artifact_id,
+      source_message_id: badgeAnswer.id,
+      text: excerpt,
+      start,
+      end: start + excerpt.length,
+      role: "assistant",
+    }];
+  }
+  const notes = chats.find((chat) => chat.run_id === "lab_run_7");
+  const settingsAnswer = chatMessages.lab_run_6?.findLast((message) => message.event_kind === "message" && message.terminal && message.role === "assistant");
+  if (notes && settingsAnswer) notes.continued_from = { run_id: "lab_run_6", artifact_id: settingsAnswer.artifact_id };
 
   return {
     projection: fixtureRow({
@@ -1019,201 +1099,448 @@ function buildFixtureProjection() {
     chats,
     chatMessages,
     movements,
+    scheduledInterfaces: fixtureScheduledInterfaces(now, chats, eeInstances),
   };
 }
 
-function fixtureChatHistory(chat, index, nextSeq) {
-  const rows = [];
-  const append = ({
-    id,
-    role = "assistant",
-    label = role === "user" ? "operator.message" : "interface.artifact.output",
-    eventKind = "message",
-    eventData = {},
-    text = "",
-    createdAtMs,
-    attachments = [],
-    error = false,
-    terminal = eventKind === "message",
-    interfaceId = role === "user" || eventKind === "message" ? chat.chat_interface_id : chat.provider_interface_id,
-    latencyMs = 0,
-  }) => {
-    rows.push(fixtureRow({
-      id: `${chat.run_id}:${id}`,
+function fixtureScheduledInterfaces(now, chats, environments) {
+  const nextWeekday = (hour, weekday = null) => {
+    const next = new Date(now);
+    next.setHours(hour, 0, 0, 0);
+    while (next.getTime() <= now || (weekday === null ? [0, 6].includes(next.getDay()) : next.getDay() !== weekday)) {
+      next.setDate(next.getDate() + 1);
+    }
+    return next.getTime();
+  };
+  const chatInterface = (runId) => chats.find((chat) => chat.run_id === runId)?.chat_interface_id ?? "";
+  const delivery = (seq, daysAgo, runId, journal = null) => ({
+    seq,
+    at_ms: now - daysAgo * DAY_MS,
+    run_id: runId,
+    chat_interface_id: chatInterface(runId),
+    journal,
+  });
+  const reviewJournal = {
+    digest: fixtureDigest("lab-system-review-journal"),
+    outcome: "changed",
+    summary: "Tightened the onboarding empty state copy and removed an unused settings toggle.",
+    checks: [
+      { check: "Client type check", result: "passed", evidence: "tsc --noEmit" },
+      { check: "Settings navigation contract", result: "passed", evidence: "test-client-navigation" },
+    ],
+    changes: [
+      { kind: "file", path: "app/src/components/onboarding/EmptyState.tsx", action: "modified", reason: "Shorter first-run copy.", status: "applied", restorable: true, unrestorable_reason: "" },
+      { kind: "file", path: "app/src/components/settings/legacyToggle.tsx", action: "deleted", reason: "The toggle had no reader.", status: "applied", restorable: true, unrestorable_reason: "" },
+    ],
+    undoable: true,
+    undone: false,
+    error: "",
+  };
+  const rows = [
+    {
+      interface_id: "lab_world_daily_brief",
+      display_name: "Daily brief",
+      status: "enabled",
+      schedule: { type: "cron", cron: "0 8 * * 1-5" },
+      instructions: "Summarize recent work, active runs, blockers, and the priorities that need attention today.",
+      ee_id: FIXTURE_OPERATIONS_PROJECT_ID,
+      next_run_at_ms: nextWeekday(8),
+      next_run_source: "schedule",
+      deliveries: [delivery(910, 1, "lab_run_4"), delivery(842, 2, "lab_run_4")],
+    },
+    {
+      interface_id: "lab_world_weekly_review",
+      display_name: "Weekly review",
+      status: "disabled",
+      schedule: { type: "cron", cron: "0 16 * * 5" },
+      instructions: "Review this week's completed and active runs and draft a concise status update.",
+      ee_id: FIXTURE_PRIMARY_PROJECT_ID,
+      next_run_at_ms: null,
+      next_run_source: "",
+      deliveries: [delivery(615, 6, "lab_run_7")],
+    },
+    {
+      interface_id: "lab_world_system_review",
+      display_name: "System review",
+      status: "enabled",
+      schedule: {
+        type: "inactivity",
+        seconds: 3_600,
+        interface_match: { interface_type: "world", role: "user" },
+        exclude_interface_match: { interface_driver_ref: "cron_life" },
+      },
+      instructions: "Review recent work in Octopus. If something would make the system work better, make one small, reversible change and record it in the change journal.",
+      ee_id: FIXTURE_ROOT_EE_ID,
+      next_run_at_ms: now + 42 * 60_000,
+      next_run_source: "driver_state",
+      inactivity_state: { status: "waiting", current: true, last_activity_at_ms: now - 18 * 60_000 },
+      deliveries: [delivery(1024, 0.6, "lab_run_3", reviewJournal)],
+    },
+    {
+      interface_id: "lab_world_cron",
+      display_name: "Trigger",
+      status: "template",
+      template: true,
+      schedule: { type: "cron", cron: "0 9 * * 1-5" },
+      instructions: "",
+      ee_id: FIXTURE_ROOT_EE_ID,
+      next_run_at_ms: null,
+      next_run_source: "",
+      deliveries: [],
+    },
+  ];
+  const known = new Set(environments.map((environment) => environment.ee_id));
+  return rows.filter((row) => known.has(row.ee_id)).map((row) => labScheduledRow(row));
+}
+
+function labScheduledRow(row) {
+  const deliveries = row.deliveries ?? [];
+  const activation = {
+    schedule: row.schedule,
+    timezone: row.timezone ?? "UTC",
+    fire_on_start: row.fire_on_start === true,
+    instructions: row.instructions,
+    status: row.status,
+  };
+  return fixtureRow({
+    interface_id: row.interface_id,
+    display_name: row.display_name,
+    template: row.template === true,
+    status: row.status,
+    valid: true,
+    activation_digest: fixtureDigest(JSON.stringify(activation)),
+    activation_path: `lab://registry/interface/${row.interface_id}/activation.json`,
+    descriptor_path: `lab://registry/interface/${row.interface_id}/interface.json`,
+    schedule: row.schedule,
+    timezone: activation.timezone,
+    fire_on_start: activation.fire_on_start,
+    instructions: row.instructions,
+    reminder_env: "",
+    run_template: {
+      run_id: `lab_run_template_${row.interface_id}`,
+      ee_id: row.ee_id,
+      worker_interface_id: fixtureEnvironmentWorker(row.ee_id),
+      checkpoint_count: 3,
+      outbound_interface_ids: [],
+      artifact_binding_count: 0,
+    },
+    clone_eligible: true,
+    last_run_at_ms: deliveries[0]?.at_ms ?? null,
+    last_movement_seq: deliveries[0]?.seq ?? null,
+    next_run_at_ms: row.status === "enabled" ? row.next_run_at_ms : null,
+    next_run_source: row.status === "enabled" ? row.next_run_source : "",
+    inactivity_state: row.schedule.type === "inactivity" ? row.inactivity_state ?? { status: "unstarted", current: true, last_activity_at_ms: null } : null,
+    deliveries,
+    ee_id: row.ee_id,
+    error: "",
+  });
+}
+
+function labArtifactBytes(data, params) {
+  const runId = requiredString(params.run_id, "run_id");
+  if (Object.hasOwn(params, "call_id")) throw new Error("The tool result for this call is not admitted in this run.");
+  const artifactId = requiredString(params.artifact_id, "artifact_id");
+  const interfaceId = requiredString(params.interface_id, "interface_id");
+  if (Object.hasOwn(params, "attachment_id")) throw new Error("Test attachments keep only their name and size.");
+  const message = (data.chatMessages[runId] ?? []).find((candidate) => candidate.artifact_id === artifactId);
+  const artifact = message ? null : data.artifacts.find((candidate) => candidate.artifact_id === artifactId && candidate.run_id === runId);
+  if (!message && !artifact) throw new Error("The requested artifact is not admitted for this run and interface.");
+  if (message && message.interface_id !== interfaceId) throw new Error("The requested artifact is not admitted for this run and interface.");
+  const label = message ? message.label : artifact.label;
+  const payload = message
+    ? Object.fromEntries(Object.entries(message.event_data ?? {}).filter(([key]) => !key.startsWith("_")))
+    : { label: artifact.label, run_id: artifact.run_id, ee_id: artifact.ee_id, worker: artifact.worker, status: artifact.status, created_at: artifact.created_at };
+  const bytes = Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  return {
+    artifact_id: artifactId,
+    run_id: runId,
+    interface_id: interfaceId,
+    filename: `${label}.json`,
+    mime_type: "application/json",
+    content_hash: fixtureDigest(bytes),
+    size: bytes.byteLength,
+    base64: bytes.toString("base64"),
+  };
+}
+
+function fixtureDigest(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function fixtureChatAgent(eeId, projectPresentations) {
+  if (eeId === FIXTURE_ROOT_EE_ID) return { agent_id: null, agent_name: null, agent_icon: null, agent_color: null };
+  return {
+    agent_id: `lab_agent_${eeId}`,
+    agent_name: eeId === FIXTURE_PRIMARY_PROJECT_ID ? "Octopus Development" : "Research Development",
+    agent_icon: eeId === FIXTURE_PRIMARY_PROJECT_ID ? "glasses" : "curious",
+    agent_color: projectPresentations.find((presentation) => presentation.ee_id === eeId)?.color || null,
+  };
+}
+
+function labChatEvents(chat) {
+  const threadId = `lab-thread-${chat.run_id}`;
+  const provider = chat.provider_bound_interface_id || chat.provider_interface_id;
+  const worker = chat.worker_interface_id;
+  const envelope = (turnId, itemId, lifecycle, startedAtMs = null, completedAtMs = null, durationMs = null) => ({
+    turn_id: turnId,
+    item_id: itemId,
+    lifecycle,
+    started_at_ms: startedAtMs,
+    completed_at_ms: completedAtMs,
+    duration_ms: durationMs,
+  });
+  const row = ({ id, role = "assistant", label, eventKind, eventData, text, createdAtMs, seq, durable = true, interfaceId = provider, latencyMs = 0, terminal = false, attachments = [] }) => {
+    const transport = durable
+      ? {
+          _movement: {
+            seq,
+            trace_id: "",
+            recorded_at_unix_ms: createdAtMs,
+            from: { Interface: role === "user" ? chat.chat_interface_id : provider },
+            to: { Interface: worker },
+            metadata: { runtime: { run: chat.run_id, ee: chat.ee_id, worker, checkpoint: "cp_provider_output", interface: role === "user" ? chat.chat_interface_id : provider, epoch: 0, trace_id: "" } },
+          },
+        }
+      : { _stream: { stream_id: `lab-stream-${chat.run_id}`, stream_seq: seq, byte_start_offset: 0, byte_end_offset: 0, source_movement_seq: seq, recorded_at_unix_ms: createdAtMs } };
+    const origin = role === "user" ? {} : { _activity_origin: { interface_id: provider, interface_role: "provider" }, _run_activity: true };
+    return fixtureRow({
+      id: role === "user" ? id : `${chat.run_id}:${id}`,
       run_id: chat.run_id,
       role,
       label,
       direction: role === "user" ? "in" : "out",
       event_kind: eventKind,
-      event_data: eventData,
+      event_data: { ...eventData, ...transport, ...origin },
       text,
       created_at_ms: createdAtMs,
-      movement_seq: nextSeq(),
-      artifact_id: `${chat.run_id}:${id}`,
-      content_hash: `lab-chat-${chat.run_id}-${id}`,
+      movement_seq: seq,
+      artifact_id: durable ? (role === "user" ? id : `${label}:${chat.run_id}:${id}`) : "",
+      content_hash: durable ? fixtureDigest(`${chat.run_id}:${id}:${text}`) : "",
       interface_id: interfaceId,
       latency_ms: latencyMs,
       attachments,
-      error,
+      error: false,
       terminal,
-    }));
+    });
   };
+  return {
+    turnId: (id) => `lab-turn-${chat.run_id}-${id}`,
+    user: ({ id, text, createdAtMs, seq, attachments = [] }) => row({
+      id,
+      role: "user",
+      label: "operator.message",
+      eventKind: "message",
+      eventData: { text, message_id: id, attachments, _event: envelope("", "", "") },
+      text,
+      createdAtMs,
+      seq,
+      interfaceId: chat.chat_interface_id,
+      terminal: true,
+      attachments,
+    }),
+    turnStarted: ({ id, turnId, createdAtMs, seq }) => row({
+      id,
+      label: "turn.started",
+      eventKind: "turn_started",
+      eventData: {
+        label: "turn.started",
+        threadId,
+        turn: { completedAt: null, durationMs: null, error: null, id: turnId, items: [], itemsView: "notLoaded", startedAt: Math.floor(createdAtMs / 1000), status: "inProgress" },
+        _event: envelope(turnId, "", "started", Math.floor(createdAtMs / 1000)),
+      },
+      text: "Turn started",
+      createdAtMs,
+      seq,
+      durable: false,
+    }),
+    reasoning: ({ id, turnId, summary, createdAtMs, seq }) => {
+      const itemId = `rs_lab_${chat.run_id}_${id}`;
+      return row({
+        id,
+        label: "turn.reasoning",
+        eventKind: "reasoning",
+        eventData: { completed_at_ms: createdAtMs, content: [], item_id: itemId, label: "turn.reasoning", lifecycle: "completed", summary, thread_id: threadId, turn_id: turnId, _event: envelope(turnId, itemId, "completed", null, createdAtMs) },
+        text: summary.join("\n"),
+        createdAtMs,
+        seq,
+      });
+    },
+    commentary: ({ id, turnId, text, createdAtMs, seq }) => {
+      const itemId = `msg_lab_${chat.run_id}_${id}`;
+      return row({
+        id,
+        label: "turn.agent_message",
+        eventKind: "commentary",
+        eventData: { completed_at_ms: createdAtMs, item_id: itemId, label: "turn.agent_message", lifecycle: "completed", phase: "commentary", text, thread_id: threadId, turn_id: turnId, _event: envelope(turnId, itemId, "completed", null, createdAtMs) },
+        text,
+        createdAtMs,
+        seq,
+      });
+    },
+    tool: ({ id, turnId, tool, args, body, createdAtMs, seq }) => {
+      const callId = `lab-call-${chat.run_id}-${id}`;
+      const completed = body !== undefined;
+      return row({
+        id: `${id}-${completed ? "completed" : "started"}`,
+        label: "turn.dynamic_tool_call",
+        eventKind: "dynamic_tool",
+        eventData: {
+          arguments: args,
+          call_id: callId,
+          item_id: callId,
+          label: "turn.dynamic_tool_call",
+          lifecycle: completed ? "completed" : "started",
+          namespace: "formed_interfaces",
+          status: completed ? "completed" : "started",
+          thread_id: threadId,
+          tool,
+          turn_id: turnId,
+          ...(completed ? { body, error: null, ok: true, success: true } : {}),
+          _event: envelope(turnId, callId, completed ? "completed" : "started"),
+        },
+        text: tool,
+        createdAtMs,
+        seq,
+        durable: false,
+      });
+    },
+    fileChange: ({ id, turnId, changes, diff = "", createdAtMs, seq }) => {
+      const itemId = `lab-patch-${chat.run_id}-${id}`;
+      return row({
+        id,
+        label: "turn.file_change",
+        eventKind: "file_change",
+        eventData: { changes, ...(diff ? { diff } : {}), item_id: itemId, label: "turn.file_change", lifecycle: "completed", status: "completed", thread_id: threadId, turn_id: turnId, _event: envelope(turnId, itemId, "completed") },
+        text: `Updated ${changes.map((change) => change.path.split("/").at(-1)).join(", ")}`,
+        createdAtMs,
+        seq,
+      });
+    },
+    finalAnswer: ({ id, turnId, text, createdAtMs, seq, contextTokens, latencyMs }) => {
+      const itemId = `msg_lab_${chat.run_id}_${id}`;
+      const outputTokens = Math.round(text.length / 3.6) + 180;
+      return row({
+        id,
+        label: "interface.artifact.output",
+        eventKind: "message",
+        eventData: {
+          context_window_usage: { context_window: LAB_CONTEXT_WINDOW, used_tokens: contextTokens },
+          item_id: itemId,
+          label: "interface.artifact.output",
+          lifecycle: "completed",
+          phase: "final_answer",
+          provider_token_usage: {
+            context_window: LAB_CONTEXT_WINDOW,
+            cumulative: { cached_input_tokens: contextTokens * 4, input_tokens: contextTokens * 5, output_tokens: outputTokens * 3, reasoning_output_tokens: outputTokens, total_tokens: contextTokens * 5 + outputTokens * 3, uncached_input_tokens: contextTokens },
+            current_context: { cached_input_tokens: contextTokens - 2_400, input_tokens: contextTokens - outputTokens, output_tokens: outputTokens, reasoning_output_tokens: Math.round(outputTokens / 2), total_tokens: contextTokens, uncached_input_tokens: 2_400 },
+          },
+          text,
+          thread_id: threadId,
+          turn_id: turnId,
+          _event: envelope(turnId, itemId, "completed", null, createdAtMs),
+        },
+        text,
+        createdAtMs,
+        seq,
+        interfaceId: chat.chat_interface_id,
+        latencyMs,
+        terminal: true,
+      });
+    },
+    turnCompleted: ({ id, turnId, startedAtMs, finalId, finalText, createdAtMs, seq }) => row({
+      id,
+      label: "turn.completed",
+      eventKind: "turn_completed",
+      eventData: {
+        label: "turn.completed",
+        threadId,
+        turn: {
+          completedAt: Math.floor(createdAtMs / 1000),
+          durationMs: createdAtMs - startedAtMs,
+          error: null,
+          id: turnId,
+          items: [{ id: `msg_lab_${chat.run_id}_${finalId}`, phase: "final_answer", text: finalText, type: "agentMessage" }],
+          itemsView: "summary",
+          startedAt: Math.floor(startedAtMs / 1000),
+          status: "completed",
+        },
+        _event: envelope(turnId, "", "completed", Math.floor(startedAtMs / 1000), Math.floor(createdAtMs / 1000), createdAtMs - startedAtMs),
+      },
+      text: "Turn completed",
+      createdAtMs,
+      seq,
+    }),
+  };
+}
+
+function fixtureChatHistory(chat, index, nextSeq) {
+  const rows = [];
+  const events = labChatEvents(chat);
+  let contextTokens = 18_400 + index * 2_300;
+  const userMessage = (id, text, createdAtMs) => rows.push(events.user({ id: `msg_${chat.run_id}_${id}`, text, createdAtMs, seq: nextSeq() }));
+  const turn = (id, startAtMs, durationMs, steps, finalText) => {
+    const turnId = events.turnId(id);
+    rows.push(events.turnStarted({ id: `${id}-turn-started`, turnId, createdAtMs: startAtMs + 600, seq: nextSeq() }));
+    for (const step of steps) rows.push(step(turnId, startAtMs));
+    const finalAtMs = startAtMs + durationMs;
+    contextTokens += 6_800 + finalText.length * 3;
+    rows.push(events.finalAnswer({ id: `${id}-final`, turnId, text: finalText, createdAtMs: finalAtMs, seq: nextSeq(), contextTokens, latencyMs: durationMs }));
+    rows.push(events.turnCompleted({ id: `${id}-turn-completed`, turnId, startedAtMs: startAtMs, finalId: `${id}-final`, finalText, createdAtMs: finalAtMs + 200, seq: nextSeq() }));
+  };
+  const reasoning = (id, offsetMs, summary) => (turnId, startAtMs) => events.reasoning({ id, turnId, summary, createdAtMs: startAtMs + offsetMs, seq: nextSeq() });
+  const commentary = (id, offsetMs, text) => (turnId, startAtMs) => events.commentary({ id, turnId, text, createdAtMs: startAtMs + offsetMs, seq: nextSeq() });
+  const toolCall = (id, startOffsetMs, endOffsetMs, tool, args, body) => [
+    (turnId, startAtMs) => events.tool({ id, turnId, tool, args, createdAtMs: startAtMs + startOffsetMs, seq: nextSeq() }),
+    (turnId, startAtMs) => events.tool({ id, turnId, tool, args, body, createdAtMs: startAtMs + endOffsetMs, seq: nextSeq() }),
+  ];
+  const fileChange = (id, offsetMs, changes, diff) => (turnId, startAtMs) => events.fileChange({ id, turnId, changes, diff, createdAtMs: startAtMs + offsetMs, seq: nextSeq() });
 
   if (chat.run_id === "lab_run_1") {
     const firstAt = chat.created_at_ms + 45_000;
-    append({ id: "overview-request", role: "user", text: "Give me a concise overview of the active projects and what needs attention.", createdAtMs: firstAt });
-    append({
-      id: "overview-response",
-      text: [
-        "You have three active areas:",
-        "",
-        "- **Lumen** — the current product pass is healthy; the connection-status task is ready for review.",
-        "- **Research** — the onboarding comparison is complete and pinned for later use.",
-        "- **Operations** — the weekly project pulse is scheduled for later today.",
-        "",
-        "Nothing is blocked. The most useful next step is to review the small Lumen UI change, then decide whether to include it in the next release.",
-      ].join("\n"),
-      createdAtMs: firstAt + 38_000,
-      latencyMs: 38_000,
-    });
+    userMessage("overview-request", "Give me a concise overview of the active projects and what needs attention.", firstAt);
+    turn("overview", firstAt + 400, 38_000, [
+      reasoning("overview-reasoning", 4_000, ["**Reading active project state**"]),
+      ...toolCall("overview-runs", 6_000, 9_500, "projection.runs.list", { limit: 20 }, { runs: 8 }),
+    ], [
+      "You have three active areas:",
+      "",
+      "- **Lumen** — the current product pass is healthy; the connection-status task is ready for review.",
+      "- **Research** — the onboarding comparison is complete and pinned for later use.",
+      "- **Operations** — the weekly project pulse is scheduled for later today.",
+      "",
+      "Nothing is blocked. The most useful next step is to review the small Lumen UI change, then decide whether to include it in the next release.",
+    ].join("\n"));
     const secondAt = chat.updated_at_ms - 48_000;
-    append({ id: "today-request", role: "user", text: "What should I focus on next?", createdAtMs: secondAt });
-    append({
-      id: "today-response",
-      text: "Review **Add connection status to project header**. It is a contained change with a passing focused check, so you can inspect the file diff without opening any private project data.",
-      createdAtMs: chat.updated_at_ms,
-      latencyMs: 48_000,
-    });
+    userMessage("today-request", "What should I focus on next?", secondAt);
+    turn("today", secondAt + 400, 47_000, [
+      reasoning("today-reasoning", 5_000, ["**Ranking open work by impact**"]),
+    ], "Review **Add connection status to project header**. It is a contained change with a passing focused check, so you can inspect the file diff without opening any private project data.");
     return rows;
   }
 
   if (chat.run_id === "lab_run_2") {
     const turnStart = chat.updated_at_ms - 128_000;
-    const turnId = "lab-demo-turn-status-badge";
-    const activity = (offset, input) => append({
-      ...input,
-      createdAtMs: turnStart + offset,
-      latencyMs: offset,
-      terminal: false,
-    });
-    append({
-      id: "request",
-      role: "user",
-      text: "Add a compact connection-status badge to the project header. Reuse the existing visual language and run a focused check.",
-      createdAtMs: turnStart,
-    });
-    activity(1_200, { id: "turn-started", eventKind: "turn_started", label: "turn.started", eventData: { lifecycle: "started", turn_id: turnId } });
-    activity(7_000, {
-      id: "reasoning-inspect",
-      eventKind: "reasoning",
-      label: "model.reasoning",
-      text: "Inspecting the existing project header",
-      eventData: { lifecycle: "completed", summary: [{ text: "Inspecting the existing project header" }], turn_id: turnId },
-    });
-    activity(11_000, {
-      id: "list-started",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { arguments: { path: "src/components" }, call_id: "lab-list-components", status: "started", tool: "coder.list_dir" },
-    });
-    activity(15_000, {
-      id: "list-completed",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { call_id: "lab-list-components", result: { entries: ["ProjectHeader.tsx", "StatusBadge.tsx"] }, status: "completed", tool: "coder.list_dir" },
-    });
-    activity(20_000, {
-      id: "read-header-started",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { arguments: { path: "src/components/ProjectHeader.tsx" }, call_id: "lab-read-header", status: "started", tool: "coder.read_file" },
-    });
-    activity(28_000, {
-      id: "read-header-completed",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { call_id: "lab-read-header", result: { bytes: 1_842 }, status: "completed", tool: "coder.read_file" },
-    });
-    activity(32_000, {
-      id: "read-badge-started",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { arguments: { path: "src/components/StatusBadge.tsx" }, call_id: "lab-read-badge", status: "started", tool: "coder.read_file" },
-    });
-    activity(39_000, {
-      id: "read-badge-completed",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { call_id: "lab-read-badge", result: { bytes: 816 }, status: "completed", tool: "coder.read_file" },
-    });
-    activity(48_000, {
-      id: "reasoning-implementation",
-      eventKind: "reasoning",
-      label: "model.reasoning",
-      text: "Reusing the existing status primitive",
-      eventData: { lifecycle: "completed", summary: [{ text: "Reusing the existing status primitive" }], turn_id: turnId },
-    });
-    activity(53_000, {
-      id: "search-started",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { arguments: { path: "src", query: "connectionStatus" }, call_id: "lab-search-status", status: "started", tool: "coder.grep" },
-    });
-    activity(61_000, {
-      id: "search-completed",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { call_id: "lab-search-status", result: { matches: 3 }, status: "completed", tool: "coder.grep" },
-    });
-    activity(79_000, {
-      id: "file-change",
-      eventKind: "file_change",
-      label: "file.change",
-      text: "Updated ProjectHeader.tsx",
-      eventData: {
-        changes: [{ added: 12, deleted: 3, kind: "update", path: "src/components/ProjectHeader.tsx" }],
-        diff: fixtureProjectHeaderDiff(),
-        status: "completed",
-      },
-    });
-    activity(93_000, {
-      id: "reasoning-verify",
-      eventKind: "reasoning",
-      label: "model.reasoning",
-      text: "Verifying the focused interaction",
-      eventData: { lifecycle: "completed", summary: [{ text: "Verifying the focused interaction" }], turn_id: turnId },
-    });
-    activity(99_000, {
-      id: "check-started",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: { arguments: { command: "npm test -- ProjectHeader" }, call_id: "lab-project-header-check", status: "started", tool: "coder.build" },
-    });
-    activity(120_000, {
-      id: "check-completed",
-      eventKind: "dynamic_tool",
-      label: "tool.call",
-      eventData: {
-        call_id: "lab-project-header-check",
-        result: { output: "PASS src/components/ProjectHeader.test.tsx\n1 test passed" },
-        status: "completed",
-        tool: "coder.build",
-      },
-    });
-    activity(126_000, { id: "turn-completed", eventKind: "turn_completed", label: "turn.completed", eventData: { duration_ms: 124_800, lifecycle: "completed", turn_id: turnId } });
-    append({
-      id: "response",
-      text: [
-        "Added the connection-status badge to the project header.",
-        "",
-        "- Reused the existing `StatusBadge` component and semantic tones.",
-        "- Kept the project title layout stable at narrow widths.",
-        "- Added an accessible status label for screen readers.",
-        "- `npm test -- ProjectHeader` passes.",
-      ].join("\n"),
-      createdAtMs: chat.updated_at_ms,
-      latencyMs: 128_000,
-    });
+    userMessage("request", "Add a compact connection-status badge to the project header. Reuse the existing visual language and run a focused check.", turnStart);
+    turn("badge", turnStart + 400, 127_000, [
+      reasoning("reasoning-inspect", 6_000, ["**Inspecting the existing project header**"]),
+      commentary("plan", 9_000, "I'll look at the header and the existing status primitive first, then add the badge without changing the layout."),
+      ...toolCall("list", 11_000, 15_000, "coder.list_dir", { path: "src/components" }, { entries: ["ProjectHeader.tsx", "StatusBadge.tsx"] }),
+      ...toolCall("read-header", 20_000, 28_000, "coder.read_file", { path: "src/components/ProjectHeader.tsx" }, { bytes: 1_842 }),
+      ...toolCall("read-badge", 32_000, 39_000, "coder.read_file", { path: "src/components/StatusBadge.tsx" }, { bytes: 816 }),
+      reasoning("reasoning-implementation", 46_000, ["**Reusing the existing status primitive**"]),
+      commentary("found", 50_000, "`StatusBadge` already has the semantic tones I need, so the header only needs a small slot for it."),
+      ...toolCall("search", 53_000, 61_000, "coder.grep", { path: "src", query: "connectionStatus" }, { matches: 3 }),
+      fileChange("header-change", 79_000, [{ added: 12, deleted: 3, kind: "update", path: "src/components/ProjectHeader.tsx" }], fixtureProjectHeaderDiff()),
+      reasoning("reasoning-verify", 92_000, ["**Verifying the focused interaction**"]),
+      ...toolCall("check", 99_000, 120_000, "coder.build", { command: "npm test -- ProjectHeader" }, { output: "PASS src/components/ProjectHeader.test.tsx\n1 test passed" }),
+    ], [
+      "Added the connection-status badge to the project header.",
+      "",
+      "- Reused the existing `StatusBadge` component and semantic tones.",
+      "- Kept the project title layout stable at narrow widths.",
+      "- Added an accessible status label for screen readers.",
+      "- `npm test -- ProjectHeader` passes.",
+    ].join("\n"));
     return rows;
   }
 
@@ -1227,6 +1554,16 @@ function fixtureChatHistory(chat, index, nextSeq) {
     "Draft release notes from the completed work in this project.",
     "Find why the preview occasionally reconnects after becoming active.",
   ];
+  const progress = [
+    "",
+    "",
+    "I'll walk the onboarding screens and note where the empty states disagree.",
+    "I'll collect this week's finished and active runs before writing the pulse.",
+    "I'll compare the three patterns on first action, optional setup, and the way back.",
+    "I'll keep the section structure and only adjust spacing, copy weight, and focus.",
+    "I'll group the completed work by outcome before drafting.",
+    "I'll reproduce the reconnect and check the preview identity across tab resume.",
+  ];
   const responses = [
     "",
     "",
@@ -1238,9 +1575,26 @@ function fixtureChatHistory(chat, index, nextSeq) {
     "The reconnect was caused by a stale preview identity after the tab resumed. The diagnosis is recorded; no private endpoint or machine detail is present in this demo.",
   ];
   const requestAt = chat.updated_at_ms - 58_000;
-  append({ id: "request", role: "user", text: prompts[index] || chat.title, createdAtMs: requestAt });
-  append({ id: "response", text: responses[index] || "Done.", createdAtMs: chat.updated_at_ms, latencyMs: 58_000 });
+  userMessage("request", prompts[index] || chat.title, requestAt);
+  turn("work", requestAt + 400, 57_000, [
+    reasoning("reasoning", 5_000, [`**${chat.title}**`]),
+    commentary("progress", 8_000, progress[index] || "Working on it."),
+  ], responses[index] || "Done.");
   return rows;
+}
+
+function fixtureWorkspaceEntries() {
+  return [
+    { path: "README.md", kind: "file", text: "# Lumen\n\nA small demo project used by the isolated Client Lab profile.\n" },
+    { path: "package.json", kind: "file", text: JSON.stringify({ name: "lumen-demo", private: true, scripts: { test: "vitest run" } }, null, 2) },
+    { path: "src", kind: "directory" },
+    { path: "src/components", kind: "directory" },
+    { path: "src/components/ProjectHeader.tsx", kind: "file", text: fixtureProjectHeaderSource() },
+    { path: "src/components/ProjectHeader.test.tsx", kind: "file", text: fixtureProjectHeaderTestSource() },
+    { path: "src/components/StatusBadge.tsx", kind: "file", text: fixtureStatusBadgeSource() },
+    { path: "src/styles", kind: "directory" },
+    { path: "src/styles/tokens.css", kind: "file", text: ":root {\n  --status-online: #3fb950;\n  --status-offline: #8b949e;\n}\n" },
+  ];
 }
 
 function fixtureProjectHeaderDiff() {
@@ -1334,7 +1688,7 @@ function fixtureInterfaces() {
     ["lab_system_browser", "System", "bidirectional", "service"],
     ["lab_system_exec", "System", "bidirectional", "service"],
     ["lab_world_operator_chat", "World", "inbound", "user"],
-    ["lab_world_provider_codex", "World", "bidirectional", "provider"],
+    ["world_provider_codex", "World", "bidirectional", "provider"],
     ["lab_world_web_search", "World", "bidirectional", "service"],
     ["lab_world_calendar", "World", "bidirectional", "service"],
     ["lab_world_email", "World", "bidirectional", "service"],
@@ -1375,8 +1729,8 @@ function fixtureEnvironments(at) {
     allowed_child_ee_templates: index === 0 ? ["self_improvement", "operator_interaction"] : [],
     policy: {
       allowed_interfaces: index === 0
-        ? ["lab_system_worker_planner", "lab_world_operator_chat", "lab_world_provider_codex", "lab_world_calendar"]
-        : ["lab_system_worker_coder", "lab_system_worker_research", "lab_system_exec", "lab_world_operator_chat", "lab_world_provider_codex", "lab_world_web_search", "lab_world_files"],
+        ? ["lab_system_worker_planner", "lab_world_operator_chat", "world_provider_codex", "lab_world_calendar"]
+        : ["lab_system_worker_coder", "lab_system_worker_research", "lab_system_exec", "lab_world_operator_chat", "world_provider_codex", "lab_world_web_search", "lab_world_files"],
       allowed_tools: index === 0
         ? ["artifact_handoff"]
         : ["coder.list_dir", "coder.read_file", "coder.grep", "coder.apply_patch", "coder.build"],
@@ -1414,11 +1768,18 @@ function fixtureWorkerEnvironments(environments) {
     FIXTURE_RESEARCH_PROJECT_ID,
     FIXTURE_ROOT_EE_ID,
   ];
+  const now = Date.now();
   return kinds.map((kind, index) => fixtureRow({
     worker_environment_id: `lab_we_${index + 1}`,
     worker_environment_kind: kind,
     kind,
     status: fixtureWorkerEnvironmentStatus(index),
+    live_available: fixtureWorkerEnvironmentStatus(index) === "active",
+    opened_at_unix_ms: now - (index + 1) * 3_600_000,
+    last_activity_at_unix_ms: fixtureWorkerEnvironmentStatus(index) === "released" ? now - (index + 1) * 1_800_000 : now - (index + 1) * 240_000,
+    opened_at_movement_seq: 40 + index * 7,
+    description: kind === "git_worktree" ? "Isolated worktree for the Lumen project." : `${kind.split("_").join(" ")} for lab tasks.`,
+    projection_kind: "worker_environment",
     ee_id: environmentIds[index] || environments[index % environments.length].ee_id,
     display_name: kind === "git_worktree" ? "Lumen worktree" : kind.split("_").join(" "),
     root: kind.includes("worktree") ? FIXTURE_WORKSPACE_ROOT : "",
@@ -1495,17 +1856,7 @@ function fixtureWorkerEnvironmentSurfaces(kind, index) {
   }
   if (kind === "git_worktree") {
     const worktreeFiles = surface("worktree_files", "files", "Files", {
-      entries: [
-        { path: "README.md", kind: "file", text: "# Lumen\n\nA small demo project used by the isolated Client Lab profile.\n" },
-        { path: "package.json", kind: "file", text: JSON.stringify({ name: "lumen-demo", private: true, scripts: { test: "vitest run" } }, null, 2) },
-        { path: "src", kind: "directory" },
-        { path: "src/components", kind: "directory" },
-        { path: "src/components/ProjectHeader.tsx", kind: "file", text: fixtureProjectHeaderSource() },
-        { path: "src/components/ProjectHeader.test.tsx", kind: "file", text: fixtureProjectHeaderTestSource() },
-        { path: "src/components/StatusBadge.tsx", kind: "file", text: fixtureStatusBadgeSource() },
-        { path: "src/styles", kind: "directory" },
-        { path: "src/styles/tokens.css", kind: "file", text: ":root {\n  --status-online: #3fb950;\n  --status-offline: #8b949e;\n}\n" },
-      ],
+      entries: fixtureWorkspaceEntries(),
     }, { root: `fixture://${FIXTURE_WORKSPACE_ROOT}` });
     return [
       surface("worktree_status", "worktree_status", "Worktree", {
@@ -1753,7 +2104,7 @@ function fixtureCheckpoints(run, runIndex, at) {
       label: ["Receive context", "Execute task", "Verify output"][index],
       status: projected ? "projected" : "made",
       interface: index === 0 ? "lab_world_operator_chat" : "lab_system_worker_planner",
-      out_interfaces: index === 2 ? ["lab_world_operator_chat"] : ["lab_world_provider_codex"],
+      out_interfaces: index === 2 ? ["lab_world_operator_chat"] : ["world_provider_codex"],
       tool_name: index === 1 ? "shell_exec" : "artifact_handoff",
       artifact_label: ["context.reference", "llm.request", "interface.episode.output"][index],
       artifact_bindings: index + 1,
@@ -1781,327 +2132,124 @@ function fixtureEnvironmentDisplayName(eeId) {
   return eeId;
 }
 
-function fixtureApplications(environments) {
-  const definitions = [
-    {
-      id: "lab_application_discord",
-      name: "Discord",
-      description: "Use Discord messages in the tasks you choose.",
-      category: "connector",
-      icon: "message",
-      logoDataUrl: "./lab/application-icons/discord.png",
-      interfaces: ["lab_world_discord"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_email",
-      name: "Email",
-      description: "Read and send email from the tasks you choose.",
-      category: "connector",
-      icon: "email",
-      logoDataUrl: "./lab/application-icons/email.png",
-      interfaces: ["lab_world_email"],
-      available: [FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_matrix",
-      name: "Matrix",
-      description: "Use Matrix rooms and messages in the tasks you choose.",
-      category: "connector",
-      icon: "message",
-      logoDataUrl: "./lab/application-icons/matrix.png",
-      interfaces: ["lab_world_matrix"],
-      available: [FIXTURE_RESEARCH_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_slack",
-      name: "Slack",
-      description: "Use Slack conversations in the tasks where it is enabled.",
-      category: "connector",
-      icon: "message",
-      logoDataUrl: "./lab/application-icons/slack.png",
-      interfaces: ["lab_world_slack"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_speaker",
-      name: "Speaker",
-      description: "Play spoken responses through your Mac's audio output.",
-      category: "connector",
-      icon: "voice",
-      logoDataUrl: "./lab/application-icons/speaker.png",
-      interfaces: ["lab_world_speaker"],
-      available: [FIXTURE_ROOT_EE_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_speech_to_text",
-      name: "Speech to Text",
-      description: "Turn speech recordings into text.",
-      category: "connector",
-      icon: "voice",
-      logoDataUrl: "./lab/application-icons/speech-to-text.png",
-      interfaces: ["lab_world_speech_to_text"],
-      available: [FIXTURE_ROOT_EE_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_telegram",
-      name: "Telegram",
-      description: "Use Telegram chats in the tasks you choose.",
-      category: "connector",
-      icon: "message",
-      logoDataUrl: "./lab/application-icons/telegram.png",
-      interfaces: ["lab_world_telegram"],
-      available: [FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_text_to_speech",
-      name: "Text to Speech",
-      description: "Turn written responses into natural speech.",
-      category: "connector",
-      icon: "voice",
-      logoDataUrl: "./lab/application-icons/text-to-speech.png",
-      interfaces: ["lab_world_text_to_speech"],
-      available: [FIXTURE_ROOT_EE_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_whatsapp",
-      name: "WhatsApp",
-      description: "Use WhatsApp conversations in the tasks you choose.",
-      category: "connector",
-      icon: "message",
-      logoDataUrl: "./lab/application-icons/whatsapp.png",
-      interfaces: ["lab_world_whatsapp"],
-      available: [FIXTURE_ROOT_EE_ID, FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_google_calendar",
-      name: "Google Calendar",
-      description: "Work with Google Calendar events and schedules.",
-      category: "plugin",
-      icon: "calendar",
-      logoDataUrl: "./lab/application-icons/google-calendar.png",
-      interfaces: ["lab_world_mcp_google_calendar"],
-      available: [FIXTURE_ROOT_EE_ID, FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [FIXTURE_OPERATIONS_PROJECT_ID],
-      connected: ["lab_run_4"],
-    },
-    {
-      id: "lab_application_google_drive",
-      name: "Google Drive",
-      description: "Find and work with files in Google Drive.",
-      category: "plugin",
-      icon: "files",
-      logoDataUrl: "./lab/application-icons/google-drive.png",
-      interfaces: ["lab_world_mcp_google_drive"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID],
-      selected: [FIXTURE_PRIMARY_PROJECT_ID],
-      connected: ["lab_run_2"],
-    },
-    {
-      id: "lab_application_image_generation",
-      name: "Image generation",
-      description: "Create images in tasks where visual work is enabled.",
-      category: "plugin",
-      icon: "image",
-      logoDataUrl: "./lab/application-icons/image-generation.png",
-      interfaces: ["lab_world_image_generation"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_outlook_email",
-      name: "Outlook Email",
-      description: "Read, search, and work with Outlook email.",
-      category: "plugin",
-      icon: "email",
-      logoDataUrl: "./lab/application-icons/outlook-email.png",
-      interfaces: ["lab_world_mcp_microsoft_outlook_email"],
-      available: [FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_notion",
-      name: "Notion",
-      description: "Find and work with pages in Notion.",
-      category: "plugin",
-      icon: "files",
-      logoDataUrl: "./lab/application-icons/notion.png",
-      interfaces: ["lab_world_mcp_notion"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_RESEARCH_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_slack_tools",
-      name: "Slack Tools",
-      description: "Search and work with content in Slack.",
-      category: "plugin",
-      icon: "plugins",
-      logoDataUrl: "./lab/application-icons/slack-tools.png",
-      interfaces: ["lab_world_mcp_slack"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      connected: [],
-    },
-    {
-      id: "lab_application_project_files",
-      name: "Project files",
-      description: "Attach a selected project artifact as task context.",
-      category: "artifact",
-      icon: "files",
-      interfaces: [],
-      artifactBindings: [{ artifact_id: "lab_artifact_project_brief", label: "project.brief" }],
-      available: [FIXTURE_PRIMARY_PROJECT_ID],
-      selected: [FIXTURE_PRIMARY_PROJECT_ID],
-      connected: ["lab_run_2"],
-    },
-  ];
-  return definitions.map((definition, index) => fixtureRow({
-    id: definition.id,
-    name: definition.name,
-    description: definition.description,
-    category: definition.category,
-    developer: "Octopus",
-    version: "1.0.0",
-    icon: definition.icon,
-    logo: "",
-    logo_dark: "",
-    logo_data_url: definition.logoDataUrl ?? "",
-    logo_dark_data_url: definition.logoDataUrl ?? "",
-    interfaces: definition.interfaces,
-    artifact_bindings: definition.artifactBindings ?? [],
-    installed: true,
-    valid: true,
-    missing_interface_ids: [],
-    descriptor_path: `lab://applications/${definition.id}/application.json`,
-    manifest_path: `lab://applications/${definition.id}/application.json`,
-    manifest_digest: `lab-application-digest-${index + 1}`,
-    connected_run_ids: definition.connected,
-    project_states: environments.map((environment) => fixtureRow({
-      ee_id: environment.ee_id,
-      is_root: environment.ee_id === FIXTURE_ROOT_EE_ID,
-      policy_allowed: definition.available.includes(environment.ee_id),
-      ceiling_allowed: true,
-      selected_by_default: definition.selected.includes(environment.ee_id),
-      record_digest: environment.record_digest,
-    })),
-  }));
+function labApplicationRows(entries, data) {
+  return entries.map(({ record, manifest }) => {
+    const installed = record.installed === true;
+    const managed = record.release_status === "system";
+    const connected = installed
+      ? data.chats.filter((chat) => (chat.connected_application_ids ?? []).includes(manifest.id)).map((chat) => chat.run_id)
+      : [];
+    return fixtureRow({
+      ...manifest,
+      installed,
+      materialized: installed,
+      partially_materialized: false,
+      valid: true,
+      missing_interface_ids: [],
+      descriptor_path: `lab://registry/interface/${manifest.id}/interface.json`,
+      manifest_path: `lab://registry/interface/${manifest.id}/application.json`,
+      manifest_digest: record.manifest_digest,
+      package_id: record.id,
+      installed_digest: record.installed_digest,
+      source_available: record.available === true,
+      source_kind: record.available === true ? "local" : "none",
+      install_packages: record.install_packages,
+      source_digest: record.source_digest,
+      source_file_count: record.source_file_count,
+      receipt_state: record.receipt_state,
+      receipt_digest: record.receipt_digest,
+      managed,
+      install_block_reason: installed
+        ? "Application is already installed."
+        : record.available === true ? "" : "No verified package source is available.",
+      removal_allowed: installed && !managed && connected.length === 0,
+      removal_block_reason: !installed
+        ? "Application is not installed."
+        : managed
+          ? "This application is supplied by the Octopus installation and cannot be removed independently."
+          : connected.length
+            ? `Disconnect this application from ${connected.length} task${connected.length === 1 ? "" : "s"} before removing it.`
+            : "",
+      connected_run_ids: connected,
+      partially_connected_run_ids: [],
+      project_states: data.eeInstances.map((environment) => fixtureRow({
+        ee_id: environment.ee_id,
+        is_root: environment.ee_id === FIXTURE_ROOT_EE_ID,
+        policy_allowed: installed,
+        ceiling_allowed: true,
+        selected_by_default: installed && (LAB_DEFAULT_APPLICATIONS[environment.ee_id] ?? []).includes(manifest.id),
+        record_digest: environment.record_digest,
+      })),
+    });
+  });
 }
 
-function fixtureDrivers(environments, workerEnvironments) {
-  const definitions = [
-    {
-      name: "git_worktree",
-      substrate: "filesystem",
-      capabilities: ["files", "git", "process exec", "review"],
-      executors: ["exec"],
-      tools: ["coder.list_dir", "coder.read_file", "coder.grep", "coder.apply_patch", "coder.build"],
-      doors: ["lab_system_exec"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID],
-      selected: [FIXTURE_PRIMARY_PROJECT_ID],
-      hostSlots: { workspace_root: FIXTURE_WORKSPACE_ROOT },
-      network: "restricted",
-      sourceFileCount: 28,
-    },
-    {
-      name: "browser_session",
-      substrate: "browser",
-      capabilities: ["navigate", "inspect", "screenshot"],
-      executors: ["browser"],
-      tools: ["browser.navigate"],
-      doors: ["lab_system_browser"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_RESEARCH_PROJECT_ID],
-      selected: [FIXTURE_RESEARCH_PROJECT_ID],
-      hostSlots: { browser_profile_root: "/workspace/.browser-profile" },
-      network: "restricted",
-      sourceFileCount: 19,
-    },
-    {
-      name: "process_session",
-      substrate: "process",
-      capabilities: ["process exec", "terminal", "files"],
-      executors: ["exec"],
-      tools: ["coder.build"],
-      doors: ["lab_system_exec"],
-      available: [FIXTURE_PRIMARY_PROJECT_ID, FIXTURE_OPERATIONS_PROJECT_ID],
-      selected: [],
-      hostSlots: { workspace_root: FIXTURE_WORKSPACE_ROOT },
-      network: "denied",
-      sourceFileCount: 16,
-    },
-  ];
-  return definitions.map((definition, index) => {
-    const activeInstances = workerEnvironments.filter((environment) => (
-      environment.worker_environment_kind === definition.name
+function labDriverRows(entries, data) {
+  return entries.map(({ record, descriptor, tools }) => {
+    const name = record.product_id;
+    const installed = record.installed === true;
+    const activeInstances = data.workerEnvironments.filter((environment) => (
+      environment.worker_environment_kind === name
       && environment.status !== "released"
     ));
-    const projectStates = environments.map((environment) => fixtureRow({
-      ee_id: environment.ee_id,
-      is_root: environment.ee_id === FIXTURE_ROOT_EE_ID,
-      policy_allowed: definition.available.includes(environment.ee_id),
-      ceiling_allowed: true,
-      selected_by_default: definition.selected.includes(environment.ee_id),
-      record_digest: environment.record_digest,
-      host_slots: definition.available.includes(environment.ee_id) ? definition.hostSlots : {},
-    }));
+    const hostSlots = LAB_DRIVER_HOST_SLOTS[name] ?? {};
+    const allowed = installed ? LAB_DRIVER_PROJECTS[name] ?? [FIXTURE_PRIMARY_PROJECT_ID] : [];
+    const projectStates = data.eeInstances.map((environment) => {
+      const selected = installed && fixtureSelectedDriverNames(environment.ee_id).includes(name);
+      const policyAllowed = selected || allowed.includes(environment.ee_id);
+      return fixtureRow({
+        ee_id: environment.ee_id,
+        is_root: environment.ee_id === FIXTURE_ROOT_EE_ID,
+        policy_allowed: policyAllowed,
+        ceiling_allowed: true,
+        selected_by_default: selected,
+        record_digest: environment.record_digest,
+        host_slots: policyAllowed ? hostSlots : {},
+      });
+    });
     const projectConfigured = projectStates.some((state) => state.policy_allowed || state.selected_by_default);
-    const packageDigest = `sha256:${String(index + 1).repeat(64).slice(0, 64)}`;
+    const boundary = descriptor.boundary_defaults ?? {};
     return fixtureRow({
-      name: definition.name,
-      package_id: `driver.${definition.name}`,
-      installed: true,
-      source_available: true,
-      source_digest: packageDigest,
-      installed_digest: packageDigest,
-      source_file_count: definition.sourceFileCount,
-      receipt_state: "valid",
-      install_block_reason: "Driver is already installed.",
-      removal_allowed: activeInstances.length === 0 && !projectConfigured,
-      removal_block_reason: activeInstances.length > 0
-        ? `Release ${activeInstances.length} active worker environment${activeInstances.length === 1 ? "" : "s"} before removing this Driver.`
-        : projectConfigured
-          ? "Remove this Driver from every project before removing its package."
-          : "",
-      substrate_family: definition.substrate,
-      worker_consent: "explicit_ceiling",
-      capabilities: definition.capabilities,
-      supported_executor_kinds: definition.executors,
+      name,
+      display_name: record.display?.name ?? name,
+      description: record.display?.description ?? "",
+      package_id: record.id,
+      installed,
+      materialized: installed,
+      partially_materialized: false,
+      source_available: record.available === true,
+      source_digest: record.source_digest,
+      installed_digest: record.installed_digest,
+      source_file_count: record.source_file_count,
+      install_packages: record.install_packages,
+      agent_presets: [],
+      receipt_state: record.receipt_state,
+      install_block_reason: installed ? "Driver is already installed." : "",
+      removal_allowed: installed && activeInstances.length === 0 && !projectConfigured,
+      removal_block_reason: !installed
+        ? "Driver is not installed."
+        : activeInstances.length > 0
+          ? `Release ${activeInstances.length} active worker environment${activeInstances.length === 1 ? "" : "s"} before removing this Driver.`
+          : projectConfigured
+            ? "Remove this Driver from every project before removing its package."
+            : "",
+      substrate_family: descriptor.substrate_family ?? "",
+      worker_consent: descriptor.worker_consent ?? "explicit_ceiling",
+      capabilities: descriptor.capabilities ?? [],
+      supported_executor_kinds: descriptor.supported_executor_kinds ?? [],
       instance_config_files: [],
-      door_interfaces: definition.doors,
-      door_driver_refs: [`lab.${definition.name}`],
-      tool_ids: definition.tools,
-      tool_bindings: definition.tools.map((toolId) => fixtureRow({
-        tool_id: toolId,
-        interface_id: definition.doors[0],
-      })),
+      door_interfaces: [...new Set(tools.map((tool) => tool.interface).filter(Boolean))],
+      door_driver_refs: descriptor.door_driver_refs ?? [],
+      tool_ids: tools.map((tool) => tool.id),
+      tool_bindings: tools.map((tool) => fixtureRow({ tool_id: tool.id, interface_id: tool.interface })),
       boundary_defaults: {
-        read_root_refs: Object.entries(definition.hostSlots).map(([path, root]) => ({ access: ["read"], path, root })),
-        write_root_refs: Object.entries(definition.hostSlots).map(([path, root]) => ({ access: ["write"], path, root })),
-        protected_read_only_subpaths: [],
-        network_ceiling: definition.network,
+        read_root_refs: boundary.read_root_refs ?? [],
+        write_root_refs: boundary.write_root_refs ?? [],
+        protected_read_only_subpaths: boundary.protected_read_only_subpaths ?? [],
+        network_ceiling: boundary.network_ceiling ?? "denied",
       },
-      lifecycle: { requires_release: definition.name !== "git_worktree" },
-      descriptor_path: `lab://drivers/${definition.name}/worker_environment_kind.json`,
+      lifecycle: { requires_release: descriptor.lifecycle?.requires_release === true },
+      descriptor_path: `lab://registry/worker_environment_kind/${name}/worker_environment_kind.json`,
       active_instances: activeInstances,
       project_states: projectStates,
     });
@@ -2114,7 +2262,13 @@ function fixtureTaskAuthoringProfiles(environments) {
     return fixtureRow({
       ee_id: environment.ee_id,
       worker_choice_interface: worker,
+      door_host_slots: environment.ee_id === FIXTURE_PRIMARY_PROJECT_ID ? { lab_system_exec: { workspace_root: FIXTURE_WORKSPACE_ROOT } } : {},
+      external_inputs: [],
+      external_relays: [],
+      model_outputs: [],
+      context_artifact_bindings: [{ id: "lab_artifact_project_brief" }],
       selected_worker_environment_kinds: fixtureSelectedDriverNames(environment.ee_id),
+      selected_tools: [],
     });
   });
 }
@@ -2172,13 +2326,13 @@ function fixtureChatExecutionContexts(data) {
         client_agent_updated_at_ms: agent ? 1 : 0,
         client_agent_deleted_at_ms: 0,
         client_template: environment.ee_id !== FIXTURE_ROOT_EE_ID,
-        client_template_provider_interface_id: "lab_world_provider_codex",
-        client_template_provider_model: fixtureProviderInterfaceDescriptors()[0].model,
+        client_template_provider_interface_id: "world_provider_codex",
+        client_template_provider_model: data.providers?.[0]?.model ?? "",
         client_template_reasoning_effort: "high",
         client_template_digest: "lab-client-template",
         client_template_application_ids: applicationChoices.map((application) => application.id),
         client_template_worker_environment_kinds: driverChoices.map((driver) => driver.name),
-        provider_interface_ids: ["lab_world_provider_codex"],
+        provider_interface_ids: ["world_provider_codex"],
         role_artifact_ids: [],
         authoring_room_interface_id: "lab_system_exec",
         door_host_slots: workspaceSlots,
@@ -2186,7 +2340,7 @@ function fixtureChatExecutionContexts(data) {
         external_relays: [],
         model_outputs: [{
           checkpoint_id: "cp_provider_output",
-          interface_id: "lab_world_provider_codex",
+          interface_id: "world_provider_codex",
           required_verified_artifact: {
             mark: "llm.output.ok",
             artifact_label: "interface.artifact.output",
@@ -2218,7 +2372,7 @@ function fixtureSelectedDriverNames(eeId) {
 function fixtureProviderStatus(chats) {
   const home = chats.find((chat) => chat.client_surface_role === "home");
   return [{
-    provider_interface_id: "lab_world_provider_codex",
+    provider_interface_id: "world_provider_codex",
     observed_at_ms: Date.now(),
     movement_seq: home?.last_movement_seq || 0,
     run_id: home?.run_id || "",
@@ -2277,31 +2431,6 @@ function fixtureMovements(now, runs, interfaces, artifacts) {
     }
   }
   return rows.sort((left, right) => right.recorded_at_unix_ms - left.recorded_at_unix_ms);
-}
-
-function fixtureProviderInterfaceDescriptors() {
-  return [
-    {
-      id: "lab_world_provider_codex",
-      label: "Codex",
-      descriptorPath: "lab://registry/interface/lab_world_provider_codex/interface.json",
-      runtimeHandlerRef: "client.lab_simulation",
-      sourceNames: ["codex"],
-      model: "gpt-5.6-codex",
-      reasoningEffort: "high",
-      supportedReasoningEfforts: ["low", "medium", "high", "extra_high"],
-      models: [{
-        model: "gpt-5.6-codex",
-        displayName: "GPT-5.6 Codex",
-        description: "Test provider model",
-        defaultReasoningEffort: "high",
-        supportedReasoningEfforts: ["low", "medium", "high", "extra_high"],
-        showInPicker: true,
-        isDefault: true,
-      }],
-      preferred: true,
-    },
-  ];
 }
 
 function distribute(total, weights) {
@@ -2365,6 +2494,10 @@ function fixtureRunActivityPage(runId, rows, params) {
   });
   const selected = (fromEnd || beforeSeq !== null ? matching.slice(-limit) : matching.slice(0, limit)).map((message) => ({
     ...message,
+    movement_kind: message.direction === "in" ? "InterfaceArrival" : "InterfaceOutbound",
+    from: { kind: "interface", id: message.direction === "in" ? message.interface_id : message.event_data?._activity_origin?.interface_id || message.interface_id },
+    to: { kind: "interface", id: message.event_data?._movement?.to?.Interface || message.interface_id },
+    verification: "",
     payload_error: "",
   }));
   const oldestSeq = selected.length ? Number(selected[0].movement_seq) : null;
@@ -2405,7 +2538,53 @@ function requiredString(value, field) {
   return text;
 }
 
+function fixtureChatSearch(data, params) {
+  const query = requiredString(params.query, "query").replace(/\s+/g, " ").trim();
+  if (query.length < 2) throw new Error("task transcript search query must contain at least two characters");
+  if (!Array.isArray(params.task_run_ids)) throw new Error("task_run_ids must be an array of exact projected task run ids");
+  const runIds = [...new Set(params.task_run_ids.map(String))];
+  const limit = Math.min(50, Math.max(1, Number(params.limit) || 12));
+  const beforeSeq = Number.isSafeInteger(params.before_seq) ? params.before_seq : Number.MAX_SAFE_INTEGER;
+  const needle = query.toLocaleLowerCase();
+  const candidates = runIds.flatMap((runId) => (data.chatMessages[runId] ?? [])
+    .filter((message) => message.event_kind === "message" && typeof message.text === "string" && message.movement_seq < beforeSeq)
+    .map((message) => ({ runId, message })))
+    .sort((left, right) => right.message.movement_seq - left.message.movement_seq);
+  const matches = [];
+  let lastSeq = -1;
+  for (const { runId, message } of candidates) {
+    const text = message.text.replace(/\s+/g, " ").trim();
+    const index = text.toLocaleLowerCase().indexOf(needle);
+    if (index < 0) continue;
+    if (matches.length === limit) {
+      return { matches, has_older: true, next_before_seq: lastSeq, index_watermark: fixtureSearchWatermark(data), scope: fixtureSearchScope(runIds) };
+    }
+    const start = Math.max(0, index - 60);
+    const end = Math.min(text.length, index + needle.length + 60);
+    matches.push({
+      task_run_id: runId,
+      source_run_id: runId,
+      snippet: `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`,
+      message,
+    });
+    lastSeq = message.movement_seq;
+  }
+  return { matches, has_older: false, next_before_seq: -1, index_watermark: fixtureSearchWatermark(data), scope: fixtureSearchScope(runIds) };
+}
+
+function fixtureSearchWatermark(data) {
+  return Object.values(data.chatMessages).flat().reduce((latest, message) => Math.max(latest, Number(message.movement_seq) || 0), 0);
+}
+
+function fixtureSearchScope(runIds) {
+  return {
+    kind: "octopus_os_task_transcripts",
+    task_count: runIds.length,
+    run_count: runIds.length,
+    message_classes: ["operator", "terminal_agent", "terminal_error"],
+  };
+}
+
 module.exports = {
   createFixtureProjectionStore,
-  fixtureProviderInterfaceDescriptors,
 };

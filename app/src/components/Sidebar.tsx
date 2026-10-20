@@ -157,7 +157,7 @@ export function Sidebar({
   const [taskView, setTaskView] = useState({ scope: viewScope, archived: false });
   const activeTaskArchived = chatRuns.find((run) => run.runId === activeChatRunId)?.archived === true;
   const archivedView = taskView.scope === viewScope && taskView.archived;
-  const scheduledView = !inbox && accessProfile === "live" && activeSurfaceId === "scheduled" && !archivedView;
+  const scheduledView = !inbox && activeSurfaceId === "scheduled" && !archivedView;
   useEffect(() => {
     setTaskView({ scope: viewScope, archived: activeTaskArchived });
   }, [viewScope, activeChatRunId, activeTaskArchived]);

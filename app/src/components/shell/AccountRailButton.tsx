@@ -58,11 +58,11 @@ export function AccountRailButton({ accessProfile, runtimeHost, onLogOut, onOpen
           type="button"
         >{avatar}</button>
       </MessageTooltip>
-      {accessProfile === "live" ? <MessageTooltip asChild label={connected ? "Runtime connected" : runtimeHost.error || runtimeHost.phase} side="right" delayMs={300}><span
+      <MessageTooltip asChild label={connected ? "Runtime connected" : runtimeHost.error || runtimeHost.phase} side="right" delayMs={300}><span
         aria-label={connected ? "Runtime connected" : "Runtime unavailable"}
         className={`sidebar-runtime-dot navigation-rail-account-status${connected ? " is-ready" : runtimeHost.phase === "degraded" ? " is-error" : ""}`}
         role="status"
-      /></MessageTooltip> : null}
+      /></MessageTooltip>
       <OcDropdown align="start" anchorRef={trigger} aria-label="Account" contentWidth="sidebar" open={open} onOpenChange={setOpen} onCloseAutoFocus={(event) => {
         if (openingSettings.current) event.preventDefault();
       }} side="top" sideOffset={6}>

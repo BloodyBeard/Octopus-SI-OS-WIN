@@ -287,6 +287,22 @@ Its **Test Lab** settings expose fixtures, synthetic voice activity, and
 surface previews. It has no live runtime or endpoint authority. A successful
 Test preview does not prove a real model call, tool execution, or device setup.
 
+Test shows the same screens as the live client. Its Applications, Drivers,
+Application Packs, and provider models come from the package library bundled
+with the app, with a fixed set marked installed; it never reads the Home's
+registry. Its runtime status is the isolated lab's own, never the probe of the
+Home's runtime. Tasks, transcripts, triggers, and worker environments are fixtures in
+the current projection shapes. Built-in Home widgets that install by default
+are shown, and the Extensions catalog is read-only. Sending a message, steering,
+pinning, and editing a trigger are simulated in memory.
+
+Registry and Files open a **Test Home** with two folders: `registry/` is the
+bundled package library, read-only, plus a descriptor for each interface the
+lab projects; `workspace/` is the demo project the simulated task edits, and
+saving there changes only the lab's memory. Opening an artifact shows its
+fixture payload as JSON. Attachment bytes and voice recordings are not kept in
+Test, and nothing in Test can be revealed or opened on the Mac.
+
 For custom UI, [client surface documents](../app/client-surfaces/README.md)
 describe small widgets and workspace views as validated JSON. Test can watch
 local documents; Administrator reads stable documents from runtime projection

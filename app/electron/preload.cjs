@@ -78,11 +78,7 @@ function subscribeRuntimeEvent(channel, listener) {
 async function establishAccess(channel, password) {
   const result = await ipcRenderer.invoke(channel, password);
   accessToken = result.token;
-  try {
-    await refreshRuntimeEventSubscription();
-  } catch (error) {
-    if (result.profile !== "lab") throw error;
-  }
+  await refreshRuntimeEventSubscription();
   return ipcRenderer.invoke("octopus:access-status", accessToken);
 }
 
