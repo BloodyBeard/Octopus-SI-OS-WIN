@@ -1,7 +1,8 @@
 # Scenarios
 
-Three design examples show how Octopus can acquire a capability, change what
-it listens for, and change its own client. They describe the intended use of
+Four design examples show how Octopus can acquire a capability, change what
+it listens for, change its own client, and tell a model what matters when you
+come back. They describe the intended use of
 the architecture, rather than tested, ready-to-use features. Each depends on a
 model doing the work, the necessary permissions, and checks of the resulting
 behavior.
@@ -84,6 +85,32 @@ implements it reliably must be established by running and testing it.
 
 The client stays a projection: presentation and the owner's consent belong to
 the client, while the data crosses an interface as artifacts under policy.
+
+## 4. Knowing what to check when you come back
+
+1. You work in a task about a client deal, then go quiet for the evening. The
+   next morning you write in the same task again.
+2. The task's bindings route your messages through a small interface before
+   they reach the provider - artifact in, artifact out. Every movement in the
+   ledger carries its time, so the interface knows when your previous message
+   arrived without any timer.
+3. This message comes more than six hours after the last one. The interface
+   passes it on together with a note of its own: you are back after a long
+   pause; before answering, check the mail in the deal's folders. With a mail
+   interface in its grant, it can attach a digest of what arrived instead.
+   After a short pause the note is empty.
+4. The provider's checkpoint requires both the message and the note, so the
+   runtime releases them as one set: the model sees your message and the note
+   together.
+5. The threshold, the folders and the wording are that interface's
+   configuration. Which chats or projects it covers is decided by which runs
+   route through it, and a model can change the rule with an ordinary JSON
+   edit under policy.
+
+A skill could only ask the model to notice the pause itself, and the model
+does not reliably see the time between messages. Here deterministic code
+decides, the model receives the fact, and the reason it checked the mail is a
+recorded movement.
 
 For the package structure behind these examples, see
 [Extending Octopus](contracts/EXTENSION_SURFACES.md).

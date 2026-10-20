@@ -579,7 +579,8 @@ through JSON; a new kind of listener may also require package code.
 
 The framework provides the boundaries and records the results. Whether a model
 uses these capabilities effectively is an empirical question.
-[Scenarios](scenarios.md) illustrates the camera and wake-word examples.
+[Scenarios](scenarios.md) illustrates the camera, wake-word and
+return-after-a-pause examples.
 
 ## What is not solved
 
