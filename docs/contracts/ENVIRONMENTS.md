@@ -40,7 +40,12 @@ along that chain. See [Policy](POLICY.md).
 **Reorganizing is JSON.** Allowances name originals, and a task's private
 copies are admitted by them, so a narrowed environment can host real runs: a
 memory service in `memory_maintenance`, a recurring line of work in its own
-project. A run lives in the one environment its record's `ee` names; another
+project. An environment that lists interfaces names every original a task
+carries: its worker, provider and client, the rooms it uses, and the service
+doors composition adds (`system_service_input`,
+`system_worker_memory_observer`, `system_context_memory_projection`). Worker
+templates that host a provider hold the first two in their ceilings, so a
+task's copies keep them when narrowed; a refusal names the missing original. A run lives in the one environment its record's `ee` names; another
 run moves it by changing only that field, and the new place applies from the
 run's next arrival.
 
