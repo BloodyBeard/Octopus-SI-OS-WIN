@@ -1,5 +1,5 @@
 use super::*;
-use octopus_provider_run_authoring::capability_amendment::{ProviderCapabilityAmendment, ProviderCapabilityBridge, prepare_plan, rebase_plan, validate_tool_continuation};
+use octopus_run_authoring::capability_amendment::{ProviderCapabilityAmendment, ProviderCapabilityBridge, prepare_plan, rebase_plan, validate_tool_continuation};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,7 +357,7 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
     for template in current_topology["checkpoints"].as_array().ok_or("current topology has no templates")? {
         if matches!(template["role"].as_str(), Some("verified_input" | "result_input")) && !templates.contains(template) { templates.push(template.clone()); }
     }
-    let current_context = octopus_provider_run_authoring::provider_context_bindings(current, provider)?;
+    let current_context = octopus_run_authoring::provider_context_bindings(current, provider)?;
     let future_templates = candidate["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array().ok_or("planned templates absent")?.clone();
     for cp in candidate["checkpoints"].as_array_mut().ok_or("planned checkpoints absent")? {
         if future_templates.iter().any(|template| template["role"] == "stable" && template["include_context"] == true
@@ -431,7 +431,7 @@ pub fn plan_current_run_amendment_for_native(roots: &CompositionRoots, current: 
 fn prospective_bridge_inputs(record: &RunRecord, provider: &InterfaceId, tool: &str, door: &InterfaceId)
     -> Result<(Vec<octopus_descriptors::CheckpointId>, Option<RequiredVerifiedArtifact>), String> {
     validate_tool_continuation(record, provider, tool, door)?;
-    octopus_provider_run_authoring::provider_context_bindings(record, provider)?;
+    octopus_run_authoring::provider_context_bindings(record, provider)?;
     let topology: BoundRunAuthoringTopology = parse(record.interface_state.get(provider)
         .and_then(|state|state.get("run_authoring_binding")).ok_or("prospective bridge has no declared topology")?)?;
     let output = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput

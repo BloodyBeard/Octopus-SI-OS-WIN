@@ -61,14 +61,14 @@ fn pending_tool_handoff(request: &RunCompositionRequest, plan: &RunCompositionPl
             "artifact_bindings":row.artifact_bindings.iter().map(|binding|binding.id.clone()).collect::<Vec<_>>(),
             "required_verified_artifacts":row.required_verified_artifacts
         }}]});
-    octopus_provider_run_authoring::provider_context_bindings(&RunRecord::from_bytes(pending.to_string().as_bytes()).unwrap(), &provider.clone().into()).unwrap();
+    octopus_run_authoring::provider_context_bindings(&RunRecord::from_bytes(pending.to_string().as_bytes()).unwrap(), &provider.clone().into()).unwrap();
     pending
 }
 
 #[test]
 fn legacy_current_selection_materializes_defaults_and_preserves_provider_life_while_attaching() {
     use octopus_operator_chat_client::{SelectedToolSeed,run_composition::current_run::*};
-    use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+    use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
     use octopus_ledger::ContentHash;
     let temp=tempfile::tempdir().unwrap();let root=temp.path().canonicalize().unwrap();
     let mut request=support::client_fixture(&root);
@@ -844,7 +844,7 @@ fn composition_binds_planned_native_catalog_and_task_coordinates_before_validati
 #[test]
 fn native_result_receiving_adoption_preserves_legacy_rows_and_declared_authority() {
     use octopus_operator_chat_client::native_run_authoring::plan_existing_adoption;
-    use octopus_provider_run_authoring::provider_context_bindings;
+    use octopus_run_authoring::provider_context_bindings;
     let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
     let request = support::client_fixture(&root); enable_native_profile(&root);
     let plan = plan_run_composition(&request).unwrap();
@@ -1049,7 +1049,7 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
     use octopus_ledger::{ContentHash, Endpoint, LiveMovementLog, MovementKind, MovementLog, Seq, SharedBlobs};
     use octopus_ledger_store::{DurableBlobs, DurableLog};
     use octopus_operator_chat_client::{OperatorWriterRunPlanRequest, plan_operator_writer_runs};
-    use octopus_provider_run_authoring::{ProviderEmission, ProviderEmissionRoute, ProviderHandoffSession};
+    use octopus_run_authoring::{ProviderEmission, ProviderEmissionRoute, ProviderHandoffSession};
     use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact};
     use octopus_world_pyecho_life_runtime::LedgerTailReader;
     use std::{collections::BTreeMap, io::Write, path::Path, process::{Command, Stdio}, sync::{Arc, Mutex}};

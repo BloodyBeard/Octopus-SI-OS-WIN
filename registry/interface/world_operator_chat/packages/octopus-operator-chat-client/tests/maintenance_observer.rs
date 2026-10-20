@@ -333,7 +333,7 @@ fn selected_native_capture_keeps_companion_exact_on_operator_revisions() {
                 "checkpoint":{"id":row.id,"epoch":row.epoch,"interface_binding":row.interface_binding,"outbound_interface_bindings":row.outbound_interface_bindings,
                     "artifact_bindings":row.artifact_bindings.iter().map(|b|b.id.clone()).collect::<Vec<_>>(),"required_verified_artifacts":row.required_verified_artifacts}}]});
             request.existing_run_record=Some(pending.clone());std::fs::write(&plan.run_write.path,pending.to_string()).unwrap();
-            octopus_provider_run_authoring::provider_context_bindings(&RunRecord::from_bytes(pending.to_string().as_bytes()).unwrap(),&provider.clone().into()).unwrap();
+            octopus_run_authoring::provider_context_bindings(&RunRecord::from_bytes(pending.to_string().as_bytes()).unwrap(),&provider.clone().into()).unwrap();
             let mut unproven=request.clone();unproven.existing_run_record.as_mut().unwrap()["interface_state"][provider].as_object_mut().unwrap().remove("pending_handoff");
             assert!(plan_operator_chat_topology(&unproven).is_err());
         }
@@ -414,7 +414,7 @@ mod movement_gate {
         SharedBlobs,
     };
     use octopus_ledger_store::{DurableBlobs, DurableLog};
-    use octopus_provider_run_authoring::{
+    use octopus_run_authoring::{
         declared_provider_run_writer, RunAuthoringProfile,
         ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome, ProviderHandoffSession,
         ProviderSourceRecovery,
@@ -733,7 +733,7 @@ mod movement_gate {
             file: &InterfaceArtifactFile,
             id: &str,
             run: &str,
-        ) -> octopus_provider_run_authoring::ProviderOutputHandoff {
+        ) -> octopus_run_authoring::ProviderOutputHandoff {
             let (row, _) = self.input_in_run(file, id, Some(run));
             self.handoff_at(id, run, row.seq.0).0
         }
@@ -742,7 +742,7 @@ mod movement_gate {
             id: &str,
             run: &str,
             source: u64,
-        ) -> (octopus_provider_run_authoring::ProviderOutputHandoff, octopus_ledger::ArtifactRef) {
+        ) -> (octopus_run_authoring::ProviderOutputHandoff, octopus_ledger::ArtifactRef) {
             let ctx = self.context(id);
             let mut reader = LedgerReplayReader::open(&ctx).unwrap();
             let row = loop {
@@ -773,7 +773,7 @@ mod movement_gate {
             file: &InterfaceArtifactFile,
             id: &str,
             run: &str,
-        ) -> (octopus_provider_run_authoring::ProviderOutputHandoff, u64) {
+        ) -> (octopus_run_authoring::ProviderOutputHandoff, u64) {
             let receipt = self.handoff(file, id, run);
             let (recovery, outcomes) = self.drive(receipt.recover_source_with_outcomes()).await;
             let ProviderSourceRecovery::Bridged { invocation_movement_seq } = recovery else {
@@ -791,11 +791,11 @@ mod movement_gate {
         }
         async fn stable_result_handoff(
             &mut self,
-            previous: &octopus_provider_run_authoring::ProviderOutputHandoff,
+            previous: &octopus_run_authoring::ProviderOutputHandoff,
             file: &InterfaceArtifactFile,
             id: &str,
             run: &str,
-        ) -> (octopus_provider_run_authoring::ProviderOutputHandoff, u64) {
+        ) -> (octopus_run_authoring::ProviderOutputHandoff, u64) {
             let record: Value = serde_json::from_slice(&previous.current_run_record_bytes().await).unwrap();
             assert_eq!(record["id"], run);
             let pending = &record["interface_state"][id]["pending_handoff"];
@@ -1218,7 +1218,7 @@ mod movement_gate {
         source_sequence: u64,
         output_label: &str,
     ) -> Result<(), String> {
-        let result_label = octopus_provider_run_authoring::RunAuthoringResultIdentity::from_descriptor(
+        let result_label = octopus_run_authoring::RunAuthoringResultIdentity::from_descriptor(
             &ctx.resolved_interface_descriptor()?,
         )?.artifact_label().to_owned();
         let mut outputs = LedgerTailReader::open_named(&output_ctx, "projection-fixture-output")?;
@@ -1267,7 +1267,7 @@ mod movement_gate {
 
     #[tokio::test]
     async fn two_source_completions_projection_observer_rearm_and_restart_use_checked_writes() {
-        use octopus_provider_run_authoring::{SessionContextArtifact,
+        use octopus_run_authoring::{SessionContextArtifact,
             snapshot_projection::{SnapshotSourceScope, verify_selected_source_input}};
         let temp = tempfile::Builder::new()
             .prefix("oct-capture-")

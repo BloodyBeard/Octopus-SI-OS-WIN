@@ -40,7 +40,7 @@ pub struct RealtimeConfig {
     pub session: Value,
     pub reconnect_attempts: u32,
     pub max_transcript_bytes: usize,
-    pub run_authoring_profile: octopus_provider_run_authoring::RunAuthoringProfile,
+    pub run_authoring_profile: octopus_run_authoring::RunAuthoringProfile,
     pub model_hidden_tools: Vec<String>,
     pub context_output_labels: Vec<String>,
     pub session_snapshot_labels: Vec<String>,

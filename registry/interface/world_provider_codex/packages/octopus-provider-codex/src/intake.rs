@@ -6,7 +6,7 @@ use octopus_interfaces::{DeliveryVerdict, InterfaceArtifactFile};
 use octopus_ledger::{ContentHash, Endpoint, Movement, MovementKind, RefusedReason};
 use octopus_ledger_store::DurableMovementDecoder;
 use octopus_operator_chat_client::input_intake::{INPUT_INTAKE_DRIVER, InputIntakeConfig, InputNotificationAction};
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     checked_edit_verification_failure, checked_provider_run_advance, owner_writer_binding,
     OwnerWriterEvidence,
 };

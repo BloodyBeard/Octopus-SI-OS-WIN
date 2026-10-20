@@ -5,8 +5,8 @@ use octopus_ledger_index::ArrivalDedupIndex;
 use octopus_tool_handlers::{ToolResultArtifact, ToolResultError};
 
 fn ordered_before(entry: &Value) -> String {
-    let preimage: octopus_provider_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
-    preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_provider_run_authoring::DecodeBudget::new(8 * 1024 * 1024).unwrap()).unwrap()
+    let preimage: octopus_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
+    preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_run_authoring::DecodeBudget::new(8 * 1024 * 1024).unwrap()).unwrap()
 }
 fn ordered_postimage(entry: &Value) -> Value {
     let before = ordered_before(entry);
@@ -14,7 +14,7 @@ fn ordered_postimage(entry: &Value) -> Value {
     let mut after = serde_json::from_str(&before).unwrap();
     let patch: json_patch::Patch = serde_json::from_value(entry["patch"].clone()).unwrap();
     json_patch::patch(&mut after, &patch).unwrap();
-    let format: Option<octopus_provider_run_authoring::JsonFormat> = entry.get("json_format").cloned().map(serde_json::from_value).transpose().unwrap();
+    let format: Option<octopus_run_authoring::JsonFormat> = entry.get("json_format").cloned().map(serde_json::from_value).transpose().unwrap();
     let bytes = format.unwrap_or_default().encode(&after).unwrap();
     assert_eq!(entry["expected_after_hash"], ContentHash::of_bytes(&bytes).to_hex());
     after
@@ -102,13 +102,13 @@ fn pair() -> (Fixture, Fixture) {
         .extend(peer_checkpoints);
     for provider in ["voice", "peer"] {
         let id = RunId::new(format!("writer_{provider}"));
-        let writer = octopus_provider_run_authoring::separate_writer_run(
+        let writer = octopus_run_authoring::separate_writer_run(
             &mut run,
             &InterfaceId::new(provider),
             &id,
         )
         .unwrap();
-        let content = octopus_provider_run_authoring::JsonFormat::Compact.encode(&writer).unwrap();
+        let content = octopus_run_authoring::JsonFormat::Compact.encode(&writer).unwrap();
         std::fs::write(
             owner.ctx.root_slots["run_records_root"].join(format!("{id}.json")),
             content,
@@ -505,7 +505,7 @@ async fn outgoing_connection_survives_publication_conflict_and_cold_recovery() {
             install(&owner, ws, retry, file).await;
         };
         let (result, ()) = tokio::join!(restarted.recover_source_with_outcomes(), finish);
-        let (recovery, outputs) = result.unwrap(); assert_eq!(recovery, octopus_provider_run_authoring::ProviderSourceRecovery::Completed);
+        let (recovery, outputs) = result.unwrap(); assert_eq!(recovery, octopus_run_authoring::ProviderSourceRecovery::Completed);
         assert_eq!(outputs.len(), 1); assert!(matches!(&outputs[0], ProviderHandoffOutcome::Admitted { artifact, .. } if artifact == &output));
         let final_bytes = std::fs::read(&owner.run_path).unwrap();
         let final_record: Value = serde_json::from_slice(&final_bytes).unwrap();
@@ -516,14 +516,14 @@ async fn outgoing_connection_survives_publication_conflict_and_cold_recovery() {
         assert_eq!(final_record["interface_state"]["peer"], before["interface_state"]["peer"]);
         assert_eq!(std::fs::read(file.manifest_path()).unwrap(), private_bytes); assert_eq!(file.read_payload_bytes().unwrap(), private_payload);
         let limits = owner.ctx.required_host_io_limits().unwrap();
-        let evidence = octopus_provider_run_authoring::CheckedRunEvidence { movements_path: &owner.ctx.movements_path, ledger_index_path: &owner.ctx.ledger_index_path,
+        let evidence = octopus_run_authoring::CheckedRunEvidence { movements_path: &owner.ctx.movements_path, ledger_index_path: &owner.ctx.ledger_index_path,
             blobs_dir: &owner.ctx.blobs_dir, max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes };
-        let writer = octopus_provider_run_authoring::CheckedRunWriter { owner: InterfaceId::new("voice"), source: InterfaceId::new("source"), door: InterfaceId::new("door"),
+        let writer = octopus_run_authoring::CheckedRunWriter { owner: InterfaceId::new("voice"), source: InterfaceId::new("source"), door: InterfaceId::new("door"),
             tool: "file.write".into(), call_label: "tool.call".into(), result_label: "file.write.result".into() };
-        let error = octopus_provider_run_authoring::checked_run_file_chain(&evidence, &owner.run_path, &owner.pinned, &final_bytes, owner.source_seq, &[writer]).unwrap_err();
+        let error = octopus_run_authoring::checked_run_file_chain(&evidence, &owner.run_path, &owner.pinned, &final_bytes, owner.source_seq, &[writer]).unwrap_err();
         assert!(error.contains("complete admitted checked file.write chain"), "{error}");
         let ledger = std::fs::read(&owner.ctx.movements_path).unwrap(); let cold = owner.handoff();
-        assert_eq!(cold.recover_source().await.unwrap(), octopus_provider_run_authoring::ProviderSourceRecovery::Completed);
+        assert_eq!(cold.recover_source().await.unwrap(), octopus_run_authoring::ProviderSourceRecovery::Completed);
         assert!(cold.current_session_context_artifacts().await.iter().any(|entry| entry.source_artifact == output));
         assert_eq!(std::fs::read(&owner.ctx.movements_path).unwrap(), ledger); assert!(owner.arrivals.try_recv().is_err());
     }).await.expect("outgoing publication recovery exceeded deadline");

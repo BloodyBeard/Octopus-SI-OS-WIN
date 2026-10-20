@@ -83,7 +83,7 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
     assert_eq!(coordinates["authoring"]["run_records_root"], json!(request.roots.run_records_root));
     let record = RunRecord::from_bytes(retained.run_write.content.as_bytes()).unwrap();
     let provider = InterfaceId::new(&retained.provider_interface_id);
-    let door = octopus_provider_run_authoring::bound_tool_door(
+    let door = octopus_run_authoring::bound_tool_door(
         &serde_json::from_str(&retained.run_write.content).unwrap(),
         &provider,
         &retained.authoring.capability_tools["file.write"],

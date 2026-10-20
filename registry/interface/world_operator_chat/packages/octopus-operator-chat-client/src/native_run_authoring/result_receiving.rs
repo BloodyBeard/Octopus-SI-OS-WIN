@@ -104,7 +104,7 @@ pub(super) fn prepare(
         current["interface_state"][provider.as_str()]["run_authoring_binding"].clone(),
     )
     .map_err(|e| e.to_string())?;
-    let context = octopus_provider_run_authoring::provider_context_bindings(record, &provider)?;
+    let context = octopus_run_authoring::provider_context_bindings(record, &provider)?;
     let mut next = current.clone();
     let mut topology = bound.clone();
     let mut removed = BTreeSet::new();

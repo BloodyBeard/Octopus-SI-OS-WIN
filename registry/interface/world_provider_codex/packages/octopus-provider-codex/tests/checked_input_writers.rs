@@ -17,7 +17,7 @@ use octopus_operator_chat_client::{
     input_intake::InputIntakeConfig, run_composition::plan_run_composition,
 };
 use octopus_provider_codex::intake_state::prepare_input;
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     CheckedRunEdit, CheckedRunEvidence, CheckedRunEvidenceReader, CheckedRunTransition,
     CheckedRunWriter, checked_provider_run_advance, checked_run_file_chain,
     checked_run_file_chain_before,
@@ -718,7 +718,7 @@ fn intake_retries_both_negative_cas_boundaries_only_with_exact_call_and_independ
 #[test]
 fn intake_verification_failure_rebases_retained_input_without_inventing_tool_result() {
     use octopus_provider_codex::intake_state::{checked_input_result, reprepare_input};
-    use octopus_provider_run_authoring::checked_edit_verification_failure;
+    use octopus_run_authoring::checked_edit_verification_failure;
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut f = Fixture::new();
@@ -882,7 +882,7 @@ fn intake_verification_failure_rebases_retained_input_without_inventing_tool_res
 
 #[test]
 fn delivered_source_is_bound_read_only_and_requires_its_exact_admitted_edge() {
-    use octopus_provider_run_authoring::{input_artifacts, context_artifact_payloads};
+    use octopus_run_authoring::{input_artifacts, context_artifact_payloads};
     let mut f = Fixture::new();
     let source = f.log.read_from(Seq(0))[0].clone();
     let before = f.before.clone();

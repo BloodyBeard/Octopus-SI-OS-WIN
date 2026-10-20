@@ -1,6 +1,6 @@
 use super::*;
 use octopus_ledger::ArtifactRef;
-use octopus_provider_run_authoring::{RunAuthoringProfile, declared_provider_run_writer};
+use octopus_run_authoring::{RunAuthoringProfile, declared_provider_run_writer};
 use octopus_tool_registry::ToolArgumentValidator;
 use serde_json::Value;
 

@@ -11,7 +11,7 @@ fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
 
 async fn native_terminal_handoff_cases() {
     use octopus_interfaces::DeliveryVerdict;
-    use octopus_provider_run_authoring::ProviderSourceRecovery;
+    use octopus_run_authoring::ProviderSourceRecovery;
     use octopus_runtime::run_record::RunRecord;
     fn edge(ctx: &InterfaceLiftContext, bytes: &[u8], checkpoint: &octopus_runtime::run_record::CheckpointRecord,
         file: &InterfaceArtifactFile, kind: MovementKind, target: InterfaceId) -> Movement {
@@ -96,7 +96,7 @@ async fn native_terminal_handoff_cases() {
                     let call_envelope=InterfaceInvocationEnvelope{artifact:cache_artifact(gate_ctx,&file),artifact_file:file,artifact_binding_payloads:vec![],metadata:Some(call_metadata)};
                     let body=octopus_system_room_env::execute_file_write_result(&call_envelope,&call.arguments,&["system_room".into()],&BTreeMap::from([("run_records_root".into(),root.join("runs"))]),&root.join(format!("effects-{writes}")),1<<24).unwrap();
                     if let Some(source)=overlap {
-                        use octopus_provider_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer,checked_declared_run_advance,CheckedRunError};
+                        use octopus_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer,checked_declared_run_advance,CheckedRunError};
                         let profile:RunAuthoringProfile=serde_json::from_value(gate_ctx.descriptor_snapshot.as_ref().unwrap().interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"].clone()).unwrap();
                         let writer=declared_provider_run_writer(&RunRecord::from_bytes(&target_before).unwrap(),&gate_ctx.interface,&profile).unwrap();
                         let limits=gate_ctx.required_host_io_limits().unwrap();
@@ -112,12 +112,12 @@ async fn native_terminal_handoff_cases() {
                     let selected_bytes=std::fs::read(path).unwrap();let selected=RunRecord::from_bytes(&selected_bytes).unwrap();
                     let pending=&selected.interface_state[&gate_ctx.interface]["pending_handoff"];
                     if count==2 && delivered.len()==1 && pending["withdrawal"].is_object() && pending["context_publication"].is_null() {
-                        use octopus_provider_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer};
+                        use octopus_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer};
                         let profile:RunAuthoringProfile=serde_json::from_value(gate_ctx.descriptor_snapshot.as_ref().unwrap().interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"].clone()).unwrap();
                         let writer=declared_provider_run_writer(&selected,&gate_ctx.interface,&profile).unwrap();
                         let limits=gate_ctx.required_host_io_limits().unwrap();let evidence=CheckedRunEvidence {movements_path:&gate_ctx.movements_path,ledger_index_path:&gate_ctx.ledger_index_path,blobs_dir:&gate_ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
                         let source=selected.interface_state[&gate_ctx.interface]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter().find(|template|template["role"]=="stable"&&template["include_context"]==true).unwrap()["interface_binding"]["interface"].as_str().unwrap();
-                        assert!(!octopus_provider_run_authoring::provider_input_payloads_ready(&evidence,&path.canonicalize().unwrap(),&selected_bytes,&writer,&InterfaceId::new(source)).unwrap());
+                        assert!(!octopus_run_authoring::provider_input_payloads_ready(&evidence,&path.canonicalize().unwrap(),&selected_bytes,&writer,&InterfaceId::new(source)).unwrap());
                     }
                     ws.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&DeliveryVerdict::Admitted{seq}).unwrap().into())).await.unwrap(); writes+=1;
                     if delivered_before+delivered.len()==count { break; }
@@ -177,10 +177,10 @@ async fn native_terminal_handoff_cases() {
     async fn assert_saved_snapshot_authority(
         ctx:&InterfaceLiftContext,root:&Path,run_path:&Path,descriptor:&InterfaceDescriptor,run:&RunId,
         envelope:&InterfaceInvocationEnvelope,result_seq:u64,pinned:&[u8],selected:&[u8],ledger:&[u8],
-        saved:&octopus_provider_run_authoring::PendingSourceWithdrawal,authoring_id:&InterfaceId,phase:usize,stop_seq:u64,
+        saved:&octopus_run_authoring::PendingSourceWithdrawal,authoring_id:&InterfaceId,phase:usize,stop_seq:u64,
         receiver:&mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
     ) {
-    use octopus_provider_run_authoring::{CheckedRunEdit,CheckedRunEvidence,declared_provider_run_writer,RunAuthoringProfile};
+    use octopus_run_authoring::{CheckedRunEdit,CheckedRunEvidence,declared_provider_run_writer,RunAuthoringProfile};
     let profile:RunAuthoringProfile=serde_json::from_value(descriptor.interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"].clone()).unwrap();
     let installed_record=RunRecord::from_bytes(selected).unwrap();
     let writer=declared_provider_run_writer(&installed_record,&descriptor.id,&profile).unwrap();
@@ -209,7 +209,7 @@ async fn native_terminal_handoff_cases() {
             proof["parent"]=serde_json::Value::Null;payload["session_context"]["parent"]=serde_json::Value::Null;
             proof["replaced_context"].as_array_mut().unwrap().retain(|entry|entry[0]!=head);
             let replaced=proof["replaced_context"].as_array().unwrap().iter().map(|entry|entry[0]["id"].clone()).collect::<Vec<_>>();
-            let mut publication=octopus_provider_run_authoring::provider_context_bindings(&installed_record,&descriptor.id).unwrap()
+            let mut publication=octopus_run_authoring::provider_context_bindings(&installed_record,&descriptor.id).unwrap()
                 .into_iter().filter(|binding|!replaced.contains(&json!(binding.id))).map(|binding|json!(binding.id)).collect::<Vec<_>>();
             publication.push(pending["items"][0]["artifact_id"].clone());
             state["pending_handoff"]["context_publication"]=json!(publication);
@@ -236,13 +236,13 @@ async fn native_terminal_handoff_cases() {
             std::fs::write(&replay_ctx.movements_path,&ledger).unwrap();
             let limits=ctx.required_host_io_limits().unwrap();
             let advance=&call_value["arguments"]["writes"][0];
-            let preimage:octopus_provider_run_authoring::Preimage=serde_json::from_value(advance["expected_before_content"].clone()).unwrap();
-            let writer_before=preimage.decode(advance["expected_before_hash"].as_str().unwrap(),&mut octopus_provider_run_authoring::DecodeBudget::new(limits.max_payload_bytes).unwrap()).unwrap().into_bytes();
+            let preimage:octopus_run_authoring::Preimage=serde_json::from_value(advance["expected_before_content"].clone()).unwrap();
+            let writer_before=preimage.decode(advance["expected_before_hash"].as_str().unwrap(),&mut octopus_run_authoring::DecodeBudget::new(limits.max_payload_bytes).unwrap()).unwrap().into_bytes();
             let before_record=RunRecord::from_bytes(&writer_before).unwrap();
             assert_eq!(before_record.id.as_str(),installed_record.interface_state[&descriptor.id]["run_authoring_binding"]["writer_run"]["run"].as_str().unwrap());
             let mut after_value:serde_json::Value=serde_json::from_slice(&writer_before).unwrap();
             json_patch::patch(&mut after_value,&serde_json::from_value::<json_patch::Patch>(advance["patch"].clone()).unwrap()).unwrap();
-            let format:octopus_provider_run_authoring::JsonFormat=serde_json::from_value(advance["json_format"].clone()).unwrap();
+            let format:octopus_run_authoring::JsonFormat=serde_json::from_value(advance["json_format"].clone()).unwrap();
             let writer_after=format.encode(&after_value).unwrap();
             assert_eq!(ContentHash::of_bytes(&writer_after).to_hex(),advance["expected_after_hash"].as_str().unwrap());
             let call_cp=before_record.checkpoints.iter().find(|cp|before_record.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(authoring_id)&&cp.outbound_interfaces().eq([&writer.door])).unwrap();
@@ -255,7 +255,7 @@ async fn native_terminal_handoff_cases() {
             ]}}));
             append(&replay_ctx,edge(&replay_ctx,&writer_after,result_cp,&result,MovementKind::InterfaceOutbound,descriptor.id.clone()));
             let evidence=CheckedRunEvidence {movements_path:&replay_ctx.movements_path,ledger_index_path:&replay_ctx.ledger_index_path,blobs_dir:&ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
-            let error=octopus_provider_run_authoring::checked_run_file_chain(&evidence,&run_path.canonicalize().unwrap(),&selected,edit.content.as_bytes(),stop_seq,&[writer.clone()]).unwrap_err();
+            let error=octopus_run_authoring::checked_run_file_chain(&evidence,&run_path.canonicalize().unwrap(),&selected,edit.content.as_bytes(),stop_seq,&[writer.clone()]).unwrap_err();
             assert!(error.contains(if fault=="delta" {"exact source context parent and delta"} else {"exact predecessor snapshot parent or complete dynamic replacement set"}),"checked {fault}: {error}");
         }
         std::fs::remove_file(attempt.manifest_path()).unwrap();
@@ -265,10 +265,10 @@ async fn native_terminal_handoff_cases() {
     }
     async fn source_with_snapshot(
         ctx:&InterfaceLiftContext,root:&Path,run_path:&Path,descriptor:&InterfaceDescriptor,run:&RunId,
-        first:octopus_provider_run_authoring::ProviderOutputHandoff,input:InterfaceInvocationEnvelope,
+        first:octopus_run_authoring::ProviderOutputHandoff,input:InterfaceInvocationEnvelope,
         authoring_id:&InterfaceId,listener:&tokio::net::UnixListener,
         receiver:&mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
-    ) -> (octopus_provider_run_authoring::ProviderOutputHandoff,InterfaceInvocationEnvelope,u64) {
+    ) -> (octopus_run_authoring::ProviderOutputHandoff,InterfaceInvocationEnvelope,u64) {
     let prior=artifact(&ctx.interface_var_dir().join("prior-answer"),"interface.artifact.output",json!({"label":"interface.artifact.output","text":"prior completed reply"}));
     let hand=Box::pin(first.hand_final(ProviderEmission {artifact:prior,route:ProviderEmissionRoute::ClientProjection}));
     let gate=pump(&ctx,root,&run_path,&authoring_id,&listener,receiver,&input.artifact,0,1,true,0,true);
@@ -427,14 +427,14 @@ async fn native_terminal_handoff_cases() {
                 assert!(!String::from_utf8(ledger).unwrap().lines().any(|line|serde_json::from_str::<Movement>(line).unwrap().artifact==Some(materialized_artifact_ref(&seed).unwrap())));
                 assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(root.join("runs/installed_child.json")).unwrap()).unwrap()["status"],"idle");
                 {
-                    use octopus_provider_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer};
+                    use octopus_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer};
                     let profile:RunAuthoringProfile=serde_json::from_value(descriptor.interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"].clone()).unwrap();
                     let writer=declared_provider_run_writer(&installed_record,&descriptor.id,&profile).unwrap();
                     let limits=ctx.required_host_io_limits().unwrap();let evidence=CheckedRunEvidence {movements_path:&ctx.movements_path,ledger_index_path:&ctx.ledger_index_path,blobs_dir:&ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
-                    assert!(!octopus_provider_run_authoring::checked_run_file_chain(&evidence,&run_path.canonicalize().unwrap(),&installed,&after,stop_seq,&[writer.clone()]).unwrap().is_empty());
-                    assert!(octopus_provider_run_authoring::provider_input_rearm_ready(&evidence,&RunRecord::from_bytes(&after).unwrap(),&descriptor.id).unwrap());
+                    assert!(!octopus_run_authoring::checked_run_file_chain(&evidence,&run_path.canonicalize().unwrap(),&installed,&after,stop_seq,&[writer.clone()]).unwrap().is_empty());
+                    assert!(octopus_run_authoring::provider_input_rearm_ready(&evidence,&RunRecord::from_bytes(&after).unwrap(),&descriptor.id).unwrap());
                     let source=installed_record.interface_state[&descriptor.id]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter().find(|template|template["role"]=="stable"&&template["include_context"]==true).unwrap()["interface_binding"]["interface"].as_str().unwrap();
-                    assert!(octopus_provider_run_authoring::provider_input_payloads_ready(&evidence,&run_path.canonicalize().unwrap(),&after,&writer,&InterfaceId::new(source)).unwrap());
+                    assert!(octopus_run_authoring::provider_input_payloads_ready(&evidence,&run_path.canonicalize().unwrap(),&after,&writer,&InterfaceId::new(source)).unwrap());
                     if let Some(file)=&selected_file {
                         let reference=materialized_artifact_ref(file).unwrap();
                         let current=RunRecord::from_bytes(&after).unwrap();
@@ -743,7 +743,7 @@ async fn native_terminal_handoff_cases() {
                         let encoded=serde_json::to_string(&candidate).unwrap().replace(&prefix(old),&prefix(reference.id.as_str())).replace(old,reference.id.as_str());candidate=serde_json::from_str(&encoded).unwrap();
                         let item=&mut candidate["interface_state"][descriptor.id.as_str()]["pending_handoff"]["items"][0];
                         item["artifact_content_hash"]=json!(reference.content.to_hex());item["manifest_relative_path"]=json!(forged.manifest_path().canonicalize().unwrap().strip_prefix(ctx.interface_var_dir().canonicalize().unwrap()).unwrap());
-                        let edit=octopus_provider_run_authoring::CheckedRunEdit::prepare_with_format(run_path.canonicalize().unwrap(),&before,candidate,call["correlation_id"].as_str().unwrap().into(),serde_json::from_value(target["json_format"].clone()).unwrap()).unwrap();
+                        let edit=octopus_run_authoring::CheckedRunEdit::prepare_with_format(run_path.canonicalize().unwrap(),&before,candidate,call["correlation_id"].as_str().unwrap().into(),serde_json::from_value(target["json_format"].clone()).unwrap()).unwrap();
                         let mut changed=call.clone();let target=&mut changed["arguments"]["writes"][1];
                         target["patch"]=json!(edit.patch);target["expected_after_hash"]=json!(edit.after_hash);
                         let call_label=file.read_manifest().unwrap().label;
@@ -772,7 +772,7 @@ async fn native_terminal_handoff_cases() {
                 let closed=context.iter().find(|entry|entry.label==TURN_INTERRUPTED_RESULT_LABEL).unwrap();assert_eq!(closed.payload,expected);
                 assert!(context.iter().any(|entry|entry.source_artifact==old[0].1));
                 let current=RunRecord::from_bytes(&before).unwrap();
-                let heads=octopus_provider_run_authoring::provider_context_bindings(&current,&descriptor.id).unwrap();
+                let heads=octopus_run_authoring::provider_context_bindings(&current,&descriptor.id).unwrap();
                 assert!(heads.iter().any(|binding|binding.id==closed.source_artifact.id));assert!(!heads.iter().any(|binding|binding.id==old[0].1.id));
                 assert_eq!(std::fs::read(run_path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
                 if let Some(deferred)=deferred {
@@ -921,7 +921,7 @@ async fn native_terminal_handoff_cases() {
             let close=Box::pin(close_stream_emissions(&handoff,&mut pending,true));
             let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true);
             let (closed,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(close,gate)}).await.unwrap();
-            assert!(matches!(closed.unwrap(),(0,Some(octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted{..}))));
+            assert!(matches!(closed.unwrap(),(0,Some(octopus_run_authoring::ProviderHandoffOutcome::Admitted{..}))));
             assert_eq!(delivered.len(),1);assert!(pending.is_empty());
             let current=RunRecord::from_bytes(&std::fs::read(&plan.run_write.path).unwrap()).unwrap();
             let settled=&current.interface_state[&descriptor.id]["pending_handoff"];
@@ -963,7 +963,7 @@ async fn native_terminal_handoff_cases() {
             assert_eq!(delivered[0].0,"turn.input.acknowledged");
             let after=std::fs::read(&plan.run_write.path).unwrap();let current=RunRecord::from_bytes(&after).unwrap();
             assert_eq!(current.interface_state[&descriptor.id]["context_generation"],selected.interface_state[&descriptor.id]["context_generation"]);
-            assert_eq!(octopus_provider_run_authoring::provider_context_bindings(&current,&descriptor.id).unwrap(),octopus_provider_run_authoring::provider_context_bindings(&selected,&descriptor.id).unwrap());
+            assert_eq!(octopus_run_authoring::provider_context_bindings(&current,&descriptor.id).unwrap(),octopus_run_authoring::provider_context_bindings(&selected,&descriptor.id).unwrap());
             let ledger=std::fs::read(&ctx.movements_path).unwrap();
             let saved=load_control_journal(&ctx,seq,&run,"steer-pending","steer").unwrap().unwrap();
             let TurnControlJournalPhase::Delivered{result}=saved.phase else {panic!("durable steer receipt")};
@@ -1008,7 +1008,7 @@ async fn native_terminal_handoff_cases() {
             let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&control.artifact,0,1,true,0,true);
             let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(admit,gate)}).await.unwrap();
             assert_eq!(delivered.len(),1); assert_eq!(delivered[0].0,"turn.control.acknowledged");
-            assert!(matches!(result.unwrap(),octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted{seq,artifact}
+            assert!(matches!(result.unwrap(),octopus_run_authoring::ProviderHandoffOutcome::Admitted{seq,artifact}
                 if seq==delivered[0].2 && artifact==delivered[0].1));
             arbiter.record_acknowledgement(&run,control_seq,"stop-a",DurableArtifactAdmission{artifact:delivered[0].1.clone(),movement_seq:delivered[0].2},acknowledged).await.unwrap();
         }
@@ -1157,7 +1157,7 @@ async fn native_terminal_handoff_cases() {
             let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&next_input.artifact,0,1,true,1,false);
             let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async { tokio::join!(admit,gate) }).await.unwrap();
             assert_eq!(delivered.len(),1); assert_eq!(delivered[0].0,"interface.context.updated");
-            assert!(matches!(result.unwrap().as_slice(),[octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted{..}]));
+            assert!(matches!(result.unwrap().as_slice(),[octopus_run_authoring::ProviderHandoffOutcome::Admitted{..}]));
             drop(next_handoff);
             let restored=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&next_input,next_seq,&before).unwrap();
             let (_,outcomes)=tokio::time::timeout(std::time::Duration::from_secs(5),restored.recover_source_with_outcomes()).await.unwrap().unwrap();

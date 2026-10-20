@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use octopus_interface_transport::{InterfaceLifeFuture, InterfaceLiftContext, InterfaceLiftFn};
 use octopus_interfaces::{InterfaceDescriptor, InterfaceInvocationEnvelope};
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     ProviderHandoffSession, ProviderOutputHandoff, RunAuthoringResultIdentity,
 };
 use octopus_world_pyecho_life_runtime::{LedgerReplayReader, LedgerTailReader};

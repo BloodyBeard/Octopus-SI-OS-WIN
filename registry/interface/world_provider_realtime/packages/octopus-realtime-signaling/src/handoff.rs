@@ -5,7 +5,7 @@ use octopus_descriptors::{ArtifactId, InterfaceId};
 use octopus_interfaces::InterfaceArtifactFile;
 use octopus_ledger::{ArtifactRef, ContentHash, RequiredVerifiedArtifact};
 use octopus_policy::AuthoredInterfaceBinding;
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome, ProviderOutputHandoff,
 };
 use serde::Deserialize;

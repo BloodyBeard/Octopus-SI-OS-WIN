@@ -1209,7 +1209,7 @@ pub fn decode_code_mode_door_artifact(
     purpose: octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose,
 ) -> Result<Option<ToolCallArtifact>, octopus_tool_door_runtime::ToolDoorArtifactDecodeError> {
     let checked_error = |error| match error {
-        octopus_provider_run_authoring::CheckedRunError::AwaitingResults { call_sequences } =>
+        octopus_run_authoring::CheckedRunError::AwaitingResults { call_sequences } =>
             octopus_tool_door_runtime::ToolDoorArtifactDecodeError::AwaitingResults { call_sequences },
         error => octopus_tool_door_runtime::ToolDoorArtifactDecodeError::Invalid(error.to_string()),
     };

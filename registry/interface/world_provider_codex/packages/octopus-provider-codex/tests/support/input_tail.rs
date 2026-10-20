@@ -35,7 +35,7 @@ fn intake_receipts_follow_exact_inline_or_separate_writer_identity() {
     let payload = serde_json::to_vec(&ToolResultArtifact::success("file.write", Some("write:1".into()), serde_json::json!({"result":"files_written"}))).unwrap();
     for run in ["recipient", "separate_writer"] {
         if run == "separate_writer" {
-            octopus_provider_run_authoring::separate_owner_writer_run(&mut document, &config.writer, &octopus_descriptors::RunId::new(run)).unwrap();
+            octopus_run_authoring::separate_owner_writer_run(&mut document, &config.writer, &octopus_descriptors::RunId::new(run)).unwrap();
         }
         let record = RunRecord::from_bytes(&serde_json::to_vec(&document).unwrap()).unwrap();
         let mut movement = Movement { seq:Seq(1),lamport:Lamport(1),recorded_at_unix_ms:0,trace:TraceId("trace".into()),kind:MovementKind::InterfaceOutbound,

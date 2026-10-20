@@ -314,7 +314,7 @@ impl AdmittedConsentArtifact {
     pub fn payload_bytes(&self) -> &[u8] { &self.payload }
 }
 
-impl octopus_provider_run_authoring::CheckedRunEvidenceReader for ConsentEvidenceReader {
+impl octopus_run_authoring::CheckedRunEvidenceReader for ConsentEvidenceReader {
     fn max_payload_bytes(&self) -> u64 { self.max_payload_bytes }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         ConsentEvidenceReader::movement(self, seq).map(Some)
@@ -782,10 +782,10 @@ impl ConsentAuthority {
                         "human decision changed its original Home-checked pending request")?;
                     let install = request.selected_return_install.as_ref().ok_or("selected human decision lost its checked return installation")?;
                     let installed = reader.admitted(&install.result)?;
-                    octopus_provider_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &admitted.record_bytes,
+                    octopus_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &admitted.record_bytes,
                         install.result.movement_seq, admitted.movement.seq.0,
                         &[selected.human_required.clone(), selected.approved.clone(), selected.declined.clone()])?;
-                    octopus_provider_run_authoring::validate_selected_return_reads(&admitted.metadata, &selected.selected_artifacts)?;
+                    octopus_run_authoring::validate_selected_return_reads(&admitted.metadata, &selected.selected_artifacts)?;
                 } else {
                     require(human_required.is_none(), "unselected human decision supplied an undeclared Home continuation")?;
                 }
@@ -818,7 +818,7 @@ impl ConsentAuthority {
         &self, reader: &mut ConsentEvidenceReader, request: &ConsentRequestRecord,
         selected: &SelectedConsentReturn, intake: &AdmittedConsentArtifact,
     ) -> Result<CheckedRunInstall, String> {
-        use octopus_provider_run_authoring::{checked_run_install, checked_return_interval,
+        use octopus_run_authoring::{checked_run_install, checked_return_interval,
             validate_checked_owner_transition, validate_checked_provider_transition, validate_selected_return_reads};
         let owner = selected.owner_writer.as_ref().unwrap_or(&selected.provider_writer);
         require(owner.owner == request.owner_interface && request.offer.session.client_interface != self.binding.config.home_interface
@@ -836,7 +836,7 @@ impl ConsentAuthority {
         let result: ToolResultArtifact = serde_json::from_slice(&pending.payload).map_err(string_error)?;
         let request_value = result.body.as_ref().and_then(|body| body.get("operator_request"))
             .ok_or("selected consent return lost its original pending request")?;
-        let pending_request: octopus_provider_run_authoring::OwnerOperatorRequest = serde_json::from_value(request_value.clone()).map_err(string_error)?;
+        let pending_request: octopus_run_authoring::OwnerOperatorRequest = serde_json::from_value(request_value.clone()).map_err(string_error)?;
         pending_request.validate_bound_files(&intake.metadata)?;
         let mut writers = vec![selected.provider_writer.clone()];
         writers.extend(selected.owner_writer.clone());
@@ -856,12 +856,12 @@ impl ConsentAuthority {
         let mut return_install = None;
         for transition in &chain {
             if transition.result.seq.0 < original.movement.seq.0 {
-                octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&transition.before, &transition.after, &original_checkpoint)?;
+                octopus_run_authoring::validate_unchanged_admitted_checkpoint(&transition.before, &transition.after, &original_checkpoint)?;
             }
             let prior = RunRecord::from_bytes(&transition.before).map_err(string_error)?;
             let next = RunRecord::from_bytes(&transition.after).map_err(string_error)?;
             if return_install.is_some() {
-                for id in &protected { octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&transition.before, &transition.after, id)?; }
+                for id in &protected { octopus_run_authoring::validate_unchanged_admitted_checkpoint(&transition.before, &transition.after, id)?; }
             } else if protected.iter().any(|id| next.checkpoint(id).is_some()) {
                 require(protected.iter().all(|id| prior.checkpoint(id).is_none())
                     && transition.writer == *owner && transition.call.seq.0 > request.request.movement_seq,
@@ -1475,10 +1475,10 @@ impl ConsentAuthority {
         let selected = request.selected_return.as_ref().ok_or("Home human-required reply has no selected return contract")?;
         let install = request.selected_return_install.as_ref().ok_or("Home human-required reply lost its checked return installation")?;
         let installed = reader.admitted(&install.result)?;
-        octopus_provider_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &reply.record_bytes,
+        octopus_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &reply.record_bytes,
             install.result.movement_seq, reply.movement.seq.0,
             &[selected.human_required.clone(), selected.approved.clone(), selected.declined.clone()])?;
-        octopus_provider_run_authoring::validate_selected_return_reads(&reply.metadata, &selected.selected_artifacts)?;
+        octopus_run_authoring::validate_selected_return_reads(&reply.metadata, &selected.selected_artifacts)?;
         require(reply.metadata.runtime.as_ref().is_some_and(|runtime| runtime.checkpoint == selected.human_required),
             "Home human-required reply used another original return checkpoint")?;
         Ok(request)
@@ -1504,13 +1504,13 @@ impl ConsentAuthority {
         let selected = request.selected_return.as_ref().ok_or("Home final has no selected original return contract")?;
         let install = request.selected_return_install.as_ref().ok_or("Home final lost its actual return installation")?;
         let installed = reader.admitted(&install.result)?;
-        octopus_provider_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &reply.record_bytes,
+        octopus_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &reply.record_bytes,
             install.result.movement_seq, reply.movement.seq.0,
             &[selected.human_required.clone(), selected.approved.clone(), selected.declined.clone()])?;
-        octopus_provider_run_authoring::validate_selected_return_reads(&reply.metadata, &selected.selected_artifacts)?;
+        octopus_run_authoring::validate_selected_return_reads(&reply.metadata, &selected.selected_artifacts)?;
         let pending = reader.admitted(&request.request)?;
         let result: ToolResultArtifact = serde_json::from_slice(&pending.payload).map_err(string_error)?;
-        let pending: octopus_provider_run_authoring::OwnerOperatorRequest = serde_json::from_value(result.body.as_ref()
+        let pending: octopus_run_authoring::OwnerOperatorRequest = serde_json::from_value(result.body.as_ref()
             .and_then(|body| body.get("operator_request")).cloned().ok_or("Home final lost its immutable pending operation")?).map_err(string_error)?;
         self.validate_selected_return_rows(&reply.record, selected, &request, &pending.original.door_interface)?;
         let expected = if decision == ConsentDecision::Accept { &selected.approved } else { &selected.declined };
@@ -2139,7 +2139,7 @@ impl ConsentLiveOwner {
                 if let Some(selected) = &request.selected_return {
                     let pending = reader.admitted(&request.request)?;
                     let result: ToolResultArtifact = serde_json::from_slice(&pending.payload).map_err(string_error)?;
-                    let owner_request: octopus_provider_run_authoring::OwnerOperatorRequest = serde_json::from_value(
+                    let owner_request: octopus_run_authoring::OwnerOperatorRequest = serde_json::from_value(
                         result.body.and_then(|body| body.get("operator_request").cloned()).ok_or("selected publication lost its pending request")?).map_err(string_error)?;
                     self.controller.authority.validate_selected_return_rows(&intake.record, selected, request, &owner_request.original.door_interface)?;
                     selected_checkpoint = Some(if let Some(response) = response {
@@ -2207,10 +2207,10 @@ impl ConsentLiveOwner {
             let return_install = publication.return_install.as_ref().ok_or("selected publication lost its actual checked return install")?;
             let installed = reader.admitted(&return_install.result)?;
             let protected = [selected.human_required.clone(), selected.approved.clone(), selected.declined.clone()];
-            octopus_provider_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &admitted.record_bytes,
+            octopus_run_authoring::checked_return_interval(reader, selected, &installed.record_bytes, &admitted.record_bytes,
                 return_install.result.movement_seq, evidence.movement_seq, &protected)?;
-            octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&original, &admitted.record_bytes, &publication.checkpoint)?;
-            octopus_provider_run_authoring::validate_selected_return_reads(&admitted.metadata, &selected.selected_artifacts)?;
+            octopus_run_authoring::validate_unchanged_admitted_checkpoint(&original, &admitted.record_bytes, &publication.checkpoint)?;
+            octopus_run_authoring::validate_selected_return_reads(&admitted.metadata, &selected.selected_artifacts)?;
             if publication.paired_target.is_some() {
                 let response: Value = serde_json::from_slice(&admitted.payload).map_err(string_error)?;
                 let answer = response.get("operator_approval_response").ok_or("selected final publication has no approval body")?;

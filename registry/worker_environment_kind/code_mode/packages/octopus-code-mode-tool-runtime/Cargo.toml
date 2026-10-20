@@ -15,7 +15,7 @@ tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
 
-octopus-provider-run-authoring = { path = "../../../../interface/world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-run-authoring = { path = "../../../../interface/system_interface_authoring/packages/octopus-run-authoring" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-runtime = { path = "../../../../../crates/octopus-runtime" }

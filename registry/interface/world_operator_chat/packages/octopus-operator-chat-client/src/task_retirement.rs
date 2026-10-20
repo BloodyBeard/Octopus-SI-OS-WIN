@@ -11,7 +11,7 @@ use octopus_file_storage::publication::{
 };
 use octopus_interface_transport::{InterfaceLifeOwnership, SpawnLifeConfig};
 use octopus_process_session_tool_runtime::{ToolRetirementRequest, tool_retirement_quiescent};
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     CheckedRunEvidence, RunAuthoringProfile, declared_provider_run_writer,
     provider_input_payloads_ready,
 };

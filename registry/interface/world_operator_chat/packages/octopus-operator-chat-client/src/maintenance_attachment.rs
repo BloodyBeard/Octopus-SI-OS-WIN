@@ -175,7 +175,7 @@ fn validate_retained(existing: &Value, declaration: &Value, identity: &PlannedId
         if checkpoints != 0 || !ended_without_terminal {
             return Err("accepted maintenance source does not retain one exact active terminal checkpoint".into());
         }
-        octopus_provider_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&identity.model_interface_id))?;
+        octopus_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&identity.model_interface_id))?;
     }
     Ok(relay.into())
 }

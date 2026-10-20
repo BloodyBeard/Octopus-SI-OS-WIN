@@ -436,7 +436,7 @@ pub struct CodeModeOwnerTopology {
     pub prelude_artifact: ArtifactRef,
     pub file_write_tool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coauthor: Option<octopus_provider_run_authoring::CheckedRunWriter>,
+    pub coauthor: Option<octopus_run_authoring::CheckedRunWriter>,
     pub authoring_result: OwnerCheckpoint,
     pub model_output: OwnerCheckpoint,
     pub notification: Option<OwnerCheckpoint>,

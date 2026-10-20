@@ -24,7 +24,7 @@ pub(crate) fn prove(
     source_seq: u64,
     current: &[u8],
     session: &[SessionContextArtifact],
-    outcomes: &[octopus_provider_run_authoring::ProviderHandoffOutcome],
+    outcomes: &[octopus_run_authoring::ProviderHandoffOutcome],
 ) -> Result<Option<StoppedResultSettlement>, InterfaceDriverError> {
     let runtime = invocation_runtime_metadata(input)?;
     let record: serde_json::Value = serde_json::from_slice(current)
@@ -33,7 +33,7 @@ pub(crate) fn prove(
     if pending["source_movement_seq"] != source_seq || pending["terminal"] != true {
         return Ok(None);
     }
-    let [octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted { seq, artifact }] =
+    let [octopus_run_authoring::ProviderHandoffOutcome::Admitted { seq, artifact }] =
         outcomes
     else {
         return Ok(None);
@@ -218,7 +218,7 @@ pub(crate) fn prove_interrupted(
     source_seq: u64,
     current: &[u8],
     session: &[SessionContextArtifact],
-    outcomes: &[octopus_provider_run_authoring::ProviderHandoffOutcome],
+    outcomes: &[octopus_run_authoring::ProviderHandoffOutcome],
     journal: &InterruptedResultSource<'_>,
 ) -> Result<StoppedResultSettlement, InterfaceDriverError> {
     let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
@@ -226,7 +226,7 @@ pub(crate) fn prove_interrupted(
     let record: serde_json::Value = serde_json::from_slice(current)
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
     let pending = &record["interface_state"][runtime.interface.as_str()]["pending_handoff"];
-    let [octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted { seq, artifact }] = outcomes else {
+    let [octopus_run_authoring::ProviderHandoffOutcome::Admitted { seq, artifact }] = outcomes else {
         return Err(fail("interrupted settlement requires one admitted completed error"));
     };
     let errors = session.iter().filter(|entry| entry.source_artifact == *artifact
@@ -547,7 +547,7 @@ pub(crate) fn materialize_for_test(
 
 pub(crate) struct PendingIntentControl {
     pub(crate) source: CodexContinuityState,
-    pub(crate) intent: octopus_provider_run_authoring::PendingSourceIntent,
+    pub(crate) intent: octopus_run_authoring::PendingSourceIntent,
     applied: serde_json::Value,
 }
 
@@ -567,7 +567,7 @@ impl CodexTurnControlBroker {
 
 pub(crate) fn prove_intent(
     descriptor: &InterfaceDescriptor, input: &InterfaceInvocationEnvelope,
-    intent: octopus_provider_run_authoring::PendingSourceIntent, session: &[SessionContextArtifact],
+    intent: octopus_run_authoring::PendingSourceIntent, session: &[SessionContextArtifact],
 ) -> Result<PendingIntentControl, InterfaceDriverError> {
     let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
     let runtime = invocation_runtime_metadata(input)?;
@@ -717,7 +717,7 @@ pub(crate) fn validate_saved_intent_closure(
 
 pub(crate) fn intent_control_continuity(
     descriptor: &InterfaceDescriptor, input: &InterfaceInvocationEnvelope,
-    intent: octopus_provider_run_authoring::PendingSourceIntent, session: &[SessionContextArtifact],
+    intent: octopus_run_authoring::PendingSourceIntent, session: &[SessionContextArtifact],
 ) -> Result<CodexContinuityState, InterfaceDriverError> {
     let runtime = invocation_runtime_metadata(input)?;
     let value: serde_json::Value = serde_json::from_slice(&intent.payload).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;

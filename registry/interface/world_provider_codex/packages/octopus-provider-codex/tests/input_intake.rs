@@ -12,8 +12,8 @@ use octopus_operator_chat_client::{
 use octopus_provider_codex::intake_state::{
     InputDelivery, IntakeState, load_state, prepare_input, save_state,
 };
-use octopus_provider_run_authoring::provider_context_bindings;
-use octopus_provider_run_authoring::{CheckedRunTransition, validate_checked_owner_transition};
+use octopus_run_authoring::provider_context_bindings;
+use octopus_run_authoring::{CheckedRunTransition, validate_checked_owner_transition};
 use octopus_runtime::run_record::RunRecord;
 use serde_json::{Value, json};
 
@@ -181,7 +181,7 @@ async fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_inte
             .unwrap();
         assert_eq!(
             input.artifact_bindings,
-            octopus_provider_run_authoring::input_artifacts::read_bindings(&next, &id, provider_context_bindings(&next, &config.provider_interface).unwrap()).unwrap()
+            octopus_run_authoring::input_artifacts::read_bindings(&next, &id, provider_context_bindings(&next, &config.provider_interface).unwrap()).unwrap()
         );
         if let Some(previous) = previous_input {
             assert!(next.checkpoint(&previous).is_none());
@@ -280,7 +280,7 @@ async fn admitted_publication_seed(
     use octopus_interfaces::{DeliveryVerdict, InterfaceArtifactFile, InterfaceArtifactManifest, InterfaceInvocationEnvelope};
     use octopus_ledger::{LiveMovementLog, SharedBlobs};
     use octopus_ledger_store::{DurableBlobs, DurableLog};
-    use octopus_provider_run_authoring::{CheckedRunWriter, ProviderEmission, ProviderEmissionRoute, ProviderHandoffSession};
+    use octopus_run_authoring::{CheckedRunWriter, ProviderEmission, ProviderEmissionRoute, ProviderHandoffSession};
     use octopus_operator_chat_client::run_revision::{prepare_run_revision, verify_run_revision};
     use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact};
     use octopus_world_pyecho_life_runtime::LedgerTailReader;
@@ -369,7 +369,7 @@ async fn admitted_publication_seed(
         assert!(input.metadata().unwrap().grant.may_read_artifact(reference.id.as_str()));
     }
     assert!(!static_ids.contains(&json!(seed_input.artifact.id)));
-    let sources = octopus_provider_run_authoring::input_artifacts::selections(&admitted,&config.writer.owner).unwrap();
+    let sources = octopus_run_authoring::input_artifacts::selections(&admitted,&config.writer.owner).unwrap();
     assert_eq!(sources.len(),attempt+1); assert_eq!(sources.last().unwrap().artifact,seed_input.artifact); assert_eq!(sources.last().unwrap().source_movement_seq,seed_seq);
     let session = ProviderHandoffSession::new(&ctx).unwrap();
     let handoff = session.from_invocation(&ctx,ctx.descriptor_snapshot.as_ref().unwrap(),&admitted.id,&input,seq,&pinned);
@@ -383,7 +383,7 @@ async fn admitted_publication_seed(
         let failed = session.failed_source_handoff(&ctx,descriptor,&admitted.id,&input,seq).unwrap();
         let descriptor_value = serde_json::to_value(descriptor).unwrap();
         let profile = serde_json::from_value(descriptor_value.pointer("/interface_driver_config/private_config/run_authoring_profile").unwrap().clone()).unwrap();
-        let writer = octopus_provider_run_authoring::declared_provider_run_writer(&admitted,&config.provider_interface,
+        let writer = octopus_run_authoring::declared_provider_run_writer(&admitted,&config.provider_interface,
             &profile).unwrap();
         let error = InterfaceArtifactFile::write(ctx.var_dir.join("emitted"),"turn.error",
             &serde_json::to_vec(&json!({"label":"turn.error","message":failure,"will_retry":false,"additional_details":{"source_movement_seq":seq}})).unwrap()).unwrap();
@@ -429,7 +429,7 @@ async fn admitted_publication_seed(
         (seed_seq,seed_input) = envelope(&ctx,&next,&config.writer.owner);
     } else {
         let handoff = handoff.unwrap();
-        assert_eq!(handoff.recover_source().await.unwrap(),octopus_provider_run_authoring::ProviderSourceRecovery::Process);
+        assert_eq!(handoff.recover_source().await.unwrap(),octopus_run_authoring::ProviderSourceRecovery::Process);
     }
     assert!(input.artifact_binding_payloads.iter().find(|bound| bound.artifact == *snapshot).unwrap().read_bytes().unwrap()
         .windows(b"Read the exact source".len()).any(|window| window == b"Read the exact source"));

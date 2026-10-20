@@ -1,6 +1,6 @@
-use octopus_provider_run_authoring::JsonFormat;
+use octopus_run_authoring::JsonFormat;
 use super::*;
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     CheckedRunWriter, WriterRunBinding, separate_owner_writer_run, separate_writer_run,
 };
 

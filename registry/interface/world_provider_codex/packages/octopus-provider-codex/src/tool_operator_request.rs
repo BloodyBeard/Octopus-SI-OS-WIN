@@ -1,13 +1,13 @@
 use super::*;
 use serde::{Deserialize, Serialize};
-use octopus_provider_run_authoring::{OperatorPermissionDecision as AppDecision, OperatorPermissionPersistence};
+use octopus_run_authoring::{OperatorPermissionDecision as AppDecision, OperatorPermissionPersistence};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(transparent)]
-pub(super) struct ToolOperatorRequest(octopus_provider_run_authoring::OwnerOperatorRequest);
+pub(super) struct ToolOperatorRequest(octopus_run_authoring::OwnerOperatorRequest);
 
 impl std::ops::Deref for ToolOperatorRequest {
-    type Target = octopus_provider_run_authoring::OwnerOperatorRequest;
+    type Target = octopus_run_authoring::OwnerOperatorRequest;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
@@ -153,7 +153,7 @@ impl ToolOperatorRequest {
         hidden_tools: &[String],
     ) -> Result<(), InterfaceDriverError> {
         self.validate_envelope(input, &self.original.door_interface)?;
-        let client = octopus_provider_run_authoring::bound_client_interface(record, &input.runtime()?.interface).map_err(reject)?;
+        let client = octopus_run_authoring::bound_client_interface(record, &input.runtime()?.interface).map_err(reject)?;
         self.0.validate_operator_interface(&client).map_err(reject)?;
         if !hidden_tools.contains(&self.resume.tool) {
             return Err(reject(
@@ -161,7 +161,7 @@ impl ToolOperatorRequest {
             ));
         }
         for tool in [&self.original.tool, &self.resume.tool] {
-            let door = octopus_provider_run_authoring::bound_tool_door(
+            let door = octopus_run_authoring::bound_tool_door(
                 record,
                 &input.runtime()?.interface,
                 tool,
@@ -214,7 +214,7 @@ impl ToolOperatorRequest {
 
 impl ToolOperatorContinuity {
     fn validate_payload_bindings(&self, input: &InterfaceInvocationEnvelope) -> Result<(), InterfaceDriverError> {
-        octopus_provider_run_authoring::validate_payload_artifact_selection(&self.payload_artifact_bindings).map_err(reject)?;
+        octopus_run_authoring::validate_payload_artifact_selection(&self.payload_artifact_bindings).map_err(reject)?;
         let metadata = input.metadata()?;
         for reference in &self.payload_artifact_bindings {
             if !metadata.artifact_binding_refs.iter().filter(|bound| bound.id == reference.id).eq([reference])
@@ -309,7 +309,7 @@ impl ToolOperatorContinuity {
                 "GUI result cannot settle before the provider admits the operator decision",
             ));
         };
-        octopus_provider_run_authoring::OperatorPermissionResponse {
+        octopus_run_authoring::OperatorPermissionResponse {
             request_id: self.request.request_id.clone(), call_id: self.request.call_id.clone(),
             decision: *decision, selected_persistence: *selected_persistence,
         }.validate(&self.request.request_id, &self.request.call_id, self.request.permission_offer.as_ref()).map_err(reject)?;
@@ -369,7 +369,7 @@ mod tests {
             id: ArtifactId::new("original"),
             content: ContentHash::of_bytes(b"original"),
         };
-        let digest = |request: &octopus_provider_run_authoring::ApplicationOperatorRequest| {
+        let digest = |request: &octopus_run_authoring::ApplicationOperatorRequest| {
             let mut commitment = serde_json::json!({
                 "schema_version": request.schema_version,
                 "original": request.original,
@@ -383,7 +383,7 @@ mod tests {
             if let Some(policy) = &request.native_policy { commitment["native_policy"] = serde_json::json!(policy); }
             sha256_hex(&octopus_descriptors::canonical_bytes(&commitment))
         };
-        let mut request: octopus_provider_run_authoring::ApplicationOperatorRequest = serde_json::from_value(serde_json::json!({
+        let mut request: octopus_run_authoring::ApplicationOperatorRequest = serde_json::from_value(serde_json::json!({
             "schema_version":1,"request_id":"pending","call_id":"call-1",
             "original":{"run":"run-1","ee":"ee-1","worker":"system_worker_test","door_interface":"system_gui_test","tool":"gui.app_state__approval_task","correlation_id":"call-1","arguments":{"app":{"kind":"bundle_id","value":"com.example.app"}},"source_movement_seq":3,"source_artifact":original},
             "scope":{"worker_environment_id":"room-1","formation_pin":"pin-1","host_generation":"host-1"},
@@ -432,7 +432,7 @@ mod tests {
         let offered_digest = digest(&offered);
         offered.request_id = format!("sha256:{offered_digest}");offered.resume.correlation_id = format!("app-resume:{offered_digest}");
         offered.validate().unwrap();
-        let projected = octopus_provider_run_authoring::OwnerOperatorRequest::from(offered.clone()).projection();
+        let projected = octopus_run_authoring::OwnerOperatorRequest::from(offered.clone()).projection();
         assert_eq!(projected["detail"]["native_policy"]["warning_subtitle"],"Original native warning");
         offered.native_policy.as_mut().unwrap().allow_persistent_approval=false;
         assert!(offered.validate().is_err());

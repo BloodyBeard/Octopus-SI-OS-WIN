@@ -169,7 +169,7 @@ impl PublicationSelectionSeeds {
                 ));
             }
         }
-        octopus_provider_run_authoring::validate_payload_artifact_selection(
+        octopus_run_authoring::validate_payload_artifact_selection(
             &self.payload_artifact_bindings,
         )?;
         for (door, slots) in &self.door_host_slots {

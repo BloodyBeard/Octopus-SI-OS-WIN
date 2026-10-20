@@ -1,4 +1,4 @@
-use octopus_provider_run_authoring::JsonFormat;
+use octopus_run_authoring::JsonFormat;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use octopus_ledger::{
     ArtifactRef, CheckpointBindingPolicySnapshot, ContentHash, Endpoint, Movement, MovementKind,
 };
 use octopus_operator_chat_client::input_intake::{InputIntakeConfig, initial_checkpoints};
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     CheckedRunEdit, CheckedRunTransition, OwnerWriterEdit, owner_writer_binding, provider_context_bindings,
     validate_unchanged_run_neighbors,
 };
@@ -139,7 +139,7 @@ pub fn reprepare_input(
         if transition.before != expected || transition.writer.owner == config.writer.owner {
             return Err("intake retry is not a complete independent provider chain".into());
         }
-        octopus_provider_run_authoring::validate_independent_provider_transition(
+        octopus_run_authoring::validate_independent_provider_transition(
             &RunRecord::from_bytes(expected).map_err(|e|e.to_string())?,&config.provider_interface,&config.provider_profile,transition)?;
         expected = &transition.after;
     }
@@ -478,10 +478,10 @@ fn prepare_input_edit(config: &InputIntakeConfig, path: PathBuf, current: &[u8],
         &ContentHash::of_bytes(current).to_hex()[..24]
     );
     let (mut rows, mut ids) = initial_checkpoints(config, &next["trace"], &generation)?;
-    let source = octopus_provider_run_authoring::input_artifacts::InputArtifactBinding {
+    let source = octopus_run_authoring::input_artifacts::InputArtifactBinding {
         artifact: source_artifact.clone(), source_movement_seq: source_seq,
     };
-    let mut sources = octopus_provider_run_authoring::input_artifacts::selections(&original, &config.writer.owner)?;
+    let mut sources = octopus_run_authoring::input_artifacts::selections(&original, &config.writer.owner)?;
     if !sources.iter().any(|prior| prior.artifact == source.artifact) { sources.push(source); }
     let context = provider_context_bindings(&original, &config.provider_interface)?;
     rows[0]["artifact_bindings"] = json!(sources.iter().try_fold(context, |context, source| source.read_bindings(context))?);

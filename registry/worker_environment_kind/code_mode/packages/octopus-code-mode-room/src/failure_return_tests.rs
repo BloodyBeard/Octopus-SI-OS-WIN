@@ -1,21 +1,21 @@
 use super::*;
 use std::{future::Future, pin::Pin};
-use octopus_provider_run_authoring::{CheckedRunEvidence, CheckedRunEvidenceReader, FileCheckedRunReader};
+use octopus_run_authoring::{CheckedRunEvidence, CheckedRunEvidenceReader, FileCheckedRunReader};
 use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact, ToolResultError};
 
 pub(super) fn rejected_write_waits_for_the_earlier_peer(
     admission: &FrontierAdmission, ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
     source: &AdmittedDelivery, input: &InterfaceInvocationEnvelope, call_seq: u64,
 ) {
-    use octopus_provider_run_authoring::{CheckedRunEdit, CheckedRunError, CheckedRunWriter,
+    use octopus_run_authoring::{CheckedRunEdit, CheckedRunError, CheckedRunWriter,
         checked_failed_run_write, checked_declared_run_snapshot};
     let call: ToolCallArtifact = serde_json::from_slice(&input.artifact_file.read_payload_bytes().unwrap()).unwrap();
     let peer = admission.deliveries.lock().unwrap().iter().rev()
         .find(|row| row.seq < call_seq && row.to.as_str() == "system_provider_file_test").cloned().unwrap();
     let payload: ToolCallArtifact = serde_json::from_slice(&peer.file.read_payload_bytes().unwrap()).unwrap();
     let entry = &payload.arguments["writes"][1];
-    let preimage: octopus_provider_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
-    let before_text = preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_provider_run_authoring::DecodeBudget::new(ctx.owner_io_limits().unwrap().max_payload_bytes).unwrap()).unwrap();
+    let preimage: octopus_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
+    let before_text = preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_run_authoring::DecodeBudget::new(ctx.owner_io_limits().unwrap().max_payload_bytes).unwrap()).unwrap();
     let before = before_text.as_bytes();
     let patch:json_patch::Patch = serde_json::from_value(call.arguments["patch"].clone()).unwrap();
     let mut after:Value = serde_json::from_slice(before).unwrap();
@@ -206,12 +206,12 @@ pub(super) async fn actual_nested_failure_return(
     assert_eq!(desired[0]["include_context"], false);
     desired[0]["include_context"] = json!(true);
     desired[0].as_object_mut().unwrap().remove("static_artifact_bindings");
-    let edit = match octopus_provider_run_authoring::prepare_provider_input_revision(run_path.clone(), &before, &writer, desired).unwrap() {
-        octopus_provider_run_authoring::ProviderInputRevision::Prepared { edit } => edit,
+    let edit = match octopus_run_authoring::prepare_provider_input_revision(run_path.clone(), &before, &writer, desired).unwrap() {
+        octopus_run_authoring::ProviderInputRevision::Prepared { edit } => edit,
         other => panic!("the settled old output must allow the new definition: {other:?}"),
     };
     let context_bytes = std::fs::read(durable.join("context.json")).unwrap();
-    let carrier = match octopus_provider_run_authoring::OwnerWriterEdit::prepare(
+    let carrier = match octopus_run_authoring::OwnerWriterEdit::prepare(
         &before, &edit, &writer, ctx.owner_io_limits().unwrap().max_payload_bytes).unwrap() {
         Some(ordered) => ordered.materialize(&admission.root.join("input-revision")).unwrap(),
         None => InterfaceArtifactFile::write(admission.root.join("input-revision"), &writer.call_label,
@@ -336,7 +336,7 @@ pub(super) async fn actual_nested_failure_return(
     let evidence = CheckedRunEvidence { movements_path:ctx.owner_movements_path(),ledger_index_path:ctx.owner_ledger_index_path(),
         blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,
         max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
-    let movement = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, delivered[0].seq).unwrap();
+    let movement = octopus_run_authoring::generated_artifacts::read_movement(&evidence, delivered[0].seq).unwrap();
     let mut reader = octopus_tool_door_runtime::LedgerTailReader::open_named(&ctx, "nested-failure-contract").unwrap();
     for _ in 0..2 {
         let cold = actual_owner_handoff::OwnerHandoff::new();
@@ -402,7 +402,7 @@ pub(super) async fn actual_nested_failure_return(
     let result_pin = &settled[0].metadata.runtime.as_ref().unwrap().run_record_hash.as_ref().unwrap();
     let pinned = octopus_runtime::run_record::RunRecord::from_bytes(
         &std::fs::read(ctx.owner_blobs_dir().join(result_pin)).unwrap()).unwrap();
-    let bindings = octopus_provider_run_authoring::provider_context_bindings(
+    let bindings = octopus_run_authoring::provider_context_bindings(
         &pinned, &InterfaceId::new("world_provider_test")).unwrap();
     assert_eq!(settled[0].metadata.artifact_binding_refs.iter().map(|reference| &reference.id).collect::<Vec<_>>(),
         bindings.iter().map(|binding| &binding.id).collect::<Vec<_>>());
@@ -526,7 +526,7 @@ pub(super) fn actual_refused_failure_return<'a>(
             path.file_name().unwrap().to_str().unwrap().ends_with(".installed.json").then(||
                 super::super::continuation::read_record::<super::super::continuation::InstalledHandoff>(&path).unwrap())
         }).max_by_key(|record| record.result_seq).unwrap();
-        let anchor = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, install.result_seq).unwrap();
+        let anchor = octopus_run_authoring::generated_artifacts::read_movement(&evidence, install.result_seq).unwrap();
         let anchor_runtime = anchor.runtime().unwrap();
         let installed: Value = serde_json::from_slice(&std::fs::read(ctx.owner_blobs_dir().join(&install.after_hash)).unwrap()).unwrap();
         let anchor_checkpoint = installed["checkpoints"].as_array().unwrap().iter()
@@ -593,14 +593,14 @@ pub(super) fn actual_refused_failure_return<'a>(
 fn actual_checked_recovery_observation(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext, path: &Path,
     before: &[u8], after: &[u8], after_seq: u64,
-    writer: &octopus_provider_run_authoring::CheckedRunWriter,
+    writer: &octopus_run_authoring::CheckedRunWriter,
 ) {
     let limits = ctx.owner_io_limits().unwrap();
     let evidence = CheckedRunEvidence { movements_path: ctx.owner_movements_path(),
         ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
         max_control_frame_bytes: limits.max_control_frame_bytes,
         max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes };
-    let prove = |captured: &[u8]| octopus_provider_run_authoring::checked_declared_run_advance(
+    let prove = |captured: &[u8]| octopus_run_authoring::checked_declared_run_advance(
         &evidence, path, before, captured, after_seq, vec![writer.clone()]);
     let expected = prove(after).unwrap();
     assert!(!expected.is_empty());

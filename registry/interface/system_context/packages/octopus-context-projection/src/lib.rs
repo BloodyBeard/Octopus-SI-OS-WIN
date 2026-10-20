@@ -4,7 +4,7 @@ use std::sync::Arc;
 use octopus_interface_transport::{InterfaceLiftContext, InterfaceLiftFn};
 use octopus_interfaces::InterfaceArtifactFile;
 use octopus_ledger::ArtifactRef;
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome, ProviderHandoffSession,
     ProviderSourceRecovery, RunAuthoringResultIdentity, SessionContextArtifact,
     snapshot_projection::{
@@ -727,7 +727,7 @@ pub async fn process_admitted_input(
             )
             .map_err(|e| e.to_string())?;
             let captured =
-                octopus_provider_run_authoring::snapshot_projection::read_source_artifact(
+                octopus_run_authoring::snapshot_projection::read_source_artifact(
                     ctx,
                     &reference,
                     config.bounds.max_field_bytes as u64,

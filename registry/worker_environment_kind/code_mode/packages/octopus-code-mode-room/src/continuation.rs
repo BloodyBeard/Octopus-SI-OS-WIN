@@ -1608,7 +1608,7 @@ pub fn validate_historical_authoring_result(
     source: &Movement,
 ) -> Result<bool, String> {
     let limits = ctx.owner_io_limits()?;
-    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+    let evidence = octopus_run_authoring::CheckedRunEvidence {
         movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
         max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
     };
@@ -1617,7 +1617,7 @@ pub fn validate_historical_authoring_result(
         || source.artifact.as_ref() != Some(&envelope.artifact)
         || source.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
             != Some(envelope.metadata().map_err(|e| e.to_string())?)
-        || octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, source.seq.0)? != *source {
+        || octopus_run_authoring::generated_artifacts::read_movement(&evidence, source.seq.0)? != *source {
         return Err("historical authoring result changed its exact admitted movement".into());
     }
     consume_authoring_result_with_source(ctx, envelope, || Ok(source.clone()))
@@ -1659,7 +1659,7 @@ fn consume_authoring_result_with_source(
             Ok(bytes)
         };
         let installed = checked_authoring_result_install(ctx, &root, &key, &pending, &source)?;
-        octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(
+        octopus_run_authoring::validate_unchanged_admitted_checkpoint(
             &installed, &read(hash)?, &octopus_descriptors::CheckpointId::new(&boundary.checkpoint),
         )?;
         boundary.run_record_hash = hash.to_owned();
@@ -1697,7 +1697,7 @@ fn checked_authoring_result_install(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext, root: &Path, key: &str,
     pending: &AuthoringResult, result: &Movement,
 ) -> Result<Vec<u8>, String> {
-    use octopus_provider_run_authoring::{CheckedRunEdit, CheckedRunEvidence, CheckedRunEvidenceReader,
+    use octopus_run_authoring::{CheckedRunEdit, CheckedRunEvidence, CheckedRunEvidenceReader,
         CheckedRunInstall, CheckedRunWriter, ConsentEvidenceRef, FileCheckedRunReader, RunAuthoringProfile};
     let context: ContextRecord = read_record(&root.join("context.json"))?;
     if digest(&context.identity)? != context.generation || context.identity.formation.door_interface != *ctx.owner_interface() {
@@ -1742,7 +1742,7 @@ fn checked_authoring_result_install(
     if ContentHash::of_bytes(&declaration) != hash { return Err("authoring call preimage integrity mismatch".into()); }
     let mut seeds = topology.coauthor.iter().cloned().collect::<Vec<_>>();
     seeds.push(writer);
-    let transition = octopus_provider_run_authoring::checked_declared_run_install(&evidence, &pending.path, &declaration,
+    let transition = octopus_run_authoring::checked_declared_run_install(&evidence, &pending.path, &declaration,
         &CheckedRunInstall {
             call: ConsentEvidenceRef { movement_seq:call.seq.0, artifact:call.artifact.clone().ok_or("authoring call lost its artifact")? },
             result: ConsentEvidenceRef { movement_seq:result.seq.0, artifact:result.artifact.clone().ok_or("authoring result lost its artifact")? },
@@ -1773,7 +1773,7 @@ impl ContinuationContext {
 #[serde(deny_unknown_fields)]
 pub struct PendingApplication {
     pub pending_digest: String,
-    pub request: octopus_provider_run_authoring::OwnerOperatorRequest,
+    pub request: octopus_run_authoring::OwnerOperatorRequest,
     pub operator_interface: InterfaceId,
     pub request_artifact: ArtifactRef,
 }
@@ -1785,7 +1785,7 @@ pub struct ApplicationDecision {
     pub call_id: String,
     pub decision: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_persistence: Option<octopus_provider_run_authoring::OperatorPermissionPersistence>,
+    pub selected_persistence: Option<octopus_run_authoring::OperatorPermissionPersistence>,
     pub artifact: ArtifactRef,
     pub source_seq: u64,
     pub metadata_hash: String,
@@ -1850,7 +1850,7 @@ impl ContinuationContext {
         let Some(request) = result.body.as_ref().and_then(|v| v.get("operator_request")) else {
             return Ok(None);
         };
-        let request: octopus_provider_run_authoring::OwnerOperatorRequest =
+        let request: octopus_run_authoring::OwnerOperatorRequest =
             serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
         request.validate()?;
         request.validate_bound_files(envelope.metadata().map_err(|e| e.to_string())?)?;
@@ -1981,7 +1981,7 @@ pub(crate) fn decode_application(
     let suffix = if is_decision {
         let response = application.request.parse_operator_response(payload.get("operator_approval_response")
             .cloned().ok_or("missing exact application response wrapper")?)?;
-        use octopus_provider_run_authoring::OperatorPermissionDecision;
+        use octopus_run_authoring::OperatorPermissionDecision;
         let (decision, mark, verifier) = match response.decision {
             OperatorPermissionDecision::Accept => ("accept", "operator.approval", "operator_approval"),
             OperatorPermissionDecision::Decline => ("decline", "operator.input.provided", "operator_input"),
@@ -2315,14 +2315,14 @@ pub fn validate_admitted_coauthor(
         &ctx.owner_blobs_dir().join(hash), ctx.owner_io_limits()?.max_payload_bytes,
     ).map_err(|e| e.to_string())?;
     if ContentHash::of_bytes(&bytes) != pin { return Err("coauthor Run snapshot integrity mismatch".into()); }
-    octopus_provider_run_authoring::validate_admitted_run_writer(&bytes, metadata, writer)
+    octopus_run_authoring::validate_admitted_run_writer(&bytes, metadata, writer)
 }
 
 pub fn checked_recovery_observation<T>(
     mut read: impl FnMut() -> Result<Vec<u8>, String>,
-    mut prove: impl FnMut(&[u8]) -> Result<T, octopus_provider_run_authoring::CheckedRunError>,
+    mut prove: impl FnMut(&[u8]) -> Result<T, octopus_run_authoring::CheckedRunError>,
     cancelled: impl Fn() -> bool,
-) -> Result<T, octopus_provider_run_authoring::CheckedRunError> {
+) -> Result<T, octopus_run_authoring::CheckedRunError> {
     loop {
         if cancelled() { return Err("shared run recovery cancelled".into()); }
         let current = read()?;
@@ -2403,14 +2403,14 @@ pub fn first_output_is_unsubmitted(
     let before = octopus_interfaces::read_artifact_carrier_file_bounded(
         &ctx.owner_blobs_dir().join(&original.run_record_hash), limits.max_payload_bytes).map_err(|e| e.to_string())?;
     if ContentHash::of_bytes(&before).to_hex() != original.run_record_hash { return Err("unsubmitted output snapshot integrity mismatch".into()); }
-    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+    let evidence = octopus_run_authoring::CheckedRunEvidence {
         movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
         max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
     };
     let cancel = ctx.owner_cancel();
     let unchanged_owner = checked_recovery_observation(
         || octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes).map_err(|e| e.to_string()),
-        |current| Ok(octopus_provider_run_authoring::checked_declared_run_advance(
+        |current| Ok(octopus_run_authoring::checked_declared_run_advance(
             &evidence, &path, &before, current, original.source_movement_seq, vec![writer.clone()])?
             .iter().all(|transition| transition.writer == *writer)),
         || cancel.is_cancelled(),
@@ -2430,8 +2430,8 @@ pub fn output_authority(
     root: &Path,
     config: &CodeModeConfig,
     source: &octopus_tool_door_runtime::ToolDoorOutputSource,
-) -> Result<OutputAuthority, octopus_provider_run_authoring::CheckedRunError> {
-    use octopus_provider_run_authoring::CheckedRunEvidenceReader;
+) -> Result<OutputAuthority, octopus_run_authoring::CheckedRunError> {
+    use octopus_run_authoring::CheckedRunEvidenceReader;
     use octopus_runtime::run_record::RunRecord;
     let context: ContextRecord = read_record(&root.join("context.json"))?;
     let topology = context.identity.owner_topology.as_ref().ok_or("output authority has no declared topology")?;
@@ -2450,14 +2450,14 @@ pub fn output_authority(
     let run_root = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?;
     let path = run_root.join(format!("{}.json", topology.run)).canonicalize().map_err(|e| e.to_string())?;
     if path.parent() != Some(run_root.as_path()) { return Err("output authority run escapes its granted root".into()); }
-    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+    let evidence = octopus_run_authoring::CheckedRunEvidence {
         movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
         max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
     };
     let cancel = ctx.owner_cancel();
     let (current, transitions) = checked_recovery_observation(
         || octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes).map_err(|e| e.to_string()),
-        |current| Ok((current.to_vec(), octopus_provider_run_authoring::checked_declared_run_advance(
+        |current| Ok((current.to_vec(), octopus_run_authoring::checked_declared_run_advance(
             &evidence, &path, &before, current, original.source_movement_seq, topology.coauthor.iter().cloned().collect())?)),
         || cancel.is_cancelled(),
     )?;
@@ -2482,7 +2482,7 @@ pub fn output_authority(
             || transition.result.from != Endpoint::Interface(topology.authoring_result.binding.inbound.interface.clone())
             || transition.result.to != Endpoint::Interface(ctx.owner_interface().clone())
         { return Err("output authority has another authoring return".into()); }
-        octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&transition.after, &current, &runtime.checkpoint)?;
+        octopus_run_authoring::validate_unchanged_admitted_checkpoint(&transition.after, &current, &runtime.checkpoint)?;
         return Ok(OutputAuthority::Admitted(formed_source(transition.result.clone())?));
     }
     if transitions.iter().any(|transition| transition.writer.owner == *ctx.owner_interface()) {
@@ -2515,7 +2515,7 @@ pub fn output_authority(
     let artifact = octopus_interfaces::InterfaceArtifactFile::write(root.join("output-authority"), "code_mode.owner_ready",
         &serde_json::to_vec(&payload).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let reference = artifact_ref(&artifact)?;
-    let mut history = octopus_provider_run_authoring::FileCheckedRunReader::open(&evidence, None)?;
+    let mut history = octopus_run_authoring::FileCheckedRunReader::open(&evidence, None)?;
     let mut selected = None;
     let mut arrival = false;
     let mut refusal = None;
@@ -2540,7 +2540,7 @@ pub fn output_authority(
             || !metadata.checkpoint_admission.as_ref().is_some_and(|admission| admission.complete && admission.artifact_label == "code_mode.owner_ready")
         { return Err("output authority carrier differs from its exact readiness checkpoint".into()); }
         let pinned = history.snapshot(&ContentHash::from_hex(runtime.run_record_hash.as_deref().ok_or("output authority carrier has no snapshot")?).ok_or("output authority carrier snapshot is invalid")?)?;
-        octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&pinned, &current, &runtime.checkpoint)?;
+        octopus_run_authoring::validate_unchanged_admitted_checkpoint(&pinned, &current, &runtime.checkpoint)?;
         if selected.replace(formed_source(movement.clone())?).is_some() { return Err("output authority has duplicate admissions".into()); }
         Ok(())
     })?;
@@ -2591,7 +2591,7 @@ pub fn reconcile_checked_provider_advance(
     root: &Path,
     config: &CodeModeConfig,
     input: Option<&InterfaceInvocationEnvelope>,
-) -> Result<Option<InstalledHandoff>, octopus_provider_run_authoring::CheckedRunError> {
+) -> Result<Option<InstalledHandoff>, octopus_run_authoring::CheckedRunError> {
     if !root.join("context.json").try_exists().map_err(|e| e.to_string())? { return Ok(None); }
     let context: ContextRecord = read_record(&root.join("context.json"))?;
     if context.identity.config != *config || digest(&context.identity)? != context.generation || context.identity.formation.door_interface != *ctx.owner_interface() {
@@ -2630,12 +2630,12 @@ pub fn reconcile_checked_provider_advance(
     let run_root = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?;
     let path = run_root.join(format!("{}.json",topology.run)).canonicalize().map_err(|e| e.to_string())?;
     if path.parent() != Some(run_root.as_path()) { return Err("shared run file escapes its granted root".into()); }
-    let evidence = octopus_provider_run_authoring::CheckedRunEvidence { movements_path:ctx.owner_movements_path(),ledger_index_path:ctx.owner_ledger_index_path(),blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
+    let evidence = octopus_run_authoring::CheckedRunEvidence { movements_path:ctx.owner_movements_path(),ledger_index_path:ctx.owner_ledger_index_path(),blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
     let original = load(&context.identity.first_run.run_record_hash)?;
     let (before, after_seq) = match &latest {
         Some(installed) => {
-            use octopus_provider_run_authoring::{CheckedRunInstall, ConsentEvidenceRef};
-            let transition = octopus_provider_run_authoring::checked_declared_run_install(
+            use octopus_run_authoring::{CheckedRunInstall, ConsentEvidenceRef};
+            let transition = octopus_run_authoring::checked_declared_run_install(
                 &evidence, &path, &original,
                 &CheckedRunInstall {
                     call: ConsentEvidenceRef { movement_seq: installed.source_seq, artifact: installed.source_artifact.clone() },
@@ -2661,9 +2661,9 @@ pub fn reconcile_checked_provider_advance(
     let transitions = checked_recovery_observation(
         || octopus_interfaces::read_artifact_carrier_file_bounded(&path,limits.max_payload_bytes).map_err(|e| e.to_string()),
         |current| {
-            let transitions = octopus_provider_run_authoring::checked_declared_run_advance(&evidence,&path,&before,current,after_seq,vec![writer.clone()])?;
+            let transitions = octopus_run_authoring::checked_declared_run_advance(&evidence,&path,&before,current,after_seq,vec![writer.clone()])?;
             if let Some((pinned, checkpoint)) = &input_checkpoint {
-                octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(pinned,current,checkpoint)?;
+                octopus_run_authoring::validate_unchanged_admitted_checkpoint(pinned,current,checkpoint)?;
             }
             Ok(transitions)
         },

@@ -264,7 +264,7 @@ pub(crate) fn retained_context_bindings(
     let record = RunRecord::from_bytes(&serde_json::to_vec(record).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let provider = InterfaceId::new(provider);
-    let context = octopus_provider_run_authoring::provider_context_bindings(&record, &provider)?;
+    let context = octopus_run_authoring::provider_context_bindings(&record, &provider)?;
     let topology: BoundRunAuthoringTopology =
         serde_json::from_value(record.interface_state[&provider]["run_authoring_binding"].clone())
             .map_err(|e| e.to_string())?;
@@ -586,7 +586,7 @@ pub(crate) fn configure_tool_context(
         .and_then(|state| state.get("run_authoring_binding"))
         .map(|value| serde_json::from_value(value.clone()).map_err(|error| error.to_string()))
         .transpose()?;
-    let context = octopus_provider_run_authoring::provider_context_bindings(&parsed, &provider)?;
+    let context = octopus_run_authoring::provider_context_bindings(&parsed, &provider)?;
     for template in topology
         .checkpoints
         .iter_mut()

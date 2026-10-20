@@ -40,7 +40,7 @@ use octopus_model_context_render::{
 use octopus_protocol::config_types::{ReasoningSummary, WebSearchMode};
 use octopus_protocol::models::MessagePhase;
 use octopus_protocol::openai_models::ReasoningEffort;
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderInvocationSessionSnapshot,
     ProviderVerifiedInput, SessionContextArtifact,
 };
@@ -1852,11 +1852,11 @@ pub(crate) enum ProviderStreamEmission {
     Turn(ProviderEmission),
     WithOutgoingBindings {
         emission: ProviderEmission,
-        bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+        bindings: Vec<octopus_run_authoring::ProviderOutgoingBinding>,
     },
     WithCapabilityAmendment {
         emission: ProviderEmission,
-        amendment: octopus_provider_run_authoring::ProviderCapabilityAmendment,
+        amendment: octopus_run_authoring::ProviderCapabilityAmendment,
     },
     TerminalGroup {
         stream: ProviderEmission,
@@ -4475,7 +4475,7 @@ pub(crate) fn recover_provider_turn_continuity(
         private_config_string_set(&config.private_config, "session_snapshot_labels")?;
     let record = octopus_runtime::run_record::RunRecord::from_bytes(pinned_run_record)
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
-    let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+    let context_payloads = octopus_run_authoring::context_artifact_payloads(
         &record,
         input.metadata()?,
         &input.artifact_binding_payloads,
@@ -4491,7 +4491,7 @@ pub(crate) fn recover_provider_turn_continuity(
         resolved_session_snapshot,
     )?;
     let selected_files =
-        if octopus_provider_run_authoring::payload_artifact_bindings(&record, &runtime.interface)
+        if octopus_run_authoring::payload_artifact_bindings(&record, &runtime.interface)
             .map_err(InterfaceDriverError::FailedClosed)?
             .is_empty()
         {
@@ -4552,7 +4552,7 @@ pub(crate) fn recover_provider_result_continuity(
     let snapshots = private_config_string_set(config, "session_snapshot_labels")?;
     let record = octopus_runtime::run_record::RunRecord::from_bytes(pinned)
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
-    let payloads = octopus_provider_run_authoring::context_artifact_payloads(&record, input.metadata()?, &input.artifact_binding_payloads)
+    let payloads = octopus_run_authoring::context_artifact_payloads(&record, input.metadata()?, &input.artifact_binding_payloads)
         .map_err(InterfaceDriverError::FailedClosed)?;
     let payloads = resolve_instruction_context(input.metadata()?, &payloads)
         .map_err(InterfaceDriverError::FailedClosed)?.remaining_payloads;
@@ -4603,10 +4603,10 @@ pub(crate) fn recovered_tool_handoff_receipt(
     source_movement_seq: u64,
     current_record: &[u8],
     session: &[SessionContextArtifact],
-    outcomes: &[octopus_provider_run_authoring::ProviderHandoffOutcome],
+    outcomes: &[octopus_run_authoring::ProviderHandoffOutcome],
     output_root: &Path,
 ) -> Result<Option<ProviderEmission>, InterfaceDriverError> {
-    use octopus_provider_run_authoring::ProviderHandoffOutcome;
+    use octopus_run_authoring::ProviderHandoffOutcome;
     let Some(ProviderHandoffOutcome::Admitted { seq, artifact }) = outcomes.last() else {
         return Ok(None);
     };
@@ -6275,7 +6275,7 @@ impl CodexAppServerInterfaceDriver {
                 request: request.clone(),
                 payload_artifact_bindings: payload_selection.clone(),
                 request_artifact: input.artifact.clone(),
-                operator_interface: octopus_provider_run_authoring::bound_client_interface(
+                operator_interface: octopus_run_authoring::bound_client_interface(
                     &run_record,
                     &runtime.interface,
                 )
@@ -7763,8 +7763,8 @@ impl CodexAppServerInterfaceDriver {
         context: TurnContext<'_, '_>,
         pending: &PendingServerRequest,
         operation: NativePending,
-        bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
-        amendment: Option<octopus_provider_run_authoring::ProviderCapabilityAmendment>,
+        bindings: Vec<octopus_run_authoring::ProviderOutgoingBinding>,
+        amendment: Option<octopus_run_authoring::ProviderCapabilityAmendment>,
         handle: AppServerRequestHandle,
     ) -> Result<(), InterfaceDriverError> {
         emit_native_effect(context.sink, &pending.turn_id, operation, bindings, amendment)?;
@@ -8694,7 +8694,7 @@ impl TurnSink<'_> {
     fn send_with_outgoing_bindings(
         &self,
         mut output: CodexTurnOutput,
-        bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+        bindings: Vec<octopus_run_authoring::ProviderOutgoingBinding>,
     ) -> Result<(), InterfaceDriverError> {
         if !matches!(output.route, ProviderEmissionRoute::Tool { .. }) {
             return Err(InterfaceDriverError::FailedClosed("outgoing binding authoring requires an ordinary tool emission".into()));
@@ -8708,7 +8708,7 @@ impl TurnSink<'_> {
     fn send_with_capability_amendment(
         &self,
         mut output: CodexTurnOutput,
-        amendment: octopus_provider_run_authoring::ProviderCapabilityAmendment,
+        amendment: octopus_run_authoring::ProviderCapabilityAmendment,
     ) -> Result<(), InterfaceDriverError> {
         if !matches!(output.route, ProviderEmissionRoute::Tool { .. }) {
             return Err(InterfaceDriverError::FailedClosed("a capability amendment requires an ordinary tool emission".into()));
@@ -11773,10 +11773,10 @@ fn admitted_payload_context(
 ) -> Result<(Vec<octopus_interfaces::ArtifactBindingPayload>, Vec<ArtifactRef>), InterfaceDriverError> {
     let metadata = input.metadata()?;
     let runtime = invocation_runtime_metadata(input)?;
-    let context = octopus_provider_run_authoring::context_artifact_payloads(
+    let context = octopus_run_authoring::context_artifact_payloads(
         record, metadata, &input.artifact_binding_payloads,
     ).map_err(InterfaceDriverError::FailedClosed)?;
-    let selected = octopus_provider_run_authoring::payload_artifact_bindings(record, &runtime.interface)
+    let selected = octopus_run_authoring::payload_artifact_bindings(record, &runtime.interface)
         .map_err(InterfaceDriverError::FailedClosed)?.into_iter()
         .filter(|reference| metadata.artifact_binding_refs.contains(reference)
             && metadata.grant.artifact_access.get(reference.id.as_str()).is_some_and(|access| access.read))
@@ -11796,7 +11796,7 @@ fn selected_file_projection(
 ) -> Result<SelectedFileProjection, InterfaceDriverError> {
     let metadata = input.metadata()?;
     let runtime = invocation_runtime_metadata(input)?;
-    let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+    let context_payloads = octopus_run_authoring::context_artifact_payloads(
         record,
         metadata,
         &input.artifact_binding_payloads,
@@ -11806,7 +11806,7 @@ fn selected_file_projection(
         .map_err(InterfaceDriverError::FailedClosed)?
         .remaining_payloads;
     let selected =
-        octopus_provider_run_authoring::payload_artifact_bindings(record, &runtime.interface)
+        octopus_run_authoring::payload_artifact_bindings(record, &runtime.interface)
             .map_err(InterfaceDriverError::FailedClosed)?;
     if selected.is_empty() {
         return Ok(SelectedFileProjection {
@@ -12267,7 +12267,7 @@ pub(crate) fn decode_inflight_turn_control(
         let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| InterfaceDriverError::FailedClosed(
             "operator steering provider declares no interface_driver_config".into(),
         ))?;
-        let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+        let context_payloads = octopus_run_authoring::context_artifact_payloads(
             &record, input.metadata()?, &input.artifact_binding_payloads,
         ).map_err(InterfaceDriverError::FailedClosed)?;
         let context_payloads = resolve_instruction_context(input.metadata()?, &context_payloads)
@@ -13078,8 +13078,8 @@ fn native_pending_operation(pending: &CodexPendingContinuity) -> Result<Option<N
 
 fn emit_native_effect(
     sink: &TurnSink<'_>, turn_id: &str, operation: NativePending,
-    bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
-    amendment: Option<octopus_provider_run_authoring::ProviderCapabilityAmendment>,
+    bindings: Vec<octopus_run_authoring::ProviderOutgoingBinding>,
+    amendment: Option<octopus_run_authoring::ProviderCapabilityAmendment>,
 ) -> Result<(), InterfaceDriverError> {
     let value = serde_json::to_value(&operation).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
     let effect = operation.effect;
@@ -15689,7 +15689,7 @@ fn parse_codex_continuity(
         }
     }
     if let Some(request) = &state.tool_operator_request {
-        octopus_provider_run_authoring::validate_payload_artifact_selection(&request.payload_artifact_bindings).map_err(InterfaceDriverError::FailedClosed)?;
+        octopus_run_authoring::validate_payload_artifact_selection(&request.payload_artifact_bindings).map_err(InterfaceDriverError::FailedClosed)?;
         request.request.validate()?;
         request.request.validate_pending(&state)?;
     }
@@ -21276,7 +21276,7 @@ while IFS= read -r _; do :; done
         let mut cold_input = input.clone();
         cold_input.artifact_binding_payloads[2] = snapshot_bound;
         let cold_record = make_record(&mut cold_input, "world_provider_test", &selected);
-        let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+        let context_payloads = octopus_run_authoring::context_artifact_payloads(
             &cold_record,
             cold_input.metadata().unwrap(),
             &cold_input.artifact_binding_payloads,
@@ -21388,7 +21388,7 @@ while IFS= read -r _; do :; done
         );
         let mut unselected = input.clone();
         let unselected_record = make_record(&mut unselected, "world_provider_test", &[]);
-        let payloads = octopus_provider_run_authoring::context_artifact_payloads(
+        let payloads = octopus_run_authoring::context_artifact_payloads(
             &unselected_record,
             unselected.metadata().unwrap(),
             &unselected.artifact_binding_payloads,

@@ -179,7 +179,7 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
                         == Some(&InterfaceId::new(&first.model_interface_id))
             })
             .unwrap();
-        let context = octopus_provider_run_authoring::provider_context_bindings(
+        let context = octopus_run_authoring::provider_context_bindings(
             &next,
             &InterfaceId::new(&first.model_interface_id),
         )

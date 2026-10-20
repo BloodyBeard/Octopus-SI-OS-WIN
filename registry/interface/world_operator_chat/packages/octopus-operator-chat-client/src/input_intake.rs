@@ -2,7 +2,7 @@ use std::path::Path;
 
 use octopus_descriptors::InterfaceId;
 use octopus_ledger::RequiredVerifiedArtifact;
-use octopus_provider_run_authoring::{CheckedRunWriter, RunAuthoringProfile};
+use octopus_run_authoring::{CheckedRunWriter, RunAuthoringProfile};
 use octopus_runtime::run_record::ArtifactBinding;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -388,9 +388,9 @@ fn reconcile_input_context(record: &mut Value, config: &InputIntakeConfig) -> Re
     {
         return Err("intake must own distinct input/call/result checkpoints".into());
     }
-    let context = octopus_provider_run_authoring::input_artifacts::read_bindings(
+    let context = octopus_run_authoring::input_artifacts::read_bindings(
         &parsed, &config.writer.owner,
-        octopus_provider_run_authoring::provider_context_bindings(&parsed, &config.provider_interface)?,
+        octopus_run_authoring::provider_context_bindings(&parsed, &config.provider_interface)?,
     )?;
     let topology: crate::BoundRunAuthoringTopology = serde_json::from_value(
         parsed.interface_state[&config.provider_interface]["run_authoring_binding"].clone(),

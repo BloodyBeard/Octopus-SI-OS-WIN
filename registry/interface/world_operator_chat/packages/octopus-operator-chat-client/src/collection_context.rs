@@ -290,7 +290,7 @@ pub(crate) fn plan(
             return Err("accepted catalogue has a different worker identity".into());
         }
         let bindings =
-            octopus_provider_run_authoring::provider_context_bindings(&record, &provider)?;
+            octopus_run_authoring::provider_context_bindings(&record, &provider)?;
         let bound = bindings
             .iter()
             .filter(|binding| binding.id == adoption.snapshot.id)

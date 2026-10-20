@@ -353,7 +353,7 @@ pub(super) fn wire(
             context_ids.push(id.clone());
         }
     }
-    let text_provider_context = octopus_provider_run_authoring::provider_context_bindings(
+    let text_provider_context = octopus_run_authoring::provider_context_bindings(
         &RunRecord::from_bytes(content.as_bytes()).map_err(|e| e.to_string())?,
         &InterfaceId::new(&identity.model_interface_id),
     )?
@@ -499,7 +499,7 @@ pub(super) fn wire(
                 "Home voice Run differs from its exact independent execution contract".into(),
             );
         }
-        octopus_provider_run_authoring::provider_context_bindings(
+        octopus_run_authoring::provider_context_bindings(
             &record,
             &bound.provider_interface,
         )?;

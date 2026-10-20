@@ -59,7 +59,7 @@ octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-ledger-index = { path = "../../../../../crates/octopus-ledger-index" }
 octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
 octopus-model-context-render = { path = "../octopus-model-context-render" }
-octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-run-authoring = { path = "../../../system_interface_authoring/packages/octopus-run-authoring" }
 octopus-operator-chat-client = { path = "../../../world_operator_chat/packages/octopus-operator-chat-client" }
 octopus-login = { path = "../octopus-codex-login" }
 octopus-secrets = { path = "../octopus-secrets" }

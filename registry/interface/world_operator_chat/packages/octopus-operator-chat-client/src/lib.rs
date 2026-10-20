@@ -488,7 +488,7 @@ struct BoundRunAuthoringTopology {
     payload_artifact_bindings: Vec<octopus_ledger::ArtifactRef>,
     checkpoints: Vec<BoundCheckpointTemplate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    writer_run: Option<octopus_provider_run_authoring::WriterRunBinding>,
+    writer_run: Option<octopus_run_authoring::WriterRunBinding>,
 }
 
 pub fn plan_operator_chat_topology(
@@ -806,7 +806,7 @@ fn plan_operator_chat_topology_files_for_source(
     )?;
     let retained_context_ids = if request.retain_current_capabilities {
         let existing = RunRecord::from_bytes(&serde_json::to_vec(request.existing_run_record.as_ref().ok_or("retained instruction selection requires its existing record")?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        octopus_provider_run_authoring::provider_context_bindings(&existing, &InterfaceId::new(&identity.model_interface_id))?
+        octopus_run_authoring::provider_context_bindings(&existing, &InterfaceId::new(&identity.model_interface_id))?
             .into_iter().map(|binding| binding.id.to_string()).collect::<BTreeSet<_>>()
     } else { BTreeSet::new() };
     let mut selected_context = context_bindings::with_instruction_source_bindings_from_planned(
@@ -3927,7 +3927,7 @@ fn validate_octopus_os_authoring_profile(
             ));
         }
     }
-    octopus_provider_run_authoring::validate_payload_artifact_selection(&profile.payload_artifact_bindings)?;
+    octopus_run_authoring::validate_payload_artifact_selection(&profile.payload_artifact_bindings)?;
     for reference in &profile.payload_artifact_bindings {
         if artifacts.contains(reference.id.as_str()) {
             return Err("authoring profile payload selection collides with context bindings".into());
@@ -4580,7 +4580,7 @@ fn build_chat_run_record(
                 .chain(binding.payload_artifact_bindings.iter().map(|reference| &reference.id))
                 .collect::<BTreeSet<_>>();
             Ok::<_, String>(
-                octopus_provider_run_authoring::provider_context_bindings(
+                octopus_run_authoring::provider_context_bindings(
                     &record,
                     &InterfaceId::new(&identity.model_interface_id),
                 )?
@@ -4627,7 +4627,7 @@ fn build_chat_run_record(
         }
     }
 
-    octopus_provider_run_authoring::validate_payload_artifact_selection(payload_artifact_bindings)?;
+    octopus_run_authoring::validate_payload_artifact_selection(payload_artifact_bindings)?;
     let reserved = identity.code_mode_owners.values().flat_map(|owner| {
         std::iter::once(&owner.prelude.id).chain(std::iter::once(&owner.topology.id))
             .chain(owner.prelude_sources.iter().flat_map(|source| [&source.source.id, &source.snapshot.id]))
@@ -7713,7 +7713,7 @@ mod tests {
     #[test]
     fn task_agent_nested_selection_survives_model_change_and_current_amendment() {
         use crate::run_composition::{CompositionRoots, current_run::*};
-        use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+        use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let registry = root.join("registry");
@@ -7905,7 +7905,7 @@ mod tests {
                 assert!(delivery["text"].as_str().unwrap().contains(&request.ee_instances_root.display().to_string()));
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
-                let provider_context = octopus_provider_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
+                let provider_context = octopus_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
                 let stable = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::Stable
                     && cp.interface_binding.interface.as_str() == plan.chat_interface_id).unwrap();
                 assert!(stable.interface_binding.admits("operator.message") && stable.interface_binding.admits("client.action.result"));
@@ -8008,7 +8008,7 @@ mod tests {
             continuation.existing_run_record=Some(current_context);
             let next=plan_operator_chat_topology(&continuation).expect("ordinary existing Home/task continues the same selected Browser/CU path");
             let next_record = RunRecord::from_bytes(next.run_record_content.as_bytes()).unwrap();
-            let context = octopus_provider_run_authoring::provider_context_bindings(&next_record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
+            let context = octopus_run_authoring::provider_context_bindings(&next_record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
             assert_eq!(serde_json::to_value(&context[context.len()-2..]).unwrap(), history);
             assert!(!context.iter().any(|binding| binding.id.as_str() == "interface.artifact.output:stale"));
             assert_eq!(next.run_id, plan.run_id);
@@ -8022,7 +8022,7 @@ mod tests {
             assert!(!next.interface_writes.iter().any(|write| write.path == sidecar_path), "ordinary continuation must not rewrite unrelated client configuration");
             if role == "home" {
                 use crate::run_composition::{CompositionRoots, current_run::*};
-                use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+                use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
                 let roots = CompositionRoots { registry_root:registry_root.to_path_buf(), ee_instances_root:request.ee_instances_root.clone(),
                     run_records_root:ee_root.join("runs"), interface_private_state_root:ee_root.join("interface-private") };
                 std::fs::create_dir_all(&roots.ee_instances_root).unwrap();

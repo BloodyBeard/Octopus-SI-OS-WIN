@@ -18,8 +18,8 @@ use octopus_operator_chat_client::run_composition::current_run::{CurrentRunReque
 use octopus_operator_chat_client::publication_selection::{
     PublicationSelectionEvidence, validate_evidence, validate_publication_snapshot_refs,
 };
-use octopus_provider_run_authoring::ProviderOutgoingBinding;
-use octopus_provider_run_authoring::capability_amendment::{ProviderCapabilityAmendment, ProviderCapabilityBridge, validate_installed};
+use octopus_run_authoring::ProviderOutgoingBinding;
+use octopus_run_authoring::capability_amendment::{ProviderCapabilityAmendment, ProviderCapabilityBridge, validate_installed};
 use octopus_runtime::run_record::RunRecord;
 use octopus_tool_handlers::ToolResultArtifact;
 use octopus_tool_registry::ToolArgumentValidator;

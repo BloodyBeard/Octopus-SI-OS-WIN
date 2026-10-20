@@ -29,15 +29,15 @@ const REGISTRY_INTERFACE_OWNER_PACKAGES: &[(&str, &str, &str)] = &[
         "registry/interface/world_provider_codex",
     ),
     (
-        "octopus-provider-run-authoring",
-        "registry/interface/world_provider_ollama/packages/octopus-provider-run-authoring",
-        "registry/interface/world_provider_ollama",
+        "octopus-run-authoring",
+        "registry/interface/system_interface_authoring/packages/octopus-run-authoring",
+        "registry/interface/system_interface_authoring",
     ),
 ];
 
 const PROVIDER_IMPLEMENTATION_PACKAGES: &[&str] = &[
     "octopus-model-context-render",
-    "octopus-provider-run-authoring",
+    "octopus-run-authoring",
 ];
 
 const FORBIDDEN_HOT_PATH_CRATES: &[&str] = &[
@@ -965,7 +965,7 @@ fn terminal_product_does_not_refuse_to_the_model_provider() {
         if line.starts_with('#') {
             continue;
         }
-        if !line.contains("world_provider_codex") && !line.contains("world_provider_ollama") {
+        if !line.contains("world_provider_codex") && !line.contains("system_interface_authoring") {
             continue;
         }
         let dep_name = line.split('=').next().map(str::trim).unwrap_or_default();

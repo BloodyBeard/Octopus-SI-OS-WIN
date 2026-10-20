@@ -62,7 +62,7 @@ fn successive_tool_results_use_admitted_session_continuity() {
     handed[2].payload["tool"] = serde_json::json!("artifact.read");
     handed[2].payload["correlation_id"] = serde_json::json!("call-read");
     handed[2].payload["arguments"] = serde_json::json!({"path":"document"});
-    let outcomes = vec![octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted {
+    let outcomes = vec![octopus_run_authoring::ProviderHandoffOutcome::Admitted {
         seq:30, artifact:handed[2].source_artifact.clone(),
     }];
     let mut current: serde_json::Value = serde_json::from_slice(&record).unwrap();

@@ -4,7 +4,7 @@ use octopus_descriptors::{ArtifactId, InterfaceId};
 use octopus_interface_transport::SpawnLifeConfig;
 use octopus_interfaces::{InterfaceArtifactFile, InterfaceArtifactManifest};
 use octopus_ledger::{ArtifactRef, ContentHash, Endpoint, MovementKind};
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     CheckedRunEdit, CheckedRunEvidence, CheckedRunEvidenceReader, CheckedRunInstall,
     CheckedRunWriter, ConsentEvidenceRef, FileCheckedRunReader, OwnerWriterEdit,
     ProviderInputRevision, RunAuthoringProfile, checked_declared_run_advance,

@@ -5,7 +5,7 @@ use octopus_interface_transport::{InterfaceActivationArrival, InterfaceHostIoLim
 use octopus_interfaces::{DeliveryVerdict, InterfaceArtifactFile, InterfaceInvocationEnvelope};
 use octopus_ledger::{Endpoint, LiveMovementLog, MovementKind, MovementLog, Seq, SharedBlobs};
 use octopus_ledger_store::{DurableBlobs, DurableLog};
-use octopus_provider_run_authoring::{ProviderEmission, ProviderEmissionRoute, ProviderHandoffSession, ProviderSourceRecovery};
+use octopus_run_authoring::{ProviderEmission, ProviderEmissionRoute, ProviderHandoffSession, ProviderSourceRecovery};
 use octopus_world_pyecho_life_runtime::LedgerTailReader;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -127,7 +127,7 @@ async fn home_stop_rearms_through_real_admission_and_file_effect_across_restart(
     let mut b = Boundary {runtime,log,blobs:SharedBlobHandle::new(blobs),ctx,arrivals,socket,author,door:plan.authoring_environment_interface_id.into(),roots};
     let artifact = |label: &str, payload: Value| InterfaceArtifactFile::write(root.join("provider/emitted"), label, &serde_json::to_vec(&payload).unwrap()).unwrap();
     let emission = |file| ProviderEmission { artifact:file, route:ProviderEmissionRoute::ClientProjection };
-    let mut foreground: Option<octopus_provider_run_authoring::ProviderOutputHandoff> = None;
+    let mut foreground: Option<octopus_run_authoring::ProviderOutputHandoff> = None;
     for attempt in 0..3 {
         let stop = artifact("operator.turn.control", json!({"action":"stop","control_id":format!("stop-{attempt}")}));
         assert!(matches!(b.admit(&stop, &client).await, DeliveryVerdict::Admitted { .. }));

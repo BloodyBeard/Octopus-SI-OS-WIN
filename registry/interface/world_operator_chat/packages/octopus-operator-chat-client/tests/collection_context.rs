@@ -170,7 +170,7 @@ fn new_run_inlines_exact_scoped_metadata_without_bodies_or_activation() {
         json!(snapshot)
     );
     assert!(
-        octopus_provider_run_authoring::provider_context_bindings(
+        octopus_run_authoring::provider_context_bindings(
             &record,
             &plan.provider_interface_id.clone().into()
         )
@@ -436,12 +436,12 @@ fn existing_run_keeps_its_accepted_catalogue_after_library_change_and_restart() 
             .starts_with("artifact:artifact-collection-catalogue-")
     }));
     assert_eq!(
-        octopus_provider_run_authoring::provider_context_bindings(
+        octopus_run_authoring::provider_context_bindings(
             &RunRecord::from_bytes(accepted.run_record_content.as_bytes()).unwrap(),
             &accepted.model_interface_id.clone().into()
         )
         .unwrap(),
-        octopus_provider_run_authoring::provider_context_bindings(
+        octopus_run_authoring::provider_context_bindings(
             &RunRecord::from_bytes(next.run_record_content.as_bytes()).unwrap(),
             &accepted.model_interface_id.clone().into()
         )
@@ -527,7 +527,7 @@ fn existing_run_keeps_its_accepted_catalogue_after_library_change_and_restart() 
     );
     let child_record = RunRecord::from_bytes(fresh.run_write.content.as_bytes()).unwrap();
     assert!(
-        !octopus_provider_run_authoring::provider_context_bindings(
+        !octopus_run_authoring::provider_context_bindings(
             &child_record,
             &fresh.provider_interface_id.into()
         )

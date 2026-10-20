@@ -1,7 +1,7 @@
 use super::*;
 use octopus_interfaces::InterfaceInvocationEnvelope;
 use octopus_provider_codex::intake_state::{IntakeEdit, reprepare_input};
-use octopus_provider_run_authoring::{OwnerWriterEvidence, separate_owner_writer_run};
+use octopus_run_authoring::{OwnerWriterEvidence, separate_owner_writer_run};
 use octopus_tool_handlers::ToolResultArtifact;
 
 fn begin(f: &mut Fixture, edit: &IntakeEdit) -> (Value, InterfaceInvocationEnvelope) {
@@ -12,8 +12,8 @@ fn begin(f: &mut Fixture, edit: &IntakeEdit) -> (Value, InterfaceInvocationEnvel
     let call: Value = serde_json::from_slice(&captured.payload_bytes).unwrap();
     let writer = f.config.writer.clone();
     let entry = &call["arguments"]["writes"][0];
-    let preimage: octopus_provider_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
-    let snapshot_text = preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_provider_run_authoring::DecodeBudget::new(f.ctx.host_io_limits.as_ref().unwrap().max_payload_bytes).unwrap()).unwrap();
+    let preimage: octopus_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
+    let snapshot_text = preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_run_authoring::DecodeBudget::new(f.ctx.host_io_limits.as_ref().unwrap().max_payload_bytes).unwrap()).unwrap();
     let snapshot = snapshot_text.as_bytes();
     let mut draft = f.movement_draft(&writer, &edit.edit, snapshot, None);
     draft.artifact = Some(f.artifact(&writer.call_label, call.clone()));
@@ -90,7 +90,7 @@ fn intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart() {
     let initial =
         separate_owner_writer_run(&mut value, &f.config.writer, &"writer_intake".into()).unwrap();
     value["interface_state"][f.config.writer.owner.as_str()]["writer_run"].as_object_mut().unwrap().remove("initial_record_format");
-    let encode = |v: &Value| octopus_provider_run_authoring::JsonFormat::Pretty.encode(v).unwrap();
+    let encode = |v: &Value| octopus_run_authoring::JsonFormat::Pretty.encode(v).unwrap();
     std::fs::write(
         f.path.parent().unwrap().join("writer_intake.json"),
         encode(&initial),
@@ -103,9 +103,9 @@ fn intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart() {
         serde_json::from_str(&first.edit.content).unwrap(), first.edit.correlation_id.clone(), None).unwrap();
     let mut retained = serde_json::to_value(&first).unwrap();
     for entry in retained["ordered"]["arguments"]["writes"].as_array_mut().unwrap() {
-        let preimage: octopus_provider_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
+        let preimage: octopus_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
         let before = preimage.decode(entry["expected_before_hash"].as_str().unwrap(),
-            &mut octopus_provider_run_authoring::DecodeBudget::new(8 * 1024 * 1024).unwrap()).unwrap();
+            &mut octopus_run_authoring::DecodeBudget::new(8 * 1024 * 1024).unwrap()).unwrap();
         let mut after: Value = serde_json::from_str(&before).unwrap();
         let patch: json_patch::Patch = serde_json::from_value(entry["patch"].clone()).unwrap();
         json_patch::patch(&mut after, &patch).unwrap();

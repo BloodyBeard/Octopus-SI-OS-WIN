@@ -6,7 +6,7 @@ use octopus_context_projection::{
     ContextProjectionConfig, OUTCOME_LABEL, OUTPUT_LABEL, OutcomeProjectionConfig,
     ProjectionBounds, ProjectionRule,
 };
-use octopus_provider_run_authoring::snapshot_projection::SnapshotInputRoute;
+use octopus_run_authoring::snapshot_projection::SnapshotInputRoute;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

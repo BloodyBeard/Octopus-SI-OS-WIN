@@ -368,7 +368,7 @@ fn plan_tool_contract_adoption(
 }
 
 pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<NativeRunAdoptionPlan, String> {
-    use octopus_provider_run_authoring::{CheckedRunEvidence, declared_provider_run_writer, provider_context_bindings, provider_input_payloads_ready};
+    use octopus_run_authoring::{CheckedRunEvidence, declared_provider_run_writer, provider_context_bindings, provider_input_payloads_ready};
     let roots = &request.roots;
     for root in [&roots.registry_root, &roots.ee_instances_root, &roots.run_records_root,
         &roots.interface_private_state_root, &request.ledger_root] {

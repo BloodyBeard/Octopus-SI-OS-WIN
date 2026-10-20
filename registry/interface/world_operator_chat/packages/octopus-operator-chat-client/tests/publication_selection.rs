@@ -380,7 +380,7 @@ fn ordinary_component_ids_and_a_new_dotted_tool_reach_real_authoring() {
 #[test]
 fn native_amendment_and_continuation_preserve_accepted_capabilities_and_publication_evidence() {
     use octopus_operator_chat_client::run_composition::{CompositionRoots, current_run::*};
-    use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+    use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let (mut request, pin, mut entry) = fixture(&root);
@@ -554,7 +554,7 @@ fn native_amendment_and_continuation_preserve_accepted_capabilities_and_publicat
         .contains("not readable")
     );
     let accepted_bindings =
-        octopus_provider_run_authoring::provider_context_bindings(&current, &provider).unwrap();
+        octopus_run_authoring::provider_context_bindings(&current, &provider).unwrap();
     set_defaults("fresh-context");
     let old_policy = std::fs::read(
         roots
@@ -594,7 +594,7 @@ fn native_amendment_and_continuation_preserve_accepted_capabilities_and_publicat
     let next = plan_operator_chat_topology(&request).unwrap();
     let next_record = RunRecord::from_bytes(next.run_record_content.as_bytes()).unwrap();
     assert_eq!(
-        octopus_provider_run_authoring::provider_context_bindings(&next_record, &provider).unwrap(),
+        octopus_run_authoring::provider_context_bindings(&next_record, &provider).unwrap(),
         accepted_bindings
     );
     assert_eq!(next.publication_evidence, accepted.publication_evidence);
@@ -626,7 +626,7 @@ fn native_amendment_and_continuation_preserve_accepted_capabilities_and_publicat
     let reconfigured_record =
         RunRecord::from_bytes(reconfigured.run_record_content.as_bytes()).unwrap();
     let fresh_bindings =
-        octopus_provider_run_authoring::provider_context_bindings(&reconfigured_record, &provider)
+        octopus_run_authoring::provider_context_bindings(&reconfigured_record, &provider)
             .unwrap();
     assert!(
         fresh_bindings

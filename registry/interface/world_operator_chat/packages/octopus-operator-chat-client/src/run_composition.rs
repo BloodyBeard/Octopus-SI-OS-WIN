@@ -6,7 +6,7 @@ pub use octopus_app_server::{
 use octopus_ee::EeInstance;
 pub use octopus_context_collections::CollectionSelection;
 use octopus_ledger::{ArtifactRef, InvocationMetadata};
-use octopus_provider_run_authoring::ProviderOutgoingBinding;
+use octopus_run_authoring::ProviderOutgoingBinding;
 use crate::publication_selection::{
     PublicationSelectionEvidence, PublicationSelectionSeeds, PublicationSourceAuthority,
     resolve_publication_selection, validate_target_read_formation,

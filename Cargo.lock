@@ -6529,7 +6529,7 @@ dependencies = [
  "octopus-marks",
  "octopus-policy",
  "octopus-process-session-tool-runtime",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-runtime",
  "octopus-system-gui-env",
  "octopus-tool-handlers",
@@ -6554,7 +6554,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-process-session-tool-runtime",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-runtime",
  "octopus-tool-handlers",
  "octopus-worker-env",
@@ -6740,7 +6740,7 @@ dependencies = [
  "octopus-interface-transport",
  "octopus-interfaces",
  "octopus-ledger",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-world-pyecho-life-runtime",
  "serde",
  "serde_json",
@@ -7149,7 +7149,7 @@ dependencies = [
  "octopus-ledger-index",
  "octopus-ledger-store",
  "octopus-policy",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-runtime",
  "octopus-tool-handlers",
  "octopus-util-abspath",
@@ -7476,7 +7476,7 @@ dependencies = [
  "octopus-policy",
  "octopus-process-session-tool-runtime",
  "octopus-provider-codex",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-runtime",
  "octopus-system-room-env",
  "octopus-tool-handlers",
@@ -7637,7 +7637,7 @@ dependencies = [
  "octopus-model-context-render",
  "octopus-operator-chat-client",
  "octopus-protocol",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-runtime",
  "octopus-secrets",
  "octopus-system-room-env",
@@ -7665,36 +7665,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "octopus-provider-run-authoring"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "futures",
- "json-patch",
- "octopus-app-server-interface",
- "octopus-descriptors",
- "octopus-file-write-contract",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-ledger-index",
- "octopus-ledger-store",
- "octopus-marks",
- "octopus-runtime",
- "octopus-system-room-env",
- "octopus-tool-handlers",
- "octopus-world-pyecho-life-runtime",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.28.0",
- "tokio-util",
- "url",
-]
-
-[[package]]
 name = "octopus-realtime-signaling"
 version = "0.1.0"
 dependencies = [
@@ -7710,7 +7680,7 @@ dependencies = [
  "octopus-ledger-store",
  "octopus-login",
  "octopus-policy",
- "octopus-provider-run-authoring",
+ "octopus-run-authoring",
  "octopus-system-room-env",
  "octopus-tool-handlers",
  "octopus-world-pyecho-life-runtime",
@@ -7783,6 +7753,36 @@ dependencies = [
  "serde_json",
  "tiny_http",
  "zeroize",
+]
+
+[[package]]
+name = "octopus-run-authoring"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "futures",
+ "json-patch",
+ "octopus-app-server-interface",
+ "octopus-descriptors",
+ "octopus-file-write-contract",
+ "octopus-interface-transport",
+ "octopus-interfaces",
+ "octopus-ledger",
+ "octopus-ledger-index",
+ "octopus-ledger-store",
+ "octopus-marks",
+ "octopus-runtime",
+ "octopus-system-room-env",
+ "octopus-tool-handlers",
+ "octopus-world-pyecho-life-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]

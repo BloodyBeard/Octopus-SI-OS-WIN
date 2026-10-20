@@ -22,7 +22,7 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
 octopus-login = { path = "../../../world_provider_codex/packages/octopus-codex-login" }
-octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-run-authoring = { path = "../../../system_interface_authoring/packages/octopus-run-authoring" }
 
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-policy = { path = "../../../../../crates/octopus-policy" }

@@ -1,5 +1,5 @@
 [package]
-name = "octopus-provider-run-authoring"
+name = "octopus-run-authoring"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [lib]
 doctest = false
-name = "octopus_provider_run_authoring"
+name = "octopus_run_authoring"
 path = "src/lib.rs"
 
 [dependencies]

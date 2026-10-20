@@ -46,7 +46,7 @@ mod failure_projection_tests;
 use crate::opencodex::{
     OpenCodexDescriptorConfig, descriptor_config as opencodex_descriptor_config,
 };
-use octopus_provider_run_authoring::{
+use octopus_run_authoring::{
     CheckedRunError, FailedSourceHandoffError, ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome,
     ProviderHandoffSession, ProviderInvocationSessionSnapshot, ProviderOutputHandoff,
     ProviderSourceRecovery, RunAuthoringResultIdentity, payload_carries_session_context,
@@ -200,7 +200,7 @@ enum InterruptedResultAdmission {
 type PendingProviderEmission = (
     ProviderEmission,
     Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+    Vec<octopus_run_authoring::ProviderOutgoingBinding>,
 );
 
 type ActiveTurnControls = Arc<tokio::sync::Mutex<BTreeMap<String, Arc<CodexTurnControlBroker>>>>;
@@ -3338,7 +3338,7 @@ fn operator_turn_requires_deferral(
     descriptor: &InterfaceDescriptor,
     run: &RunId,
     turn: &QueuedTurn,
-    current: &[octopus_provider_run_authoring::SessionContextArtifact],
+    current: &[octopus_run_authoring::SessionContextArtifact],
 ) -> Result<bool, String> {
     let source_snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
     let continuity = recover_provider_turn_continuity(
@@ -3413,7 +3413,7 @@ fn input_awaits_open_handoff(ctx: &InterfaceLiftContext, run: &RunId, turn: &Que
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("provider run '{}' current record cannot be read: {error}", run.as_str()))?;
     let record = octopus_runtime::run_record::RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
-    octopus_provider_run_authoring::open_standing_handoff_before(ctx, &record, &ctx.interface, turn.seq)
+    octopus_run_authoring::open_standing_handoff_before(ctx, &record, &ctx.interface, turn.seq)
 }
 
 fn independent_provider_input(ctx: &InterfaceLiftContext, turn: &QueuedTurn) -> Result<Option<bool>, String> {
@@ -3421,7 +3421,7 @@ fn independent_provider_input(ctx: &InterfaceLiftContext, turn: &QueuedTurn) -> 
         .map_err(|error| error.to_string())?;
     let metadata = turn.envelope.metadata().map_err(|error| error.to_string())?;
     let runtime = metadata.runtime.as_ref().ok_or("provider input has no runtime identity")?;
-    octopus_provider_run_authoring::independent_provider_input(&record, &ctx.interface, &runtime.checkpoint)
+    octopus_run_authoring::independent_provider_input(&record, &ctx.interface, &runtime.checkpoint)
 }
 
 async fn prepare_deferred_provider_turn(
@@ -3654,7 +3654,7 @@ async fn checked_deferred_interrupted_result(
     turn: &QueuedTurn,
     source: Option<&crate::handler::CodexContinuityState>,
     released: Option<&DeferredProviderTurnRelease>,
-    current: Option<&[octopus_provider_run_authoring::SessionContextArtifact]>,
+    current: Option<&[octopus_run_authoring::SessionContextArtifact]>,
 ) -> Result<Option<(DeferredProviderTurnRelease, crate::handler::CodexContinuityState)>, String> {
     let Some(source) = source.filter(|state| codex_continuity_has_interrupted_pending(state)) else { return Ok(None); };
     let snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
@@ -3698,7 +3698,7 @@ async fn checked_interrupted_result_continuity(
     interrupted: &crate::handler::CodexContinuityState,
     result_source: &DurableArtifactAdmission,
     closure: &DurableArtifactAdmission,
-    current: &[octopus_provider_run_authoring::SessionContextArtifact],
+    current: &[octopus_run_authoring::SessionContextArtifact],
 ) -> Result<crate::handler::CodexContinuityState, String> {
     let result = read_provider_source_movement(ctx, run, result_source.movement_seq)?;
     if result.artifact.as_ref() != Some(&result_source.artifact) {
@@ -3753,7 +3753,7 @@ async fn checked_interrupted_result_continuity(
     if let Some(existing) = evidence.iter().find(|entry| entry.source_artifact == result_source.artifact) {
         if existing.payload != result_payload { return Err("interrupted release result conflicts with checked current evidence".into()); }
     } else {
-        evidence.push(octopus_provider_run_authoring::SessionContextArtifact {
+        evidence.push(octopus_run_authoring::SessionContextArtifact {
             label: result_manifest.label,
             payload: result_payload, source_artifact: result_source.artifact.clone(),
             source_movement_seq: Some(result_source.movement_seq),
@@ -3829,7 +3829,7 @@ fn bound_operator_session_snapshot(
     let mut matched = None;
     let record = octopus_runtime::run_record::RunRecord::from_bytes(&ctx.pinned_run_record_bytes(&turn.envelope)?)
         .map_err(|error| error.to_string())?;
-    let payloads = octopus_provider_run_authoring::context_artifact_payloads(
+    let payloads = octopus_run_authoring::context_artifact_payloads(
         &record, turn.envelope.metadata().map_err(|error| error.to_string())?, &turn.envelope.artifact_binding_payloads,
     )?;
     let payloads = octopus_model_context_render::resolve_instruction_context(
@@ -3910,8 +3910,8 @@ fn rebase_deferred_provider_turn(
     };
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
     let record = octopus_runtime::run_record::RunRecord::from_bytes(&pinned).map_err(|error| error.to_string())?;
-    let selected = octopus_provider_run_authoring::payload_artifact_bindings(&record, &ctx.interface)?;
-    octopus_provider_run_authoring::context_artifact_payloads(
+    let selected = octopus_run_authoring::payload_artifact_bindings(&record, &ctx.interface)?;
+    octopus_run_authoring::context_artifact_payloads(
         &record, turn.envelope.metadata().map_err(|error| error.to_string())?, &turn.envelope.artifact_binding_payloads,
     )?;
     let mut envelope = turn.envelope.clone();
@@ -6079,7 +6079,7 @@ async fn hand_failure_into_standing_route(
     if record.id != *run {
         return Err(format!("provider run record '{}' names run '{}'", run.as_str(), record.id.as_str()));
     }
-    octopus_provider_run_authoring::standing_route_admits_only(&record, &ctx.interface, crate::handler::TURN_ERROR_LABEL)?;
+    octopus_run_authoring::standing_route_admits_only(&record, &ctx.interface, crate::handler::TURN_ERROR_LABEL)?;
     match ctx.hand_arrival(materialize_failed_source_error(ctx, source_movement_seq, message)?, Vec::new()).await? {
         octopus_ledger::DeliveryVerdict::Admitted { .. } => Ok(()),
         octopus_ledger::DeliveryVerdict::Refused { reason, detail } => Err(format!(
@@ -6451,7 +6451,7 @@ async fn settle_completed_interrupted_result(
 fn prove_completed_interrupted_result(
     ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId, turn: &QueuedTurn,
     journal: &InterruptedEffectJournal, record: &[u8],
-    context: &[octopus_provider_run_authoring::SessionContextArtifact], outcomes: &[ProviderHandoffOutcome],
+    context: &[octopus_run_authoring::SessionContextArtifact], outcomes: &[ProviderHandoffOutcome],
 ) -> Result<crate::handler::stopped_result::StoppedResultSettlement, String> {
     match &journal.phase {
         InterruptedEffectPhase::Resolving { result_source_movement_seq, source_artifact }
@@ -8377,7 +8377,7 @@ mod tests {
             let closed = &closure_payload["codex_continuity"];
             assert_eq!(closed["context_generation"], 10);
             assert!(closed["pending"].is_null() && closed["interrupted_pending"].is_null());
-            let mut context: Vec<octopus_provider_run_authoring::SessionContextArtifact> = vec![serde_json::from_value(session_entry(
+            let mut context: Vec<octopus_run_authoring::SessionContextArtifact> = vec![serde_json::from_value(session_entry(
                 TURN_INTERRUPTED_RESULT_LABEL, closure_payload.clone(),
                 materialized_artifact_ref(&closure.artifact).unwrap(), 5,
             )).unwrap()];
@@ -9428,7 +9428,7 @@ mod tests {
             movement(3, MovementKind::InterfaceArrival, Endpoint::Interface(descriptor.id.clone()),
                 Endpoint::Interface(InterfaceId::new("system_worker_test")), closure.artifact.clone()), later_source,
         ]);
-        let mut current = vec![octopus_provider_run_authoring::SessionContextArtifact {
+        let mut current = vec![octopus_run_authoring::SessionContextArtifact {
             label:"interface.artifact.output".into(), payload:json!({"label":"interface.artifact.output","codex_continuity":interrupted}),
             source_artifact:partial_ref, source_movement_seq:Some(0),
         }];
@@ -9445,7 +9445,7 @@ mod tests {
             assert_eq!(current.len(), 1);
         }
         let later = continuity(10, None);
-        current.push(octopus_provider_run_authoring::SessionContextArtifact {
+        current.push(octopus_run_authoring::SessionContextArtifact {
             label:"turn.agent_message".into(), payload:json!({"label":"turn.agent_message","codex_continuity":later}),
             source_artifact:ArtifactRef { id:ArtifactId::new("later-answer"), content:ContentHash::of_bytes(b"later") },
             source_movement_seq:Some(5),

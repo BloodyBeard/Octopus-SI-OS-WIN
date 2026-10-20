@@ -718,7 +718,7 @@ fn selected_home_retains_native_history_retirement_evidence() {
     let labels = private_config_string_set(config,"context_output_labels").unwrap();
     let snapshots = private_config_string_set(config,"session_snapshot_labels").unwrap();
     let mut session = Vec::new(); let mut current = None;
-    for binding in octopus_provider_run_authoring::provider_context_bindings(&record,&provider).unwrap() {
+    for binding in octopus_run_authoring::provider_context_bindings(&record,&provider).unwrap() {
         let Some((_, hash)) = binding.id.as_str().rsplit_once(':') else { continue; };
         let Some(hash) = octopus_ledger::ContentHash::from_hex(hash) else { continue; };
         let reference = ArtifactRef { id:binding.id,content:hash };
@@ -734,7 +734,7 @@ fn selected_home_retains_native_history_retirement_evidence() {
             if current.as_ref().is_none_or(|prior: &CodexContinuityState| state.context_generation > prior.context_generation) { current=Some(state); }
         }
         if value.get(SESSION_CONTEXT_FIELD).is_some() {
-            session = octopus_provider_run_authoring::resolve_session_snapshot_chain(&home.join("ledger/blobs"),limits,&reference,&bytes,None,&snapshots,&provider).unwrap();
+            session = octopus_run_authoring::resolve_session_snapshot_chain(&home.join("ledger/blobs"),limits,&reference,&bytes,None,&snapshots,&provider).unwrap();
         }
     }
     let current = current.unwrap();

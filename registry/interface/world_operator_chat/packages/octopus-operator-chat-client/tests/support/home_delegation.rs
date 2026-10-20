@@ -7,7 +7,7 @@ use octopus_interfaces::InterfaceArtifactFile;
 use octopus_ledger::{Endpoint, LiveMovementLog, MovementKind, MovementLog, Seq};
 use octopus_ledger_store::{DurableBlobs, DurableLog};
 use octopus_interface_transport::{InterfaceHostIoLimits, InterfaceLiftContext};
-use octopus_provider_run_authoring::ProviderHandoffSession;
+use octopus_run_authoring::ProviderHandoffSession;
 use octopus_world_pyecho_life_runtime::LedgerTailReader;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -230,7 +230,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
             }
         } else { seeds.remove(index); }
         let bytes = serde_json::to_vec(&altered).unwrap();
-        octopus_provider_run_authoring::provider_context_bindings(&RunRecord::from_bytes(&bytes).unwrap(), &voice["provider_id"].as_str().unwrap().into()).unwrap();
+        octopus_run_authoring::provider_context_bindings(&RunRecord::from_bytes(&bytes).unwrap(), &voice["provider_id"].as_str().unwrap().into()).unwrap();
         std::fs::write(&voice_path, bytes).unwrap();
         assert!(plan_operator_chat_topology(&next).unwrap_err().contains("Home voice Run differs from its exact independent execution contract"));
     }
@@ -245,7 +245,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     }
     std::fs::write(&path, &continued.run_record_content).unwrap();
     let current = RunRecord::from_bytes(continued.run_record_content.as_bytes()).unwrap();
-    octopus_provider_run_authoring::provider_context_bindings(
+    octopus_run_authoring::provider_context_bindings(
         &voice_record,
         &voice["provider_id"].as_str().unwrap().into(),
     )

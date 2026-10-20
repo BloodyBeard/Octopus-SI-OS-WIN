@@ -12,7 +12,7 @@ use octopus_interfaces::{
 use octopus_ledger::{
     CheckpointBindingPolicySnapshot, Endpoint, Lamport, Movement, MovementKind, Seq, TraceId,
 };
-use octopus_provider_run_authoring::ProviderHandoffSession;
+use octopus_run_authoring::ProviderHandoffSession;
 use std::{collections::BTreeSet, io::Write, path::PathBuf, time::Duration};
 use tokio::{net::UnixListener, sync::mpsc};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
