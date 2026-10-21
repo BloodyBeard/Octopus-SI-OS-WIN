@@ -1,5 +1,19 @@
 const attentionKinds = new Set(["approval", "user_input", "elicitation"]);
 const titles = { message: "Message", approval: "Approval needed", user_input: "Input needed", elicitation: "Information needed" };
+const EXCERPT_LIMIT = 320;
+
+function activityExcerpt(text) {
+  if (typeof text !== "string") return null;
+  const plain = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s+/gm, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!plain) return null;
+  return plain.length > EXCERPT_LIMIT ? `${plain.slice(0, EXCERPT_LIMIT - 1).trimEnd()}…` : plain;
+}
 
 function operatorActivityRows({ chat, messages, deliveries, responses, agent }) {
   const rows = [], pending = new Map();
@@ -15,6 +29,7 @@ function operatorActivityRows({ chat, messages, deliveries, responses, agent }) 
     agent_color: agent ? chat.agent_color ?? null : null,
     artifact_id: message.artifact_id, movement_id: movementId, seq: message.movement_seq,
     request_id: requestId, created_at_ms: message.created_at_ms || null,
+    excerpt: activityExcerpt(message.text),
   });
   for (const message of ordered) {
     if (message.direction !== "out" || message.interface_id !== chat.chat_interface_id) continue;

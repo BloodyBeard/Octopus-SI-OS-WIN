@@ -18,6 +18,7 @@ export type MarkActivityItem = Readonly<{
   worker: string;
   workerOriginal: string;
   sourceTitle: string | null;
+  excerpt: string | null;
   runId: string;
   artifactId: string;
   createdAt: number | null;
@@ -54,6 +55,7 @@ export function decodeMarkActivity(value: unknown): MarkActivityItem[] {
       worker: item.worker as string,
       workerOriginal: typeof item.worker_original === "string" && item.worker_original ? item.worker_original : item.worker as string,
       sourceTitle: null,
+      excerpt: null,
       runId: item.run_id as string,
       artifactId: item.artifact_id as string,
       createdAt: Number.isFinite(time) ? time : null,
@@ -93,7 +95,7 @@ export function decodeOperatorActivity(value: unknown, marks: readonly MarkActiv
     if (item.client_surface_role !== "home" && item.client_surface_role !== "task") throw new Error("Activity chat role is invalid");
     if (typeof item.worker !== "string" || !Number.isSafeInteger(item.seq) || (item.seq as number) < 0) throw new Error("Activity movement is invalid");
     if (item.created_at_ms !== null && (typeof item.created_at_ms !== "number" || !Number.isFinite(item.created_at_ms) || item.created_at_ms <= 0)) throw new Error("Activity timestamp is invalid");
-    for (const key of ["movement_id", "request_id"]) if (item[key] !== null && (typeof item[key] !== "string" || !item[key])) throw new Error(`Activity ${key} is invalid`);
+    for (const key of ["movement_id", "request_id", "excerpt"]) if (item[key] !== null && (typeof item[key] !== "string" || !item[key])) throw new Error(`Activity ${key} is invalid`);
     if (item.kind === "message" ? !item.movement_id || item.request_id !== null : !item.request_id) throw new Error("Activity receipt identity is missing");
     if (identities.has(item.id as string)) throw new Error("Activity identity is duplicated");
     identities.add(item.id as string);
@@ -102,6 +104,7 @@ export function decodeOperatorActivity(value: unknown, marks: readonly MarkActiv
     return {
       id: item.id as string, kind: item.kind as ActivityKind, title: item.title as string, name: item.name as string,
       ...identity, worker: item.worker, workerOriginal: item.worker, sourceTitle: titles.get(item.run_id as string) ?? null,
+      excerpt: item.excerpt as string | null,
       runId: item.run_id as string, artifactId: item.artifact_id as string,
       movementId: item.movement_id as string | null, requestId: item.request_id as string | null,
       sequence: item.seq as number, createdAt: item.created_at_ms as number | null, clientSurfaceRole: item.client_surface_role,

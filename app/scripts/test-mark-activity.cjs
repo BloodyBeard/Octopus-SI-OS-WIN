@@ -145,7 +145,7 @@ function attentionRow(seq, kind = "message", patch = {}) {
   return { id: `attention:${seq}`, kind, title: `${kind === "message" ? "Message" : "Approval needed"} — Actual task`, name: kind,
     run_id: "run-test", client_surface_role: "task", worker: "worker-test", agent_id: "agent-test", agent_name: "Actual Agent", agent_icon: "curious", agent_color: "emerald",
     artifact_id: `artifact:${seq}`, movement_id: kind === "message" ? `movements:${seq}` : null, request_id: kind === "message" ? null : `request:${seq}`,
-    seq, created_at_ms: Date.now(), ...patch };
+    seq, created_at_ms: Date.now(), excerpt: kind === "message" ? "Actual reply" : null, ...patch };
 }
 const attentionSet = (...rows) => ({ chats: [{ run_id: "run-test", agent_id: "agent-test", agent_name: "Actual Agent", agent_icon: "curious", agent_color: "emerald" }], activity: rows });
 
@@ -388,7 +388,7 @@ test("actual ledger projection decodes only admitted marks with exact source fie
   assert.ok(movementRows.every((row) => row.from.kind === "interface" && row.to.kind === "interface"));
   const decoded = activity.decodeMarkActivity(projected);
   assert.deepEqual(ids(decoded), ["movements:1", "movements:3"]);
-  assert.deepEqual(decoded[0], { id: "movements:3", sequence: 2, name: "check.passed", worker: "worker-test", workerOriginal: "worker-test", sourceTitle: null, runId: "run-test", artifactId: "same-artifact", createdAt: 1_788_600_002_000,
+  assert.deepEqual(decoded[0], { id: "movements:3", sequence: 2, name: "check.passed", worker: "worker-test", workerOriginal: "worker-test", sourceTitle: null, excerpt: null, runId: "run-test", artifactId: "same-artifact", createdAt: 1_788_600_002_000,
     kind: "mark", title: "check.passed", agentId: null, agentName: null, agentIcon: null, agentColor: null, movementId: "movements:3", requestId: null, clientSurfaceRole: null, navigation: { kind: "mark", movementId: "movements:3" } });
   assert.equal(projected.marks[0].checkpoint_id, ""); assert.equal(projected.marks[0].interface_id, "");
   assert.deepEqual(activity.decodeMarkKinds(await store.read({ contract_version: 1, method: "projection.descriptors.mark_kinds.list" })), ["check.passed"]);
@@ -852,7 +852,7 @@ test("Inbox rows read as plain words, name their source and fold repeats from on
   const presentation = load("src/components/activity/markPresentation.ts");
   const now = new Date(2026, 9, 21, 15, 0).getTime();
   const mark = (id, name, at, extra = {}) => ({ id, kind: "mark", name, title: name, worker: "system_worker_memory_observer_0123456789abcdef0123", workerOriginal: "system_worker_memory_observer",
-    sourceTitle: null, agentName: null, agentIcon: null, runId: "run-memory", createdAt: at, sequence: 1, navigation: { kind: "mark", movementId: id }, ...extra });
+    sourceTitle: null, excerpt: null, agentName: null, agentIcon: null, runId: "run-memory", createdAt: at, sequence: 1, navigation: { kind: "mark", movementId: id }, ...extra });
   const request = { ...mark("approve", "approval", now - 86_400_000 * 3), kind: "approval", title: "Allow file write", sourceTitle: "Prepare release notes", runId: "run-task" };
   const items = [
     mark("a", "tool.call.allowed", now - 60_000), mark("b", "tool.call.allowed", now - 120_000),

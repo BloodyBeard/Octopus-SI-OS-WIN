@@ -5,10 +5,9 @@ import { OcDropdown } from "../../design-system/OcDropdown";
 import { OctopusNavSection } from "../navigation/OctopusNav";
 import { OctopusSpinner } from "../navigation/OctopusSpinner";
 import { OctopusMarquee } from "../navigation/OctopusMarquee";
-import { AgentPresetLogo } from "../agent/AgentPresetLogo";
-import { Glyph } from "../IconGlyphs";
+import { ActivityMark } from "./ActivityMark";
 import type { MarkActivityItem } from "./markActivity";
-import { activityPresentation, activitySections, activitySource, activityTitle, isActivityRequest, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
+import { activityPresentation, activitySections, activitySource, activityTitle, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
 import type { MarkActivity } from "./useMarkActivity";
 import "./markActivity.css";
 
@@ -80,7 +79,6 @@ function ActivitySection({ children, heading }: { children: ReactNode; heading: 
 
 function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; now: number; row: ActivityRowGroup; unread: boolean; onSelect: () => void }) {
   const item = row.lead;
-  const presentation = activityPresentation(item);
   const title = activityTitle(item);
   const source = activitySource(item);
   const time = relativeActivityTime(item.createdAt, now);
@@ -105,13 +103,11 @@ function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; 
   >
     <div className="flex h-full w-full items-center text-sm leading-4">
       <div className="flex min-w-0 flex-1 items-start gap-2.5">
-        <span className="mark-activity-glyph" data-request={isActivityRequest(item) || undefined} aria-hidden="true">
-          {item.agentIcon ? <AgentPresetLogo color={item.agentColor} icon={item.agentIcon} size={14} /> : <Glyph name={presentation.glyph} size={14} />}
-        </span>
+        <span className="mark-activity-glyph"><ActivityMark item={item} size={16} /></span>
         <div className="flex min-w-0 flex-1 self-stretch flex-col items-start gap-0.5 text-base leading-5" data-thread-title-trigger="">
           <div className="flex w-full min-w-0 flex-1 items-center gap-1.5">
             <OctopusMarquee className="min-w-0 flex-1 select-none" animateOnGroupHover data-thread-title=""><span dir="auto">{title}</span></OctopusMarquee>
-            {count > 1 ? <span className="mark-activity-count">{count}</span> : null}
+            {count > 1 ? <span className="mark-activity-count">{`×${count}`}</span> : null}
             {unread ? <div className="mark-activity-unread" aria-hidden="true"><span className="icon-xs relative scale-50"><span className="mark-activity-unread-dot" /></span></div> : null}
           </div>
           <span className="mark-activity-secondary flex w-full min-w-0 items-center gap-1 pe-row-y text-xs leading-4 select-none" data-thread-secondary-title="">

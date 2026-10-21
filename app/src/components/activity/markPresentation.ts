@@ -115,6 +115,16 @@ export function relativeActivityTime(at: number | null, now: number): string {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(at);
 }
 
+export function activityMoment(at: number, now: number): string {
+  const day = new Date(now);
+  day.setHours(0, 0, 0, 0);
+  const time = new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(at);
+  if (at >= day.getTime()) return `Today at ${time}`;
+  if (at >= day.getTime() - 86_400_000) return `Yesterday at ${time}`;
+  const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(at);
+  return `${date} at ${time}`;
+}
+
 function sentence(value: string): string {
   return value ? value[0].toLocaleUpperCase() + value.slice(1) : value;
 }

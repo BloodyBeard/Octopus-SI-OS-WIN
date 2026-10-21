@@ -654,7 +654,7 @@ test("pins and preferences written by another window reach this window's sidebar
 test("the Inbox lists projected activity in the sidebar, selects it in place and opens a task mark beside the inbox", { timeout: 20_000 }, async () => {
   const host = fakeHost();
   host.activity = [{ id: "attention:7", kind: "message", title: "Message — Task run-2", name: "message", run_id: "run-2", client_surface_role: "task", worker: "worker.test",
-    agent_id: null, agent_name: null, agent_icon: null, agent_color: null, artifact_id: "artifact:7", movement_id: "movements:7", request_id: null, seq: 7, created_at_ms: Date.now() }];
+    agent_id: null, agent_name: null, agent_icon: null, agent_color: null, artifact_id: "artifact:7", movement_id: "movements:7", request_id: null, seq: 7, created_at_ms: Date.now(), excerpt: "Task run-2 finished." }];
   await mount(host);
   await until(() => button("Inbox, 1 unread"), "the rail never counted the unread mark");
   button("Inbox, 1 unread").click();
