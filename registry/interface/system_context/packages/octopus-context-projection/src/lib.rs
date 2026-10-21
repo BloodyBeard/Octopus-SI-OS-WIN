@@ -730,14 +730,17 @@ pub async fn process_admitted_input(
                 octopus_run_authoring::snapshot_projection::read_source_artifact(
                     ctx,
                     &reference,
-                    config.bounds.max_field_bytes as u64,
+                    u64::MAX,
                 )?;
-            output["selected_input"]["original_fields"] = fields(
-                &captured,
-                &origin.pointers,
-                config.bounds.max_field_bytes,
-                true,
-            )?;
+            if let Some(pointer) = origin.pointers.iter().find(|pointer| captured.pointer(pointer).is_none()) {
+                return Err(format!("required projection field '{pointer}' is absent"));
+            }
+            let (original, trimmed) =
+                bounded_fields(&captured, &origin.pointers, config.bounds.max_field_bytes)?;
+            output["selected_input"]["original_fields"] = original;
+            if !trimmed.is_empty() {
+                output["selected_input"]["original_trimmed_fields"] = json!(trimmed);
+            }
         }
         render_task(config, &mut output)?;
         (OUTPUT_LABEL, output)
