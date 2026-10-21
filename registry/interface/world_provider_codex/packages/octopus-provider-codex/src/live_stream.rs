@@ -780,14 +780,14 @@ pub(crate) fn seal_source_turn_stream(
     source_movement_seq: u64,
     terminal_label: &str,
     terminal_artifact_payload_blake3: &str,
-) -> Result<Option<InterfaceArtifactFile>, String> {
+) -> Result<Vec<InterfaceArtifactFile>, String> {
     if !rules.enabled {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let run_root = root.join(identity_hash(&[provider_interface, run]));
     let entries = match std::fs::read_dir(&run_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(format!(
                 "Codex live stream run directory '{}' could not be read: {error}",
@@ -849,25 +849,16 @@ pub(crate) fn seal_source_turn_stream(
             || rows.iter().skip(1).any(|row| row["source_movement_seq"].as_u64() == Some(source_movement_seq));
         if belongs_to_source {
             validate_complete_rows(&bytes[..complete_end], &identity, source_movement_seq)?;
-            candidates.push(identity);
+            let opened_at = rows.first().and_then(|row| row["opened_at_unix_ms"].as_u64())
+                .ok_or("Codex stream header has no opening time")?;
+            candidates.push((opened_at, identity));
         }
     }
-    if candidates.len() > 1 {
-        return Err(format!(
-            "Codex run '{run}' source movement {source_movement_seq} owns more than one open native turn stream"
-        ));
-    }
-    let Some(identity) = candidates.pop() else {
-        return Ok(None);
-    };
-    let mut stream = LiveTurnStream::open(root, rules, identity, source_movement_seq)?;
-    stream
-        .seal_terminal(
-            source_movement_seq,
-            terminal_label,
-            terminal_artifact_payload_blake3,
-        )
-        .map(Some)
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.turn_id.cmp(&right.1.turn_id)));
+    candidates.into_iter().map(|(_, identity)| {
+        LiveTurnStream::open(root, rules, identity, source_movement_seq)?
+            .seal_terminal(source_movement_seq, terminal_label, terminal_artifact_payload_blake3)
+    }).collect()
 }
 
 pub(crate) fn recover_sealed_terminal_stream(

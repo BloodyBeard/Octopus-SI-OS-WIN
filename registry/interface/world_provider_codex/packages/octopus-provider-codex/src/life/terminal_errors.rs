@@ -100,7 +100,7 @@ pub(crate) async fn emit_terminal_error_message(
         .private_config;
     let rules = LiveStreamRules::from_private_config_or_disabled(private_config)
         .map_err(|error| error.to_string())?;
-    let stream = seal_source_turn_stream(
+    let streams = seal_source_turn_stream(
         &ctx.interface_var_dir().join("streams"),
         &rules,
         descriptor.id.as_str(),
@@ -113,7 +113,7 @@ pub(crate) async fn emit_terminal_error_message(
         artifact,
         route: ProviderEmissionRoute::ClientProjection,
     };
-    if let Some(stream) = stream {
+    for stream in streams {
         match handoff.hand_observation(ProviderEmission {
             artifact: stream,
             route: ProviderEmissionRoute::ClientProjection,
