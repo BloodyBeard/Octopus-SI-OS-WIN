@@ -923,6 +923,7 @@ fn native_result_receiving_adoption_preserves_legacy_rows_and_declared_authority
     std::fs::write(&plan.run_write.path,archived.to_string()).unwrap();
     let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
     assert!(deferred["reason"].as_str().unwrap().contains("archived task"));
+    assert!(deferred["preimages"].as_array().unwrap().iter().any(|pin|pin["path"]==json!(ee_path)));
     std::fs::write(&plan.run_write.path,legacy.to_string()).unwrap();
     for write in adopted["writes"].as_array().unwrap() {std::fs::write(write["path"].as_str().unwrap(),write["content"].as_str().unwrap()).unwrap();}
     assert_eq!(adoption().unwrap()["status"],"unchanged");

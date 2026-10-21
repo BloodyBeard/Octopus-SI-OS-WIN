@@ -421,13 +421,13 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         status: NativeRunAdoptionStatus::Unchanged, run_id: request.run_id.clone(), provider_interface_id: provider.into(),
         source_movement_seq, reason: None, writes: Vec::new(), preimages: Vec::new(),
     };
+    result_receiving::pin_authority(request, &record, &provider_id, &config, &mut preimages)?;
     if state.get("client_archive").is_some() {
         result.status = NativeRunAdoptionStatus::Deferred;
         result.reason = Some("an archived task keeps its saved checkpoint frontier until it is restored".into());
         result.preimages = preimages;
         return Ok(result);
     }
-    result_receiving::pin_authority(request, &record, &provider_id, &config, &mut preimages)?;
     let cutover = result_receiving::prepare(request, &config, &record, &current, client, &state, &mut preimages)?;
     if let Some(reason) = cutover.deferred {
         result.status = NativeRunAdoptionStatus::Deferred;
