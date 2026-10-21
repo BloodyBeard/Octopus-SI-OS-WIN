@@ -200,6 +200,31 @@ test("code that reports an error fails, and yielded code stays active", async ()
   assert.equal(rows()[0].dataset.state, "active");
 });
 
+test("a yielded code cell and the wait that finishes it read as one completed cell", async () => {
+  const script = "text(await prelude.cua.getState());";
+  const run = tool("code", { tool: "code_mode.run__42450f1bf38856e1fb9743bf91929c06", call_id: "code", status: "completed", ok: true, arguments: { script },
+    body: { cell_id: "1", state: "yielded", output: [], pending_tool_calls: ["tool-1"] } });
+  const waitStarted = tool("wait-start", { tool: "code_mode.wait__42450f1bf38856e1fb9743bf91929c06", call_id: "wait", status: "started", arguments: { cell_id: "1", yield_time_ms: 20000 } });
+  const waitDone = tool("wait-end", { tool: "code_mode.wait__42450f1bf38856e1fb9743bf91929c06", call_id: "wait", status: "completed", ok: true, arguments: { cell_id: "1" },
+    body: { cell_id: "1", state: "completed", output: [{ type: "text", text: "CELL_STATE_OK" }], pending_tool_calls: [] } });
+  await show([ask("u"), run, waitStarted], { streaming: true });
+  await openGroups();
+  assert.equal(exec().length, 1, "the wait joins the cell it waits on");
+  assert.equal(exec()[0].dataset.state, "active");
+  await show([ask("u"), run, waitStarted, waitDone]);
+  await openGroups();
+  const [cell] = exec();
+  assert.equal(exec().length, 1);
+  assert.equal(cell.dataset.state, "complete");
+  assert.equal(cell.querySelector(".octopus-exec-shell-command").textContent, script);
+  assert.match(cell.textContent, /CELL_STATE_OK/);
+  assert.doesNotMatch(cell.textContent, /still running/i);
+  const other = { ...waitDone, id: "other-wait", eventData: { ...waitDone.eventData, call_id: "other", arguments: { cell_id: "9" }, body: { ...waitDone.eventData.body, cell_id: "9" } } };
+  await show([ask("u"), run, other]);
+  await openGroups();
+  assert.equal(exec()[0].dataset.state, "active", "a wait on another cell leaves this cell running");
+});
+
 test("a command call shows its started arguments with its completed result", async () => {
   const begin = tool("start", { call_id: "command-call", status: "started", tool: "workspace.build__0123456789abcdef0123456789abcdef", arguments: { command: ["/bin/sh", "-c", "pwd"] } });
   const complete = { ...begin, id: "end", eventData: { _activity_origin: origin, tool: begin.eventData.tool, call_id: "command-call", status: "completed", ok: true,

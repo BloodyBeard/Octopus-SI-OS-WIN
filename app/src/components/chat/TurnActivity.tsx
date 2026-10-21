@@ -5,9 +5,9 @@ import { CadencedShimmerText } from "../CadencedShimmerText";
 import { Glyph } from "../IconGlyphs";
 import { MessageContent } from "./MessageContent";
 import { reasoningSummaryHeading } from "./reasoningSummary";
-import { dynamicToolGlyph, dynamicToolPresentation, dynamicToolReadLabel, dynamicToolSummary, webSearchActivityDetail, webSearchActivityLabel } from "./toolPresentation";
+import { baseDynamicToolId, dynamicToolGlyph, dynamicToolPresentation, dynamicToolReadLabel, dynamicToolSummary, webSearchActivityDetail, webSearchActivityLabel } from "./toolPresentation";
 import { conversationTraceAdmission, isFinalAssistantResponse } from "./conversationTrace";
-import { commandActivityModel, commandHasProcessEvidence } from "./commandActivityModel";
+import { commandActivityModel, commandHasProcessEvidence, commandResultBody } from "./commandActivityModel";
 import {
   multiAgentAction,
   multiAgentIds,
@@ -1253,9 +1253,14 @@ function activityProgressSurface(units: ActivityUnit[], working: boolean): {
 function coalesceActivities(messages: ChatRenderMessage[], preserveMovements = false): ActivityEntry[] {
   const entries: ActivityEntry[] = [];
   const positions = new Map<string, number>();
+  const codeCells = new Map<string, string>();
   for (const message of messages) {
     const family = activityFamily(message);
-    const signature = preserveMovements ? `movement:${message.id}` : activitySignature(message);
+    const continuedCell = preserveMovements ? "" : codeModeCell(message, CODE_MODE_CONTINUATION_TOOLS);
+    const signature = codeCells.get(continuedCell)
+      ?? (preserveMovements ? `movement:${message.id}` : activitySignature(message));
+    const runCell = preserveMovements ? "" : codeModeCell(message, CODE_MODE_RUN_TOOLS);
+    if (runCell) codeCells.set(runCell, signature);
     const position = positions.get(signature);
     if (position !== undefined) {
       const entry = entries[position];
@@ -1443,8 +1448,10 @@ function activityDetailMessages(entry: ActivityEntry): ChatRenderMessage[] {
     }];
   }
   if (entry.family === "dynamic_tool") {
-    const first = entry.messages[0];
-    const last = entry.messages.at(-1);
+    const continuations = entry.messages.filter((message) => codeModeCell(message, CODE_MODE_CONTINUATION_TOOLS));
+    const cellMessages = entry.messages.filter((message) => !continuations.includes(message));
+    const first = cellMessages[0] ?? entry.messages[0];
+    const last = cellMessages.at(-1) ?? entry.messages.at(-1);
     if (!first || !last) return [];
     return [{
       ...last,
@@ -1452,6 +1459,7 @@ function activityDetailMessages(entry: ActivityEntry): ChatRenderMessage[] {
       eventData: {
         ...record(first.eventData),
         ...record(last.eventData),
+        ...continuedCodeCell(record(last.eventData), continuations),
         arguments: record(first.eventData).arguments ?? record(last.eventData).arguments,
         _lifecycle_evidence: entry.messages.map((message) => ({
           artifact_id: message.artifactId ?? "",
@@ -1462,6 +1470,30 @@ function activityDetailMessages(entry: ActivityEntry): ChatRenderMessage[] {
     }];
   }
   return uniqueMessages(entry.messages);
+}
+
+const CODE_MODE_RUN_TOOLS = new Set(["code_mode.run"]);
+const CODE_MODE_CONTINUATION_TOOLS = new Set(["code_mode.wait", "code_mode.resume"]);
+
+function codeModeCell(message: ChatRenderMessage, tools: ReadonlySet<string>): string {
+  if (message.eventKind !== "dynamic_tool") return "";
+  const data = record(message.eventData);
+  if (!tools.has(baseDynamicToolId(text(data.tool)))) return "";
+  return text(commandResultBody(data).cell_id) || text(record(data.arguments).cell_id);
+}
+
+function continuedCodeCell(run: Record<string, unknown>, continuations: ChatRenderMessage[]): Record<string, unknown> {
+  const settled = continuations.map((message) => record(message.eventData))
+    .filter((data) => Object.keys(commandResultBody(data)).length > 0);
+  const latest = settled.at(-1);
+  if (!latest) return {};
+  const outputs = [commandResultBody(run), ...settled.map(commandResultBody)]
+    .flatMap((body) => Array.isArray(body.output) ? body.output : []);
+  return {
+    body: { ...commandResultBody(run), ...commandResultBody(latest), output: outputs },
+    ...(latest.ok === undefined ? {} : { ok: latest.ok }),
+    ...(latest.error === undefined ? {} : { error: latest.error }),
+  };
 }
 
 function uniqueMessages(messages: Array<ChatRenderMessage | undefined>): ChatRenderMessage[] {
