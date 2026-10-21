@@ -914,6 +914,15 @@ fn native_result_receiving_adoption_preserves_legacy_rows_and_declared_authority
     let pending=pending_tool_handoff(&request,&plan,&legacy);
     std::fs::write(&plan.run_write.path,pending.to_string()).unwrap();
     let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
+    let mut archived=legacy.clone();
+    let client=archived["interface_state"].as_object().unwrap().iter()
+        .find(|(_,state)|state.get("client_surface_role").is_some()).unwrap().0.clone();
+    archived["interface_state"][&client]["client_archive"]=json!({"schema_version":1,"active_checkpoints":legacy["active_checkpoints"],
+        "checkpoints_digest":"0".repeat(64),"archived_at_ms":1});
+    archived["active_checkpoints"]=json!([]);
+    std::fs::write(&plan.run_write.path,archived.to_string()).unwrap();
+    let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
+    assert!(deferred["reason"].as_str().unwrap().contains("archived task"));
     std::fs::write(&plan.run_write.path,legacy.to_string()).unwrap();
     for write in adopted["writes"].as_array().unwrap() {std::fs::write(write["path"].as_str().unwrap(),write["content"].as_str().unwrap()).unwrap();}
     assert_eq!(adoption().unwrap()["status"],"unchanged");
