@@ -27,6 +27,7 @@ export function useMarkActivity(profile: string, home: string, primary: boolean,
   const items = useMemo(() => projectedItems.filter((item) => !read.has(item.id)
     && !(item.navigation.kind === "run" && visibleRuns.has(item.navigation.runId))), [projectedItems, read, visibleRuns]);
   const filtered = useMemo(() => selectActivity(items, preferences.markActivityMode, preferences.markActivityTypes), [items, preferences.markActivityMode, preferences.markActivityTypes]);
+  const listed = useMemo(() => selectActivity(projectedItems, preferences.markActivityMode, preferences.markActivityTypes), [projectedItems, preferences.markActivityMode, preferences.markActivityTypes]);
 
   const mergeRead = useCallback((added: ReadonlySet<string> = new Set(), removed: ReadonlySet<string> = new Set()) => {
     const persisted = decodeActivityReadState(window.localStorage.getItem(key));
@@ -141,16 +142,16 @@ export function useMarkActivity(profile: string, home: string, primary: boolean,
     } catch (error) { setReadFailure(formatProjectionError(error)); return false; }
   }, [items, key, mergeRead, snapshot?.key]);
 
-  const groups = useMemo<MarkActivityGroup[]>(() => [{ key: "priority", label: "Priority", items: filtered }], [filtered]);
+  const groups = useMemo<MarkActivityGroup[]>(() => [{ key: "priority", label: "Priority", items: listed }], [listed]);
   const clearNotifications = useCallback(() => {
     try {
       if (snapshot?.key !== key || readState?.key !== key || failure || readFailure) throw new Error("Activity read state is unavailable.");
-      const ids = filtered.map((item) => item.id);
+      const ids = listed.map((item) => item.id);
       if (!ids.length) throw new Error("There are no Activity notifications to clear.");
       mergeRead(new Set(), new Set(ids));
       return true;
     } catch (error) { setReadFailure(formatProjectionError(error)); return false; }
-  }, [failure, filtered, key, mergeRead, readFailure, readState?.key, snapshot?.key]);
+  }, [failure, listed, key, mergeRead, readFailure, readState?.key, snapshot?.key]);
   const kinds = useMemo(() => [...new Set([...(snapshot?.key === key ? snapshot.kinds : []), ...sourceItems.filter((item) => item.kind === "mark").map((item) => item.name), ...(preferences.markActivityTypes ?? [])])].sort(), [sourceItems, key, preferences.markActivityTypes, snapshot]);
 
   return {
@@ -158,6 +159,7 @@ export function useMarkActivity(profile: string, home: string, primary: boolean,
     error: failure || readFailure,
     loaded: snapshot?.key === key && readState?.key === key && !failure && !readFailure,
     unreadCount: filtered.length,
+    listedCount: listed.length,
     arrivalId: arrival?.key === key ? `${key}:${arrival.id}` : "",
   };
 }

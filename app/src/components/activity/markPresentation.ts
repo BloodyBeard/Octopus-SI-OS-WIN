@@ -129,10 +129,10 @@ export function activityMoment(at: number, now: number): string {
   const day = new Date(now);
   day.setHours(0, 0, 0, 0);
   const time = new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(at);
-  if (at >= day.getTime()) return `Today at ${time}`;
-  if (at >= day.getTime() - 86_400_000) return `Yesterday at ${time}`;
+  if (at >= day.getTime()) return time;
+  if (at >= day.getTime() - 86_400_000) return `Yesterday, ${time}`;
   const date = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(at);
-  return `${date} at ${time}`;
+  return `${date}, ${time}`;
 }
 
 function sentence(value: string): string {

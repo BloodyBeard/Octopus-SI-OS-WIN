@@ -4,7 +4,6 @@ import { OcIconButton, OcMenuItem, OcMenuSectionLabel } from "../../design-syste
 import { OcDropdown } from "../../design-system/OcDropdown";
 import { OctopusNavSection } from "../navigation/OctopusNav";
 import { OctopusSpinner } from "../navigation/OctopusSpinner";
-import { OctopusMarquee } from "../navigation/OctopusMarquee";
 import { ActivityMark } from "./ActivityMark";
 import type { MarkActivityItem } from "./markActivity";
 import { activityHeadline, activityPresentation, activitySections, activitySummary, isActivityRequest, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
@@ -86,12 +85,11 @@ function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; 
   return <div
     aria-current={active ? "page" : undefined}
     aria-label={[title, count > 1 && `${count} times`, summary, unread && "Unread"].filter(Boolean).join(", ")}
-    className="mark-activity-row sidebar-item group"
+    className="mark-activity-row"
     data-active={active || undefined}
     data-activity-kind={item.kind}
+    data-read={!unread || undefined}
     data-sidebar-nav-item=""
-    data-title-aligned-trailing-rail=""
-    data-multiline=""
     onClick={(event) => { if (!event.defaultPrevented && event.button === 0) onSelect(); }}
     onKeyDown={(event) => {
       if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
@@ -101,22 +99,18 @@ function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; 
     role="button"
     tabIndex={0}
   >
-    <div className="flex h-full w-full items-center text-sm leading-4">
-      <div className="flex min-w-0 flex-1 items-start gap-2.5">
-        <span className="mark-activity-glyph"><ActivityMark item={item} size={16} /></span>
-        <div className="flex min-w-0 flex-1 self-stretch flex-col items-start gap-0.5 text-base leading-5" data-thread-title-trigger="">
-          <div className="flex w-full min-w-0 flex-1 items-center gap-1.5">
-            <OctopusMarquee className="min-w-0 flex-1 select-none" animateOnGroupHover data-thread-title=""><span dir="auto">{title}</span></OctopusMarquee>
-            {count > 1 ? <span className="mark-activity-count">{`×${count}`}</span> : null}
-            {unread ? <div className="mark-activity-unread" aria-hidden="true"><span className="icon-xs relative scale-50"><span className="mark-activity-unread-dot" /></span></div> : null}
-          </div>
-          <span className="mark-activity-secondary flex w-full min-w-0 items-center gap-1 pe-row-y text-xs leading-4 select-none" data-thread-secondary-title="">
-            <span className="min-w-0 truncate" data-request={isActivityRequest(item) || undefined}>{summary}</span>
-            {time ? <><span aria-hidden="true">·</span><time className="shrink-0" dateTime={item.createdAt ? new Date(item.createdAt).toISOString() : undefined}>{time}</time></> : null}
-          </span>
-        </div>
-      </div>
-    </div>
+    <span className="mark-activity-icon"><ActivityMark item={item} size={20} glyphSize={18} /></span>
+    <span className="mark-activity-text">
+      <span className="mark-activity-top">
+        <span className="mark-activity-title" dir="auto">{title}</span>
+        {count > 1 ? <span className="mark-activity-count">{`×${count}`}</span> : null}
+        {time ? <time dateTime={item.createdAt ? new Date(item.createdAt).toISOString() : undefined}>{time}</time> : null}
+      </span>
+      <span className="mark-activity-sub">
+        <span data-request={isActivityRequest(item) || undefined}>{summary}</span>
+        {unread ? <i className="mark-activity-dot" aria-hidden="true" /> : null}
+      </span>
+    </span>
   </div>;
 }
 
@@ -133,7 +127,7 @@ function ActivityOptions({ activity }: { activity: MarkActivity }) {
     setClientPreferences({ markActivityMode: "custom", markActivityTypes: [...selected] });
   };
   return <div className="flex items-center gap-1">
-    <OcIconButton appearance="sidebar" glyph="clearRead" label="Clear Inbox" title={!activity.loaded || activity.error ? "Inbox read state is unavailable" : !activity.unreadCount ? "No notifications to clear" : undefined} disabled={!activity.unreadCount || !activity.loaded || Boolean(activity.error)} onClick={activity.clearNotifications} />
+    <OcIconButton appearance="sidebar" glyph="clearRead" label="Clear Inbox" title={!activity.loaded || activity.error ? "Inbox read state is unavailable" : !activity.listedCount ? "No notifications to clear" : undefined} disabled={!activity.listedCount || !activity.loaded || Boolean(activity.error)} onClick={activity.clearNotifications} />
     <OcIconButton appearance="sidebar" glyph="activityOptions" label="Inbox options" aria-expanded={open} aria-haspopup="menu" data-state={open ? "open" : "closed"} onClick={() => setOpen(!open)} buttonRef={anchor} />
     <OcDropdown anchorRef={anchor} align="start" contentWidth="sidebar" modal open={open} onOpenChange={setOpen} aria-label="Inbox options">
       <OcMenuSectionLabel>Show</OcMenuSectionLabel>

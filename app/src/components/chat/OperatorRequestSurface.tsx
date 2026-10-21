@@ -381,7 +381,7 @@ function ResolvedResponse({ response }: { response: unknown }) {
   return <div className="operator-request-resolved"><Glyph name="check" size={13} /><span>{summary}</span></div>;
 }
 
-function requestPresentation(kind: "approval" | "elicitation" | "user_input", data: Record<string, unknown>, fallback: string): {
+export function requestPresentation(kind: "approval" | "elicitation" | "user_input", data: Record<string, unknown>, fallback: string): {
   glyph: GlyphName;
   kicker: string;
   title: string;

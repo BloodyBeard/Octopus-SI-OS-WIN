@@ -248,10 +248,11 @@ test("reading and clearing notifications persist across close, remount and windo
   try {
     await h.respond(projected, undefined, undefined, set); assert.equal(h.value.unreadCount, 2);
     assert.equal(h.value.markRead(["attention:9"]), true); h.flush();
-    assert.deepEqual(ids(h.value.groups[0].items), ["attention:10"]);
+    assert.deepEqual(ids(h.value.groups[0].items), ["attention:10", "attention:9"], "a read item stays listed");
+    assert.equal(h.value.unreadCount, 1); assert.equal(h.value.read.has("attention:9"), true);
     assert.ok(h.value.projectedItems.some((item) => item.id === "attention:9"), "read detail retains its current projection target");
     h.props.open = false; h.update(); h.props.open = true; h.update();
-    assert.deepEqual(ids(h.value.groups[0].items), ["attention:10"]);
+    assert.deepEqual(ids(h.value.groups[0].items), ["attention:10", "attention:9"]); assert.equal(h.value.unreadCount, 1);
     h.window.writeFailure = true; assert.equal(h.value.clearNotifications(), false); h.flush();
     assert.ok(h.value.items.some((item) => item.id === "attention:10")); assert.equal(h.value.loaded, false);
     h.window.writeFailure = false; h.window.storage(readKey(), disk.get(readKey())); h.flush();
@@ -268,7 +269,7 @@ test("reading and clearing notifications persist across close, remount and windo
       assert.equal(other.value.clearNotifications(), true); other.flush();
       h.window.storage(dismissKey, disk.get(dismissKey)); h.flush(); assert.equal(h.value.groups[0].items.length, 0);
       disk.set(dismissKey, '["attention:12"]'); h.window.storage(dismissKey, '["attention:13"]'); h.flush();
-      assert.deepEqual([...h.value.dismissed].sort(), ["attention:10", "attention:11", "attention:12", "attention:13"]);
+      assert.deepEqual([...h.value.dismissed].sort(), ["attention:10", "attention:11", "attention:12", "attention:13", "attention:9"]);
       assert.equal(h.value.read.has("attention:9"), true);
     } finally { other.close(); }
     h.props.home = "/another/home"; h.update(); await h.respond(projected, undefined, undefined, set);
@@ -401,32 +402,32 @@ test("actual ledger projection decodes only admitted marks with exact source fie
   for (const invalid of ["{}", "null", "[1]", '[""]', "bad"]) assert.throws(() => activity.decodeActivityReadState(invalid));
 });
 
-test("reading removes only the exact movement immediately and it stays absent across filters, reopening and refresh", async () => {
+test("reading marks only the exact movement read and it stays listed as read across filters, reopening and refresh", async () => {
   const h = mountedActivity();
   try {
     await h.respond(projected);
     assert.equal(h.value.unreadCount, 2);
     assert.equal(h.value.markRead(["movements:1"]), true); h.flush();
-    assert.equal(h.value.unreadCount, 1); assert.equal(h.value.read.has("movements:3"), false);
+    assert.equal(h.value.unreadCount, 1); assert.equal(h.value.read.has("movements:3"), false); assert.equal(h.value.read.has("movements:1"), true);
     assert.deepEqual(ids(h.value.items), ["movements:3"]);
     h.props.open = false; h.update(); h.props.open = true; h.update();
-    assert.deepEqual(ids(h.value.groups[0].items), ["movements:3"]);
-    h.preferences.markActivityMode = "custom"; h.preferences.markActivityTypes = []; h.update(); assert.equal(h.value.unreadCount, 0);
-    h.preferences.markActivityMode = "all"; h.preferences.markActivityTypes = null; h.update(); assert.deepEqual(ids(h.value.groups[0].items), ["movements:3"]);
+    assert.deepEqual(ids(h.value.groups[0].items), ["movements:1", "movements:3"]);
+    h.preferences.markActivityMode = "custom"; h.preferences.markActivityTypes = []; h.update(); assert.equal(h.value.unreadCount, 0); assert.equal(h.value.listedCount, 0);
+    h.preferences.markActivityMode = "all"; h.preferences.markActivityTypes = null; h.update(); assert.deepEqual(ids(h.value.groups[0].items), ["movements:1", "movements:3"]);
     h.refresh(); await h.respond(marks(projected.marks[0]));
     h.refresh(); await h.respond(projected); assert.deepEqual(ids(h.value.items), ["movements:3"]);
-    assert.equal(h.value.clearNotifications(), true); h.flush(); assert.deepEqual(ids(h.value.items), []);
+    assert.equal(h.value.clearNotifications(), true); h.flush(); assert.deepEqual(ids(h.value.items), []); assert.deepEqual(ids(h.value.groups[0].items), []);
   } finally { h.close(); }
 });
 
-test("legacy saved read notifications stay absent when Activity opens and reads never become history", async () => {
+test("legacy saved read notifications stay read when Activity opens and reads never become unread again", async () => {
   const h = mountedActivity({ open: false, disk: new Map([[readKey(), '["movements:1"]']]) });
   try {
     await h.respond(projected); assert.deepEqual(ids(h.value.items), ["movements:3"]);
-    h.props.open = true; h.update(); assert.deepEqual(ids(h.value.groups[0].items), ["movements:3"]);
-    h.value.markRead(["movements:3"]); h.flush(); assert.deepEqual(ids(h.value.items), []);
+    h.props.open = true; h.update(); assert.deepEqual(ids(h.value.groups[0].items), ["movements:1", "movements:3"]);
+    h.value.markRead(["movements:3"]); h.flush(); assert.deepEqual(ids(h.value.items), []); assert.equal(h.value.unreadCount, 0);
     h.props.open = false; h.update(); h.props.open = true; h.update();
-    assert.deepEqual(ids(h.value.groups[0].items), []);
+    assert.deepEqual(ids(h.value.groups[0].items), ["movements:1", "movements:3"]); assert.equal(h.value.unreadCount, 0);
   } finally { h.close(); }
 });
 
