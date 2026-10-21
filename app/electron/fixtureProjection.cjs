@@ -492,6 +492,41 @@ function createFixtureProjectionStore(options = {}) {
     };
   }
 
+  async function submitInterfaceArtifact(request) {
+    const runId = requiredString(request?.runId, "runId");
+    const interfaceId = requiredString(request?.interfaceId, "interfaceId");
+    const label = requiredString(request?.label, "label");
+    const kind = { "operator.approval.response": "approval", "operator.user_input.response": "user_input", "operator.elicitation.response": "elicitation" }[label];
+    if (!kind) throw new Error(`The Test profile answers operator requests only; '${label}' is not accepted.`);
+    const chat = data.chats.find((item) => item.run_id === runId && item.chat_interface_id === interfaceId);
+    if (!chat) throw new Error(`Test run '${runId}' has no chat interface '${interfaceId}'.`);
+    const response = request?.payload?.[`operator_${kind}_response`];
+    const requestId = typeof response?.request_id === "string" ? response.request_id : "";
+    const messages = data.chatMessages[runId] || [];
+    const pending = messages.find((message) => message.event_kind === kind && message.event_data?.request_id === requestId && message.event_data?.resolved !== true);
+    if (!pending) throw new Error(`Test run '${runId}' has no pending ${kind} request '${requestId}'.`);
+    const now = Date.now();
+    const turnId = String(pending.event_data.turn_id || "");
+    const declined = kind === "approval" && response.decision === "decline";
+    pending.event_data = { ...pending.event_data, resolved: true, response };
+    const events = labChatEvents(chat);
+    const finalText = kind === "approval"
+      ? declined ? "Understood. I left the tests unrun, and the change is ready for your own check." : "`npm test -- ProjectHeader` passes. The connection badge is ready."
+      : "Thanks. I'll compare the set you picked and come back with the summary.";
+    messages.push(events.resolved({ id: `${requestId}-resolved`, turnId, requestId, text: declined ? "Declined" : "Answered", createdAtMs: now, seq: nextFixtureChatSeq(data) }));
+    const previous = messages.findLast((message) => message.event_data?.context_window_usage);
+    const contextTokens = (Number(previous?.event_data?.context_window_usage?.used_tokens) || 18_000) + 3_200;
+    messages.push(events.finalAnswer({ id: `${requestId}-final`, turnId, text: finalText, createdAtMs: now + 1, seq: nextFixtureChatSeq(data), contextTokens, latencyMs: now - pending.created_at_ms }));
+    messages.push(events.turnCompleted({ id: `${requestId}-turn-completed`, turnId, startedAtMs: pending.created_at_ms, finalId: `${requestId}-final`, finalText, createdAtMs: now + 2, seq: nextFixtureChatSeq(data) }));
+    chat.turn_open = false;
+    chat.turn_state = "idle";
+    chat.updated_at_ms = now;
+    chat.message_count = messages.length;
+    generation += 1;
+    onChange(generation);
+    return { interfaceId, runId, label, contentHash: `lab${requestId}response`, verdict: { admitted: { seq: pending.movement_seq + 1 } } };
+  }
+
   async function submitChatSteer(request) {
     const runId = requiredString(request?.runId, "runId");
     const text = typeof request?.text === "string" ? request.text.trim() : "";
@@ -697,6 +732,7 @@ function createFixtureProjectionStore(options = {}) {
     mutateScheduledInterface,
     submitChatTurn,
     submitChatSteer,
+    submitInterfaceArtifact,
     updateChatPins,
     generation: () => generation,
     invalidate: () => {},
@@ -1031,6 +1067,10 @@ function buildFixtureProjection() {
   let chatMovementSeq = 1;
   const chatMessages = Object.fromEntries(chats.map((chat, index) => {
     const messages = fixtureChatHistory(chat, index, () => chatMovementSeq++);
+    if (messages.some((message) => ["approval", "user_input", "elicitation"].includes(message.event_kind) && message.event_data?.resolved !== true)) {
+      chat.turn_open = true;
+      chat.turn_state = "waiting";
+    }
     chat.message_count = messages.length;
     chat.last_movement_seq = messages.at(-1)?.movement_seq || 0;
     chat.updated_at_ms = Math.max(chat.updated_at_ms, messages.at(-1)?.created_at_ms || 0);
@@ -1465,6 +1505,27 @@ function labChatEvents(chat) {
         terminal: true,
       });
     },
+    request: ({ id, turnId, kind, data, text, createdAtMs, seq }) => row({
+      id,
+      label: `operator.${kind}.request`,
+      eventKind: kind,
+      eventData: { ...data, label: `operator.${kind}.request`, thread_id: threadId, turn_id: turnId, _event: envelope(turnId, data.request_id, "started") },
+      text,
+      createdAtMs,
+      seq,
+      interfaceId: chat.chat_interface_id,
+      terminal: true,
+    }),
+    resolved: ({ id, turnId, requestId, text, createdAtMs, seq }) => row({
+      id,
+      label: "turn.operator_request.resolved",
+      eventKind: "operator_request_resolved",
+      eventData: { label: "turn.operator_request.resolved", requestId, thread_id: threadId, turn_id: turnId, _event: envelope(turnId, requestId, "completed") },
+      text,
+      createdAtMs,
+      seq,
+      interfaceId: chat.chat_interface_id,
+    }),
     turnCompleted: ({ id, turnId, startedAtMs, finalId, finalText, createdAtMs, seq }) => row({
       id,
       label: "turn.completed",
@@ -1512,6 +1573,13 @@ function fixtureChatHistory(chat, index, nextSeq) {
     (turnId, startAtMs) => events.tool({ id, turnId, tool, args, body, createdAtMs: startAtMs + endOffsetMs, seq: nextSeq() }),
   ];
   const fileChange = (id, offsetMs, changes, diff) => (turnId, startAtMs) => events.fileChange({ id, turnId, changes, diff, createdAtMs: startAtMs + offsetMs, seq: nextSeq() });
+  const pendingRequest = (id, askAtMs, prompt, kind, text, data) => {
+    const turnId = events.turnId(id);
+    userMessage(id, prompt, askAtMs - 9_000);
+    rows.push(events.turnStarted({ id: `${id}-turn-started`, turnId, createdAtMs: askAtMs - 8_400, seq: nextSeq() }));
+    rows.push(events.reasoning({ id: `${id}-reasoning`, turnId, summary: [`**${text}**`], createdAtMs: askAtMs - 4_000, seq: nextSeq() }));
+    rows.push(events.request({ id: `${id}-request`, turnId, kind, data, text, createdAtMs: askAtMs, seq: nextSeq() }));
+  };
 
   if (chat.run_id === "lab_run_1") {
     const firstAt = chat.created_at_ms + 45_000;
@@ -1559,6 +1627,13 @@ function fixtureChatHistory(chat, index, nextSeq) {
       "- Added an accessible status label for screen readers.",
       "- `npm test -- ProjectHeader` passes.",
     ].join("\n"));
+    pendingRequest("tests", Date.now() - 3 * 60_000, "Also run the full header suite before you finish.", "approval", "Run the header tests?", {
+      request_id: "lab-approval-header-tests",
+      kind: "exec",
+      method: "item/commandExecution/requestApproval",
+      title: "Run the header tests?",
+      detail: { command: "npm test -- ProjectHeader", cwd: FIXTURE_WORKSPACE_ROOT, reason: "Checks the new connection badge before handing the change back." },
+    });
     return rows;
   }
 
@@ -1598,6 +1673,22 @@ function fixtureChatHistory(chat, index, nextSeq) {
     reasoning("reasoning", 5_000, [`**${chat.title}**`]),
     commentary("progress", 8_000, progress[index] || "Working on it."),
   ], responses[index] || "Done.");
+  if (chat.run_id === "lab_run_5") {
+    pendingRequest("scope", Date.now() - 18 * 60_000, "Go deeper on this and include tools outside our category.", "user_input", "Which products should I compare?", {
+      request_id: "lab-question-compare-scope",
+      method: "item/tool/requestUserInput",
+      message: "Which products should I compare?",
+      questions: [{
+        id: "scope",
+        header: "Scope",
+        question: "Which products should I compare?",
+        options: [
+          { label: "Five closest", description: "A quick comparison of the tools most like ours." },
+          { label: "Wider set of twelve", description: "Takes longer and covers mobile apps too." },
+        ],
+      }],
+    });
+  }
   return rows;
 }
 

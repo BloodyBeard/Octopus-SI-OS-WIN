@@ -4607,7 +4607,8 @@ ipcMain.handle("octopus:transcribe-dictation", async (_event, token, request) =>
 });
 
 ipcMain.handle("octopus:submit-interface-artifact", async (_event, token, request) => {
-  getClientAccessController().requireSession(token, ["live"]);
+  const { profile } = getClientAccessController().requireSession(token, ["live", "lab"]);
+  if (profile === "lab") return getProjectionStore("lab").submitInterfaceArtifact(request);
   await prepareLiveProjectionRead();
   const octopusHome = resolveOctopusHome();
   return submitClientInterfaceArtifact({
