@@ -1,9 +1,13 @@
+import { useEffect, useState } from "react";
+import { loadChatRunMessages, type ChatRunMessage } from "../../chatRuns";
 import { OcButton } from "../../design-system/components";
+import { projectAssistantDirectives } from "../chat/assistantDirectives";
+import { MessageContent } from "../chat/MessageContent";
 import { Glyph } from "../IconGlyphs";
 import { OctopusLoadingState } from "../OctopusLoadingLogo";
 import { ActivityMark } from "./ActivityMark";
 import type { MarkActivityItem } from "./markActivity";
-import { activityMoment, activityPresentation, activityRows, activitySource, isActivityRequest, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
+import { activityHeadline, activityMoment, activityPresentation, activitySource, isActivityRequest } from "./markPresentation";
 import type { MarkActivity } from "./useMarkActivity";
 import "./inbox.css";
 
@@ -15,123 +19,79 @@ export type InboxSurfaceState = {
   onOpen: (item: MarkActivityItem) => void;
 };
 
-export function InboxSurface({ activity, selected, selectedGroup = [], onSelect, onOpen }: InboxSurfaceState) {
+export function InboxSurface({ activity, selected, selectedGroup = [], onOpen }: InboxSurfaceState) {
   const item = selected && activity.projectedItems.find((candidate) => candidate.id === selected.id);
   const now = Date.now();
 
   return (
     <section className="inbox-surface" aria-label="Inbox details">
-      <div className="inbox-surface-content" data-view={item ? "detail" : "summary"}>
+      <div className="inbox-surface-content" data-view={item ? "detail" : "placeholder"}>
         {activity.error ? (
-          <div className="inbox-summary" role="alert">
-            <Glyph name="warning" size={28} />
-            <h1>Inbox is unavailable</h1>
-            <p>{activity.error}</p>
+          <div className="inbox-placeholder" role="alert">
+            <Glyph name="warning" size={16} />
+            <span>{activity.error}</span>
           </div>
         ) : !activity.loaded ? (
-          <OctopusLoadingState className="inbox-summary" label="Loading Inbox" />
+          <OctopusLoadingState className="inbox-placeholder" label="Loading Inbox" />
         ) : selected && !item ? (
-          <div className="inbox-summary" role="status"><Glyph name="inbox" size={28} /><h1>This activity is gone</h1><p>Pick another item from your Inbox.</p></div>
+          <p className="inbox-placeholder" role="status">This item is no longer in your Inbox</p>
         ) : item ? (
-          <InboxDetail item={item} group={selectedGroup.includes(item.id) ? selectedGroup : [item.id]} activity={activity} now={now} onOpen={onOpen} onSelect={onSelect} />
+          <InboxDetail item={item} group={selectedGroup.includes(item.id) ? selectedGroup : [item.id]} activity={activity} now={now} onOpen={onOpen} />
         ) : (
-          <InboxOverview activity={activity} now={now} onSelect={onSelect} />
+          <p className="inbox-placeholder">{activity.items.length ? "Select an item to view" : "You're all caught up"}</p>
         )}
       </div>
     </section>
   );
 }
 
-function InboxOverview({ activity, now, onSelect }: {
-  activity: MarkActivity;
-  now: number;
-  onSelect: (item: MarkActivityItem, ids?: readonly string[]) => void;
-}) {
-  const unread = activity.items.filter((candidate) => !activity.read.has(candidate.id));
-  const requests = unread.filter(isActivityRequest);
-  const replies = unread.filter((candidate) => candidate.kind === "message");
-  const listed = unread.length ? [...requests, ...unread.filter((candidate) => !isActivityRequest(candidate))] : activity.items;
-  const rows = activityRows(listed).slice(0, 6);
-  const heading = requests.length
-    ? `${requests.length} ${requests.length === 1 ? "thing needs" : "things need"} you`
-    : unread.length ? "Catch up on your work" : "You're all caught up";
-  return (
-    <div className="inbox-summary">
-      <span className="inbox-summary-icon"><Glyph name="inbox" size={28} /></span>
-      <h1>{heading}</h1>
-      <p>{unread.length ? "Replies, requests and what Octopus did while you were away." : "New replies and requests will show up here as your work runs."}</p>
-      <dl className="inbox-summary-counts">
-        <div data-attention={requests.length > 0 || undefined}><dt>Needs you</dt><dd>{requests.length}</dd></div>
-        <div><dt>New replies</dt><dd>{replies.length}</dd></div>
-        <div><dt>Unread</dt><dd>{unread.length}</dd></div>
-      </dl>
-      {rows.length ? (
-        <section className="inbox-list" aria-label={unread.length ? "Unread" : "Recent"}>
-          <h2>{unread.length ? "Unread" : "Recent"}</h2>
-          {rows.map((row) => (
-            <InboxItemRow key={row.id} now={now} row={row} secondary={rowSecondary(row.lead, true)}
-              onSelect={() => onSelect(row.lead, row.items.map((candidate) => candidate.id))} />
-          ))}
-        </section>
-      ) : null}
-    </div>
-  );
-}
-
-function InboxDetail({ item, group, activity, now, onOpen, onSelect }: {
+function InboxDetail({ item, group, activity, now, onOpen }: {
   item: MarkActivityItem;
   group: readonly string[];
   activity: MarkActivity;
   now: number;
   onOpen: (item: MarkActivityItem) => void;
-  onSelect: (item: MarkActivityItem, ids?: readonly string[]) => void;
 }) {
   const presentation = activityPresentation(item);
-  const occurrences = group.map((id) => activity.projectedItems.find((candidate) => candidate.id === id)).filter((candidate): candidate is MarkActivityItem => Boolean(candidate));
-  const times = occurrences.map((candidate) => candidate.createdAt).filter((at): at is number => at !== null).sort((left, right) => left - right);
-  const source = activitySource(item);
+  const request = isActivityRequest(item);
   const homeRun = item.navigation.kind === "run" && item.navigation.clientSurfaceRole === "home";
   const openLabel = item.navigation.kind === "mark" ? "Show in history"
-    : homeRun ? "Open Home" : isActivityRequest(item) ? "Review in task" : "Open task";
-  const related = activityRows(activity.projectedItems.filter((candidate) => candidate.runId === item.runId && !group.includes(candidate.id))).slice(0, 5);
+    : homeRun ? "Open Home" : request ? "Review in task" : "Open task";
+  const occurrences = group.map((id) => activity.projectedItems.find((candidate) => candidate.id === id)).filter((candidate): candidate is MarkActivityItem => Boolean(candidate));
+  const times = occurrences.map((candidate) => candidate.createdAt).filter((at): at is number => at !== null).sort((left, right) => left - right);
   return (
     <article className="inbox-detail" key={item.id}>
-      <div className="inbox-detail-kind" data-request={isActivityRequest(item) || undefined}>
-        <Glyph name={presentation.glyph} size={14} />
-        <span>{presentation.category}</span>
-      </div>
-      <h1>{presentation.label}</h1>
-      <div className="inbox-detail-source">
-        <ActivityMark item={item} size={16} />
-        <span className="inbox-detail-source-name">{source}</span>
-        {item.createdAt ? <>
-          <span aria-hidden="true">·</span>
-          <time dateTime={new Date(item.createdAt).toISOString()}>{activityMoment(item.createdAt, now)}</time>
-        </> : null}
-      </div>
-      <div className="inbox-detail-card" data-quote={item.excerpt ? true : undefined}>
-        {item.excerpt
-          ? <blockquote className="inbox-detail-excerpt">{item.excerpt}</blockquote>
-          : <p className="inbox-detail-description">{homeRun ? "Open Home to read this and continue the conversation." : presentation.description}</p>}
-        {occurrences.length > 1 ? (
-          <p className="inbox-detail-occurrences">
-            {`Happened ${occurrences.length} times`}
-            {times.length > 1 ? ` between ${clock(times[0])} and ${clock(times.at(-1) as number)}` : ""}.
-          </p>
-        ) : null}
-        <div className="inbox-detail-actions">
-          <OcButton leadingIcon={item.navigation.kind === "mark" ? "activity" : "openExternal"} onClick={() => onOpen(item)} variant="primary">{openLabel}</OcButton>
+      <header className="inbox-detail-header">
+        <div className="inbox-detail-heading">
+          <h1>{activityHeadline(item)}</h1>
+          <div className="inbox-detail-meta">
+            <ActivityMark item={item} size={14} />
+            <span className="inbox-detail-meta-source">{activitySource(item)}</span>
+            {item.createdAt ? <>
+              <span aria-hidden="true">·</span>
+              <time dateTime={new Date(item.createdAt).toISOString()}>{activityMoment(item.createdAt, now)}</time>
+            </> : null}
+            {item.kind !== "mark" ? <>
+              <span aria-hidden="true">·</span>
+              <span data-request={request || undefined}>{presentation.label}</span>
+            </> : null}
+          </div>
         </div>
-      </div>
-      {related.length ? (
-        <section className="inbox-list" aria-label={`More from ${source}`}>
-          <h2>More from {source}</h2>
-          {related.map((row) => (
-            <InboxItemRow key={row.id} now={now} row={row} secondary={rowSecondary(row.lead, false)}
-              onSelect={() => onSelect(row.lead, row.items.map((candidate) => candidate.id))} />
-          ))}
-        </section>
-      ) : null}
+        <OcButton leadingIcon={item.navigation.kind === "mark" ? "activity" : "openExternal"} onClick={() => onOpen(item)} variant={request ? "primary" : "secondary"}>{openLabel}</OcButton>
+      </header>
+      {item.kind === "mark" ? (
+        <div className="inbox-detail-body">
+          <p>{presentation.description}</p>
+          {occurrences.length > 1 ? (
+            <p className="inbox-detail-occurrences">
+              {`Happened ${occurrences.length} times`}
+              {times.length > 1 ? ` between ${clock(times[0])} and ${clock(times.at(-1) as number)}` : ""}.
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <InboxThread item={item} />
+      )}
       <details className="inbox-detail-technical">
         <summary>
           <span>Technical details</span>
@@ -149,26 +109,49 @@ function InboxDetail({ item, group, activity, now, onOpen, onSelect }: {
   );
 }
 
-function InboxItemRow({ now, row, secondary, onSelect }: { now: number; row: ActivityRowGroup; secondary: string; onSelect: () => void }) {
-  const item = row.lead;
-  const count = row.items.length;
-  return (
-    <button className="inbox-item-row" data-request={isActivityRequest(item) || undefined} onClick={onSelect} type="button">
-      <ActivityMark item={item} size={16} />
-      <span className="inbox-item-text">
-        <strong>{activityPresentation(item).label}</strong>
-        {secondary ? <span>{secondary}</span> : null}
-      </span>
-      {count > 1 ? <span className="inbox-item-count">{`×${count}`}</span> : null}
-      {item.createdAt ? <time dateTime={new Date(item.createdAt).toISOString()}>{relativeActivityTime(item.createdAt, now)}</time> : null}
-    </button>
-  );
+type ActivityThread = { key: string; prompt: ChatRunMessage | null; reply: ChatRunMessage | null; error: string };
+
+function useActivityThread(item: MarkActivityItem): ActivityThread | null {
+  const [thread, setThread] = useState<ActivityThread | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    loadChatRunMessages(item.runId).then((messages) => {
+      if (cancelled) return;
+      const reply = messages.filter((message) => message.artifactId === item.artifactId && message.movementSeq === item.sequence).at(-1) ?? null;
+      const prompt = reply
+        ? messages.filter((message) => message.role === "user" && message.movementSeq < reply.movementSeq && message.text.trim()).at(-1) ?? null
+        : null;
+      setThread({ key: item.id, prompt, reply, error: reply ? "" : "This message is no longer in the task." });
+    }, (failure: unknown) => {
+      if (!cancelled) setThread({ key: item.id, prompt: null, reply: null, error: failure instanceof Error ? failure.message : String(failure) });
+    });
+    return () => { cancelled = true; };
+  }, [item.artifactId, item.id, item.runId, item.sequence]);
+  return thread?.key === item.id ? thread : null;
 }
 
-function rowSecondary(item: MarkActivityItem, withSource: boolean): string {
-  const source = withSource ? activitySource(item) : "";
-  if (!item.excerpt) return source;
-  return source ? `${source} — ${item.excerpt}` : item.excerpt;
+function InboxThread({ item }: { item: MarkActivityItem }) {
+  const thread = useActivityThread(item);
+  const replyText = thread?.reply ? projectAssistantDirectives(thread.reply.text).markdown.trim() : "";
+  return (
+    <div className="inbox-thread text-size-chat" aria-busy={thread === null || undefined}>
+      {thread?.prompt ? (
+        <div className="inbox-thread-prompt">
+          <div className="bg-token-foreground/5 max-w-[77%] min-w-0 overflow-hidden break-words rounded-2xl px-3 py-2 text-left">
+            <div className="whitespace-pre-wrap"><MessageContent compactHeadings text={thread.prompt.text} variant="user" /></div>
+          </div>
+        </div>
+      ) : null}
+      {replyText ? (
+        <div className="inbox-thread-reply"><MessageContent text={replyText} variant="assistant" /></div>
+      ) : item.excerpt ? (
+        <p className="inbox-thread-excerpt">{item.excerpt}</p>
+      ) : !thread ? null : (
+        <p className="inbox-thread-excerpt">{activityPresentation(item).description}</p>
+      )}
+      {thread?.error ? <p className="inbox-thread-error" role="status">{thread.error}</p> : null}
+    </div>
+  );
 }
 
 function clock(at: number): string {

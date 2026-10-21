@@ -57,6 +57,16 @@ export function activityTitle(item: MarkActivityItem): string {
   return activityPresentation(item).label;
 }
 
+export function activityHeadline(item: MarkActivityItem): string {
+  return item.kind === "mark" ? activityPresentation(item).label : item.sourceTitle ?? activityPresentation(item).label;
+}
+
+export function activitySummary(item: MarkActivityItem): string {
+  if (item.kind === "mark") return activitySource(item);
+  if (item.kind === "message") return item.excerpt ?? activityPresentation(item).label;
+  return activityPresentation(item).label;
+}
+
 export function activitySource(item: MarkActivityItem): string {
   if (item.agentName) return item.agentName;
   if (item.sourceTitle) return item.sourceTitle;

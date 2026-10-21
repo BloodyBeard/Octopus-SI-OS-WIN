@@ -7,7 +7,7 @@ import { OctopusSpinner } from "../navigation/OctopusSpinner";
 import { OctopusMarquee } from "../navigation/OctopusMarquee";
 import { ActivityMark } from "./ActivityMark";
 import type { MarkActivityItem } from "./markActivity";
-import { activityPresentation, activitySections, activitySource, activityTitle, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
+import { activityHeadline, activityPresentation, activitySections, activitySummary, isActivityRequest, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
 import type { MarkActivity } from "./useMarkActivity";
 import "./markActivity.css";
 
@@ -79,13 +79,13 @@ function ActivitySection({ children, heading }: { children: ReactNode; heading: 
 
 function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; now: number; row: ActivityRowGroup; unread: boolean; onSelect: () => void }) {
   const item = row.lead;
-  const title = activityTitle(item);
-  const source = activitySource(item);
+  const title = activityHeadline(item);
+  const summary = activitySummary(item);
   const time = relativeActivityTime(item.createdAt, now);
   const count = row.items.length;
   return <div
     aria-current={active ? "page" : undefined}
-    aria-label={[title, count > 1 && `${count} times`, source, unread && "Unread"].filter(Boolean).join(", ")}
+    aria-label={[title, count > 1 && `${count} times`, summary, unread && "Unread"].filter(Boolean).join(", ")}
     className="mark-activity-row sidebar-item group"
     data-active={active || undefined}
     data-activity-kind={item.kind}
@@ -111,7 +111,7 @@ function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; 
             {unread ? <div className="mark-activity-unread" aria-hidden="true"><span className="icon-xs relative scale-50"><span className="mark-activity-unread-dot" /></span></div> : null}
           </div>
           <span className="mark-activity-secondary flex w-full min-w-0 items-center gap-1 pe-row-y text-xs leading-4 select-none" data-thread-secondary-title="">
-            <span className="min-w-0 truncate">{source}</span>
+            <span className="min-w-0 truncate" data-request={isActivityRequest(item) || undefined}>{summary}</span>
             {time ? <><span aria-hidden="true">·</span><time className="shrink-0" dateTime={item.createdAt ? new Date(item.createdAt).toISOString() : undefined}>{time}</time></> : null}
           </span>
         </div>

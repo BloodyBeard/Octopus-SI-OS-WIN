@@ -33,6 +33,7 @@
 .mark-activity-row:hover, .mark-activity-row[data-active] { background: var(--color-background-primary-ghost-hover); }
 .mark-activity-row:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 0; }
 .mark-activity-secondary { color: var(--color-text-tertiary); }
+.mark-activity-secondary [data-request] { color: var(--color-text-accent); }
 .mark-activity-agent-icon { background: currentColor; mask-position: center; mask-repeat: no-repeat; mask-size: contain; }
 .mark-activity-unread { position: relative; display: flex; width: 20px; height: 20px; flex-shrink: 0; align-items: center; justify-content: center; color: var(--color-text-description); }
 .mark-activity-unread-dot { position: absolute; inset: 0; border-radius: 9999px; background: var(--color-background-info-solid); }
