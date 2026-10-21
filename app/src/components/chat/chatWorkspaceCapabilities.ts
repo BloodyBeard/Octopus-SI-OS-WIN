@@ -265,6 +265,7 @@ export function executionContextTaskCapabilities(
   });
   const externalInputs = worker.externalInputs.map((input) => ({
     ...input,
+    ...(input.artifactNames ? { artifactNames: [...input.artifactNames] } : {}),
     requiredVerifiedArtifacts: input.requiredVerifiedArtifacts.map((requirement) => ({
       ...requirement,
       params: { ...requirement.params },

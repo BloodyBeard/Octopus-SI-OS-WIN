@@ -1851,6 +1851,7 @@ export type OctopusChatTurnRequest = {
   externalInputs?: Array<{
     checkpointId: string;
     interfaceId: string;
+    artifactNames?: string[];
     requiredVerifiedArtifacts?: Array<{
       mark: string;
       artifactLabel: string;

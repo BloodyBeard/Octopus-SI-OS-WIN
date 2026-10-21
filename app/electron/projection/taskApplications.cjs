@@ -204,6 +204,9 @@ async function configureOctopusOsTaskApplication(
         ? [{
             checkpointId,
             interfaceId,
+            ...(arrayValue(input?.artifact_names).length
+              ? { artifactNames: arrayValue(input.artifact_names).map(stringValue) }
+              : {}),
             requiredVerifiedArtifacts: projectOctopusOsRequiredVerifiedArtifacts(
               input?.required_verified_artifacts,
             ),

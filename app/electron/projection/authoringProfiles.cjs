@@ -154,12 +154,13 @@ function parseOctopusOsExternalInputs(value, file) {
   return value.map((candidate, index) => {
     exactObjectKeys(
       candidate,
-      ["checkpoint_id", "interface_id", "required_verified_artifacts"],
+      ["checkpoint_id", "interface_id", "artifact_names", "required_verified_artifacts"],
       ["checkpoint_id", "interface_id"],
       `Octopus OS external input ${index}`,
     );
     const checkpointId = requiredSafeRegistryId(candidate.checkpoint_id, `Octopus OS external input ${index} checkpoint`);
     const interfaceId = requiredSafeRegistryId(candidate.interface_id, `Octopus OS external input ${index} interface`);
+    const artifactNames = parseOctopusOsArtifactNames(candidate.artifact_names, `Octopus OS external input ${index}`, file);
     if (checkpoints.has(checkpointId) || interfaces.has(interfaceId)) {
       throw new Error(`Octopus OS external input ${index} is duplicated: ${file}`);
     }
@@ -173,9 +174,20 @@ function parseOctopusOsExternalInputs(value, file) {
     return {
       checkpoint_id: checkpointId,
       interface_id: interfaceId,
+      ...(artifactNames.length > 0 ? { artifact_names: artifactNames } : {}),
       ...(requirements.length > 0 ? { required_verified_artifacts: requirements } : {}),
     };
   });
+}
+
+function parseOctopusOsArtifactNames(value, owner, file) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${owner} artifact_names must be a non-empty array: ${file}`);
+  }
+  const names = value.map((name, index) => requiredContractToken(name, `${owner} artifact name ${index}`));
+  if (new Set(names).size !== names.length) throw new Error(`${owner} repeats an artifact name: ${file}`);
+  return names;
 }
 
 function parseOctopusOsExternalRelays(value, file) {

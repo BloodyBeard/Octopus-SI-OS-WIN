@@ -399,6 +399,7 @@ function operatorExternalInputs(value) {
     if (!isObject(input)) throw new Error(`externalInputs[${index}] must be a JSON object`);
     const checkpointId = safeSegment(input.checkpointId, `externalInputs[${index}].checkpointId`);
     const interfaceId = safeSegment(input.interfaceId, `externalInputs[${index}].interfaceId`);
+    const artifactNames = operatorArtifactNames(input.artifactNames, `externalInputs[${index}].artifactNames`);
     const requiredVerifiedArtifacts = operatorRequiredVerifiedArtifacts(
       input.requiredVerifiedArtifacts,
       `externalInputs[${index}].requiredVerifiedArtifacts`,
@@ -410,11 +411,20 @@ function operatorExternalInputs(value) {
     return {
       checkpoint_id: checkpointId,
       interface_id: interfaceId,
+      ...(artifactNames.length > 0 ? { artifact_names: artifactNames } : {}),
       ...(requiredVerifiedArtifacts.length > 0
         ? { required_verified_artifacts: requiredVerifiedArtifacts }
         : {}),
     };
   });
+}
+
+function operatorArtifactNames(value, field) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
+  const names = value.map((name, index) => safeContractToken(name, `${field}[${index}]`));
+  if (new Set(names).size !== names.length) throw new Error(`${field} repeats an artifact name`);
+  return names;
 }
 
 function operatorExternalRelays(value) {

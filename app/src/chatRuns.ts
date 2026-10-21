@@ -111,6 +111,7 @@ export type ChatWorkerChoice = {
 export type ChatExternalInput = {
   checkpointId: string;
   interfaceId: string;
+  artifactNames?: string[];
   requiredVerifiedArtifacts: ChatRequiredVerifiedArtifact[];
 };
 
@@ -606,9 +607,10 @@ function asExternalInputs(value: unknown): ChatExternalInput[] {
     const input = asRecord(candidate);
     const checkpointId = asString(input.checkpoint_id);
     const interfaceId = asString(input.interface_id);
+    const artifactNames = (Array.isArray(input.artifact_names) ? input.artifact_names : []).map(asString).filter(Boolean);
     const requiredVerifiedArtifacts = asRequiredVerifiedArtifacts(input.required_verified_artifacts);
     return checkpointId && interfaceId
-      ? [{ checkpointId, interfaceId, requiredVerifiedArtifacts }]
+      ? [{ checkpointId, interfaceId, ...(artifactNames.length ? { artifactNames } : {}), requiredVerifiedArtifacts }]
       : [];
   });
 }

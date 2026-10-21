@@ -340,6 +340,7 @@ async function run(preparedExecutable) {
       externalInputs: [{
         checkpointId: "cp_link_result_probe",
         interfaceId: "system_worker_operator_home",
+        artifactNames: ["task.summary"],
         requiredVerifiedArtifacts: [linkedResultRequirement],
       }],
       externalRelays: [{
@@ -356,6 +357,7 @@ async function run(preparedExecutable) {
     assert.equal(taskPlan.authoringProfile.worker_choice_interface, task.worker_interface_id);
     assert.ok(taskPlan.authoringProfile.context_artifact_bindings.some((binding) => binding.id === "artifact-worker-role-operator-task"));
     assert.ok(!taskPlan.authoringProfile.context_artifact_bindings.some((binding) => binding.id === "artifact-worker-role-operator-home"));
+    assert.deepEqual(taskPlan.authoringProfile.external_inputs[0].artifact_names, ["task.summary"]);
     assert.deepEqual(
       taskPlan.authoringProfile.external_inputs[0].required_verified_artifacts,
       [{

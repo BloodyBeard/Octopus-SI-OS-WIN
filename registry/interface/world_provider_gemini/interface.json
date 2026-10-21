@@ -162,6 +162,14 @@
                               "type": "string",
                               "minLength": 1
                             },
+                            "artifact_names": {
+                              "type": "array",
+                              "minItems": 1,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
                             "required_verified_artifacts": {
                               "type": "array",
                               "items": {
@@ -560,6 +568,14 @@
                             "interface_id": {
                               "type": "string",
                               "minLength": 1
+                            },
+                            "artifact_names": {
+                              "type": "array",
+                              "minItems": 1,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
                             },
                             "required_verified_artifacts": {
                               "type": "array",
@@ -1049,6 +1065,14 @@
                         "interface_id": {
                           "type": "string",
                           "minLength": 1
+                        },
+                        "artifact_names": {
+                          "type": "array",
+                          "minItems": 1,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
                         },
                         "required_verified_artifacts": {
                           "type": "array",
@@ -1582,6 +1606,14 @@
                         "interface_id": {
                           "type": "string",
                           "minLength": 1
+                        },
+                        "artifact_names": {
+                          "type": "array",
+                          "minItems": 1,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
                         },
                         "required_verified_artifacts": {
                           "type": "array",

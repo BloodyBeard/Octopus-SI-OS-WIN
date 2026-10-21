@@ -1297,7 +1297,7 @@ async function verifyOperatorChatStatusProjection(temporary) {
     assert.equal((await readStatuses()).chats[0].turn_open, true, "pending source retains a turn after its input checkpoint is replaced");
     const sidecarPath = path.join(registryRoot, "interface", workspace.homeInterfaceId, "octopus_os.json");
     const sidecar = JSON.parse(await fs.readFile(sidecarPath, "utf8"));
-    sidecar.authoring_profile.external_inputs = [{ checkpoint_id: "cp_external_input", interface_id: "peer" }];
+    sidecar.authoring_profile.external_inputs = [{ checkpoint_id: "cp_external_input", interface_id: "peer", artifact_names: ["sensor.observation"] }];
     await fs.writeFile(sidecarPath, JSON.stringify(sidecar));
     record.interface_state[workspace.homeInterfaceId].cycle_checkpoint_ids = [];
     delete record.interface_state[provider].pending_handoff;

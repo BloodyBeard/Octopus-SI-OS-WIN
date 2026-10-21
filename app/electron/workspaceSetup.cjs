@@ -4734,10 +4734,13 @@ function projectProfileExternalInputs(value) {
   return value.map((entry, index) => {
     const route = exactObject(
       entry,
-      ["checkpoint_id", "interface_id", "required_verified_artifacts"],
+      ["checkpoint_id", "interface_id", "artifact_names", "required_verified_artifacts"],
       ["checkpoint_id", "interface_id"],
       `Project authoring external input ${index + 1}`,
     );
+    const artifactNames = route.artifact_names === undefined
+      ? []
+      : parseUniqueIds(route.artifact_names, `Project authoring external input ${index + 1} artifact names`);
     const requirements = projectProfileRequiredVerifiedArtifacts(
       route.required_verified_artifacts,
       `Project authoring external input ${index + 1}`,
@@ -4745,6 +4748,7 @@ function projectProfileExternalInputs(value) {
     return {
       checkpointId: requiredId(route.checkpoint_id, `Project authoring external input ${index + 1} checkpoint`),
       interfaceId: requiredId(route.interface_id, `Project authoring external input ${index + 1} interface`),
+      ...(artifactNames.length ? { artifactNames } : {}),
       ...(requirements.length ? { requiredVerifiedArtifacts: requirements } : {}),
     };
   });
