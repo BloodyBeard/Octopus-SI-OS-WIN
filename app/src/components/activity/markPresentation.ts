@@ -13,20 +13,20 @@ const kindPresentation: Record<Exclude<ActivityKind, "mark">, ActivityPresentati
 };
 
 const markPresentations: Record<string, ActivityPresentation> = {
-  "tool.call.allowed": { label: "Tool use approved", category: "Tools", glyph: "tool", description: "Octopus checked a tool call against the task's permissions and let it run." },
-  "tool.result.corresponds": { label: "Tool result confirmed", category: "Tools", glyph: "tool", description: "A tool's result was matched to the exact call that asked for it." },
-  "emit.tool_call.present": { label: "Tool call prepared", category: "Tools", glyph: "tool", description: "The model produced a well-formed tool call." },
-  "memory.capture.completed": { label: "Saved to memory", category: "Memory", glyph: "memory", description: "Octopus finished saving what it learned from recent work to memory." },
-  "memory.experience.admitted": { label: "New experience to remember", category: "Memory", glyph: "memory", description: "A finished piece of work was accepted for Octopus to learn from." },
-  "operator.approval": { label: "You approved an action", category: "Approvals", glyph: "check", description: "Your approval was recorded and the task continued." },
-  "operator.input.provided": { label: "You answered a request", category: "Approvals", glyph: "user", description: "Your answer was recorded and handed back to the task." },
-  "task.summary.received": { label: "Task summary ready", category: "Tasks", glyph: "taskSummary", description: "A task delivered its summary back to where it was started from." },
-  "coder.build.ok": { label: "Build passed", category: "Code", glyph: "code", description: "The project built successfully." },
-  "context.recipe.valid": { label: "Context prepared", category: "Context", glyph: "layers", description: "The context a task reads was assembled and checked." },
-  "email.authorization.requested": { label: "Email access requested", category: "Access", glyph: "lock", description: "A task asked for permission to use email." },
-  "hook.gate.passed": { label: "Hook check passed", category: "Checks", glyph: "check", description: "A configured hook let the step continue." },
-  "lifecycle.decision.allowed": { label: "Step allowed", category: "Checks", glyph: "check", description: "A lifecycle check allowed the next step." },
-  "ocr.text.contains": { label: "Text found on screen", category: "Computer Use", glyph: "desktop", description: "Expected text was recognized on the screen." },
+  "tool.call.allowed": { label: "Tool call allowed", category: "Policy", glyph: "tool", description: "The runtime checked a tool call against the run's formed grant and let it run." },
+  "tool.result.corresponds": { label: "Tool result matched its call", category: "Tools", glyph: "tool", description: "A tool result was verified to answer the exact call that requested it." },
+  "emit.tool_call.present": { label: "Tool call emitted", category: "Tools", glyph: "tool", description: "The model output contained a well-formed tool call." },
+  "memory.experience.admitted": { label: "Experience admitted to memory", category: "Memory", glyph: "memory", description: "A finished run was accepted as an experience for the memory observer to process." },
+  "memory.capture.completed": { label: "Memory capture completed", category: "Memory", glyph: "memory", description: "The memory observer processed an admitted experience and kept what later work should not have to rediscover." },
+  "operator.approval": { label: "Operator approval recorded", category: "Approvals", glyph: "check", description: "Your approval was recorded and handed back to the run." },
+  "operator.input.provided": { label: "Operator answer recorded", category: "Approvals", glyph: "user", description: "Your answer was recorded and handed back to the run." },
+  "task.summary.received": { label: "Task summary received", category: "Tasks", glyph: "taskSummary", description: "A task delivered its summary to the run that started it." },
+  "coder.build.ok": { label: "Build passed", category: "Code", glyph: "code", description: "The project build verifier passed." },
+  "context.recipe.valid": { label: "Context recipe valid", category: "Context", glyph: "layers", description: "The context a run reads was assembled and verified against its recipe." },
+  "email.authorization.requested": { label: "Email authorization requested", category: "Access", glyph: "lock", description: "A run asked for permission to use email." },
+  "hook.gate.passed": { label: "Hook gate passed", category: "Checks", glyph: "check", description: "A configured hook let the step continue." },
+  "lifecycle.decision.allowed": { label: "Lifecycle decision allowed", category: "Checks", glyph: "check", description: "A lifecycle check allowed the next step." },
+  "ocr.text.contains": { label: "OCR text matched", category: "Computer Use", glyph: "desktop", description: "Expected text was recognized on the screen." },
 };
 
 const sourcePresentations: Record<string, string> = {
@@ -62,17 +62,17 @@ export function activityHeadline(item: MarkActivityItem): string {
 }
 
 export function activitySummary(item: MarkActivityItem): string {
-  if (item.kind === "mark") return activitySource(item);
+  if (item.kind === "mark") return `${activitySource(item)} · ${item.name}`;
   if (item.kind === "message") return item.excerpt ?? activityPresentation(item).label;
   return activityPresentation(item).label;
 }
 
 export function activitySource(item: MarkActivityItem): string {
   if (item.agentName) return item.agentName;
-  if (item.sourceTitle) return item.sourceTitle;
+  if (item.kind !== "mark" && item.sourceTitle) return item.sourceTitle;
   const original = item.workerOriginal || item.worker;
   if (sourcePresentations[original]) return sourcePresentations[original];
-  const readable = original.replace(/^(?:lab_)?system_worker_/, "").replace(/_[0-9a-f]{16,}$/, "").replaceAll(/[._]+/g, " ").trim();
+  const readable = original.replace(/^(?:lab_)?system_worker_/, "").replace(/_[0-9a-f]{8,}.*$/, "").replaceAll(/[._]+/g, " ").trim();
   return readable ? sentence(readable) : "Octopus";
 }
 

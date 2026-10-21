@@ -860,11 +860,12 @@ test("Inbox rows read as plain words, name their source and fold repeats from on
     mark("c", "tool.call.allowed", now - 180_000, { runId: "run-other", sourceTitle: "Prepare release notes" }),
     mark("d", "memory.capture.completed", now - 86_400_000), mark("e", "custom.step_done", now - 86_400_000 * 9), request,
   ];
-  assert.equal(presentation.activityTitle(items[0]), "Tool use approved");
+  assert.equal(presentation.activityTitle(items[0]), "Tool call allowed");
   assert.equal(presentation.activityTitle(items[4]), "Custom step done");
   assert.equal(presentation.activityTitle(request), "Approval needed");
   assert.equal(presentation.activitySource(items[0]), "Memory");
-  assert.equal(presentation.activitySource(items[2]), "Prepare release notes");
+  assert.equal(presentation.activitySource(items[2]), "Memory", "a mark names its worker role, not the title of the run's chat");
+  assert.equal(presentation.activitySummary(items[0]), "Memory · tool.call.allowed");
   assert.equal(presentation.activitySource({ ...items[0], workerOriginal: "system_worker_review_agent", worker: "system_worker_review_agent_0123456789abcdef0123" }), "Review agent");
   const sections = presentation.activitySections(items, now);
   assert.deepEqual(sections.map((section) => section.label), ["Needs you", "Today", "Yesterday", "Earlier"]);

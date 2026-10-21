@@ -60,7 +60,7 @@ function InboxPreview({ item, group, activity, onOpen }: {
   const action = item.kind === "approval" ? "Review in task"
     : request ? "Answer in task"
       : item.navigation.kind === "mark" ? "Open history" : homeRun ? "Open Home" : "Open task";
-  const author = item.kind === "mark" ? item.sourceTitle ?? activitySource(item) : activitySource(item);
+  const author = activitySource(item);
   const occurrences = group.map((id) => activity.projectedItems.find((candidate) => candidate.id === id)?.createdAt ?? null)
     .filter((at): at is number => at !== null).sort((left, right) => left - right);
   return (
