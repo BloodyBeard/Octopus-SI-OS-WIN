@@ -6,36 +6,48 @@ import { OctopusNavSection } from "../navigation/OctopusNav";
 import { OctopusSpinner } from "../navigation/OctopusSpinner";
 import { OctopusMarquee } from "../navigation/OctopusMarquee";
 import { AgentPresetLogo } from "../agent/AgentPresetLogo";
+import { Glyph } from "../IconGlyphs";
 import type { MarkActivityItem } from "./markActivity";
+import { activityPresentation, activitySections, activitySource, activityTitle, isActivityRequest, relativeActivityTime, type ActivityRowGroup } from "./markPresentation";
 import type { MarkActivity } from "./useMarkActivity";
 import "./markActivity.css";
 
 export function MarkActivityView({ activity, activeId, onSelect }: {
   activity: MarkActivity;
   activeId: string;
-  onSelect: (item: MarkActivityItem) => void;
+  onSelect: (item: MarkActivityItem, ids: readonly string[]) => void;
 }) {
   const [visibleCount, setVisibleCount] = useState(10);
+  const now = useActivityClock();
+  const items = activity.groups.flatMap((group) => group.items);
+  const sections = activitySections(items, now);
   let remaining = visibleCount;
-  const groups = activity.groups.flatMap((group) => {
-    const items = group.items.slice(0, remaining);
-    remaining -= items.length;
-    return group.key === "priority" || items.length ? [{ ...group, items }] : [];
+  const visible = sections.flatMap((section) => {
+    const rows = section.rows.slice(0, Math.max(remaining, 0));
+    remaining -= rows.length;
+    return rows.length ? [{ ...section, rows }] : [];
   });
-  const hasMore = activity.groups.reduce((count, group) => count + group.items.length, 0) > visibleCount;
+  const hasMore = sections.reduce((count, section) => count + section.rows.length, 0) > visibleCount;
+  const options = <ActivityOptions activity={activity} />;
   return (
     <div className="mark-activity px-row-x" aria-label="Inbox">
       <div className="flex flex-col" role="list">
-        {groups.map((group, index) => (
-          <Fragment key={group.key}>
-            {index > 0 ? <div aria-hidden="true" className="h-4 shrink-0" /> : null}
-            <ActivitySection heading={<OctopusNavSection title={group.key === "priority" ? <div className="py-0.5">{group.label}</div> : group.label} titleActions={index === 0 ? <ActivityOptions activity={activity} /> : undefined}>{null}</OctopusNavSection>}>
+        {!visible.length ? (
+          <ActivitySection heading={<OctopusNavSection title={<div className="py-0.5">Inbox</div>} titleActions={options}>{null}</OctopusNavSection>}>
+            {activity.error ? <div className="mark-activity-message" role="alert">{activity.error}</div> : null}
+            {!activity.loaded && !activity.error ? <div className="mark-activity-message" role="status">Loading Inbox…</div> : null}
+            {activity.loaded && !activity.error ? <div className="mark-activity-empty">You're all caught up</div> : null}
+          </ActivitySection>
+        ) : visible.map((section, index) => (
+          <Fragment key={section.key}>
+            {index > 0 ? <div aria-hidden="true" className="h-3 shrink-0" /> : null}
+            <ActivitySection heading={<OctopusNavSection title={<div className="py-0.5">{section.label}</div>} titleActions={index === 0 ? options : undefined}>{null}</OctopusNavSection>}>
               {index === 0 && activity.error ? <div className="mark-activity-message" role="alert">{activity.error}</div> : null}
-              {index === 0 && !activity.loaded && !activity.error ? <div className="mark-activity-message" role="status">Loading Inbox…</div> : null}
-              {group.key === "priority" && activity.loaded && !activity.error && !group.items.length ? <div className="mark-activity-empty">Nothing needs attention</div> : null}
-              {group.items.map((item) => (
-                <div role="listitem" key={item.id}>
-                  <ActivityRow active={activeId === item.id} item={item} unread={!activity.read.has(item.id)} onSelect={() => onSelect(item)} />
+              {section.rows.map((row) => (
+                <div role="listitem" key={row.id}>
+                  <ActivityRow active={row.items.some((item) => item.id === activeId)} now={now} row={row}
+                    unread={row.items.some((item) => !activity.read.has(item.id))}
+                    onSelect={() => onSelect(row.lead, row.items.map((item) => item.id))} />
                 </div>
               ))}
             </ActivitySection>
@@ -45,6 +57,15 @@ export function MarkActivityView({ activity, activeId, onSelect }: {
       </div>
     </div>
   );
+}
+
+function useActivityClock() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return now;
 }
 
 function ActivitySection({ children, heading }: { children: ReactNode; heading: ReactNode }) {
@@ -57,16 +78,22 @@ function ActivitySection({ children, heading }: { children: ReactNode; heading: 
   </div>;
 }
 
-function ActivityRow({ active, item, unread, onSelect }: { active: boolean; item: MarkActivityItem; unread: boolean; onSelect: () => void }) {
-  const agentName = item.agentName || item.worker;
+function ActivityRow({ active, now, row, unread, onSelect }: { active: boolean; now: number; row: ActivityRowGroup; unread: boolean; onSelect: () => void }) {
+  const item = row.lead;
+  const presentation = activityPresentation(item);
+  const title = activityTitle(item);
+  const source = activitySource(item);
+  const time = relativeActivityTime(item.createdAt, now);
+  const count = row.items.length;
   return <div
     aria-current={active ? "page" : undefined}
-    aria-label={[item.title, agentName, unread && "Unread"].filter(Boolean).join(", ")}
+    aria-label={[title, count > 1 && `${count} times`, source, unread && "Unread"].filter(Boolean).join(", ")}
     className="mark-activity-row sidebar-item group"
     data-active={active || undefined}
+    data-activity-kind={item.kind}
     data-sidebar-nav-item=""
-    data-title-aligned-trailing-rail={Boolean(agentName) || undefined}
-    data-multiline={Boolean(agentName) || undefined}
+    data-title-aligned-trailing-rail=""
+    data-multiline=""
     onClick={(event) => { if (!event.defaultPrevented && event.button === 0) onSelect(); }}
     onKeyDown={(event) => {
       if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
@@ -77,13 +104,20 @@ function ActivityRow({ active, item, unread, onSelect }: { active: boolean; item
     tabIndex={0}
   >
     <div className="flex h-full w-full items-center text-sm leading-4">
-      <div className="flex min-w-0 flex-1 items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-start gap-2.5">
+        <span className="mark-activity-glyph" data-request={isActivityRequest(item) || undefined} aria-hidden="true">
+          {item.agentIcon ? <AgentPresetLogo color={item.agentColor} icon={item.agentIcon} size={14} /> : <Glyph name={presentation.glyph} size={14} />}
+        </span>
         <div className="flex min-w-0 flex-1 self-stretch flex-col items-start gap-0.5 text-base leading-5" data-thread-title-trigger="">
-          <div className="flex w-full min-w-0 flex-1 items-center gap-1">
-            <OctopusMarquee className="min-w-0 flex-1 select-none" animateOnGroupHover data-thread-title=""><span dir="auto">{item.title}</span></OctopusMarquee>
+          <div className="flex w-full min-w-0 flex-1 items-center gap-1.5">
+            <OctopusMarquee className="min-w-0 flex-1 select-none" animateOnGroupHover data-thread-title=""><span dir="auto">{title}</span></OctopusMarquee>
+            {count > 1 ? <span className="mark-activity-count">{count}</span> : null}
             {unread ? <div className="mark-activity-unread" aria-hidden="true"><span className="icon-xs relative scale-50"><span className="mark-activity-unread-dot" /></span></div> : null}
           </div>
-          {agentName ? <span className="mark-activity-secondary line-clamp-2 w-full pe-row-y text-xs leading-4 select-none" data-thread-secondary-title=""><span className="inline-flex items-center gap-1">{item.agentIcon ? <AgentPresetLogo color={item.agentColor} icon={item.agentIcon} size={12} /> : null}<span>{agentName}</span></span></span> : null}
+          <span className="mark-activity-secondary flex w-full min-w-0 items-center gap-1 pe-row-y text-xs leading-4 select-none" data-thread-secondary-title="">
+            <span className="min-w-0 truncate">{source}</span>
+            {time ? <><span aria-hidden="true">·</span><time className="shrink-0" dateTime={item.createdAt ? new Date(item.createdAt).toISOString() : undefined}>{time}</time></> : null}
+          </span>
         </div>
       </div>
     </div>
@@ -109,8 +143,8 @@ function ActivityOptions({ activity }: { activity: MarkActivity }) {
       <OcMenuSectionLabel>Show</OcMenuSectionLabel>
       <OcMenuItem aria-checked={mode === "attention"} label="Messages and requests" role="menuitemradio" selected={mode === "attention"} onClick={() => setClientPreferences({ markActivityMode: "attention" })} />
       <OcMenuItem aria-checked={mode === "all"} label="All activity" role="menuitemradio" selected={mode === "all"} onClick={() => setClientPreferences({ markActivityMode: "all" })} />
-      <OcMenuSectionLabel>Additional marks</OcMenuSectionLabel>
-      {activity.kinds.map((name) => <OcMenuItem aria-checked={mode === "all" || mode === "custom" && Boolean(types?.includes(name))} key={name} label={name} onClick={() => toggle(name)} role="menuitemcheckbox" selected={mode === "all" || mode === "custom" && Boolean(types?.includes(name))} />)}
+      <OcMenuSectionLabel>Also show</OcMenuSectionLabel>
+      {activity.kinds.map((name) => <OcMenuItem aria-checked={mode === "all" || mode === "custom" && Boolean(types?.includes(name))} key={name} label={markKindLabel(name)} description={name} onClick={() => toggle(name)} role="menuitemcheckbox" selected={mode === "all" || mode === "custom" && Boolean(types?.includes(name))} />)}
     </OcDropdown>
   </div>;
 }
@@ -131,4 +165,8 @@ function ActivityNextPage({ onLoad }: { onLoad: () => void }) {
     return () => observer.disconnect();
   }, []);
   return <div role="listitem"><div className="flex w-full justify-center py-3" ref={sentinel}><OctopusSpinner className="icon-xs text-secondary" /></div></div>;
+}
+
+function markKindLabel(name: string): string {
+  return activityPresentation({ kind: "mark", name } as MarkActivityItem).label;
 }

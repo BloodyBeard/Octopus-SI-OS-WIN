@@ -571,6 +571,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     secondaryRunIdentityReady, secondaryChatWorkspace.activeRunId, secondaryHomeViewMode]);
   const markActivity = useMarkActivity(accessProfile, runtimeHost.home, clientWindow.primary, activeNavigationSection === "inbox", visibleChatRunIds);
   const [activitySelection, setActivitySelection] = useState<MarkActivityItem | null>(null);
+  const [activitySelectionGroup, setActivitySelectionGroup] = useState<readonly string[]>([]);
   const [secondaryMovementSelection, setSecondaryMovementSelection] = useState<MarkActivityItem | null>(null);
   useEffect(() => { setActivitySelection(null); setSecondaryMovementSelection(null); }, [accessProfile, runtimeHost.home]);
   const [commandMenuOpen, setCommandMenuOpen] = useState(false);
@@ -1191,11 +1192,14 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     selectSurface(surface.id);
   }, [openNavigationSection, selectSurface]);
 
-  const selectInboxItem = useCallback((item: MarkActivityItem) => {
+  const selectInboxItem = useCallback((item: MarkActivityItem, ids: readonly string[] = [item.id]) => {
     const current = markActivity.projectedItems.find((candidate) => candidate.id === item.id);
     if (!current) { appToast.warning("This notification is no longer available."); return; }
     setActivitySelection({ ...current });
-    if (!markActivity.read.has(current.id) && !markActivity.markRead([current.id])) appToast.warning("Could not save this notification's read state.");
+    const group = [...new Set([current.id, ...ids])];
+    setActivitySelectionGroup(group);
+    const unread = group.filter((id) => !markActivity.read.has(id));
+    if (unread.length && !markActivity.markRead(unread)) appToast.warning("Could not save this notification's read state.");
   }, [markActivity.projectedItems, markActivity.markRead, markActivity.read]);
 
   const openActivityMark = useCallback((item: MarkActivityItem) => {
@@ -2232,7 +2236,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     key={secondarySurface.id}
     accessProfile={accessProfile}
     surface={secondarySurface}
-    inbox={{ activity: markActivity, selected: activitySelection, onSelect: selectInboxItem, onOpen: openActivityMark }}
+    inbox={{ activity: markActivity, selected: activitySelection, selectedGroup: activitySelectionGroup, onSelect: selectInboxItem, onOpen: openActivityMark }}
     topology={topology}
     query={secondaryQuery}
     focusedMovement={secondaryMovementSelection}
@@ -2467,7 +2471,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
             accessProfile={accessProfile}
             commandsActive={primaryCommandsActive}
             surface={activeSurface}
-            inbox={{ activity: markActivity, selected: activitySelection, onSelect: selectInboxItem, onOpen: openActivityMark }}
+            inbox={{ activity: markActivity, selected: activitySelection, selectedGroup: activitySelectionGroup, onSelect: selectInboxItem, onOpen: openActivityMark }}
             topology={topology}
             query={query}
             onQueryChange={(value) => { setActivitySelection(null); setQuery(value); }}

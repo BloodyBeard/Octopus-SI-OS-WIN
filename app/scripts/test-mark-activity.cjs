@@ -388,7 +388,7 @@ test("actual ledger projection decodes only admitted marks with exact source fie
   assert.ok(movementRows.every((row) => row.from.kind === "interface" && row.to.kind === "interface"));
   const decoded = activity.decodeMarkActivity(projected);
   assert.deepEqual(ids(decoded), ["movements:1", "movements:3"]);
-  assert.deepEqual(decoded[0], { id: "movements:3", sequence: 2, name: "check.passed", worker: "worker-test", runId: "run-test", artifactId: "same-artifact", createdAt: 1_788_600_002_000,
+  assert.deepEqual(decoded[0], { id: "movements:3", sequence: 2, name: "check.passed", worker: "worker-test", workerOriginal: "worker-test", sourceTitle: null, runId: "run-test", artifactId: "same-artifact", createdAt: 1_788_600_002_000,
     kind: "mark", title: "check.passed", agentId: null, agentName: null, agentIcon: null, agentColor: null, movementId: "movements:3", requestId: null, clientSurfaceRole: null, navigation: { kind: "mark", movementId: "movements:3" } });
   assert.equal(projected.marks[0].checkpoint_id, ""); assert.equal(projected.marks[0].interface_id, "");
   assert.deepEqual(activity.decodeMarkKinds(await store.read({ contract_version: 1, method: "projection.descriptors.mark_kinds.list" })), ["check.passed"]);
@@ -720,7 +720,7 @@ test("Inbox selection stays on its detail surface and explicit open follows exac
   const activate = owner.body.statements.find((node) => ts.isExpressionStatement(node) && contains(node, "CLIENT_NOTIFICATION_ACTIVATE_EVENT"));
   assert.ok(open && activate, "Activity callback owners must exist");
   const create = load(relative, {}, `export function create(deps: any) {
-    const { useCallback, useEffect, markActivity, appToast, selectSurface, setActivitySelection, setQuery, setSecondaryPaneOpen, openSecondaryChatTab, openSecondaryTab, secondaryPaneTab, homeChatWorkspace, setSecondaryHomeViewMode, setSecondaryMovementSelection, window, CustomEvent, CLIENT_NOTIFICATION_ACTIVATE_EVENT } = deps;
+    const { useCallback, useEffect, markActivity, appToast, selectSurface, setActivitySelection, setActivitySelectionGroup, setQuery, setSecondaryPaneOpen, openSecondaryChatTab, openSecondaryTab, secondaryPaneTab, homeChatWorkspace, setSecondaryHomeViewMode, setSecondaryMovementSelection, window, CustomEvent, CLIENT_NOTIFICATION_ACTIVATE_EVENT } = deps;
     ${select.getText(parsed)}\n${open.getText(parsed)}\n${activate.getText(parsed)}\nreturn { openActivityMark, selectInboxItem };
   }`).create;
   const calls = [], items = activity.decodeMarkActivity(projected), window = storageWindow();
@@ -730,7 +730,7 @@ test("Inbox selection stays on its detail surface and explicit open follows exac
     useCallback: (fn) => fn, useEffect: (fn) => { cleanup = fn(); }, window, CustomEvent, CLIENT_NOTIFICATION_ACTIVATE_EVENT: "activate",
     markActivity: { projectedItems: items, read: new Set(), markRead: (ids) => { calls.push(["read", ids]); return readResult; } },
     appToast: { warning: (message) => calls.push(["warning", message]) },
-    selectSurface: (id) => calls.push(["surface", id]), setActivitySelection: (value) => calls.push(["selected", value]),
+    selectSurface: (id) => calls.push(["surface", id]), setActivitySelection: (value) => calls.push(["selected", value]), setActivitySelectionGroup: () => {},
     openSecondaryChatTab: (id) => calls.push(["chat", id]),
     homeChatWorkspace: {selectRun: (id) => calls.push(["home", id])},
     setSecondaryHomeViewMode: (mode) => calls.push(["home-mode", mode]),
@@ -846,4 +846,28 @@ test("missing, wrong-sequence, unaddressable and index failures never become a s
     h.props.focusedMovement = { id: "movements:3", sequence: null }; h.update(); await h.settle();
     assert.equal(elements(h.value, (node) => node.type?.name === "ProjectionResourceFailure").length, 1);
   } finally { h.close(); }
+});
+
+test("Inbox rows read as plain words, name their source and fold repeats from one source", () => {
+  const presentation = load("src/components/activity/markPresentation.ts");
+  const now = new Date(2026, 9, 21, 15, 0).getTime();
+  const mark = (id, name, at, extra = {}) => ({ id, kind: "mark", name, title: name, worker: "system_worker_memory_observer_0123456789abcdef0123", workerOriginal: "system_worker_memory_observer",
+    sourceTitle: null, agentName: null, agentIcon: null, runId: "run-memory", createdAt: at, sequence: 1, navigation: { kind: "mark", movementId: id }, ...extra });
+  const request = { ...mark("approve", "approval", now - 86_400_000 * 3), kind: "approval", title: "Allow file write", sourceTitle: "Prepare release notes", runId: "run-task" };
+  const items = [
+    mark("a", "tool.call.allowed", now - 60_000), mark("b", "tool.call.allowed", now - 120_000),
+    mark("c", "tool.call.allowed", now - 180_000, { runId: "run-other", sourceTitle: "Prepare release notes" }),
+    mark("d", "memory.capture.completed", now - 86_400_000), mark("e", "custom.step_done", now - 86_400_000 * 9), request,
+  ];
+  assert.equal(presentation.activityTitle(items[0]), "Tool use approved");
+  assert.equal(presentation.activityTitle(items[4]), "Custom step done");
+  assert.equal(presentation.activityTitle(request), "Approval needed");
+  assert.equal(presentation.activitySource(items[0]), "Memory");
+  assert.equal(presentation.activitySource(items[2]), "Prepare release notes");
+  assert.equal(presentation.activitySource({ ...items[0], workerOriginal: "system_worker_review_agent", worker: "system_worker_review_agent_0123456789abcdef0123" }), "Review agent");
+  const sections = presentation.activitySections(items, now);
+  assert.deepEqual(sections.map((section) => section.label), ["Needs you", "Today", "Yesterday", "Earlier"]);
+  assert.deepEqual(sections[1].rows.map((row) => row.items.map((item) => item.id)), [["a", "b"], ["c"]]);
+  assert.equal(presentation.relativeActivityTime(now - 120_000, now), "2m");
+  assert.equal(presentation.relativeActivityTime(now - 3 * 3_600_000, now), "3h");
 });

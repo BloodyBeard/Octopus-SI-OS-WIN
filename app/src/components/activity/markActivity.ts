@@ -16,6 +16,8 @@ export type MarkActivityItem = Readonly<{
   navigation: { kind: "run"; runId: string; clientSurfaceRole: "home" | "task" } | { kind: "mark"; movementId: string };
   name: string;
   worker: string;
+  workerOriginal: string;
+  sourceTitle: string | null;
   runId: string;
   artifactId: string;
   createdAt: number | null;
@@ -50,6 +52,8 @@ export function decodeMarkActivity(value: unknown): MarkActivityItem[] {
       movementId: id, requestId: null, clientSurfaceRole: null,
       navigation: { kind: "mark" as const, movementId: id },
       worker: item.worker as string,
+      workerOriginal: typeof item.worker_original === "string" && item.worker_original ? item.worker_original : item.worker as string,
+      sourceTitle: null,
       runId: item.run_id as string,
       artifactId: item.artifact_id as string,
       createdAt: Number.isFinite(time) ? time : null,
@@ -74,9 +78,11 @@ export function decodeOperatorActivity(value: unknown, marks: readonly MarkActiv
   const result = value as Record<string, unknown>;
   if (!Array.isArray(result.activity) || !Array.isArray(result.chats)) throw new Error("Activity projection is incomplete");
   const chats = new Map<string, ReturnType<typeof activityIdentity>>();
+  const titles = new Map<string, string | null>();
   for (const chat of result.chats) {
     if (!chat || typeof chat !== "object" || typeof chat.run_id !== "string" || !chat.run_id || chats.has(chat.run_id)) throw new Error("Activity chat identity is invalid");
     chats.set(chat.run_id, activityIdentity(chat));
+    titles.set(chat.run_id, typeof chat.title === "string" && chat.title.trim() ? chat.title.trim() : null);
   }
   const identities = new Set<string>();
   const attention = result.activity.map((row: unknown): MarkActivityItem => {
@@ -95,13 +101,14 @@ export function decodeOperatorActivity(value: unknown, marks: readonly MarkActiv
     if (JSON.stringify(identity) !== JSON.stringify(chats.get(item.run_id as string))) throw new Error("Activity Agent differs from its projected chat identity");
     return {
       id: item.id as string, kind: item.kind as ActivityKind, title: item.title as string, name: item.name as string,
-      ...identity, worker: item.worker, runId: item.run_id as string, artifactId: item.artifact_id as string,
+      ...identity, worker: item.worker, workerOriginal: item.worker, sourceTitle: titles.get(item.run_id as string) ?? null,
+      runId: item.run_id as string, artifactId: item.artifact_id as string,
       movementId: item.movement_id as string | null, requestId: item.request_id as string | null,
       sequence: item.seq as number, createdAt: item.created_at_ms as number | null, clientSurfaceRole: item.client_surface_role,
       navigation: { kind: "run", runId: item.run_id as string, clientSurfaceRole: item.client_surface_role },
     };
   });
-  return [...attention, ...marks.map((item) => ({ ...item, ...chats.get(item.runId) }))]
+  return [...attention, ...marks.map((item) => ({ ...item, ...chats.get(item.runId), sourceTitle: titles.get(item.runId) ?? null }))]
     .sort((a, b) => (b.createdAt ?? -1) - (a.createdAt ?? -1) || (b.sequence ?? -1) - (a.sequence ?? -1) || a.id.localeCompare(b.id));
 }
 

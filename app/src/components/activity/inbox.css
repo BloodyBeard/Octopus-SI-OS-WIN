@@ -130,3 +130,46 @@
   .inbox-detail-sender time { width: 100%; margin-left: 32px; }
   .inbox-summary h1, .inbox-detail h1 { font-size: 20px; }
 }
+
+.inbox-overview-glyph,
+.inbox-detail-source-glyph {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--color-background-primary-ghost-hover);
+  color: var(--color-text-secondary);
+  place-items: center;
+}
+
+.inbox-detail-source-glyph { width: 22px; height: 22px; border-radius: 6px; }
+
+.inbox-overview-row[data-request] .inbox-overview-glyph,
+.inbox-detail-kind[data-request] { color: var(--color-text-accent, var(--color-background-info-solid)); }
+
+.inbox-detail-occurrences {
+  margin: -8px 0 20px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.inbox-detail-technical { margin-top: 32px; }
+
+.inbox-detail-technical-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  margin-left: -6px;
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  cursor: var(--cursor-interaction);
+}
+
+.inbox-detail-technical-toggle:hover { background: var(--color-background-primary-ghost-hover); color: var(--color-text-secondary); }
+.inbox-detail-technical-toggle:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 0; }
+.inbox-detail-technical .inbox-detail-evidence { margin-top: 12px; }

@@ -1,33 +1,27 @@
+import { useState } from "react";
 import { OcButton } from "../../design-system/components";
-import { Glyph, type GlyphName } from "../IconGlyphs";
+import { Glyph } from "../IconGlyphs";
 import { AgentPresetLogo } from "../agent/AgentPresetLogo";
 import { OctopusLoadingState } from "../OctopusLoadingLogo";
-import type { MarkActivityItem, ActivityKind } from "./markActivity";
+import type { MarkActivityItem } from "./markActivity";
+import { activityPresentation, activitySource, activityTitle, isActivityRequest, relativeActivityTime } from "./markPresentation";
 import type { MarkActivity } from "./useMarkActivity";
 import "./inbox.css";
 
 export type InboxSurfaceState = {
   activity: MarkActivity;
   selected: MarkActivityItem | null;
-  onSelect: (item: MarkActivityItem) => void;
+  selectedGroup?: readonly string[];
+  onSelect: (item: MarkActivityItem, ids?: readonly string[]) => void;
   onOpen: (item: MarkActivityItem) => void;
 };
 
-const activityPresentation: Record<ActivityKind, { label: string; glyph: GlyphName; body: string }> = {
-  message: { label: "New message", glyph: "chat", body: "Open the task to read the reply and continue the conversation." },
-  approval: { label: "Approval requested", glyph: "lock", body: "Review the request in its task before deciding whether to approve it." },
-  user_input: { label: "Your input is needed", glyph: "user", body: "Open the task to answer the request and continue the work." },
-  elicitation: { label: "Information requested", glyph: "chat", body: "Open the task to review and answer the request." },
-  mark: { label: "Recorded activity", glyph: "worktree", body: "View the recorded movement to inspect its evidence and context." },
-};
-
-export function InboxSurface({ activity, selected, onSelect, onOpen }: InboxSurfaceState) {
+export function InboxSurface({ activity, selected, selectedGroup = [], onSelect, onOpen }: InboxSurfaceState) {
   const item = selected && activity.projectedItems.find((candidate) => candidate.id === selected.id);
-  const presentation = item ? activityPresentation[item.kind] : null;
-  const openLabel = item?.navigation.kind === "mark" ? "View movement"
-    : item?.navigation.kind === "run" && item.navigation.clientSurfaceRole === "home" ? "Open Home" : "Open task";
   const unread = activity.items.filter((candidate) => !activity.read.has(candidate.id));
-  const previewItems = (unread.length ? unread : activity.items).slice(0, 5);
+  const requests = unread.filter(isActivityRequest);
+  const previewItems = [...requests, ...unread.filter((candidate) => !isActivityRequest(candidate))].slice(0, 5);
+  const now = Date.now();
 
   return (
     <section className="inbox-surface" aria-label="Inbox details">
@@ -41,47 +35,26 @@ export function InboxSurface({ activity, selected, onSelect, onOpen }: InboxSurf
         ) : !activity.loaded ? (
           <OctopusLoadingState className="inbox-summary" label="Loading Inbox" />
         ) : selected && !item ? (
-          <div className="inbox-summary" role="status"><Glyph name="inbox" size={32} /><h1>Activity is no longer available</h1><p>Select another item from your Inbox.</p></div>
-        ) : item && presentation ? (
-          <article className="inbox-detail" key={item.id}>
-            <div className="inbox-detail-kind"><Glyph name={presentation.glyph} size={18} /><span>{presentation.label}</span></div>
-            <h1>{item.title}</h1>
-            <div className="inbox-detail-sender">
-              {item.agentIcon ? <AgentPresetLogo color={item.agentColor} icon={item.agentIcon} size={24} /> : <Glyph name="user" size={24} />}
-              <span>{item.agentName || item.worker || "Octopus"}</span>
-              {item.createdAt ? <time dateTime={new Date(item.createdAt).toISOString()}>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(item.createdAt)}</time> : null}
-            </div>
-            <p className="inbox-detail-description">{item.navigation.kind === "run" && item.navigation.clientSurfaceRole === "home" ? "Open Home to review this activity and continue the conversation." : presentation.body}</p>
-            <div className="inbox-detail-actions">
-              <OcButton leadingIcon={item.navigation.kind === "mark" ? "worktree" : "openExternal"} onClick={() => onOpen(item)} variant="primary">{openLabel}</OcButton>
-            </div>
-            {item.navigation.kind === "mark" ? (
-              <dl className="inbox-detail-evidence">
-                <div><dt>Mark</dt><dd>{item.name}</dd></div>
-                {item.sequence !== null ? <div><dt>Movement</dt><dd>{item.sequence}</dd></div> : null}
-                {item.artifactId ? <div><dt>Artifact</dt><dd>{item.artifactId}</dd></div> : null}
-              </dl>
-            ) : null}
-          </article>
+          <div className="inbox-summary" role="status"><Glyph name="inbox" size={32} /><h1>This activity is gone</h1><p>Pick another item from your Inbox.</p></div>
+        ) : item ? (
+          <InboxDetail item={item} group={selectedGroup.includes(item.id) ? selectedGroup : [item.id]} activity={activity} now={now} onOpen={onOpen} />
         ) : (
           <div className="inbox-summary">
             <span className="inbox-summary-icon"><Glyph name="inbox" size={32} /></span>
-            <h1>{activity.unreadCount ? "Your Inbox" : "You're up to date"}</h1>
-            <p>{activity.unreadCount ? "Messages and requests from across Octopus." : "New messages and requests will appear here as work progresses."}</p>
-            <div className="inbox-summary-counts">
-              <div><strong>{activity.unreadCount}</strong><span>Unread</span></div>
-              <div><strong>{activity.items.filter((candidate) => !activity.read.has(candidate.id) && candidate.kind !== "message" && candidate.kind !== "mark").length}</strong><span>Requests</span></div>
-            </div>
+            <h1>{requests.length ? `${requests.length} ${requests.length === 1 ? "thing needs" : "things need"} you` : unread.length ? "Catch up on your work" : "You're all caught up"}</h1>
+            <p>{unread.length ? "Replies, requests and what Octopus did while you were away." : "New replies and requests will show up here as your work runs."}</p>
             {previewItems.length ? (
               <div className="inbox-overview">
-                <h2>{unread.length ? "Unread activity" : "Recent activity"}</h2>
-                {previewItems.map((candidate) => (
-                  <button className="inbox-overview-row" key={candidate.id} onClick={() => onSelect(candidate)} type="button">
-                    <Glyph name={activityPresentation[candidate.kind].glyph} size={20} />
-                    <span className="inbox-overview-text"><strong>{candidate.title}</strong><span>{candidate.agentName || candidate.worker || activityPresentation[candidate.kind].label}</span></span>
-                    {candidate.createdAt ? <time dateTime={new Date(candidate.createdAt).toISOString()}>{new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(candidate.createdAt)}</time> : null}
-                  </button>
-                ))}
+                {previewItems.map((candidate) => {
+                  const presentation = activityPresentation(candidate);
+                  return (
+                    <button className="inbox-overview-row" data-request={isActivityRequest(candidate) || undefined} key={candidate.id} onClick={() => onSelect(candidate)} type="button">
+                      <span className="inbox-overview-glyph"><Glyph name={presentation.glyph} size={16} /></span>
+                      <span className="inbox-overview-text"><strong>{activityTitle(candidate)}</strong><span>{activitySource(candidate)}</span></span>
+                      {candidate.createdAt ? <time dateTime={new Date(candidate.createdAt).toISOString()}>{relativeActivityTime(candidate.createdAt, now)}</time> : null}
+                    </button>
+                  );
+                })}
               </div>
             ) : null}
           </div>
@@ -89,4 +62,61 @@ export function InboxSurface({ activity, selected, onSelect, onOpen }: InboxSurf
       </div>
     </section>
   );
+}
+
+function InboxDetail({ item, group, activity, now, onOpen }: {
+  item: MarkActivityItem;
+  group: readonly string[];
+  activity: MarkActivity;
+  now: number;
+  onOpen: (item: MarkActivityItem) => void;
+}) {
+  const [technical, setTechnical] = useState(false);
+  const presentation = activityPresentation(item);
+  const occurrences = group.map((id) => activity.projectedItems.find((candidate) => candidate.id === id)).filter((candidate): candidate is MarkActivityItem => Boolean(candidate));
+  const times = occurrences.map((candidate) => candidate.createdAt).filter((at): at is number => at !== null).sort((left, right) => left - right);
+  const source = activitySource(item);
+  const homeRun = item.navigation.kind === "run" && item.navigation.clientSurfaceRole === "home";
+  const openLabel = item.navigation.kind === "mark" ? "Show in history"
+    : homeRun ? "Open Home" : isActivityRequest(item) ? "Review in task" : "Open task";
+  return (
+    <article className="inbox-detail" key={item.id}>
+      <div className="inbox-detail-kind" data-request={isActivityRequest(item) || undefined}><Glyph name={presentation.glyph} size={16} /><span>{presentation.category}</span></div>
+      <h1>{activityTitle(item)}</h1>
+      <div className="inbox-detail-sender">
+        {item.agentIcon ? <AgentPresetLogo color={item.agentColor} icon={item.agentIcon} size={22} /> : <span className="inbox-detail-source-glyph"><Glyph name={presentation.glyph} size={14} /></span>}
+        <span>{source}</span>
+        {item.createdAt ? <time dateTime={new Date(item.createdAt).toISOString()} title={new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(item.createdAt)}>{relativeActivityTime(item.createdAt, now)}</time> : null}
+      </div>
+      <p className="inbox-detail-description">{homeRun ? "Open Home to read this and continue the conversation." : presentation.description}</p>
+      {occurrences.length > 1 ? (
+        <p className="inbox-detail-occurrences">
+          {`Happened ${occurrences.length} times`}
+          {times.length > 1 ? ` between ${clock(times[0])} and ${clock(times.at(-1) as number)}` : ""}.
+        </p>
+      ) : null}
+      <div className="inbox-detail-actions">
+        <OcButton leadingIcon={item.navigation.kind === "mark" ? "activity" : "openExternal"} onClick={() => onOpen(item)} variant="primary">{openLabel}</OcButton>
+      </div>
+      <div className="inbox-detail-technical">
+        <button aria-expanded={technical} className="inbox-detail-technical-toggle" onClick={() => setTechnical(!technical)} type="button">
+          <Glyph name={technical ? "chevronUp" : "chevronDown"} size={14} />
+          <span>Technical details</span>
+        </button>
+        {technical ? (
+          <dl className="inbox-detail-evidence">
+            <div><dt>{item.kind === "mark" ? "Mark" : "Event"}</dt><dd>{item.name}</dd></div>
+            <div><dt>Worker</dt><dd>{item.worker}</dd></div>
+            <div><dt>Run</dt><dd>{item.runId}</dd></div>
+            {item.sequence !== null ? <div><dt>Movement</dt><dd>{item.sequence}</dd></div> : null}
+            {item.artifactId ? <div><dt>Artifact</dt><dd>{item.artifactId}</dd></div> : null}
+          </dl>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function clock(at: number): string {
+  return new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(at);
 }

@@ -790,20 +790,38 @@ function buildFixtureProjection() {
     });
   }).sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
 
-  const marks = Array.from({ length: 18 }, (_, index) => {
-    const run = runs[index % runs.length];
+  const minutesAgo = (minutes) => new Date(now - minutes * 60_000).toISOString();
+  const markSources = {
+    task: { run_id: "lab_run_2", ee_id: FIXTURE_PRIMARY_PROJECT_ID, worker: "lab_system_worker_coder", worker_original: "system_worker_operator_task" },
+    review: { run_id: "lab_run_3", ee_id: FIXTURE_PRIMARY_PROJECT_ID, worker: "lab_system_worker_coder", worker_original: "system_worker_operator_task" },
+    home: { run_id: "lab_run_1", ee_id: FIXTURE_ROOT_EE_ID, worker: "lab_system_worker_planner", worker_original: "system_worker_operator_home" },
+    memory: { run_id: "lab_run_memory_observer", ee_id: FIXTURE_ROOT_EE_ID, worker: "lab_system_worker_memory_observer_3c5c96af8a1b2c7902af96c2", worker_original: "system_worker_memory_observer" },
+    projection: { run_id: "lab_run_memory_projection", ee_id: FIXTURE_ROOT_EE_ID, worker: "lab_system_worker_memory_projection_3c5c96af8a1b2c7902af96c2", worker_original: "system_worker_memory_projection" },
+  };
+  const markPlan = [
+    ["task", "tool.call.allowed", 2], ["task", "tool.call.allowed", 3], ["task", "tool.call.allowed", 4], ["task", "tool.call.allowed", 6],
+    ["task", "tool.result.corresponds", 7], ["task", "coder.build.ok", 9],
+    ["memory", "memory.experience.admitted", 14], ["projection", "memory.capture.completed", 15],
+    ["home", "task.summary.received", 38], ["home", "operator.approval", 52],
+    ["review", "tool.call.allowed", 95], ["review", "tool.call.allowed", 97], ["review", "tool.result.corresponds", 99],
+    ["memory", "memory.experience.admitted", 26 * 60], ["projection", "memory.capture.completed", 26 * 60 + 2],
+    ["home", "operator.input.provided", 30 * 60], ["review", "hook.gate.passed", 4 * 24 * 60], ["task", "context.recipe.valid", 6 * 24 * 60],
+  ];
+  const marks = markPlan.map(([source, name, minutes], index) => {
+    const origin = markSources[source];
     return fixtureRow({
       movement_id: `lab_mark_movement_${index + 1}`,
-      mark_name: ["llm.output.ok", "artifact.admitted", "run.checkpoint.closed"][index % 3],
+      mark_name: name,
       status: "admitted",
-      run_id: run.run_id,
-      ee_id: run.ee_id,
-      worker: run.worker,
-      checkpoint_id: `${run.run_id}:checkpoint:${(index % 2) + 1}`,
+      run_id: origin.run_id,
+      ee_id: origin.ee_id,
+      worker: origin.worker,
+      worker_original: origin.worker_original,
+      checkpoint_id: `${origin.run_id}:checkpoint:${(index % 2) + 1}`,
       interface_id: "",
       artifact_id: artifacts[index % artifacts.length].artifact_id,
-      created_at: at((index * 5) % 29, index % 12),
-      seq: 900 + index,
+      created_at: minutesAgo(minutes),
+      seq: 900 + markPlan.length - index,
       source: "ledger",
     });
   }).sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));

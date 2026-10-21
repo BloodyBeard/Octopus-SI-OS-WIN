@@ -1098,6 +1098,7 @@ function bindingRows(projection) {
 function markRows(projection) {
   return projectionMemo(projection, "ledger", "markRows", () => {
     const runs = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
+    const originals = new Map(descriptorRows(projection, "interface").map((descriptor) => [stringValue(descriptor.id), stringValue(descriptor.copy_of)]));
     return projection.ledgerRows.flatMap((row) => {
     const match = /^MarkOutcomeAdmitted\((.+)\)$/.exec(stringValue(row.kind));
     if (!match) return [];
@@ -1111,6 +1112,7 @@ function markRows(projection) {
       run_id: runId,
       ee_id: stringValue(run?.ee_id),
       worker: stringValue(run?.worker),
+      worker_original: originals.get(stringValue(run?.worker)) || stringValue(run?.worker),
       checkpoint_id: "",
       interface_id: "",
       artifact_id: ledgerArtifactId(row),
