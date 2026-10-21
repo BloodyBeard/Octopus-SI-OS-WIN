@@ -243,12 +243,9 @@ jobs:
         run: |
           mkdir -p registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin
           install -m 755 target/debug/octopus-input-intake-life registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/octopus-input-intake-life
-          node app/scripts/test-local-packages.cjs & packages=$!
-          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology & topology=$!
-          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology & preset=$!
-          wait $packages
-          wait $topology
-          wait $preset
+          node app/scripts/test-local-packages.cjs
+          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology
+          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology
 
       - name: Client setup and terminal contracts
         run: |
