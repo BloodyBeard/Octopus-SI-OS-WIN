@@ -6742,6 +6742,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-run-authoring",
+ "octopus-util-string",
  "octopus-world-pyecho-life-runtime",
  "serde",
  "serde_json",

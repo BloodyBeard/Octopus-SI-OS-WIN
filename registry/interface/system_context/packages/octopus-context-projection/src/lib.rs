@@ -226,18 +226,19 @@ fn fields(
     pointers: &[String],
     limit: usize,
     required: bool,
-) -> Result<Value, String> {
+) -> Result<(Value, Vec<Value>), String> {
     let mut projected = serde_json::Map::new();
+    let mut trimmed = Vec::new();
     for pointer in pointers {
         match payload.pointer(pointer) {
             Some(value) => {
-                let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
-                if bytes.len() > limit {
-                    return Err(format!(
-                        "selected projection field '{pointer}' exceeds its declared bound"
-                    ));
+                let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?.len();
+                if bytes > limit {
+                    projected.insert(pointer.clone(), truncated_middle(value, limit)?);
+                    trimmed.push(json!({"pointer":pointer,"bytes":bytes}));
+                } else {
+                    projected.insert(pointer.clone(), value.clone());
                 }
-                projected.insert(pointer.clone(), value.clone());
             }
             None if required => {
                 return Err(format!("required projection field '{pointer}' is absent"));
@@ -245,22 +246,22 @@ fn fields(
             None => {}
         }
     }
-    Ok(Value::Object(projected))
+    Ok((Value::Object(projected), trimmed))
 }
 
-fn bounded_fields(payload: &Value, pointers: &[String], limit: usize) -> Result<(Value, Vec<Value>), String> {
-    let mut projected = serde_json::Map::new();
-    let mut trimmed = Vec::new();
-    for pointer in pointers {
-        let Some(value) = payload.pointer(pointer) else { continue };
-        let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?.len();
-        if bytes > limit {
-            trimmed.push(json!({"pointer":pointer,"bytes":bytes}));
-        } else {
-            projected.insert(pointer.clone(), value.clone());
+fn truncated_middle(value: &Value, limit: usize) -> Result<Value, String> {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).map_err(|e| e.to_string())?,
+    };
+    let mut budget = limit;
+    loop {
+        let truncated = Value::String(octopus_util_string::truncate_middle_chars(&text, budget));
+        if budget == 0 || serde_json::to_vec(&truncated).map_err(|e| e.to_string())?.len() <= limit {
+            return Ok(truncated);
         }
+        budget = budget * 3 / 4;
     }
-    Ok((Value::Object(projected), trimmed))
 }
 
 pub fn project_context(
@@ -345,7 +346,7 @@ fn project_window(
         .iter()
         .find(|rule| rule.labels.contains(&input.label))
         .ok_or("selected input has no declared fields")?;
-    let input_fields = fields(
+    let (input_fields, input_trimmed) = fields(
         &input.payload,
         &input_rule.pointers,
         config.bounds.max_field_bytes,
@@ -376,7 +377,7 @@ fn project_window(
             .iter()
             .find(|rule| rule.labels.contains(&entry.label))
         {
-            let (projected, trimmed) = bounded_fields(&entry.payload, &rule.pointers, config.bounds.max_field_bytes)?;
+            let (projected, trimmed) = fields(&entry.payload, &rule.pointers, config.bounds.max_field_bytes, false)?;
             fields_trimmed |= !trimmed.is_empty();
             evidence.push(json!({"label":entry.label,"source_artifact":entry.source_artifact,
                 "source_movement_seq":seq,"fields":projected,"trimmed_fields":trimmed,
@@ -385,7 +386,7 @@ fn project_window(
             omitted.push(json!({"label":entry.label,"source_movement_seq":seq,"source_artifact":entry.source_artifact}));
         }
     }
-    let terminal_fields = fields(&payload,&config.terminal_pointers,config.bounds.max_field_bytes,true)?;
+    let (terminal_fields, terminal_trimmed) = fields(&payload,&config.terminal_pointers,config.bounds.max_field_bytes,true)?;
     let mut trimmed_entries = evidence.len().saturating_sub(config.bounds.max_projected_entries);
     loop {
         let mut output = json!({
@@ -403,6 +404,8 @@ fn project_window(
                 "input_pointers":input_rule.pointers,"terminal_pointers":config.terminal_pointers,
                 "evidence_rules":config.evidence_rules},
         });
+        if !input_trimmed.is_empty() { output["selected_input"]["trimmed_fields"] = json!(input_trimmed); }
+        if !terminal_trimmed.is_empty() { output["terminal_trimmed_fields"] = json!(terminal_trimmed); }
         render_text(&config.task, &mut output)?;
         let fits = serde_json::to_vec(&output).map_err(|e| e.to_string())?.len() as u64
             <= config.bounds.max_output_bytes;
@@ -732,11 +735,8 @@ pub async fn process_admitted_input(
                     &reference,
                     u64::MAX,
                 )?;
-            if let Some(pointer) = origin.pointers.iter().find(|pointer| captured.pointer(pointer).is_none()) {
-                return Err(format!("required projection field '{pointer}' is absent"));
-            }
             let (original, trimmed) =
-                bounded_fields(&captured, &origin.pointers, config.bounds.max_field_bytes)?;
+                fields(&captured, &origin.pointers, config.bounds.max_field_bytes, true)?;
             output["selected_input"]["original_fields"] = original;
             if !trimmed.is_empty() {
                 output["selected_input"]["original_trimmed_fields"] = json!(trimmed);
