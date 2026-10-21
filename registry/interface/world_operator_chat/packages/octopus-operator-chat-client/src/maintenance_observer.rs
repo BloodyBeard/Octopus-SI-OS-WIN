@@ -311,6 +311,10 @@ pub fn plan_maintenance_observer(
         .as_mut()
         .ok_or("provider configuration vanished")?
         .private_config;
+    collection_context::configure_inline_selection(private, &[])?;
+    if let Some(instructions) = private.get_mut("instruction_artifacts") {
+        instructions.as_array_mut().ok_or("instruction_artifacts must be an array")?.clear();
+    }
     for key in [
         "input_intake",
         "context_artifact_bindings",

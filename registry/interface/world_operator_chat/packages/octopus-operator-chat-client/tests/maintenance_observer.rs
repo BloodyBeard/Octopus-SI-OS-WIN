@@ -160,6 +160,11 @@ fn selected_native_capture_keeps_companion_exact_on_operator_revisions() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let request = capture_fixture(&root);
+    let provider_path = root.join("registry/interface/world_provider_fixture/interface.json");
+    let mut provider = read(&provider_path);
+    provider["interface_driver_config"]["private_config"]["instruction_artifacts"] =
+        json!(["artifact-context-collection-guide"]);
+    std::fs::write(&provider_path, serde_json::to_vec(&provider).unwrap()).unwrap();
     let client_path = root.join("registry/interface/world_operator_chat/client.json");
     let selected_client = read(&client_path);
     for filename in [
@@ -235,6 +240,9 @@ fn selected_native_capture_keeps_companion_exact_on_operator_revisions() {
         .find(|write| write.path.ends_with(format!("{provider}/interface.json")))
         .unwrap();
     let cloned: Value = serde_json::from_str(&formed.content).unwrap();
+    assert_eq!(cloned["interface_driver_config"]["private_config"]["instruction_artifacts"], json!([]));
+    assert_eq!(cloned["interface_driver_config"]["private_config"]["worker_instruction_artifacts"],
+        json!(["artifact-role-memory-observer"]));
     assert_eq!(
         cloned["interface_driver_config"]["private_config"]["model"],
         request.model
