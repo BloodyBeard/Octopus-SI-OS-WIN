@@ -2350,7 +2350,8 @@ function fixtureChatExecutionContexts(data) {
         client_template_digest: "lab-client-template",
         client_template_application_ids: applicationChoices.map((application) => application.id),
         client_template_worker_environment_kinds: driverChoices.map((driver) => driver.name),
-        provider_interface_ids: ["world_provider_codex"],
+        provider_interface_ids: FIXTURE_WORKER_PROVIDER_IDS,
+        interface_policy: fixtureWorkerInterfacePolicy(data.providers),
         role_artifact_ids: [],
         authoring_room_interface_id: "lab_system_exec",
         door_host_slots: workspaceSlots,
@@ -2373,6 +2374,14 @@ function fixtureChatExecutionContexts(data) {
       }],
     });
   });
+}
+
+const FIXTURE_WORKER_PROVIDER_IDS = ["world_provider_codex"];
+
+function fixtureWorkerInterfacePolicy(providers) {
+  return Object.fromEntries((providers ?? [])
+    .filter((provider) => FIXTURE_WORKER_PROVIDER_IDS.includes(provider.id))
+    .map((provider) => [provider.id, { models: provider.models.map((model) => model.model) }]));
 }
 
 function fixtureEnvironmentWorker(eeId) {

@@ -24,6 +24,24 @@ test('An existing task continues through its exact provider without a saved Agen
   for (const patch of [{ providerInterfaceId: 'other' }, { providerBoundInterfaceId: '' }, { eeId: 'other' }, { runId: 'other' }, { workerChoiceInterfaceId: 'other' }, { writable: false }, { archived: true }]) assert.equal(providerForExistingRun(provider, { ...run, ...patch }, selection), null);
   assert.equal(providerForExistingRun(provider, undefined, selection), null);
 });
+test('Test profile workers admit the models their Home and tasks send with', async () => {
+  const { createFixtureProjectionStore } = require('../electron/fixtureProjection.cjs');
+  const { projectionReadRequest } = require('../electron/projectionReadContract.cjs');
+  const { providerForExecutionContext } = capabilities.exports;
+  const store = createFixtureProjectionStore();
+  const read = async method => store.read(projectionReadRequest(method));
+  const { providers } = await read('projection.operator.providers.list');
+  const { chats } = await read('projection.operator.chats.list');
+  const { contexts } = await read('projection.operator.chat.contexts');
+  const writable = chats.filter(chat => chat.writable && ['home', 'task'].includes(chat.client_surface_role));
+  assert.ok(writable.some(chat => chat.client_surface_role === 'home'));
+  for (const chat of writable) {
+    const worker = contexts.find(context => context.ee_id === chat.ee_id)?.workers.find(candidate => candidate.id === (chat.worker_choice_interface_id || chat.worker_interface_id));
+    assert.ok(worker, chat.run_id);
+    const provider = providerForExecutionContext(providers.find(candidate => candidate.id === chat.provider_interface_id), { interfacePolicy: worker.interface_policy });
+    assert.ok(provider.models.some(model => model.model === chat.provider_model), `${chat.run_id} sends with an admitted model`);
+  }
+});
 const code = compile(['chooseAgentPreset', 'createChat', 'clientAgentSelectionFailure', 'projectAgents'].map(name => functions.get(name)).join('\n') + `\nfunction resolvePendingSelection() { (${resolvePending})(); }`);
 function selection() {
   const state = {

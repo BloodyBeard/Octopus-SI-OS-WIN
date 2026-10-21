@@ -16,7 +16,8 @@ function octopusClientServer(): Plugin {
     name: "octopus-client-server",
     configureServer(server: ViteDevServer) {
       const { createClientAccessController } = require("./electron/clientAccess.cjs");
-      const { createClientProjectionStore, readClientProviderInterfaceDescriptors } = require("./electron/clientDataSource.cjs");
+      const { createClientProjectionStore } = require("./electron/clientDataSource.cjs");
+      const { projectionReadRequest } = require("./electron/projectionReadContract.cjs");
       const { createClientSurfaceDocumentStore, filterClientSurfaceSnapshot } = require("./electron/surfaceDocuments.cjs");
       const appDir = APP_DIR;
       const repoRoot = path.resolve(appDir, "..");
@@ -153,7 +154,7 @@ function octopusClientServer(): Plugin {
       server.middlewares.use("/__octopus/providers", (req, res) => {
         void withAccess(req, res, access, ["live", "lab"], async (session) => {
           const registryRoot = session.profile === "live" ? path.join(octopusHome, "registry") : "";
-          const providers = await readClientProviderInterfaceDescriptors(session.profile, registryRoot);
+          const { providers } = await getStore(session.profile).read(projectionReadRequest("projection.operator.providers.list"));
           sendJson(res, 200, { repoRoot: session.profile === "live" ? repoRoot : null, registryRoot: registryRoot || null, providers });
         });
       });
