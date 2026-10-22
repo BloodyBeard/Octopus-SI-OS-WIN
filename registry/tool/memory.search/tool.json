@@ -15,7 +15,7 @@
   },
   "supported_worker_environment_kinds": ["system_room"],
   "handler_config": { "operation": "memory_search" },
-  "description": "Search remembered notes visible to this run: those of its environment and of the environments above it. Pass a few concrete keywords from the task; matches are ranked by keyword hits, newest first on ties, with a preview and the id to open with memory.read. No match only means these words were not found.",
+  "description": "Search remembered notes visible to this run: those of its environment and of the environments above it. Pass a few concrete keywords from the task; matches are ranked by keyword hits, newest first on ties, with a preview and the id to open with memory.read. No match only means these words were not found. If supplied, max_results must be an integer from 1 to 20.",
   "args_schema": {
     "type": "object",
     "properties": {
