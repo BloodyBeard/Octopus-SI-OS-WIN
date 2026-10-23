@@ -5,8 +5,8 @@
 <h1 align="center">Octopus Superintelligence OS</h1>
 
 <p align="center">
-  <b>The first real agentic OS.</b><br>
-  Built the way operating systems are built, for agents, on an entirely new architecture of agent execution.
+  <b>A self-evolving agentic OS.</b><br>
+  A new architecture for agent execution, built on operating-system principles, where agents can reshape their environment and the trajectory of their own work.
 </p>
 
 <p align="center">
@@ -22,8 +22,10 @@ Octopus runs agents the way the well-known ones run: they read and write your fi
 
 Underneath, its architecture gives an agent a structure to execute in and a picture of itself and of the world. Capabilities are not add-ons bolted onto a loop. They are contracts in that architecture, so the system can grow in any direction - connect something new, give itself a new sense, rewrite itself. Neither the model nor the agent loop sits at the center. The kernel is about 45,000 lines of Rust; everything else is ported onto it, starting with Codex: sign in with ChatGPT and Codex CLI runs as one interface of the system.
 
+**Self-evolution** means shaping the conditions of future work. Under policy, an agent can create and revise goals, change interfaces and external triggers, add tools, organize workers, and arrange context and execution environments. These changes persist across tasks and runs: they affect what it notices, when it acts, what it works on, and which capabilities it can use next. The agent changes its environment, and that environment shapes its subsequent behavior. **Self-improvement** remains the research aim: whether this process actually makes the system better.
+
 > [!NOTE]
-> This is a research preview. In our runs so far, today's models - GPT-6 included - do not take initiative on their own, and for an ordinary coding task Octopus gives you nothing that Codex CLI does not already give you. The architecture makes initiative possible. The project exists to find out what it takes for a model to use it.
+> This is a research preview. In our runs so far, today's models - GPT-6 included - do not take initiative on their own, and for an ordinary coding task Octopus gives you nothing that Codex CLI does not already give you. The research question is: **how can an architecture that lets agents reshape their execution environment help them steer their own long-term development?** The project studies whether this process leads to useful autonomy and measurable self-improvement.
 
 ## What you get
 

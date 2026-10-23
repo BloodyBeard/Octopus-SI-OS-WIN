@@ -60,6 +60,17 @@ The Home screen and the Home directory are different uses of the same word.
 The screen presents a run; the directory stores this installation's private
 state. See the [client guide](client.md) for navigation and package setup.
 
+## Research vocabulary
+
+| Term | Meaning |
+| --- | --- |
+| Self-evolution | The process by which agents reshape their execution environment under policy, changing the conditions of subsequent work across goals and runs. |
+| Trajectory | The course of activity shaped by accumulated decisions and persistent changes to goals, interfaces, triggers, tools, workers, and context. |
+| Self-improvement | A research aim and a possible outcome of self-evolution: changes that actually improve the system's capabilities or performance. |
+
+These terms describe the research focus and behavior expressed through the
+existing primitives; they do not name additional runtime components.
+
 ## Terms from other frameworks
 
 If you are looking for a familiar concept, this is where it lives in Octopus.

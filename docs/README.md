@@ -18,7 +18,7 @@
 - [UX](UX.md) - what the experience is built around, and where each part of
   it is served.
 - [Architecture](architecture.md) - System and World, the primitives, one turn
-  end to end, why there is no agent loop at the center.
+  end to end, and self-evolution through changes to the execution environment.
 - [Glossary](glossary.md) - every term, and what the app's words mean
   underneath.
 - [Scenarios](scenarios.md) - what the primitives are meant to express.
