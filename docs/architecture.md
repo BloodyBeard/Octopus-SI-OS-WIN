@@ -570,7 +570,7 @@ an interface is live or a tool succeeded.
 ## Autonomy and attention
 
 The research question is: **how can an architecture that lets agents reshape
-their execution environment help them steer their own long-term development?**
+their execution environment help them take initiative and steer their own long-term development?**
 
 **Self-evolution** is this process of changing the environment that shapes
 subsequent activity. Under policy, agents can create and revise goals, change

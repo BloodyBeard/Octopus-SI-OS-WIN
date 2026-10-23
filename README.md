@@ -25,7 +25,7 @@ Underneath, its architecture gives an agent a structure to execute in and a pict
 **Self-evolution** means shaping the conditions of future work. Under policy, an agent can create and revise goals, change interfaces and external triggers, add tools, organize workers, and arrange context and execution environments. These changes persist across tasks and runs: they affect what it notices, when it acts, what it works on, and which capabilities it can use next. The agent changes its environment, and that environment shapes its subsequent behavior. **Self-improvement** remains the research aim: whether this process actually makes the system better.
 
 > [!NOTE]
-> This is a research preview. In our runs so far, today's models - GPT-6 included - do not take initiative on their own, and for an ordinary coding task Octopus gives you nothing that Codex CLI does not already give you. The research question is: **how can an architecture that lets agents reshape their execution environment help them steer their own long-term development?** The project studies whether this process leads to useful autonomy and measurable self-improvement.
+> This is a research preview. In our runs so far, today's models - GPT-6 included - do not take initiative on their own, and for an ordinary coding task Octopus gives you nothing that Codex CLI does not already give you. The research question is: **how can an architecture that lets agents reshape their execution environment help them take initiative and steer their own long-term development?** The project studies whether this process leads to useful autonomy and measurable self-improvement.
 
 ## What you get
 
