@@ -168,6 +168,11 @@ time, or after this event, check this and change that.
 
 ## Self-improvement
 
+Self-evolution is visible in how the system reshapes the conditions of its
+future work: its goals, triggers, tools, workers, context, and environments.
+Those changes persist and influence its trajectory across tasks and runs.
+Self-improvement is the aim when those changes make the system better.
+
 Self-improvement has to feel as native as everything else, and it is
 configured through JSON rather than added as a feature. A trigger interface
 that, after a run goes quiet, sends a prompt to a run that looks for ways the
@@ -186,5 +191,5 @@ journal with the exact earlier bytes of every file it touched and the checks
 it ran. Triggers lists each review with what it changed, and undoes one in a
 step while the files still hold what the review wrote.
 
-See [Architecture](architecture.md#autonomy-and-attention) for the attention
-question behind it.
+See [Architecture](architecture.md#autonomy-and-attention) for the research
+question and the relationship between self-evolution, attention, and trajectory.

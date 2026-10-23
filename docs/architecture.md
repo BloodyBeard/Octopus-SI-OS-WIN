@@ -1,7 +1,8 @@
 # Architecture
 
-Octopus is an operating system for agents. It is built the way operating
-systems are built, on a new architecture of agent execution.
+Octopus is a self-evolving agentic operating system. It is built on
+operating-system principles, with an architecture that lets agents reshape
+their execution environment and influence the trajectory of their future work.
 
 The usual agent is a loop around a model: act, observe, accumulate context,
 repeat. Memory, skills, sub-agents, and schedules are then bolted onto that
@@ -568,9 +569,28 @@ an interface is live or a tool succeeded.
 
 ## Autonomy and attention
 
-Octopus studies whether useful initiative can emerge from persistent goals,
-artifact exchange, and the ability to change interfaces under policy. A run
-can wait for input; the architecture does not require continuous activity.
+The research question is: **how can an architecture that lets agents reshape
+their execution environment help them steer their own long-term development?**
+
+**Self-evolution** is this process of changing the environment that shapes
+subsequent activity. Under policy, agents can create and revise goals, change
+interfaces and external triggers, add tools, organize workers, and arrange
+context and execution environments. This is native to the existing primitives:
+goals classify EEs, interfaces admit events, workers and tools are descriptors,
+and context reaches runs through artifact bindings. Authorized runs change
+these structures through ordinary work.
+
+The focus is the trajectory across goals, tasks, and runs. A new listener changes
+what the system notices; a revised trigger changes when it acts; new goals,
+tools, and context change what it can do next. These changes persist beyond the
+task that made them. The resulting experience can inform the next revision of
+the environment, so the system can keep redirecting its own activity over time.
+
+**Self-improvement** remains the broader research aim and a possible result of
+self-evolution: the changes must actually make the system better. Persistent
+goals and artifact exchange make useful initiative possible; whether models
+use them effectively and improve over time is an empirical question. A run can
+wait for input; the architecture does not require continuous activity.
 
 Attention is part of that question: what should wake a run? A model can use
 its observations to configure an interface that listens for a relevant event,
@@ -587,8 +607,8 @@ return-after-a-pause examples.
 - **Models do not take initiative yet.** In our runs so far, current models  - 
   GPT-6 included - do not use these affordances on their own, and for an
   ordinary coding task the architecture gives nothing over Codex CLI itself.
-  Studying what it takes for a model to take initiative is why this is
-  research.
+  Studying how models use changes to their execution environment to direct
+  future activity and improve over time is why this is research.
 - **The preview is one provider deep.** The path exercised end to end is
   ChatGPT/Codex on macOS. Other descriptors exist; a descriptor is not a test.
 - **A mark is only as strong as its verifier.** "It builds" is a check. Proof
