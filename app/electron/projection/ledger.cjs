@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { blake3 } = require("@noble/hashes/blake3");
 const { artifactReadProjectionForLabel } = require("../boundedJsonProjection.cjs");
+const { verifiedArtifactFilesUnchanged } = require("../contentAddressedArtifact.cjs");
 const { ARTIFACT_PAYLOAD_READ_CONCURRENCY, ProjectionEvidenceError, RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_BYTES, RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_ENTRIES } = require("./constants.cjs");
 const { loadLedgerArtifactPayload, movementKindText, movementRunId, validateCanonicalMovement } = require("./movementRows.cjs");
 const { contentHashHex, ledgerArtifactId, ledgerArtifactLabel, stringValue } = require("./values.cjs");
@@ -222,12 +223,21 @@ function ledgerProjection(store) {
     const cacheKey = `${row.source_file}:${hex}:${contract ? JSON.stringify([contract, ledgerArtifactId(row)]) : "raw"}`;
     const cached = resolvedArtifactPayloads.get(cacheKey);
     if (cached) {
-      resolvedArtifactPayloads.delete(cacheKey);
-      resolvedArtifactPayloads.set(cacheKey, cached);
-      return cached.promise;
+      await cached.promise;
+      if (readOptions.onVerifiedFiles && cached.files
+        && !await verifiedArtifactFilesUnchanged(cached.files, path.join(path.dirname(row.source_file), "blobs"))) {
+        removeResolvedArtifactPayload(cacheKey, cached);
+      } else {
+        if (resolvedArtifactPayloads.get(cacheKey) === cached) {
+          resolvedArtifactPayloads.delete(cacheKey);
+          resolvedArtifactPayloads.set(cacheKey, cached);
+        }
+        return observedPayload(cached, readOptions);
+      }
     }
-    const entry = { promise: null, weight: 0 };
-    const pending = loadLedgerArtifactPayload(row, hex, false, contract).then(({ payload, cacheable, retainedBytes }) => {
+    const entry = { promise: null, weight: 0, files: null };
+    const pending = loadLedgerArtifactPayload(row, hex, false, contract).then(({ payload, cacheable, retainedBytes, files }) => {
+      entry.files = cacheable ? files : null;
       if (!cacheable) {
         removeResolvedArtifactPayload(cacheKey, entry);
       } else if (resolvedArtifactPayloads.get(cacheKey) === entry) {
@@ -246,9 +256,19 @@ function ledgerProjection(store) {
       throw error;
     });
     entry.promise = pending;
+    const replaced = resolvedArtifactPayloads.get(cacheKey);
+    if (replaced) removeResolvedArtifactPayload(cacheKey, replaced);
     resolvedArtifactPayloads.set(cacheKey, entry);
     trimResolvedArtifactPayloads();
-    return pending;
+    return observedPayload(entry, readOptions);
+  }
+
+  function observedPayload(entry, readOptions) {
+    if (!readOptions.onVerifiedFiles) return entry.promise;
+    return entry.promise.then((payload) => {
+      readOptions.onVerifiedFiles(entry.files);
+      return payload;
+    });
   }
 
   function removeResolvedArtifactPayload(cacheKey, entry) {

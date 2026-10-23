@@ -12,7 +12,7 @@ pub(super) fn interfaces(identity: &PlannedIdentity) -> Vec<String> {
     ]
 }
 
-fn context_id(identity: &PlannedIdentity) -> String {
+pub(super) fn context_id(identity: &PlannedIdentity) -> String {
     format!("artifact-home-delivery-{}", identity.chat_id)
 }
 
@@ -51,7 +51,12 @@ pub(super) fn template(
         if voice_update {
             vec![binding(&identity.model_interface_id)]
         } else {
-            vec![presentation_binding(&identity.model_interface_id), binding(recipient)]
+            vec![AuthoredInterfaceBinding {
+                interface: InterfaceId::new(&identity.model_interface_id),
+                config: InterfaceBindingConfig { artifact_policy: BindingArtifactPolicy::Allow {
+                    names: vec!["client.surface.document".into()], namespaces: Vec::new(),
+                } },
+            }, binding(recipient)]
         },
         Vec::new(),
     )?;
@@ -64,12 +69,24 @@ const PRESENTATION_LABELS: [&str; 2] = ["client.surface.document", "client.actio
 
 pub(super) const CLIENT_ACTION_RESULT_LABEL: &str = "client.action.result";
 
-pub(super) fn operator_input_labels(identity: &PlannedIdentity, message: &str) -> Vec<String> {
-    let mut labels = vec![message.to_string()];
-    if identity.surface_role == "home" {
-        labels.push(CLIENT_ACTION_RESULT_LABEL.into());
-    }
-    labels
+pub(super) fn operator_input_labels(_identity: &PlannedIdentity, message: &str) -> Vec<String> {
+    vec![message.to_string()]
+}
+
+fn client_result_template(identity: &PlannedIdentity, topology: &FormedCapabilityTopology) -> Result<Option<BoundCheckpointTemplate>, String> {
+    if !identity.capability_tools.contains_key("client.mcp") { return Ok(None); }
+    let mut owners = topology.tool_bindings.iter().filter(|(_, binding)|
+        binding.tools.iter().any(|tool| tool.tool.as_str() == "client.mcp"));
+    let (owner, _) = owners.next().ok_or("Home client controls require their formed tool owner")?;
+    if owners.next().is_some() { return Err("Home client controls have multiple tool owners".into()); }
+    let door = identity.capability_doors.get(owner.as_str()).ok_or("Home client control owner has no exact planned room")?;
+    let binding = |id: &str| AuthoredInterfaceBinding {
+        interface: InterfaceId::new(id), config: InterfaceBindingConfig {
+            artifact_policy: BindingArtifactPolicy::Allow { names: vec![CLIENT_ACTION_RESULT_LABEL.into()], namespaces: vec![] },
+        },
+    };
+    bound_checkpoint_template(BoundCheckpointRole::IndependentInput,
+        binding(&identity.chat_interface_id), vec![binding(door)], Vec::new()).map(Some)
 }
 
 fn presentation_binding(id: &str) -> AuthoredInterfaceBinding {
@@ -89,17 +106,12 @@ pub(super) fn plan(
     identity: &PlannedIdentity,
     private_worker_role_artifacts: &[String],
     writes: &mut Vec<PlannedClientWrite>,
-) -> Result<Option<ArtifactBindingSeed>, String> {
-    if identity.surface_role != "home" {
-        return plan_task_coordinates(
-            &request.registry_root, &request.ee_instances_root,
-            request.run_records_root.as_deref(), identity, writes,
-        ).map(Some);
-    }
-    let authoring = authoring_coordinates(
+) -> Result<Vec<ArtifactBindingSeed>, String> {
+    let authoring = plan_task_coordinates(
         &request.registry_root, &request.ee_instances_root,
         request.run_records_root.as_deref(), identity, writes,
     )?;
+    if identity.surface_role != "home" { return Ok(vec![authoring]); }
     let registry = &request.registry_root;
     request
         .run_records_root
@@ -144,13 +156,13 @@ pub(super) fn plan(
         "client_action":{"interface":ids[0],"label":"client.action","recipient_interface":identity.chat_interface_id,"schema":"octopus.client_action","schema_version":1,"actions":["open_surface","inspect_client","list_widgets","set_widget"],"result_label":CLIENT_ACTION_RESULT_LABEL},
         "voice_update":{"run":voice.context.run_id,"interface":ids[1],"label":"realtime.session.update","recipient_interface":voice.context.provider_id,"payload":{"call_id":"copy from the admitted realtime.delegation artifact","correlation_id":"same admitted call correlation","update_id":"new stable identity for this one semantic update","delegation_id":"same admitted delegation or null","channel":"commentary","text":"Model-selected public progress or result, grounded in Task evidence"}},
         "run":identity.run_id,
-        "authoring":authoring
+        "authoring_artifact":authoring.id
     });
     let text = format!(
-        "Exact Home artifact delivery addresses for this run:\n{}\n\nFor widgets, client Extensions and client navigation use the actual granted client.mcp tool and its inspect_client/list_widgets/set_widget/publish_widget/open_client_surface catalogue operations with the stated System presentation interface. inspect_client reports the running client's Extensions folder, contracts, host vocabulary and every Extension's admission, review and runtime state before you change the client. The MCP adapter uses artifact.send under the same grant. inspect_client, list_widgets and set_widget return admission first; the client returns client.action.result with the same request_id and actual saved widget state as your next input, after the turn. One set_widget call carries every change for any number of widgets from one inventory, with their exact widget_id/source_digest. End the turn right after such a call without a reply and continue the operator's request when the result arrives; do not poll for it. These controls do not require Computer Use or source edits. During a live call, the client shares your public progress, answer fragments, completed replies and errors with voice as they appear. Answer an admitted voice delegation with ordinary public output; do not call artifact.send merely to repeat that output. For independent Task returns or a deliberately separate voice update, use the actual granted artifact.send tool with the stated System interface, label, and payload. The runtime admits this artifact once and delivers it both to the listed recipient and to Home's exact text provider. Home re-arms its widget receipt. Voice updates reach separate Home and Voice checkpoints; each Run re-arms only its own input through its declared checked writer. A widget receipt is presentation evidence; it does not ask for or force an outward text reply. Decide whether any response is useful. Task workers can use the same return pins only after authoring those exact bindings, policy and readable role closure in their own runs. Never resend an admitted artifact to make it visible. Voice updates must copy call_id/correlation_id/delegation_id from actual admitted voice semantics, not private transport state or guessed values. A sent update is not speech-playback proof; inspect its realtime.session.updated evidence. Stopping voice does not cancel Tasks. Use artifact-home-widget-authoring for native/sandbox and persistent/transient document payloads and for installed client Extensions with their data sources.",
+        "Exact Home artifact delivery addresses for this run:\n{}\n\nFor widgets, client Extensions and client navigation use the actual granted client.mcp tool and its inspect_client/list_widgets/set_widget/publish_widget/open_client_surface catalogue operations with the stated System presentation interface. inspect_client reports the running client's Extensions folder, contracts, host vocabulary and every Extension's admission, review and runtime state before you change the client. The MCP adapter uses artifact.send under the same grant. inspect_client, list_widgets and set_widget wait for the client and return its actual saved state within the same tool call. The correlated client.action.result returns to the system room; it does not become a new operator message. One set_widget call carries every change for any number of widgets from one inventory, with their exact widget_id/source_digest. Use that tool result to continue the request immediately, then give one concise confirmation. Do not end the turn to wait or poll for a result. These controls do not require Computer Use or source edits. During a live call, the client sends public progress to the voice commentary channel and streams public answers to the speakable channel, preserving the exact delegation and sending each text fragment once. The voice provider delegates a request to this run; use the same client controls and wait for their actual result before replying. Answer an admitted voice delegation with ordinary public output; do not call artifact.send merely to repeat that output. For independent Task returns or a deliberately separate voice update, use the actual granted artifact.send tool with the stated System interface, label, and payload. The runtime admits this artifact once and delivers it both to the listed recipient and to Home's exact text provider. Task workers can use the same return pins only after authoring those exact bindings, policy and readable role closure in their own runs. Never resend an admitted artifact to make it visible. Voice updates must copy call_id/correlation_id/delegation_id from actual admitted voice semantics, not private transport state or guessed values. A sent update is not speech-playback proof; inspect its realtime.session.updated evidence. Stopping voice does not cancel Tasks. Use artifact-home-widget-authoring for native/sandbox and persistent/transient document payloads and for installed client Extensions with their data sources.",
         pretty_json(&contract)?
     );
-    let text = format!("{text}\n\n{AUTHORING_COORDINATE_GUIDANCE}");
+    let text = format!("{text}\n\nThe authoring_artifact is a separate bound reference for exact registry, run, tool and filesystem coordinates. Read it before editing configuration or selecting a source path. Widget controls need only the client_action address above and their tool schema.");
     let id = context_id(identity);
     push_json_write(
         registry.join("artifact").join(&id).join("artifact.json"),
@@ -160,7 +172,7 @@ pub(super) fn plan(
         format!("artifact:{id}"),
         writes,
     )?;
-    Ok(Some(ArtifactBindingSeed { id }))
+    Ok(vec![authoring, ArtifactBindingSeed { id }])
 }
 
 const AUTHORING_COORDINATE_GUIDANCE: &str = "These coordinates are authored context, not an additional grant. The current invocation metadata, worker-environment boundary and exact tool process declarations determine access. tools maps source descriptor ids to the exact tool ids configured for this run; use the model's advertised callable name. tool_scopes describes only declared path and execution rules. An exact interface override supplies a concrete path; host_binding_not_supplied means this context has no resolved machine binding for that slot. Do not guess it from the provider cwd, registry directory, project name or installation bundle. Registry roots locate installed capability records and their owned packages; they do not establish a checkout for editing the framework's source. Read a bound workspace/source artifact or inspect permitted door declarations to obtain that distinct coordinate. A missing source workspace, unresolved root or unavailable execution tool is a specific capability/configuration gap to address through authorized tools or an exact bound return interface. Read the current tool descriptor at tool_descriptor for its full argument schema, process declaration and supported kind. Obtain the current run schema from a readable bound authoring artifact or an explicitly granted schema path. When capability declarations change, read the new invocation's exact tools, bindings and bound coordinates before using them; retained context does not confer new access.";
@@ -178,8 +190,8 @@ pub(super) fn plan_task_coordinates(
         registry_root.join("artifact").join(&id).join("artifact.json"),
         pretty_json(&json!({
             "id":id,"label":"context.reference",
-            "description":"Exact run, registry, tool ids and declared filesystem scopes for this Task; read before authoring configuration or choosing a source path.",
-            "text":format!("Authoring coordinates for this Task:\n{}\n\n{}", pretty_json(&authoring)?, AUTHORING_COORDINATE_GUIDANCE),
+            "description":"Exact run, registry, tool ids and declared filesystem scopes; read before authoring configuration or choosing a source path.",
+            "text":format!("Authoring coordinates for this run:\n{}\n\n{}", pretty_json(&authoring)?, AUTHORING_COORDINATE_GUIDANCE),
             "authoring":authoring,
         }))?,
         format!("artifact:{id}"),
@@ -232,6 +244,7 @@ fn authoring_coordinates(
         "provider_interface":identity.model_interface_id,
         "registry_root":registry,"registry_roots":registries,
         "ee_instances_root":ee_instances_root,"run_records_root":runs,
+        "ee_file":ee_instances_root.join(format!("{}.json",identity.ee_id)),
         "run_file":runs.map(|root|root.join(format!("{}.json",identity.run_id))),
         "worker_policy":registry.join("interface").join(&identity.worker_interface_id).join("policy.json"),
         "provider_descriptor":registry.join("interface").join(&identity.model_interface_id).join("interface.json"),
@@ -290,6 +303,7 @@ fn tool_path_scope(
 
 pub(super) fn wire(
     identity: &PlannedIdentity,
+    topology: &FormedCapabilityTopology,
     roles: &[String],
     context: &[ArtifactBindingSeed],
     content: String,
@@ -307,7 +321,9 @@ pub(super) fn wire(
         .filter_map(Value::as_str)
         .map(String::from)
         .collect::<std::collections::BTreeSet<_>>();
-    for mut template in [template(identity, false)?, template(identity, true)?] {
+    let mut deliveries = vec![template(identity, false)?, template(identity, true)?];
+    if let Some(reply) = client_result_template(identity, topology)? { deliveries.push(reply); }
+    for mut template in deliveries {
         for binding in context {
             let id = octopus_descriptors::ArtifactId::new(&binding.id);
             if !roles.contains(&binding.id) && !template.static_artifact_bindings.contains(&id)
@@ -350,6 +366,11 @@ pub(super) fn wire(
                 .as_array_mut()
                 .ok_or("Home has no active checkpoints")?
                 .push(json!(id));
+        }
+        // The room's reply route is independent of provider continuation. Ordinary
+        // checked run edits preserve it as an external checkpoint.
+        if !template.outbound_interface_bindings.iter().any(|binding| binding.interface.as_str() == identity.model_interface_id) {
+            continue;
         }
         let templates=record["interface_state"][&identity.model_interface_id]["run_authoring_binding"]["checkpoints"].as_array_mut().ok_or("Home text provider has no authoring topology")?;
         if templates.iter().any(|cp| cp["name"] == template.name) {

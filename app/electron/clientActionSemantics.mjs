@@ -1,3 +1,21 @@
+export function parseClientActionRequest(value) {
+  if (value?.schema !== "octopus.client_action_request") {
+    const action = parseClientAction(value);
+    if (action.action !== "open_surface") throw new Error("Client controls require a correlated tool request.");
+    return { action, toolCall: null };
+  }
+  const ref = value.tool_call;
+  if (Object.keys(value).length !== 4 || value.schema_version !== 1 || !ref || Object.keys(ref).length !== 2
+    || typeof ref.id !== "string" || !/^tool\.call:[a-f0-9]{64}$/.test(ref.id)
+    || !Array.isArray(ref.content) || ref.content.length !== 32
+    || ref.content.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
+    throw new Error("Client control request has an invalid tool call identity.");
+  }
+  const action = parseClientAction(value.action);
+  if (action.action === "open_surface") throw new Error("Navigation does not declare a result wait.");
+  return { action, toolCall: ref };
+}
+
 export function parseClientAction(value) {
   const object = value && typeof value === "object" && !Array.isArray(value);
   const text = value => typeof value === "string" && value.length > 0 && value.length <= 256 && value.trim() === value;

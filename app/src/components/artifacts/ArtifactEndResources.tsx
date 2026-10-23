@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ChatRenderMessage } from "../chat/types";
@@ -264,7 +265,7 @@ function ArtifactEndResourceMenu({ error, loading, onAction, onClose, onOpenWith
 
   return createPortal(
     <OcMenuSurface aria-label="Open artifact" className="fixed z-100 w-56" role="menu" style={position} surfaceRef={menuRef}>
-      {loading ? <OcMenuMessage>Loading available apps…</OcMenuMessage> : null}
+      {loading ? <OcLoadingRows label="Loading available apps…" rows={2} /> : null}
       {error && !loading ? <OcMenuMessage>{error}</OcMenuMessage> : null}
       {openTargets?.applications.map((application) => (
         <OcMenuItem

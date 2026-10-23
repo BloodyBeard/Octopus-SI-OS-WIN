@@ -219,6 +219,7 @@
         { "$ref": "#/$defs/listNode" },
         { "$ref": "#/$defs/tableNode" },
         { "$ref": "#/$defs/imageNode" },
+        { "$ref": "#/$defs/videoNode" },
         { "$ref": "#/$defs/inputNode" },
         { "$ref": "#/$defs/buttonNode" },
         { "$ref": "#/$defs/dividerNode" },
@@ -408,6 +409,16 @@
           "items": { "$ref": "#/$defs/tableColumn" }
         },
         "empty": { "$ref": "#/$defs/value" }
+      },
+      "additionalProperties": false
+    },
+    "videoNode": {
+      "type": "object",
+      "required": ["type", "source"],
+      "properties": {
+        "type": { "const": "video" },
+        "source": { "type": "string", "pattern": "^https://", "maxLength": 2048 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 }
       },
       "additionalProperties": false
     },

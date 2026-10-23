@@ -127,6 +127,23 @@ impl GitWorktreeProcessStore {
         self.registry.join(format!("{process_id}.json"))
     }
 
+    fn start_path(&self, room: &WorkerEnvironmentId, call: &str) -> PathBuf {
+        let mut identity = blake3::Hasher::new();
+        identity.update(&(room.as_str().len() as u64).to_le_bytes());
+        identity.update(room.as_str().as_bytes());
+        identity.update(call.as_bytes());
+        self.registry.join("starts").join(format!("{}.json", identity.finalize().to_hex()))
+    }
+
+    fn retain_start(&self, spec: &KeeperSpec) -> Result<(), String> {
+        if let Some(call) = &spec.start_call {
+            private_directory(&self.registry.join("starts"))?;
+            let room = WorkerEnvironmentId::parse(spec.worker_environment_id.clone()).map_err(|error| error.to_string())?;
+            spec.write_new(&self.start_path(&room, call))?;
+        }
+        Ok(())
+    }
+
     fn specs(&self, worker_environment_id: &WorkerEnvironmentId) -> Result<Vec<KeeperSpec>, String> {
         let entries = std::fs::read_dir(&self.registry).map_err(|error| {
             format!(
@@ -174,7 +191,12 @@ impl GitWorktreeProcessStore {
         if !valid_process_id(process_id) {
             return Err(missing());
         }
-        let spec = match KeeperSpec::read(&self.spec_path(process_id)) {
+        let path = self.spec_path(process_id);
+        let spec = match KeeperSpec::read(&path).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                KeeperSpec::read(&retained_spec_path(&path))
+            } else { Err(error) }
+        }) {
             Ok(spec) => spec,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
             Err(error) => {
@@ -190,13 +212,31 @@ impl GitWorktreeProcessStore {
         Ok(spec)
     }
 
-    fn forget(&self, spec: &KeeperSpec) {
-        for path in [
-            spec.socket.clone(),
-            self.spec_path(&spec.process_id),
-            delivered_marker(&self.spec_path(&spec.process_id)),
-        ] {
+    fn retire(&self, spec: &KeeperSpec) -> Result<(), String> {
+        let path = self.spec_path(&spec.process_id);
+        retire_spec(&path, spec)?;
+        for path in [spec.socket.clone(), path.with_extension("log")] {
             let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    async fn lock_starts(&self) -> Result<std::fs::File, String> {
+        use fs2::FileExt;
+        let file = private_options().write(true).create(true).truncate(false)
+            .open(self.registry.join("starts.lock")).map_err(|error| error.to_string())?;
+        let deadline = tokio::time::Instant::now() + KEEPER_READY_TIMEOUT;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(file),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("persistent process start is still owned by another invocation".into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(format!("persistent process start cannot be locked: {error}")),
+            }
         }
     }
 }
@@ -239,12 +279,32 @@ impl GitWorktreeProcessManager {
         validate_poll_output_ceiling(max_output_bytes)?;
         let store = self.store()?;
         let _start = self.starts.lock().await;
+        let _durable_start = store.lock_starts().await?;
+        if let Some(call) = call {
+            match KeeperSpec::read(&store.start_path(worker_environment_id, call)) {
+                Ok(spec) => {
+                    if spec.worker_environment_id != worker_environment_id.as_str() || spec.start_call.as_deref() != Some(call) {
+                        return Err("persistent process start receipt differs from its invocation".into());
+                    }
+                    drop(_durable_start);
+                    drop(_start);
+                    return poll_keeper(store, &spec, KeeperRequest::Poll {
+                        call: Some(call.into()), input: String::new(), wait_ms, max_output_bytes,
+                    }).await;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("persistent process start receipt is unreadable: {error}")),
+            }
+        }
         let specs = store.specs(worker_environment_id)?;
         if let Some(call) = call
             && let Some(spec) = specs
                 .iter()
                 .find(|spec| spec.start_call.as_deref() == Some(call))
         {
+            store.retain_start(spec)?;
+            drop(_durable_start);
+            drop(_start);
             return poll_keeper(
                 store,
                 spec,
@@ -270,7 +330,10 @@ impl GitWorktreeProcessManager {
             .map_err(|error| format!("persistent coder sandbox floor failed: {error}"))?;
         let owned = specs
             .iter()
-            .filter(|spec| !delivered_marker(&store.spec_path(&spec.process_id)).exists())
+            .filter(|spec| {
+                let path = store.spec_path(&spec.process_id);
+                !delivered_marker(&path).exists() && !retired_marker(&path).exists()
+            })
             .count();
         if owned >= limits.max_processes_per_worker_environment {
             return Err(format!(
@@ -300,10 +363,13 @@ impl GitWorktreeProcessManager {
         };
         let spec_path = store.spec_path(&spec.process_id);
         spec.write_new(&spec_path)?;
+        store.retain_start(&spec)?;
         if let Err(error) = spawn_keeper(store, &spec, &spec_path).await {
-            store.forget(&spec);
+            store.retire(&spec)?;
             return Err(error);
         }
+        drop(_durable_start);
+        drop(_start);
         poll_keeper(
             store,
             &spec,
@@ -402,7 +468,8 @@ impl GitWorktreeProcessManager {
         let store = self.store()?;
         let mut listed = Vec::new();
         for spec in store.specs(worker_environment_id)? {
-            if delivered_marker(&store.spec_path(&spec.process_id)).exists() {
+            let path = store.spec_path(&spec.process_id);
+            if delivered_marker(&path).exists() || retired_marker(&path).exists() {
                 continue;
             }
             let cwd = AbsPath::new(&spec.cwd)
@@ -412,7 +479,7 @@ impl GitWorktreeProcessManager {
                 Ok(KeeperResponse::Refused { error }) => InfoWire::failed(error),
                 Ok(_) => InfoWire::failed("persistent process keeper answered Info with another frame".to_string()),
                 Err(KeeperFailure::Gone(error)) => {
-                    store.forget(&spec);
+                    store.retire(&spec)?;
                     InfoWire::failed(error)
                 }
                 Err(KeeperFailure::Failed(error)) => InfoWire::failed(error),
@@ -455,7 +522,9 @@ impl GitWorktreeProcessManager {
                 continue;
             }
             match ask_keeper(&spec, &KeeperRequest::Release).await {
-                Ok(KeeperResponse::Released) | Err(KeeperFailure::Gone(_)) => store.forget(&spec),
+                Ok(KeeperResponse::Released) | Err(KeeperFailure::Gone(_)) => {
+                    if let Err(error) = store.retire(&spec) { failures.push(error); }
+                }
                 Ok(KeeperResponse::Refused { error }) | Err(KeeperFailure::Failed(error)) => {
                     failures.push(error)
                 }
@@ -473,7 +542,7 @@ impl GitWorktreeProcessManager {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeeperSpec {
     schema_version: u32,
@@ -506,30 +575,8 @@ impl KeeperSpec {
     }
 
     fn write_new(&self, path: &Path) -> Result<(), String> {
-        use std::io::Write;
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(path).map_err(|error| {
-            format!(
-                "persistent process record '{}' cannot be created: {error}",
-                path.display()
-            )
-        })?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| format!("persistent process record cannot be written: {error}"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|error| format!("persistent process registry cannot be synced: {error}"))?;
-        }
-        Ok(())
+        write_private_new(path, &bytes)
     }
 }
 
@@ -694,13 +741,20 @@ async fn poll_keeper(
     spec: &KeeperSpec,
     request: KeeperRequest,
 ) -> Result<GitWorktreeProcessPoll, String> {
-    let response = match ask_keeper(spec, &request).await {
-        Ok(response) => response,
-        Err(KeeperFailure::Gone(error)) => {
-            store.forget(spec);
-            return Err(error);
-        }
-        Err(KeeperFailure::Failed(error)) => return Err(error),
+    let path = store.spec_path(&spec.process_id);
+    let response = match retained_response(&path, &request)? {
+        Some(response) => response,
+        None if retired_marker(&path).exists() => return Err(format!(
+            "persistent process '{}' is retired and has no retained outcome for this call; it cannot be re-executed", spec.process_id
+        )),
+        None => match ask_keeper(spec, &request).await {
+            Ok(response) => response,
+            Err(KeeperFailure::Gone(error)) => {
+                store.retire(spec)?;
+                return Err(error);
+            }
+            Err(KeeperFailure::Failed(error)) => return Err(error),
+        },
     };
     let poll = match response {
         KeeperResponse::Poll(poll) => poll,
@@ -810,6 +864,90 @@ fn delivered_marker(spec_path: &Path) -> PathBuf {
     spec_path.with_extension("delivered")
 }
 
+fn retired_marker(spec_path: &Path) -> PathBuf {
+    spec_path.with_extension("retired")
+}
+
+fn retained_spec_path(spec_path: &Path) -> PathBuf {
+    spec_path.parent().expect("process registry parent").join("retired").join(spec_path.file_name().expect("process record name"))
+}
+
+fn retire_spec(path: &Path, spec: &KeeperSpec) -> Result<(), String> {
+    let retained = retained_spec_path(path);
+    private_directory(retained.parent().expect("retained process parent"))?;
+    match std::fs::hard_link(path, &retained) {
+        Ok(()) => {},
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound) => {
+            let prior = KeeperSpec::read(&retained).map_err(|error| error.to_string())?;
+            if prior != *spec {
+                return Err("retained persistent process differs from its original spec".into());
+            }
+        }
+        Err(error) => return Err(format!("persistent process record cannot be retained: {error}")),
+    }
+    std::fs::File::open(retained.parent().expect("retained process parent"))
+        .and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())?;
+    private_options().write(true).create(true).truncate(false).open(retired_marker(path))
+        .and_then(|file| file.sync_all()).map_err(|error| error.to_string())?;
+    match std::fs::remove_file(path) {
+        Ok(()) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(format!("persistent process live record cannot be retired: {error}")),
+    }
+    std::fs::File::open(path.parent().expect("process registry parent"))
+        .and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())
+}
+
+fn private_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = private_options().write(true).create_new(true).open(path)
+        .map_err(|error| format!("persistent process record '{}' cannot be created: {error}", path.display()))?;
+    file.write_all(bytes).and_then(|()| file.sync_all())
+        .map_err(|error| format!("persistent process record cannot be written: {error}"))?;
+    std::fs::File::open(path.parent().ok_or("persistent process record has no parent")?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("persistent process registry cannot be synced: {error}"))
+}
+
+fn call_record_path(spec_path: &Path, request: &KeeperRequest) -> Option<PathBuf> {
+    request.identity().map(|(operation, call)| {
+        spec_path.with_extension("calls").join(format!("{operation}-{}", blake3::hash(call.as_bytes()).to_hex()))
+    })
+}
+
+fn retained_response(spec_path: &Path, request: &KeeperRequest) -> Result<Option<KeeperResponse>, String> {
+    let Some(path) = call_record_path(spec_path, request) else { return Ok(None); };
+    match std::fs::read(path.with_extension("response")) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some)
+            .map_err(|error| format!("persistent process retained outcome is malformed: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("persistent process retained outcome cannot be read: {error}")),
+    }
+}
+
+fn retain_response(path: &Path, response: &KeeperResponse) -> Result<(), String> {
+    let staged = path.with_extension("response-staged");
+    let bytes = serde_json::to_vec(response).map_err(|error| error.to_string())?;
+    write_private_new(&staged, &bytes)?;
+    let published = path.with_extension("response");
+    std::fs::hard_link(&staged, &published)
+        .map_err(|error| format!("persistent process outcome cannot be published: {error}"))?;
+    std::fs::File::open(path.parent().ok_or("persistent process outcome has no parent")?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("persistent process outcome cannot be synced: {error}"))?;
+    std::fs::remove_file(staged).map_err(|error| error.to_string())
+}
+
 fn valid_process_id(process_id: &str) -> bool {
     process_id
         .strip_prefix("coder-process-")
@@ -889,6 +1027,7 @@ struct ManagedProcessState {
     timed_out: bool,
     releasing: bool,
     failure: Option<String>,
+    termination_failure: Option<String>,
 }
 
 struct PendingChunk {
@@ -904,7 +1043,7 @@ struct Keeper {
     spec_path: PathBuf,
     managed: Arc<ManagedProcess>,
     activity: Arc<tokio::sync::Notify>,
-    requests: tokio::sync::Mutex<Option<(&'static str, String, KeeperResponse)>>,
+    requests: tokio::sync::Mutex<()>,
     delivered: AtomicBool,
     released: AtomicBool,
     closed_at: std::sync::Mutex<Option<tokio::time::Instant>>,
@@ -918,6 +1057,7 @@ pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), Str
             spec_path.display()
         )
     })?;
+    write_private_new(&spec_path.with_extension("started"), b"")?;
     match std::fs::symlink_metadata(&spec.socket) {
         Ok(_) => std::fs::remove_file(&spec.socket)
             .map_err(|error| format!("stale keeper socket cannot be removed: {error}"))?,
@@ -966,6 +1106,7 @@ pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), Str
     spawn_process_timeout(
         Arc::clone(&managed),
         Duration::from_millis(spec.process_timeout_ms),
+        Duration::from_millis(spec.cleanup_timeout_ms),
         Arc::clone(&activity),
     );
     let keeper = Arc::new(Keeper {
@@ -973,7 +1114,7 @@ pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), Str
         spec_path,
         managed,
         activity,
-        requests: tokio::sync::Mutex::new(None),
+        requests: tokio::sync::Mutex::new(()),
         delivered: AtomicBool::new(false),
         released: AtomicBool::new(false),
         closed_at: std::sync::Mutex::new(None),
@@ -1001,9 +1142,9 @@ pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), Str
         }
     }
     let _ = std::fs::remove_file(&keeper.spec.socket);
-    for path in [keeper.spec_path.clone(), delivered_marker(&keeper.spec_path), keeper.spec_path.with_extension("log")] {
-        let _ = std::fs::remove_file(path);
-    }
+    let _requests = keeper.requests.lock().await;
+    retire_spec(&keeper.spec_path, &keeper.spec)?;
+    let _ = std::fs::remove_file(keeper.spec_path.with_extension("log"));
     Ok(())
 }
 
@@ -1058,33 +1199,42 @@ impl Keeper {
     async fn respond(&self, request: KeeperRequest) -> KeeperResponse {
         match request {
             KeeperRequest::Info => return KeeperResponse::Info(self.info().await),
-            KeeperRequest::Release => return self.release().await,
             _ => {}
         }
-        let mut last = self.requests.lock().await;
-        if let Some((operation, call)) = request.identity()
-            && let Some((retained_operation, retained_call, response)) = last.as_ref()
-            && *retained_operation == operation
-            && retained_call == call
-        {
-            return response.clone();
+        let _requests = self.requests.lock().await;
+        if matches!(request, KeeperRequest::Release) { return self.release().await; }
+        match retained_response(&self.spec_path, &request) {
+            Ok(Some(response)) => return response,
+            Err(error) => return KeeperResponse::Refused { error },
+            Ok(None) => {}
         }
-        let identity = request
-            .identity()
-            .map(|(operation, call)| (operation, call.to_string()));
+        if self.released.load(Ordering::SeqCst) || retired_marker(&self.spec_path).exists() {
+            return KeeperResponse::Refused { error: "persistent process is retired".into() };
+        }
+        let call_path = call_record_path(&self.spec_path, &request);
+        if let Some(path) = &call_path {
+            let prepared = private_directory(path.parent().expect("call record parent"))
+                .and_then(|()| serde_json::to_vec(&request).map_err(|error| error.to_string()))
+                .and_then(|bytes| write_private_new(path, &bytes));
+            if let Err(error) = prepared {
+                return KeeperResponse::Refused { error: format!("persistent process call cannot start or has an uncertain prior outcome: {error}") };
+            }
+        }
         let response = match self.perform(request).await {
             Ok(poll) => KeeperResponse::Poll(poll),
             Err(error) => KeeperResponse::Refused { error },
         };
+        if let Some(path) = call_path {
+            if let Err(error) = retain_response(&path, &response) { return KeeperResponse::Refused { error }; }
+        }
         if let KeeperResponse::Poll(poll) = &response
             && poll.closed
             && !poll.continuation_available
             && !self.delivered.swap(true, Ordering::SeqCst)
         {
-            let _ = std::fs::write(delivered_marker(&self.spec_path), b"");
-        }
-        if let Some((operation, call)) = identity {
-            *last = Some((operation, call, response.clone()));
+            if let Err(error) = write_private_new(&delivered_marker(&self.spec_path), b"") {
+                return KeeperResponse::Refused { error };
+            }
         }
         response
     }
@@ -1154,18 +1304,18 @@ impl Keeper {
             } => {
                 {
                     let state = managed.state.lock().await;
-                    if state.exited || state.closed {
+                    if state.closed {
                         return Err(format!(
                             "persistent coder process '{}' is not running",
                             self.spec.process_id
                         ));
                     }
                 }
-                managed
-                    .process
-                    .terminate()
-                    .await
-                    .map_err(|error| format!("persistent coder terminate failed: {error}"))?;
+                let _ = terminate_and_wait(
+                    managed,
+                    Duration::from_millis(self.spec.cleanup_timeout_ms),
+                    &self.activity,
+                ).await;
                 (wait_ms, max_output_bytes)
             }
             KeeperRequest::Info | KeeperRequest::Release => {
@@ -1177,7 +1327,7 @@ impl Keeper {
         loop {
             let terminal = {
                 let state = managed.state.lock().await;
-                state.closed || state.failure.is_some() || state.timed_out
+                state.closed || state.failure.is_some() || state.termination_failure.is_some() || state.timed_out
             };
             if terminal || wait_ms == 0 || tokio::time::Instant::now() >= deadline {
                 break;
@@ -1212,7 +1362,7 @@ impl Keeper {
             close_seq: state.close_seq,
             continuation_available: !state.closed || state.pending_bytes > 0,
             timed_out: state.timed_out,
-            failure: state.failure.clone(),
+            failure: state.failure(),
         })
     }
 
@@ -1224,7 +1374,7 @@ impl Keeper {
             exit_code: state.exit_code,
             closed: state.closed,
             timed_out: state.timed_out,
-            failure: state.failure.clone(),
+            failure: state.failure(),
             continuation_available: !state.closed || state.pending_bytes > 0,
             pending_output_bytes: state.pending_bytes,
             next_source_seq: state.next_expected_seq,
@@ -1234,31 +1384,17 @@ impl Keeper {
     async fn release(&self) -> KeeperResponse {
         self.managed.state.lock().await.releasing = true;
         self.managed.notify.notify_one();
-        let _ = self.managed.process.terminate().await;
-        let closed = tokio::time::timeout(
+        let closed = terminate_and_wait(
+            &self.managed,
             Duration::from_millis(self.spec.cleanup_timeout_ms),
-            async {
-                loop {
-                    let notified = self.activity.notified();
-                    if self.managed.state.lock().await.closed {
-                        return;
-                    }
-                    notified.await;
-                }
-            },
-        )
-        .await;
+            &self.activity,
+        ).await;
         match closed {
             Ok(()) => {
                 self.released.store(true, Ordering::SeqCst);
                 KeeperResponse::Released
             }
-            Err(_) => KeeperResponse::Refused {
-                error: format!(
-                    "persistent process '{}' closure was not proven within {} ms",
-                    self.spec.process_id, self.spec.cleanup_timeout_ms
-                ),
-            },
+            Err(error) => KeeperResponse::Refused { error },
         }
     }
 }
@@ -1279,6 +1415,14 @@ impl ManagedProcessState {
             timed_out: false,
             releasing: false,
             failure: None,
+            termination_failure: None,
+        }
+    }
+
+    fn failure(&self) -> Option<String> {
+        match (&self.failure, &self.termination_failure) {
+            (Some(failure), Some(termination)) => Some(format!("{failure}; {termination}")),
+            (failure, termination) => failure.clone().or_else(|| termination.clone()),
         }
     }
 
@@ -1454,8 +1598,8 @@ fn spawn_event_collector(
                         "persistent coder process event collector lagged by {skipped} events"
                     ));
                     managed.notify.notify_one();
-                    activity.notify_one();
-                    let _ = managed.process.terminate().await;
+                    activity.notify_waiters();
+                    let _ = request_termination(&managed, &activity).await;
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -1464,16 +1608,16 @@ fn spawn_event_collector(
                             .to_string(),
                     );
                     managed.notify.notify_one();
-                    activity.notify_one();
+                    activity.notify_waiters();
                     break;
                 }
             };
             let is_closed = matches!(event, ExecProcessEvent::Closed { .. });
             let terminate = managed.state.lock().await.record(event);
             managed.notify.notify_one();
-            activity.notify_one();
+            activity.notify_waiters();
             if terminate && !is_closed {
-                let _ = managed.process.terminate().await;
+                let _ = request_termination(&managed, &activity).await;
             }
             if is_closed {
                 break;
@@ -1485,6 +1629,7 @@ fn spawn_event_collector(
 fn spawn_process_timeout(
     managed: Arc<ManagedProcess>,
     process_timeout: Duration,
+    cleanup_timeout: Duration,
     activity: Arc<tokio::sync::Notify>,
 ) {
     let managed = Arc::downgrade(&managed);
@@ -1504,10 +1649,66 @@ fn spawn_process_timeout(
         };
         if terminate {
             managed.notify.notify_one();
-            activity.notify_one();
-            let _ = managed.process.terminate().await;
+            activity.notify_waiters();
+            let _ = terminate_and_wait(&managed, cleanup_timeout, &activity).await;
         }
     });
+}
+
+async fn record_termination_failure(
+    managed: &ManagedProcess,
+    activity: &tokio::sync::Notify,
+    error: String,
+) -> String {
+    managed.state.lock().await.termination_failure = Some(error.clone());
+    managed.notify.notify_one();
+    activity.notify_waiters();
+    error
+}
+
+async fn request_termination(
+    managed: &ManagedProcess,
+    activity: &tokio::sync::Notify,
+) -> Result<(), String> {
+    match managed.process.terminate().await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(record_termination_failure(managed, activity, format!(
+            "persistent process '{}' termination failed: {error}", managed.process.process_id()
+        )).await),
+    }
+}
+
+async fn terminate_and_wait(
+    managed: &ManagedProcess,
+    cleanup_timeout: Duration,
+    activity: &tokio::sync::Notify,
+) -> Result<(), String> {
+    let result = tokio::time::timeout(cleanup_timeout, async {
+        if managed.state.lock().await.closed {
+            return Ok(());
+        }
+        request_termination(managed, activity).await?;
+        loop {
+            let notified = activity.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if managed.state.lock().await.closed {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }).await;
+    match result {
+        Ok(Ok(())) => {
+            managed.state.lock().await.termination_failure = None;
+            Ok(())
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(record_termination_failure(managed, activity, format!(
+            "persistent process '{}' closure was not proven within {} ms",
+            managed.process.process_id(), cleanup_timeout.as_millis()
+        )).await),
+    }
 }
 
 fn event_seq(event: &ExecProcessEvent) -> Option<u64> {
@@ -1572,6 +1773,10 @@ fn executable_file(path: &Path) -> bool {
         .map(|metadata| metadata.is_file())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+#[path = "persistent_termination_tests.rs"]
+mod termination_tests;
 
 #[cfg(test)]
 mod tests {

@@ -35,6 +35,7 @@ const compiled = build({
   stdin: {
     contents: [
       'import "./src/components/icon-glyphs/shell"; export { Sidebar } from "./src/components/Sidebar";',
+      'export { ProjectSourceFolders } from "./src/components/project/ProjectSourceFolders";',
       'export { projectChatRuns, projectChatExecutionContexts } from "./src/chatRuns"; export { resolveClientAgents } from "./src/agentPresets";',
     ].join("\n"),
     resolveDir: path.join(__dirname, ".."), loader: "tsx",
@@ -167,4 +168,37 @@ test("dragging a task within the task list reorders it manually without touching
   assert.deepEqual(calls.pinned.at(-1), []);
   assert.deepEqual(calls.projects, [], "reordering a task never reassigns projects");
   await until(() => taskTitles().join() === "Task run-c,Task run-a,Task run-b", () => `the manual order was not applied: ${taskTitles()}`);
+});
+
+
+test("source folders use the native picker, deduplicate additions, and preserve explicit Primary ordering", async () => {
+  const { ProjectSourceFolders } = await compiled;
+  let folders = [];
+  const requests = [];
+  let pickerResult = { canceled: false, paths: ["/workspace/one", "/workspace/two"] };
+  window.octopusTransport = { selectClientDirectory: async (request) => { requests.push(request); return pickerResult; } };
+  const render = () => root.render(React.createElement(ProjectSourceFolders, { folders, disabled: false,
+    onChange: (next) => { folders = next; render(); }, onError: (error) => assert.fail(error) }));
+  const click = async (label) => {
+    const button = [...document.querySelectorAll("button")].find((item) => item.textContent === label || item.getAttribute("aria-label") === label);
+    assert.ok(button, label);
+    button.click();
+    await settle();
+  };
+  render();
+  await settle();
+  await click("Add folders Octopus can read and edit");
+  assert.equal(requests[0].allowMultiple, true);
+  assert.deepEqual(folders, ["/workspace/one", "/workspace/two"]);
+  await click("Make primary");
+  assert.deepEqual(folders, ["/workspace/two", "/workspace/one"]);
+  pickerResult = { canceled: false, paths: ["/workspace/one", "/workspace/three"] };
+  await click("Add folder");
+  assert.deepEqual(folders, ["/workspace/two", "/workspace/one", "/workspace/three"]);
+  await click("Remove /workspace/two");
+  assert.deepEqual(folders, ["/workspace/one", "/workspace/three"]);
+  pickerResult = { canceled: true, paths: [] };
+  await click("Add folder");
+  assert.deepEqual(folders, ["/workspace/one", "/workspace/three"]);
+  delete window.octopusTransport;
 });

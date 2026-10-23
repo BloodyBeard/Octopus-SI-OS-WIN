@@ -9,6 +9,7 @@ pub(crate) enum CodexTurnControl {
     Steer {
         control_id: String,
         input: Vec<UserInput>,
+        source_artifact: Option<ArtifactRef>,
     },
     Interrupt {
         control_id: String,
@@ -454,6 +455,10 @@ impl CodexTurnControlBroker {
                         &mut before_external_effect,
                     )
                     .await?;
+                    if result.acknowledged && result.action == "steer"
+                        && let Some(output) = &output {
+                        output.record_control_continuity(&result);
+                    }
                     let mut durable_interrupt_handoff = None;
                     if result.acknowledged && matches!(result.action.as_str(), "interrupt" | "stop")
                     {
@@ -555,6 +560,10 @@ impl CodexTurnControlBroker {
                         &mut before_external_effect,
                     )
                     .await?;
+                    if result.acknowledged && result.action == "steer"
+                        && let Some(output) = &output {
+                        output.record_control_continuity(&result);
+                    }
                     let mut durable_interrupt_handoff = None;
                     if result.acknowledged && matches!(result.action.as_str(), "interrupt" | "stop")
                     {
@@ -669,7 +678,14 @@ pub(crate) async fn apply_control_to_target(
                 disposition: CodexTurnControlDisposition::Applied,
             })
         }
-        CodexTurnControl::Steer { control_id, input } => {
+        CodexTurnControl::Steer { control_id, input, source_artifact } => {
+            let next_continuity = source_artifact.map(|source| {
+                let mut state = continuity.clone().ok_or("user steering has no native continuity")?;
+                state.context_generation = state.context_generation.checked_add(1)
+                    .ok_or("user steering exhausted its context generation")?;
+                state.turn_input = Some(source);
+                Ok::<_, String>(state)
+            }).transpose()?;
             let first = steer_attempt_application_with_retarget(
                 control_id.clone(),
                 thread_id.clone(),
@@ -694,7 +710,7 @@ pub(crate) async fn apply_control_to_target(
                 {
                     application.disposition = CodexTurnControlDisposition::DeferredTurn(CodexDeferredTurnCause::PendingSettlement);
                 }
-                return Ok(application);
+                return Ok(retain_steer_source(application, next_continuity));
             };
             before_external_effect(CodexTurnControlEffectIntent::Retarget {
                 expected_turn_id: turn_id,
@@ -716,7 +732,7 @@ pub(crate) async fn apply_control_to_target(
                 false,
             );
             match second {
-                SteerAttemptApplication::Complete(application) => Ok(application),
+                SteerAttemptApplication::Complete(application) => Ok(retain_steer_source(application, next_continuity)),
                 SteerAttemptApplication::Retarget { .. } => unreachable!(),
             }
         }
@@ -837,6 +853,16 @@ pub(crate) fn turn_steer_request(
 pub(crate) enum SteerAttemptApplication {
     Complete(ControlTargetApplication),
     Retarget { actual_turn_id: String },
+}
+
+fn retain_steer_source(
+    mut application: ControlTargetApplication,
+    continuity: Option<CodexContinuityState>,
+) -> ControlTargetApplication {
+    if application.result.acknowledged {
+        application.result.continuity = continuity;
+    }
+    application
 }
 
 pub(crate) fn steer_attempt_application_with_retarget(

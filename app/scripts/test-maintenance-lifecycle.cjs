@@ -182,16 +182,49 @@ async function fixture(t) {
   await fs.writeFile(path.join(root, "ledger", "blobs", "snapshot"), "retained snapshot");
   const readTopology = (record = source) => lifecycle.readMaintenanceTaskTopology({ registryRoot: registry, runRecordsRoot: runs,
     sourceRecord: record, sourceClientInterface: "source_client", readWriterRuns: (target, ids) => loaded.exports.octopusOsOwnedWriterRuns(root, target, ids) });
+  const connectedClients = [];
   const remove = async (hooks = {}, commit) => {
     const digest = crypto.createHash("sha256").update(await fs.readFile(sourceFile)).digest("hex");
     const scope = { clientRuns: [{ run_id: source.id, surface_role: "task", record_path: sourceFile,
-      record_digest: digest, interface_id: "source_client", ee_id: source.ee }], readOnlyRuns: [] };
+      record_digest: digest, interface_id: "source_client", ee_id: source.ee }, ...connectedClients], readOnlyRuns: [] };
     return loaded.exports.deleteOctopusOsTask(registry, root, scope, { runId: source.id, expectedDigest: digest }, hooks.releaseTaskWorkerEnvironments ?? null,
       commit ?? ((request) => commitProjectionClientAuthoring(root, registry, request, { retirementBarrier: hooks.retirementBarrier })),
       { taskLifecycle: lifecycle, ...hooks });
   };
-  return { root, registry, runs, source, d, sourceFile, entries, readTopology, remove };
+  return { root, registry, runs, source, d, sourceFile, entries, readTopology, remove, connectedClients };
 }
+
+test("task deletion disconnects idle client outputs atomically and retains authoring context", async (t) => {
+  const f = await fixture(t), file = path.join(f.runs, "connected_run.json");
+  const edge = { interface_binding: { interface: "connected_provider" }, outbound_interface_bindings: [{ interface: "source_client" }], required_verified_artifacts: [] };
+  const peer = { id: "connected_run", ee: f.source.ee, worker: "connected_worker", status: "idle", trace: "trace:connected_run",
+    checkpoints: [{ ...edge, id: "send", run: "connected_run", epoch: 0, trace: "trace:send", artifact_bindings: [{ id: "role", access: { read: true } }] }], active_checkpoints: ["send"],
+    interface_state: { connected_client: { provider_runtime_interface: "connected_provider" }, connected_provider: {
+      frontier_checkpoint_ids: ["send"], context_generation: 12, run_authoring_binding: { checkpoints: [{ ...edge, name: "send", role: "provider_interface_output", include_context: false }] } } } };
+  await writeJson(file, peer); f.connectedClients.push({ run_id: peer.id, interface_id: "connected_client" });
+  const policyFile = path.join(f.registry, "interface", "connected_worker", "policy.json");
+  await writeJson(policyFile, { id: "connected_worker", ceiling: { interfaces: ["source_client", "connected_provider"], tools: [] } });
+  const original = await fs.readFile(file);
+  const coordinates = { id: "task_coordinates", label: "context.reference", text: "Retained task coordinates",
+    authoring: { run: f.source.id, worker: f.source.worker, provider_interface: "source_provider", registry_root: f.registry, run_file: f.sourceFile } };
+  const artifact = path.join(f.registry, "artifact", coordinates.id, "artifact.json"); await writeJson(artifact, coordinates);
+  f.source.checkpoints[0].artifact_bindings.push({ id: coordinates.id }); await writeJson(f.sourceFile, f.source);
+  await fs.mkdir(path.join(f.registry, "tool", ".octopus-publication"), { mode: 0o700 });
+  await assert.rejects(f.remove({ readTaskStatus: async () => ({ turn_open: true }) }), /connected task to finish/);
+  const hooks = { readTaskStatus: async () => ({ turn_open: false, turn_state: "idle" }), retirementBarrier: contractBarrier() };
+  await assert.rejects(f.remove(hooks, request => {
+    request.writes.find(write => write.file === file).next.status = "running";
+    return commitProjectionClientAuthoring(f.root, f.registry, request, { retirementBarrier: hooks.retirementBarrier });
+  }), /more than its exact outgoing connections/);
+  await assert.rejects(f.remove({ ...hooks, retirementBarrier: contractBarrier({ verify: async () => { throw new Error("held proof failed"); } }) }), /held proof failed/);
+  assert.deepEqual(await fs.readFile(file), original); assert.ok(await fs.stat(f.sourceFile));
+  await f.remove(hooks);
+  const remaining = JSON.parse(await fs.readFile(file));
+  assert.deepEqual(remaining.checkpoints, []); assert.deepEqual(remaining.active_checkpoints, []);
+  assert.equal(remaining.interface_state.connected_provider.context_generation, 12);
+  assert.deepEqual(JSON.parse(await fs.readFile(policyFile)).ceiling.interfaces, ["connected_provider"]);
+  assert.deepEqual(JSON.parse(await fs.readFile(artifact)), coordinates);
+});
 
 test("exact companion inventory includes writers; rejected inventory and writer drift preserve records", async (t) => {
   const f = await fixture(t), topology = await f.readTopology();
@@ -236,17 +269,19 @@ test("busy or unavailable retirement refuses before cleanup; idle alone authoriz
 
 test("settled group deletion uses held owner hook and existing transaction; shared evidence survives", async (t) => {
   const f = await fixture(t), captured = await adoptCatalogue(f);
+  const prediction = await require("./support/composer-prediction-fixture.cjs").predictionFixture(f.root, f.source.id, "source_provider");
   const consumer = path.join(f.runs, "snapshot_consumer.json");
   await writeJson(consumer, { id: "snapshot_consumer", worker: "other_worker", checkpoints: [{
     interface_binding: { interface: "other_provider" }, artifact_bindings: [{ id: captured.document.id }] }] });
   let checks = 0;
   const outcome = await f.remove({ retirementBarrier: contractBarrier({ verify: async (ctx) => {
-    assert.equal(ctx.selection.records.length, 5);
+    assert.equal(ctx.selection.records.length, 6);
+    assert.equal(ctx.selection.records.find(row => row.run === prediction.id).role, "prediction");
     assert.equal(Boolean(ctx.prior_proof), checks++ > 0);
     return proofFor(ctx);
   } }) });
   assert.ok(checks > 3);
-  assert.deepEqual(Array.from(outcome.removedRuns).sort(), ["source_run", "observer_run", "observer_run_writer", "projection_run", "projection_run_writer"].sort());
+  assert.deepEqual(Array.from(outcome.removedRuns).sort(), ["source_run", "observer_run", "observer_run_writer", "projection_run", "projection_run_writer", prediction.id].sort());
   for (const id of outcome.removedRuns) await assert.rejects(fs.stat(path.join(f.runs, `${id}.json`)), /ENOENT/);
   assert.equal(await fs.readFile(path.join(f.entries, "published.json"), "utf8"), "published knowledge");
   assert.equal(await fs.readFile(path.join(f.root, "ledger", "movements.jsonl"), "utf8"), "retained movements\n");

@@ -24,6 +24,9 @@ async function main() {
   let runtime = null;
   let verified = false;
   try {
+    if (process.argv[2] === "--native-adoption-only") {
+      await nativeAdoptionContract(root); console.log("Native package adoption contract passed."); return;
+    }
     await resolution(root);
     await nativeAdoptionContract(root);
     await fixtureRuntime(root);
@@ -99,7 +102,14 @@ async function nativeAdoptionContract(root) {
   const config = JSON.parse(await fs.readFile(path.join(packageSource, "client.json")));
   config.executables.topology_planner = "owner://packages/bin/topology";
   await json(path.join(owner, "client.json"), config); await fs.mkdir(path.dirname(planner), { recursive: true });
-  await fs.writeFile(planner, `#!${process.execPath}\nlet text='';process.stdin.on('data',chunk=>text+=chunk);process.stdin.on('end',()=>{if(process.argv[2]!=='--plan-native-adoption')process.exit(64);JSON.parse(text);console.log(require('node:fs').readFileSync(${JSON.stringify(replyPath)},'utf8'))});\n`, { mode: 0o700 });
+  await fs.writeFile(planner, `#!${process.execPath}
+if(process.argv[2]!=='--plan-native-adoption-batch')process.exit(64);
+require('node:readline').createInterface({input:process.stdin}).on('line', line=>{
+  const frame=JSON.parse(line);
+  const result=frame.operation==='finish'?{finished:true}:{plan:JSON.parse(require('node:fs').readFileSync(${JSON.stringify(replyPath)},'utf8'))};
+  console.log(JSON.stringify({schema_version:1,request_id:frame.request_id,...result}));
+});
+`, { mode: 0o700 });
   const client = require(path.join(owner, "client.cjs"));
   const nextCatalog = `${JSON.stringify({ text: "updated exact catalog" })}\n`, nextProvider = `${JSON.stringify({ id: provider, declaration: 2 })}\n`;
   const planned = { status: "planned", run_id: runId, provider_interface_id: provider, source_movement_seq: 8240, reason: null,
@@ -117,13 +127,13 @@ async function nativeAdoptionContract(root) {
       ensureRuntimeHost:() => ({probe:async () => ({phase:stopped?"unmanaged":"ready",ready:!stopped,ownership:stopped?"none":"external",pid:stopped?null:123,error:null})}),
       resolveOctopusHome:() => home, clientSetupPackageRoots:() => ({stateRoot:path.join(home,"client/package-state")}),
       registerLocalPackageMutationGuard:() => () => {}, recoverLocalPackageTransactions:async () => {},
-      adoptLocalPackageUpdates:async () => {packagePasses += 1; return {changed:false};}, recoverWorkspaceTransactions,
+      adoptLocalPackageUpdates:async () => {assert.ok(stopped, "A live runtime must attach without package adoption"); packagePasses += 1; return {changed:false};}, recoverWorkspaceTransactions,
       createClientProjectionStore:() => ({read:async () => ({status:"ready",client_runs:[{run_id:runId,record_digest:hash(runBytes)}]}),close(){}}),
       resolveRepoRoot:() => root, resolveSourceRegistry:() => registry, resolveLocalPackageRegistry:() => registry,
       resolveLocalPackageLibrary:() => root, projectEePolicies:async () => ({}), projectionReadRequest:() => ({}),
       getOperatorChatClientLoader:() => ({load:async () => client}), resolveInstallationRoot:() => root,
       workspaceStorage:() => publication,
-      readWorkspaceSetupState:(options) => readWorkspaceSetupState({...options,publication}),
+      inspectWorkspaceSetupState:(options) => readWorkspaceSetupState({...options,publication}),
       commitProjectionClientAuthoring:async (home,registry,request) => {
         clientCommits++;
         assert.deepEqual(request.condition, {octopus_home:home,preimages:JSON.parse(await fs.readFile(replyPath)).preimages});
@@ -169,6 +179,16 @@ async function nativeAdoptionContract(root) {
   await json(replyPath, { ...toolPlan, status: "deferred", reason: "accepted tool result is pending", writes: [], preimages: planned.preimages.filter(preimage=>preimage.path===runPath||preimage.path===eePath) });
   await boot(); assert.equal(results.at(-1).status, "deferred"); assert.deepEqual(await fs.readFile(toolPath), toolBytes);
   const unchangedCatalog = await fs.readFile(catalogPath), unchangedProvider = await fs.readFile(providerPath);
+  const providerOnly = { ...planned, writes: [{path:providerPath,content:nextProvider,expected_before_hash:hash(unchangedProvider),tag:"provider"}],
+    preimages: [{path:runPath,sha256:hash(runBytes)},{path:eePath,sha256:hash(await fs.readFile(eePath))},{path:providerPath,sha256:hash(unchangedProvider)}] };
+  await json(replyPath, providerOnly); await boot(); assert.equal(results.at(-1).status, "adopted");
+  assert.equal(await fs.readFile(providerPath, "utf8"), nextProvider);
+  assert.deepEqual(await fs.readFile(catalogPath), unchangedCatalog); assert.deepEqual(await fs.readFile(runPath), runBytes);
+  await fs.writeFile(providerPath, unchangedProvider);
+  await json(replyPath, {...providerOnly, writes:[{...providerOnly.writes[0],content:'{"id":"foreign"}'}]});
+  await assert.rejects(boot(), /exact private provider identity/);
+  await json(replyPath, {...providerOnly, writes:[{...providerOnly.writes[0],path:catalogPath}]});
+  await assert.rejects(boot(), /exact provider declaration/);
   await json(replyPath, toolPlan);
   await fs.appendFile(ledgerPath,"new accepted call\n"); await assert.rejects(boot(), /preimage changed.*movements.jsonl/);
   await fs.writeFile(ledgerPath,ledgerBytes);
@@ -338,7 +358,8 @@ async function setupEvidence(root) {
   ], workspace_setup: { home: { provider_interface_id: "provider", worker_interface_id: "system_worker_test", context_artifact_bindings: [], selected_worker_environment_kinds: [] },
     task: { worker_interface_id: "system_worker_task_test", context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [{ package_id: "provider", default_for_new_tasks: true }] } };
   const plan = compileSetupPlan(pack, { operationId: "cli_fixture_12345678", workspaceName: "Work", workspaceGoal: "Work",
-    projects: [{ name: "First Project" }], model: "fixture-model", reasoningEffort: "low", recommended: [] });
+    projects: [{ name: "First Project" }], model: "fixture-model", reasoningEffort: "low", serviceTier: "priority", recommended: [] });
+  assert.equal(plan.workspace.request.home.serviceTier, "priority");
   assert.equal(plan.workspace.request.home.providerInterfaceId, "provider");
   assert.equal(plan.workspace.request.task.workerInterfaceId, "system_worker_task_test");
   assert.notEqual(plan.workspace.request.task.workerInterfaceId, plan.workspace.request.home.workerInterfaceId);
@@ -383,6 +404,7 @@ async function genuineSetup(environment) {
   assert.equal((await environment.accountClient().account()).signedIn, true, "Genuine setup requires existing native sign-in; this test never starts login.");
   const providers = await readProviderInterfaceDescriptors(environment.packageRoots.sourceRegistryRoot);
   const metadata = createClientProviderMetadata({ registryRoot: () => environment.packageRoots.sourceRegistryRoot,
+    sourceRegistryRoot: () => environment.packageRoots.sourceRegistryRoot,
     accountClient: () => environment.accountClient(), reference: setupReference });
   const [provider] = await metadata.catalog([providers.find((row) => row.id === "world_provider_codex")]);
   assert.ok(!provider.modelCatalogError, provider.modelCatalogError);

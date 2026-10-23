@@ -1,5 +1,5 @@
 use super::*;
-use octopus_ledger::{Endpoint, MovementMetadata};
+use octopus_ledger::{Endpoint, Movement, MovementKind, MovementMetadata};
 use octopus_ledger_index::{ArrivalDedupIndex, RetainedArrivalState};
 
 pub(super) struct Cutover {
@@ -390,6 +390,119 @@ pub(super) fn prepare(
     Ok(result)
 }
 
+fn requires_full_admission_grant(row: &Movement) -> bool {
+    row.kind == MovementKind::InterfaceArrival
+        && row
+            .invocation_metadata
+            .as_ref()
+            .and_then(MovementMetadata::invocation)
+            .is_some_and(|metadata| {
+                metadata.verification_failure.is_none()
+                    && metadata
+                        .checkpoint_admission
+                        .as_ref()
+                        .is_some_and(|admission| !admission.required_artifact_labels.is_empty())
+            })
+}
+
+pub(super) struct AdoptionLedgerView {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    hash: String,
+    max_row: u64,
+    index: ArrivalDedupIndex,
+    scopes: BTreeMap<InterfaceId, Vec<Movement>>,
+    grants: BTreeMap<ContentHash, NativeRunAdoptionPreimage>,
+}
+
+impl AdoptionLedgerView {
+    fn decode(path: &Path, bytes: Vec<u8>, max_row: u64) -> Result<Self, String> {
+        let decoder = octopus_ledger_store::DurableMovementDecoder::for_log(path);
+        let mut view = Self {
+            path: path.to_path_buf(),
+            hash: sha256_hex(&bytes),
+            bytes,
+            max_row: 0,
+            index: ArrivalDedupIndex::new(),
+            scopes: BTreeMap::new(),
+            grants: BTreeMap::new(),
+        };
+        for (sequence, line) in view
+            .bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .enumerate()
+        {
+            if !line.ends_with(b"\n") || line.len() as u64 > max_row {
+                return Err("result adoption requires a complete bounded ledger prefix".into());
+            }
+            view.max_row = view.max_row.max(line.len() as u64);
+            let (mut row, grant) = decoder
+                .decode_projection(line, sequence)
+                .map_err(|e| e.to_string())?;
+            if let Some(grant) = grant {
+                if !view.grants.contains_key(&grant)
+                    && serde_json::from_slice::<Value>(line)
+                        .map_err(|e| e.to_string())?
+                        .pointer("/invocation_metadata/grant_content")
+                        .is_some()
+                {
+                    let path = path
+                        .parent()
+                        .ok_or("adoption ledger has no parent")?
+                        .join("metadata")
+                        .join(grant.to_hex());
+                    let mut pins = Vec::new();
+                    let bytes = adoption_bytes(&path, &mut pins)?;
+                    if ContentHash::of_bytes(&bytes) != grant {
+                        return Err("native adoption checked grant failed content integrity".into());
+                    }
+                    view.grants.insert(grant, pins.pop().unwrap());
+                }
+            }
+            if requires_full_admission_grant(&row) {
+                row = decoder.decode(line, sequence).map_err(|e| e.to_string())?;
+            }
+            if matches!(
+                row.invocation_metadata,
+                Some(MovementMetadata::ArrivalFanout(_))
+            ) {
+                let Endpoint::Interface(id) = &row.from;
+                view.scopes.entry(id.clone()).or_default().push(row.clone());
+            }
+            view.index
+                .catch_up_movements(std::iter::once(row))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(view)
+    }
+
+    pub(super) fn validate(&self) -> Result<(), String> {
+        let current = adoption_bytes(&self.path, &mut Vec::new())?;
+        if current != self.bytes {
+            return Err("native adoption batch ledger prefix changed".into());
+        }
+        drop(current);
+        for (hash, expected) in &self.grants {
+            let mut pins = Vec::new();
+            let bytes = adoption_bytes(&expected.path, &mut pins)?;
+            if pins[0].sha256 != expected.sha256 || ContentHash::of_bytes(&bytes) != *hash {
+                return Err("native adoption batch checked grant changed".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn scopes<'a>(&'a self, owned: &BTreeSet<&InterfaceId>) -> Vec<&'a Movement> {
+        let mut scopes = owned
+            .iter()
+            .filter_map(|id| self.scopes.get(*id))
+            .flatten()
+            .collect::<Vec<_>>();
+        scopes.sort_unstable_by_key(|row| row.seq);
+        scopes
+    }
+}
+
 pub(super) fn outputs_settled(
     request: &NativeRunAdoptionRequest,
     record: &RunRecord,
@@ -398,32 +511,28 @@ pub(super) fn outputs_settled(
     tools: &BTreeMap<String, InterfaceId>,
     max_row: u64,
     preimages: &mut Vec<NativeRunAdoptionPreimage>,
+    ledger: &mut Option<AdoptionLedgerView>,
 ) -> Result<bool, String> {
     let path = request.ledger_root.join("movements.jsonl");
-    let bytes = adoption_bytes(&path, preimages)?;
-    let decoder = octopus_ledger_store::DurableMovementDecoder::for_log(&path);
-    let mut index = ArrivalDedupIndex::new();
-    let mut scopes = Vec::new();
-    let owned = tools
-        .values()
-        .chain(std::iter::once(provider))
-        .collect::<BTreeSet<_>>();
-    for (sequence, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
-        if !line.ends_with(b"\n") || line.len() as u64 > max_row {
-            return Err("result adoption requires a complete bounded ledger prefix".into());
-        }
-        let row = decoder.decode(line, sequence).map_err(|e| e.to_string())?;
-        if matches!(
-            row.invocation_metadata,
-            Some(MovementMetadata::ArrivalFanout(_))
-        ) && matches!(&row.from, Endpoint::Interface(id) if owned.contains(id))
-        {
-            scopes.push(row.clone());
-        }
-        index
-            .catch_up_movements(std::iter::once(row))
-            .map_err(|e| e.to_string())?;
+    if ledger.is_none() {
+        let bytes = adoption_bytes(&path, &mut Vec::new())?;
+        *ledger = Some(AdoptionLedgerView::decode(&path, bytes, max_row)?);
     }
+    let ledger = ledger.as_ref().unwrap();
+    if ledger.path != path || ledger.max_row > max_row {
+        return Err("native adoption batch ledger differs from its exact path or row bound".into());
+    }
+    preimages.push(NativeRunAdoptionPreimage {
+        path,
+        sha256: Some(ledger.hash.clone()),
+    });
+    preimages.extend(ledger.grants.values().map(|pin| NativeRunAdoptionPreimage {
+        path: pin.path.clone(),
+        sha256: pin.sha256.clone(),
+    }));
+    let owned = tools.values().chain(std::iter::once(provider)).collect();
+    let index = &ledger.index;
+    let scopes = ledger.scopes(&owned);
     for scope in &scopes {
         if index
             .retained_arrival_edges(scope.seq.0)
@@ -510,3 +619,7 @@ pub(super) fn outputs_settled(
     }
     Ok(true)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/output_settlement.rs"]
+mod projection_tests;

@@ -111,6 +111,7 @@ fn form_room(
     let worker = InterfaceId::new(worker);
     let door_root_bindings = ctx.provided_root_bindings();
     reg.form(&WorkerEnvironmentFormationRequest {
+        door_additional_root_bindings: &Default::default(),
         door_interface: &door,
         door_descriptor_hash: "hash-door",
         door_driver_ref: "system_coder_env",
@@ -341,6 +342,7 @@ async fn lease_coder_worktree_result(
     let kind_id = WorkerEnvironmentKindId::from("local.coder.worktree");
     let (spec, _) = reg.get(&kind_id).unwrap();
     let ctx = EnvContext {
+        additional_root_slots: Default::default(),
         root_slots: BTreeMap::from([
             ("repo_root".to_string(), AbsPath::new(repo).unwrap()),
             ("worktree_root".to_string(), AbsPath::new(wt).unwrap()),
@@ -468,6 +470,8 @@ async fn direct_workspace_room_supports_non_git_roots_and_refuses_symlink_escape
 
     let workspace = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
+    let secondary = tempfile::tempdir().unwrap();
+    let secondary_root = secondary.path().canonicalize().unwrap();
     let workspace_root = workspace.path().canonicalize().unwrap();
     let outside_root = outside.path().canonicalize().unwrap();
     std::fs::write(outside_root.join("secret.txt"), b"private\n").unwrap();
@@ -478,6 +482,7 @@ async fn direct_workspace_room_supports_non_git_roots_and_refuses_symlink_escape
     let kind_id = WorkerEnvironmentKindId::from("filesystem_workspace");
     let (spec, descriptor_hash) = registry.get(&kind_id).unwrap();
     let context = EnvContext {
+        additional_root_slots: BTreeMap::from([("workspace_root".into(), vec![AbsPath::new(&secondary_root).unwrap()])]),
         root_slots: BTreeMap::from([(
             "workspace_root".to_string(),
             AbsPath::new(&workspace_root).unwrap(),
@@ -505,6 +510,18 @@ async fn direct_workspace_room_supports_non_git_roots_and_refuses_symlink_escape
     );
 
     let fs = environment.fs();
+    let secondary_file = AbsPath::new(&secondary_root.join("created.txt")).unwrap();
+    fs.write(&secondary_file, b"second folder").await.unwrap();
+    assert_eq!(fs.read(&secondary_file).await.unwrap(), b"second folder");
+    let output = crate::run_sandboxed_in_worktree(
+        environment.sandbox(), octopus_descriptors::ProcessSandboxMode::Enforced,
+        &AbsPath::new(&workspace_root).unwrap(),
+        vec!["/bin/sh".into(), "-c".into(), "pwd -P; cat \"$1\"".into(), "multi-root".into(), secondary_file.as_str().into()],
+        std::time::Duration::from_secs(5), 4096, &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(output.exit_code, 0, "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("{}\nsecond folder", workspace_root.display()));
+
     let created = AbsPath::new(&workspace_root.join("nested/created.txt")).unwrap();
     let created_receipt = fs.write(&created, b"workspace\n").await.unwrap();
     assert_eq!(created_receipt.previous_content.unwrap(), None);
@@ -543,6 +560,7 @@ async fn direct_workspace_room_admits_an_explicit_additional_filesystem_root() {
     let kind_id = WorkerEnvironmentKindId::from("filesystem_workspace");
     let (spec, descriptor_hash) = registry.get(&kind_id).unwrap();
     let context = EnvContext {
+        additional_root_slots: Default::default(),
         root_slots: BTreeMap::from([
             (
                 "workspace_root".to_string(),
@@ -889,6 +907,7 @@ fn projection_rejects_caps_beyond_the_kind_boundary() {
     let tmp = std::env::temp_dir();
     let tmp_abs = AbsPath::new(&tmp).unwrap();
     let ctx = EnvContext {
+        additional_root_slots: Default::default(),
         root_slots: BTreeMap::from([
             ("repo_root".to_string(), tmp_abs.clone()),
             ("worktree_root".to_string(), tmp_abs.clone()),

@@ -21,6 +21,7 @@ import { reportClientExtensionIncident } from "../../extensions/incidents";
 import { appToast } from "../../toasts";
 import type {
   OctopusClientAccessProfile,
+  OctopusClientContext,
   OctopusOperatorChatArtifact,
   OctopusOperatorChatMovementArtifact,
 } from "../../electron";
@@ -103,6 +104,7 @@ import {
 } from "./chatTurnControl";
 
 import { useChatCapabilityCatalog } from "./useChatCapabilityCatalog";
+import { useTaskTitle } from "./useTaskTitle";
 import { chatDraftKey, useChatDraftState, type ChatDraftValue } from "./useChatDraftState";
 import { pendingQueueSteering, queueDispatchCandidates, queueSubmissionFailureStatus, queueTurnReady, visibleQueueTurns } from "./clientTurnQueue";
 import { useChatTurnQueue, type QueuedChatTurn } from "./useChatTurnQueue";
@@ -156,7 +158,7 @@ type TurnControlTarget = {
   runId: string;
 };
 
-type PendingTurnControls = Record<string, { action: "resume" | "stop"; controlId: string; afterMovementSeq: number }>;
+type PendingTurnControls = Record<string, { action: "resume" | "stop"; controlId: string; afterMovementSeq: number; requestPending?: boolean }>;
 
 export function useChatWorkspace(
   accessProfile: OctopusClientAccessProfile,
@@ -165,7 +167,10 @@ export function useChatWorkspace(
   storageScope = "main",
   clientSurfaceRole: "home" | "task" = "task",
   runtimeHome = "",
+  clientContext: OctopusClientContext = [],
 ) {
+  const clientContextRef = useRef(clientContext);
+  clientContextRef.current = clientContext;
   const clientPreferences = useClientPreferences();
   const {
     executionContextError,
@@ -475,7 +480,6 @@ export function useChatWorkspace(
       setLoadingRuns(false);
       return;
     }
-    setRunsLoaded(false);
     setLoadingRuns(true);
     try {
       const nextRuns = await runReads.request(loadChatRuns);
@@ -653,6 +657,7 @@ export function useChatWorkspace(
 
   const inFlightTurnControlTarget = inFlightTurnControlTargets[activeRunId] ?? null;
   const activeRun = projectedActiveRun;
+  useTaskTitle(activeRun, runtimeHome, accessProfile, enabled && runtimeReady);
   const activeTurnControlTarget = inFlightTurnControlTarget ?? (
     (projectedActiveRun?.turnOpen || operatorTurnResumeAcknowledgedOpen(messages, projectedActiveRun?.lastMovementSeq ?? -1))
       && projectedActiveRun?.chatInterfaceId
@@ -1095,6 +1100,31 @@ export function useChatWorkspace(
     }));
   }, [activeRunId, queuedTurns]);
 
+  useEffect(() => {
+    if (!queueReady || loadingMessages) return;
+    const failed = queuedTurns.find((item) => item.runKey === chatDraftKey(activeRunId)
+      && item.intent === "turn" && !Number.isFinite(item.queuedAfterSeq) && ["unknown", "failed"].includes(item.status));
+    if (!failed || text.trim() || attachments.length
+      || messages.some((message) => message.id === failed.messageId && message.role === "user")) return;
+    if (!text.trim() && !attachments.length) {
+      const restored = { ...failed, messageId: failed.status === "unknown" ? failed.messageId : "",
+        messageHadAttachments: failed.hadAttachments, agentPresetId: failed.agentPresetId ?? "",
+        applicationIds: failed.applicationIds ?? [], driverNames: failed.driverNames ?? [],
+        accessMode: failed.accessMode ?? "project_access" as TaskAccessMode, continuation: failed.continuation ?? null };
+      writeDraft(activeRunId, restored);
+      applyDraft(restored);
+    }
+    setError(failed.error || "Couldn't send your message. Try again.");
+    void replaceQueuedTurns((items) => items.filter((item) => item.id !== failed.id));
+  }, [queueReady, queuedTurns, activeRunId, loadingMessages, text, attachments]);
+
+  useEffect(() => {
+    if (!draftMessageId || !messages.some((message) => message.id === draftMessageId && message.role === "user")) return;
+    consumeDraft(activeRunId, text, attachments);
+    completeSubmissionIntent(activeRunId, draftMessageId);
+    setError("");
+  }, [messages, draftMessageId, activeRunId]);
+
   const queueRecoveryReads = useMemo(() => new Map<string, string>(), [accessProfile, runtimeHome]);
   const [queueRecoveryPass, setQueueRecoveryPass] = useState(0);
   useEffect(() => {
@@ -1249,7 +1279,7 @@ export function useChatWorkspace(
     resetInputHistory();
   }
 
-  function createChat(targetEeId = "", targetAgentPresetId = "") {
+  function createChat(targetEeId = "", targetAgentPresetId = "", initialText = "") {
     saveCurrentDraft(activeRunId);
     deleteDraft("");
     activeRunIdRef.current = "";
@@ -1299,7 +1329,7 @@ export function useChatWorkspace(
     applyDraft({
       messageId: "",
       messageHadAttachments: false,
-      text: "",
+      text: initialText,
       attachments: [],
       agentPresetId: selectedAgent?.id ?? targetAgentPresetId,
       eeId: nextEeId,
@@ -1323,33 +1353,33 @@ export function useChatWorkspace(
     if (usableAgent) chooseAgentPreset(usableAgent.id);
   }
 
-  function continueInNewTask(message: ChatRenderMessage) {
+  function continueInNewTask(message: ChatRenderMessage): boolean {
     const declaredContinuation = message.eventData?.continuation;
     let sourceRunId = message.runId || activeRunIdRef.current;
     let sourceArtifactId = message.artifactId || "";
     if (declaredContinuation !== undefined) {
       if (!declaredContinuation || typeof declaredContinuation !== "object" || Array.isArray(declaredContinuation)) {
         setError("The terminal artifact declares malformed continuation coordinates.");
-        return;
+        return false;
       }
       const declared = declaredContinuation as Record<string, unknown>;
       sourceRunId = eventString(declared.source_run_id);
       sourceArtifactId = eventString(declared.source_artifact_id);
       if (!sourceRunId || !sourceArtifactId) {
         setError("The terminal artifact declares incomplete continuation coordinates.");
-        return;
+        return false;
       }
     }
     if (!sourceRunId || !sourceArtifactId || message.role !== "assistant" || message.terminal === false) {
       setError("Only a completed assistant message with artifact provenance can start a new task.");
-      return;
+      return false;
     }
     saveCurrentDraft(activeRunId);
     const nextContinuation = { sourceRunId, sourceArtifactId };
     const sourceRun = runs.find((run) => run.runId === sourceRunId);
     if (!sourceRun) {
       setError(`Continuation source run '${sourceRunId}' is not present in the chat projection.`);
-      return;
+      return false;
     }
     const nextEeId = sourceRun?.eeId ?? eeId;
     const sourceAgent = clientAgentForRun(allAgentPresets, sourceRun);
@@ -1384,6 +1414,7 @@ export function useChatWorkspace(
       ? ""
       : "The source task does not identify one current Agent. Choose an Agent before sending the continuation.");
     setMessageQuery("");
+    return true;
   }
 
   function startReviewTask(seed: ReviewTaskSeed) {
@@ -1479,7 +1510,7 @@ export function useChatWorkspace(
       editedMessageId: message.id, runKey: chatDraftKey(message.runId), text: nextText });
   }
 
-  function editUserMessageInNewTask(message: ChatRenderMessage, editedText?: string): boolean {
+  function editUserMessageInNewTask(message: ChatRenderMessage, editedText?: string, sourceMessages: readonly ChatRenderMessage[] = renderedMessages): boolean {
     if (submitLockRef.current.has(chatDraftKey(""))) {
       setError("A new task is still being authored. Wait for its run identity before branching again.");
       return false;
@@ -1489,18 +1520,19 @@ export function useChatWorkspace(
       setError("Only a completed operator message can be edited into a new task.");
       return false;
     }
-    const sourceIndex = messages.findIndex((candidate) => candidate.id === message.id);
+    const sourceIndex = sourceMessages.findIndex((candidate) => candidate.id === message.id && candidate.runId === message.runId);
     if (sourceIndex < 0) {
       setError("The operator message is no longer present in the projected run.");
       return false;
     }
-    const previous = [...messages.slice(0, sourceIndex)].reverse().find((candidate) => (
-      candidate.role === "assistant"
+    const previous = [...sourceMessages.slice(0, sourceIndex)].reverse().find((candidate) => (
+      candidate.runId === message.runId
+      && candidate.role === "assistant"
       && candidate.terminal
       && candidate.eventKind === "message"
       && candidate.artifactId
     ));
-    const nextContinuation = previous
+    const nextContinuation = previous?.runId && previous.artifactId
       ? { sourceRunId: previous.runId, sourceArtifactId: previous.artifactId }
       : null;
     saveCurrentDraft(activeRunId);
@@ -2121,6 +2153,12 @@ export function useChatWorkspace(
             selectedWorkerEnvironmentKinds: taskCapabilities?.selectedWorkerEnvironmentKinds,
             selectedTools: taskCapabilities?.selectedTools,
             clientSurfaceRole: turn.clientSurfaceRole,
+            clientContext: [
+              ...clientContextRef.current,
+              ...(!turn.runId && executionContexts.find((context) => context.eeId === turn.eeId)?.sourceFolders?.length
+                ? [{ name: "Project source folders", text: JSON.stringify({ primary: executionContexts.find((context) => context.eeId === turn.eeId)!.sourceFolders[0], folders: executionContexts.find((context) => context.eeId === turn.eeId)!.sourceFolders }) }]
+                : []),
+            ],
             continuation: turn.continuation ?? undefined,
             text: turn.text,
             attachments: bridgeAttachments,
@@ -2303,20 +2341,48 @@ export function useChatWorkspace(
           current = null;
         } catch (failure) {
           const formatted = formatRuntimeError(failure);
-          if (turn.queueId) {
+          const notSent = !submittedToRuntime && queueSubmissionFailureStatus(failure, bridgeAttempted) === "failed";
+          if (turn.manual && !submittedToRuntime && !notSent && effectiveRunId) {
+            const history = await refreshMessages(effectiveRunId);
+            const admitted = history?.find((message) => message.id === messageId && message.role === "user");
+            if (admitted) {
+              await queueStore.settle(queueId, owner, "accepted", undefined, admitted.movementSeq, effectiveRunId);
+              completeSubmissionIntent(turn.runId, messageId);
+              replaceRunPending(turn.runKey, []);
+              current = null;
+              continue;
+            }
+          }
+          const activeKey = chatDraftKey(activeRunIdRef.current);
+          const restoreManualDraft = turn.manual && !submittedToRuntime
+            && (activeKey === turn.runKey || activeKey === chatDraftKey(effectiveRunId))
+            && !composerDraftRef.current.text.trim() && !composerDraftRef.current.attachments.length;
+          if (turn.queueId && !restoreManualDraft) {
             if (!submittedToRuntime) await queueStore.settle(queueId, owner,
               queueSubmissionFailureStatus(failure, bridgeAttempted), formatted);
             else await replacePausedQueueRunKeys((keys) => keys.includes(lockedRunKey) ? keys : [...keys, lockedRunKey]);
           } else {
             const activeKey = chatDraftKey(activeRunIdRef.current);
             if (activeKey === turn.runKey || activeKey === chatDraftKey(effectiveRunId)) {
-              setText((currentText) => currentText.trim() ? currentText : turn.text);
-              setAttachments((currentAttachments) => currentAttachments.length ? currentAttachments : turn.attachments);
-              setContinuation((currentContinuation) => currentContinuation ?? turn.continuation);
+              if (!composerDraftRef.current.text.trim() && !composerDraftRef.current.attachments.length) {
+                const restored = {
+                  messageId: notSent ? "" : messageId, messageHadAttachments: turn.attachments.length > 0,
+                  text: turn.text, attachments: turn.attachments, continuation: turn.continuation,
+                  agentPresetId: turn.agentPresetId, eeId: turn.eeId, workerInterfaceId: turn.workerInterfaceId,
+                  providerInterfaceId: turn.providerInterfaceId, providerModel: turn.providerModel,
+                  reasoningEffort: turn.reasoningEffort, serviceTier: turn.serviceTier,
+                  applicationIds: turn.applicationIds, driverNames: turn.driverNames, accessMode: turn.accessMode,
+                };
+                writeDraft(activeRunIdRef.current, restored);
+                applyDraft(restored);
+              }
             }
           }
+          if (restoreManualDraft) {
+            await replaceQueuedTurns((items) => items.filter((item) => item.id !== turn.queueId));
+          }
           if (
-            !turn.queueId
+            (!turn.queueId || turn.manual)
             && (chatDraftKey(effectiveRunId) === chatDraftKey(activeRunIdRef.current) || turn.runKey === chatDraftKey(activeRunIdRef.current))
           ) {
             setError(formatted);
@@ -2619,10 +2685,12 @@ export function useChatWorkspace(
 
   async function interruptActiveTurn() {
     const target = activeTurnControlTarget;
-    if (!target || pendingTurnControlsRef.current[target.runId]) return;
-    const controlId = `control_${randomId()}`;
-    const afterMovementSeq = knownMovementSeq(target.runId);
-    setPendingTurnControls((current) => ({ ...current, [target.runId]: { action: "stop", controlId, afterMovementSeq } }));
+    if (!target) return;
+    const previous = pendingTurnControlsRef.current[target.runId];
+    if (previous?.action === "resume" || previous?.requestPending) return;
+    const controlId = previous?.controlId ?? `control_${randomId()}`;
+    const afterMovementSeq = previous?.afterMovementSeq ?? knownMovementSeq(target.runId);
+    setPendingTurnControls((current) => ({ ...current, [target.runId]: { action: "stop", controlId, afterMovementSeq, requestPending: true } }));
     setError("");
     try {
       const result = await submitOperatorTurnControl({
@@ -2645,6 +2713,9 @@ export function useChatWorkspace(
       await refreshRuns();
     } catch (failure) {
       if (deliveryScopeCurrent()) setError(`Stop is awaiting confirmation. ${formatRuntimeError(failure)}`);
+    } finally {
+      if (deliveryScopeCurrent()) setPendingTurnControls((current) => current[target.runId]?.controlId === controlId
+        ? { ...current, [target.runId]: { ...current[target.runId], requestPending: false } } : current);
     }
   }
 
@@ -2851,6 +2922,7 @@ export function useChatWorkspace(
         runId: run.runId, messageId, recoverPreparedMessage: input.recoverPreparedMessage,
         providerInterfaceId: run.providerInterfaceId, providerModel: run.providerModel,
         eeId: run.eeId, workerInterfaceId: run.workerInterfaceId, clientSurfaceRole: run.clientSurfaceRole,
+        clientContext: clientContextRef.current.length ? clientContextRef.current : undefined,
         endpoint: claimed.endpoint, text: claimed.text, attachments: bridgeAttachments, timeoutMs: 45_000,
       });
       if ("refused" in submitted.verdict) {
@@ -3084,7 +3156,7 @@ export function useChatWorkspace(
     steeringWriterAvailable,
     text,
     turnOpen,
-    turnControlPending: Boolean(pendingTurnControls[activeRunId]),
+    turnControlPending: Boolean(pendingTurnControls[activeRunId] && (pendingTurnControls[activeRunId].action === "resume" || pendingTurnControls[activeRunId].requestPending)),
     toolPresentations,
     workerEnvironmentRooms,
     workerInterfaceId,

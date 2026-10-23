@@ -38,7 +38,9 @@ An empty Home opens setup. Choose an application pack, workspace name, optional
 first Project, model, and reasoning level. Existing machine provider sign-in
 can be reused; otherwise setup prints the native sign-in address to open in
 your browser. Once configured, normal startup opens Home. Setup can also be
-started explicitly with `./octopus setup`.
+started explicitly with `./octopus setup`. An explicit `--service-tier <id>`
+selects a tier from the model catalogue and preserves it in Home and setup
+Agent presets.
 
 Source changes do not automatically update packages already installed in a
 Home. Use matching built client/package versions. Package proof errors must

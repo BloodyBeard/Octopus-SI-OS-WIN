@@ -1544,6 +1544,7 @@ impl ProviderOutputHandoff {
             if !result_inputs::saved_definition_transition(&original, &record, &original_config)? {
                 source_settlement::validate_transition(&original, &record, &original_config)?;
                 source_withdrawal::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
+                rejected_final::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
             }
             let candidate_config = result_inputs::saved_attempt_config(&record, &original_config)?;
             validate_bound_run_authoring_topology(&record, &candidate_config, None)?;

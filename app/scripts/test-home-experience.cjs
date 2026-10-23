@@ -374,7 +374,7 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     "../chat/MessageContent": { MessageContent: ({ text }) => React.createElement("span", null, text) },
     "../../appearance": { useShouldReduceMotion: () => true, useAppearance: () => ({ octopuses: false }) },
     "../IconGlyphs": { Glyph: ({ name }) => React.createElement("svg", { "data-glyph": name }) },
-    "../CadencedShimmerText": { CadencedShimmerText: ({ children, active }) => React.createElement("span", { "data-active": active }, children) },
+    "../CadencedShimmerText": { CadencedShimmerText: ({ children, active }) => React.createElement("span", { "data-active": active }, children), ShimmerActivityScope: ({ children }) => children },
     "../chat/ChatComposer": { ChatComposer: composer },
     "../chat/QueuedMessageList": { QueuedMessageList: () => null },
     "./AirHandVoiceController": { AirHandVoiceController: () => null },
@@ -489,7 +489,8 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     assert.equal(view.container.querySelector('[data-widget="Invalid widget"]'), null);
     assert.match(view.container.querySelector('[role="alert"]').textContent, /exact artifact delivery provenance/);
     assert.ok(view.container.querySelector('[data-widget="Installed extension"]'));
-    await view.render({ ...props, workspace: { ...workspace, busy: true } });
+    const nextPrompt = { ...message("next-prompt", "home-client", "Continue"), role: "user", direction: "in", createdAtMs: 2000 };
+    await view.render({ ...props, workspace: { ...workspace, busy: true, renderedMessages: [...workspace.renderedMessages, nextPrompt] } });
     assert.equal(body.textContent, "Octopus is working");
     assert.equal(body.querySelector(".home-response-stage__identity"), null);
     const streaming = { ...message("stream", "home-client", "A streamed reply"), eventKind: "message_delta", terminal: false };

@@ -772,7 +772,7 @@ test("chat turns, steering, turn control and artifact reads use the verified cha
   assert.equal(loader.packageRoots().activeRegistryRoot, path.join(main.world.home, "registry"));
   assert.equal(loader.packageRoots().stateRoot, path.join(main.world.home, "client", "package-state"));
   assert.deepEqual(names(main, ["recover-workspace", "chat-client-load", "submit-operator-turn", "read-payload", "projection-invalidate"]),
-    ["recover-workspace", "chat-client-load", "submit-operator-turn", "read-payload"], "a submitted turn never invalidates the live projection itself");
+    ["chat-client-load", "submit-operator-turn", "read-payload"], "a submitted turn leaves recovery to its transaction owner and never invalidates the live projection itself");
   assert.equal(main.eventsOf("read-payload")[0][1].blobsRoot, blobs);
 
   main.world.events.length = 0;

@@ -3,10 +3,31 @@ const { constants } = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { decodeMaintenanceDeclaration } = require("./maintenance-client.cjs");
+const { readComposerPredictionTaskTopology } = require("./composer-predictions.cjs");
+const { readTaskTitleTopology } = require("./task-titles.cjs");
 
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
 
 async function readMaintenanceTaskTopology(options) {
+  const memory = await readMemoryTaskTopology(options);
+  const prediction = await readComposerPredictionTaskTopology({ ...options, readDocument: readJson });
+  const title = await readTaskTitleTopology({ ...options, readDocument: readJson });
+  if (!prediction && !title) return memory;
+  const group = memory ?? { declaration: { source_provider_interface: prediction?.provider ?? title.sourceProvider },
+    records: new Map(), targets: new Map(), interfaces: new Set(), tools: new Set() };
+  for (const companion of [prediction, title].filter(Boolean)) {
+    if (group.records.has(companion.document.id) || [...companion.interfaces].some(id => group.interfaces.has(id))) fail("client maintenance overlaps another companion");
+    group.records.set(companion.document.id, companion);
+    for (const id of companion.interfaces) group.interfaces.add(id);
+  }
+  return group;
+}
+
+function withTaskLifecycleLock(runId, operation) {
+  return require("./client/publication.cjs").withOperatorRunAuthoringLock(`prediction_${component(runId, "source Run")}`, operation);
+}
+
+async function readMemoryTaskTopology(options) {
   const source = object(options.sourceRecord, "source Run");
   const declarations = Object.entries(object(source.interface_state, "source interface state"))
     .filter(([, state]) => state?.maintenance_observer !== undefined);
@@ -267,4 +288,4 @@ function canonical(value) { if (Array.isArray(value)) return `[${value.map(canon
 function equalSets(first, second, message) { if (first.size !== second.size || [...first].some((id) => !second.has(id))) fail(message); }
 function fail(message, code = "maintenance_lifecycle_invalid") { const error = new Error(`maintenance lifecycle: ${message}`); error.code = code; throw error; }
 
-module.exports = { readMaintenanceTaskTopology, readTaskCatalogueEvidence, catalogueProvenanceProjection, assertMaintenanceNoPendingEffects };
+module.exports = { readMaintenanceTaskTopology, readTaskCatalogueEvidence, catalogueProvenanceProjection, assertMaintenanceNoPendingEffects, withTaskLifecycleLock };

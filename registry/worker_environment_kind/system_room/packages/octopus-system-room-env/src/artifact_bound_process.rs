@@ -68,7 +68,6 @@ impl ArtifactBoundProcess {
                 effect_root: effect_root.as_deref(),
                 maximum_bytes: self.maximum_bytes,
                 observed_run: self.observed_run.as_deref(),
-                run_records_root: self.run_records_root.as_deref(),
             },
         )
     }

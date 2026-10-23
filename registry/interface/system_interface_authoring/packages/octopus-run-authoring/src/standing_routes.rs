@@ -505,6 +505,7 @@ impl ProviderOutputHandoff {
             settlement_of: None,
             dispatch_fenced: true,
             withdrawal: None,
+            replacement: None,
             standing: Vec::new(),
         }
     }

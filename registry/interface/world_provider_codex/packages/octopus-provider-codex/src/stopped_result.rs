@@ -470,7 +470,7 @@ fn materialize_closure(
     closed.native_terminal = Some(terminal.clone());
     let mut outputs = Vec::new();
     for mut output in retained {
-        output.value["label"] = serde_json::json!(output.label);
+        normalize_output_identity(&mut output, closed.turn_input.as_ref())?;
         output.value[CODEX_CONTINUITY_FIELD] = serde_json::to_value(&closed)
             .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
         outputs.push(output.value);
@@ -572,7 +572,7 @@ pub(crate) fn prove_intent(
     let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
     let runtime = invocation_runtime_metadata(input)?;
     let labels = codex_context_output_labels(descriptor)?;
-    let original = recover_codex_continuity_from_current_session(session, &input.artifact, &runtime.interface, runtime.run.as_str(), &labels)?
+    let original = recover_codex_continuity_from_current_session(session, std::slice::from_ref(&input.artifact), &runtime.interface, runtime.run.as_str(), &labels)?
         .ok_or_else(|| fail("unadmitted native intent has no original pending continuity"))?;
     let wait = original.pending.as_ref().ok_or_else(|| fail("unadmitted native intent has no original effect"))?;
     let operation = native_pending_operation(wait)?.ok_or_else(|| fail("unadmitted intent is not an exact native operation"))?;

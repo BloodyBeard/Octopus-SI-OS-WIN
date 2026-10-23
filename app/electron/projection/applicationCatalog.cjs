@@ -20,7 +20,7 @@ async function readApplicationPackageCatalog(activeRegistryRoot, localRegistryRo
   };
 }
 
-async function scanApplicationPackageRoot(registryRootValue, sourceKind, warnings, optionalRoot) {
+async function scanApplicationPackageRoot(registryRootValue, sourceKind, warnings, optionalRoot, names = null) {
   const registryRoot = stringValue(registryRootValue);
   if (!registryRoot || !path.isAbsolute(registryRoot)) {
     if (!optionalRoot) warnings.push(`${sourceKind} application source registry is unavailable`);
@@ -38,7 +38,7 @@ async function scanApplicationPackageRoot(registryRootValue, sourceKind, warning
     return [];
   }
   const packages = await mapConcurrentOrdered(
-    entries.filter((entry) => entry.isDirectory()),
+    entries.filter((entry) => entry.isDirectory() && (!names || names.has(entry.name))),
     8,
     async (entry) => {
       const manifestPath = path.join(interfaceRoot, entry.name, "application.json");

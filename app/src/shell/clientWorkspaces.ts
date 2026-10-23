@@ -5,6 +5,7 @@ import type { ClientSurfaceDescriptor } from "./surfaceTypes";
 export type ClientWorkspaceKey = "dashboard" | "octopus-os";
 
 export type ClientChatProject = {
+  sourceFolders?: string[];
   id: string;
   name: string;
   icon: string;
@@ -344,10 +345,10 @@ export function saveClientChatProjects(
     parentId: profile === "lab" ? project.parentId : "",
     chatRunIds: profile === "lab" ? project.chatRunIds : [],
   }));
-  window.localStorage.setItem(
-    profileStorageKey(PROJECTS_STORAGE_KEY, profile),
-    JSON.stringify(stored),
-  );
+  const key = profileStorageKey(PROJECTS_STORAGE_KEY, profile);
+  const serialized = JSON.stringify(stored);
+  if (window.localStorage.getItem(key) === serialized) return;
+  window.localStorage.setItem(key, serialized);
   window.dispatchEvent(new CustomEvent(CHAT_PROJECTS_CHANGED_EVENT, { detail: { profile } }));
 }
 

@@ -1,5 +1,50 @@
 use super::*;
 
+pub(crate) fn resume_control_continuity(
+    ctx: &InterfaceLiftContext,
+    run: &RunId,
+    source_movement_seq: u64,
+    context_generation: u64,
+) -> Result<crate::handler::CodexContinuityState, String> {
+    let directory = ctx.interface_var_dir().join("turn-control-journal");
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(&directory).map_err(|error| format!("Resume cannot read its stopping receipts: {error}"))? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry.path().extension().is_none_or(|extension| extension != "json") { continue; }
+        let sequence = entry.path().file_stem().and_then(|stem| stem.to_str()).and_then(|stem| stem.parse::<u64>().ok())
+            .ok_or("Resume found a stopping receipt with no exact source sequence")?;
+        if sequence >= source_movement_seq { continue; }
+        let journal: TurnControlJournal = serde_json::from_slice(&std::fs::read(entry.path()).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("Resume stopping receipt is malformed: {error}"))?;
+        if journal.schema_version != 1 || journal.source_movement_seq != sequence {
+            return Err("Resume stopping receipt differs from its source identity".into());
+        }
+        if journal.run_id != run.as_str() || !terminal_control_is_satisfied(&journal.action) { continue; }
+        let TurnControlJournalPhase::Delivered { result } = journal.phase else { continue; };
+        if result.control_id != journal.control_id || result.action != journal.action {
+            return Err("Resume stopping receipt changed its acknowledged control".into());
+        }
+        if !result.acknowledged { continue; }
+        candidates.push((sequence, result));
+    }
+    let (sequence, result) = candidates.into_iter().max_by_key(|(sequence, _)| *sequence)
+        .ok_or("Resume has no delivered stopping receipt for this run")?;
+    let continuity = result.continuity.clone().ok_or("Resume stopping receipt has no native thread continuity")?;
+    if continuity.schema_version != 1 || continuity.provider_interface != ctx.interface || continuity.run != run.as_str()
+        || continuity.context_generation != context_generation
+        || result.thread_id.as_deref().is_some_and(|thread| thread != continuity.thread_id)
+    {
+        return Err("Resume stopping receipt differs from the current run continuity".into());
+    }
+    let artifact = materialize_turn_control_result(&ctx.interface_var_dir().join("emitted"), sequence, result)
+        .map_err(|error| error.to_string())?;
+    let reference = materialized_artifact_ref(&artifact)?;
+    if find_artifact_admission(ctx, run, sequence, &reference)?.movement_seq.is_none_or(|admitted| admitted >= source_movement_seq) {
+        return Err("Resume stopping receipt has no causally prior admitted outcome".into());
+    }
+    Ok(continuity)
+}
+
 pub(crate) async fn hand_control_result(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,

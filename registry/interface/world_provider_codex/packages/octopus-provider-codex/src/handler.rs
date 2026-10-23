@@ -78,6 +78,8 @@ use native_history::{read_native_turn, read_native_turn_items};
 
 #[path = "composer_prediction.rs"]
 pub(crate) mod composer_prediction;
+#[path = "client_generation.rs"]
+pub(crate) mod client_generation;
 
 pub const CODEX_APP_SERVER_INTERFACE_DRIVER_REF: &str = "codex_app_server";
 
@@ -290,6 +292,8 @@ mod recovered_inputs;
 pub(crate) use recovered_inputs::*;
 mod input_decoding;
 pub(crate) use input_decoding::*;
+mod input_messages;
+pub(crate) use input_messages::*;
 mod interrupted_results;
 pub(crate) use interrupted_results::*;
 mod native_results;

@@ -3,9 +3,6 @@ import "./components/icon-glyphs/shell";
 import { OperatorShell } from "./components/shell/OperatorShell";
 import { WelcomeOverlay } from "./components/onboarding/WelcomeOverlay";
 import { PasswordGate } from "./components/onboarding/PasswordGate";
-import { ChatGptSignInGate } from "./components/onboarding/ChatGptSignInGate";
-import { chatgptSignInAvailable } from "./onboarding/chatgptSignIn";
-import { useChatgptAccount } from "./account/useChatgptAccount";
 import { StateMorphDotCloud } from "./components/onboarding/MorphVideoDotCloud";
 import { LaunchTerminal } from "./components/onboarding/LaunchTerminal";
 import { WorkspaceSetupGate } from "./components/onboarding/WorkspaceSetupGate";
@@ -50,8 +47,6 @@ export function App() {
   const welcomeMode = useMemo(() => new URLSearchParams(window.location.search).get("welcome"), []);
   const showWelcome = !welcomeDismissed && (onboardingState.completed !== true || welcomeMode === "1");
   const localUnlockRequired = Boolean(access?.configured && !access.authenticated);
-  const chatgpt = useChatgptAccount(Boolean(access && !localUnlockRequired && access.profile !== "lab" && (!showWelcome || windowMode)));
-  const accountGateRequired = chatgptSignInAvailable() && !chatgpt.account?.signedIn;
   const [runtimeHasBeenReady, setRuntimeHasBeenReady] = useState(runtimeHost.ready);
   const launchGate = access?.profile !== "lab"
     && runtimeHost.available
@@ -92,16 +87,14 @@ export function App() {
     );
   }
 
-  if (windowMode && access.authenticated && access.profile === "live" && accountGateRequired) {
-    return <><ChatGptSignInGate /><AppToastViewport /></>;
-  }
-
   if (windowMode === "quick-task") {
     if (!access.authenticated || !access.profile) return <Suspense fallback={null}><QuickTaskAccessUnavailable /></Suspense>;
     return (
       <Suspense fallback={null}>
         <ClientPreferencesProvider profile={access.profile}>
-          <QuickTaskWindow accessProfile={access.profile} runtimeReady={runtimeHost.ready} runtimeHome={runtimeHost.home} />
+          <WorkspaceSetupGate accessProfile={access.profile} runtimeHome={runtimeHost.home}>
+            <QuickTaskWindow accessProfile={access.profile} runtimeReady={runtimeHost.ready} runtimeHome={runtimeHost.home} />
+          </WorkspaceSetupGate>
         </ClientPreferencesProvider>
         <AppToastViewport />
       </Suspense>
@@ -113,7 +106,9 @@ export function App() {
     return (
       <Suspense fallback={null}>
         <ClientPreferencesProvider profile={access.profile}>
-          <WorkerEnvironmentWindow accessProfile={access.profile} />
+          <WorkspaceSetupGate accessProfile={access.profile} runtimeHome={runtimeHost.home}>
+            <WorkerEnvironmentWindow accessProfile={access.profile} />
+          </WorkspaceSetupGate>
         </ClientPreferencesProvider>
         <AppToastViewport />
       </Suspense>
@@ -125,7 +120,9 @@ export function App() {
     return (
       <Suspense fallback={null}>
         <ClientPreferencesProvider profile={access.profile}>
-          <TaskMonitorWindow accessProfile={access.profile} />
+          <WorkspaceSetupGate accessProfile={access.profile} runtimeHome={runtimeHost.home}>
+            <TaskMonitorWindow accessProfile={access.profile} />
+          </WorkspaceSetupGate>
         </ClientPreferencesProvider>
         <AppToastViewport />
       </Suspense>
@@ -150,10 +147,6 @@ export function App() {
 
   if (localUnlockRequired) {
     return <>{primaryWindowControls}<LockScreen mode="unlock" onUnlock={setAccess} /><AppToastViewport /></>;
-  }
-
-  if (accountGateRequired && access.profile !== "lab") {
-    return <>{primaryWindowControls}<ChatGptSignInGate /><AppToastViewport /></>;
   }
 
   if (access.profile !== "lab" && runtimeHost.available && runtimeHost.phase === "probing" && !runtimeHasBeenReady) {
@@ -186,7 +179,7 @@ export function App() {
     <>
       {primaryWindowControls}
       <ClientPreferencesProvider profile={access.profile}>
-        <WorkspaceSetupGate accessProfile={access.profile}>
+        <WorkspaceSetupGate accessProfile={access.profile} runtimeHome={runtimeHost.home}>
           <OperatorShell
             accessProfile={access.profile}
             clientWindow={clientWindow}

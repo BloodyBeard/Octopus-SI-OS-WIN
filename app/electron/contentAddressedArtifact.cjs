@@ -9,6 +9,29 @@ const { BoundedJsonProjection, parseArtifactReadProjection } = require("./bounde
 const DEFAULT_MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES = 40 * 1024 * 1024;
 
+async function verifiedArtifactFilesUnchanged(files, blobsRoot) {
+  if (!Array.isArray(files)) return false;
+  let next = 0, unchanged = true;
+  await Promise.all(Array.from({ length: Math.min(8, files.length) }, async () => {
+    while (unchanged && next < files.length) {
+      const file = files[next++];
+      if (typeof file?.path !== "string" || path.dirname(file.path) !== blobsRoot
+        || !/^[0-9a-f]{64}$/.test(path.basename(file.path))) {
+        unchanged = false; break;
+      }
+      try {
+        const stat = await fs.lstat(file.path);
+        unchanged &&= stat.isFile() && !stat.isSymbolicLink()
+          && JSON.stringify(file.identity) === JSON.stringify([stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        unchanged = false;
+      }
+    }
+  }));
+  return unchanged;
+}
+
 async function readContentAddressedArtifactPayload(options) {
   const blobsRoot = absolutePath(options?.blobsRoot, "blobsRoot");
   const manifestHash = contentHash(options?.manifestHash, "manifestHash");
@@ -68,13 +91,13 @@ async function readContentAddressedArtifactPayload(options) {
   };
 }
 
-async function readStableContentAddressedBytes(filePath, expectedHash, maximumBytes, label) {
+async function readStableContentAddressedBytes(filePath, expectedHash, maximumBytes, label, onVerifiedFile) {
   const parts = [];
-  const count = await readStableContentAddressedChunks(filePath, expectedHash, maximumBytes, label, bytes => parts.push(Buffer.from(bytes)));
+  const count = await readStableContentAddressedChunks(filePath, expectedHash, maximumBytes, label, bytes => parts.push(Buffer.from(bytes)), onVerifiedFile);
   return Buffer.concat(parts, count);
 }
 
-async function readStableContentAddressedChunks(filePath, expectedHash, maximumBytes, label, consume) {
+async function readStableContentAddressedChunks(filePath, expectedHash, maximumBytes, label, consume, onVerifiedFile) {
   const stat = await fs.lstat(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${label} is not a regular file`);
   if (stat.size > maximumBytes) throw new Error(`${label} exceeds ${maximumBytes} bytes`);
@@ -107,6 +130,7 @@ async function readStableContentAddressedChunks(filePath, expectedHash, maximumB
     if (actualHash !== expectedHash) {
       throw new Error(`${label} does not match its content-addressed digest`);
     }
+    onVerifiedFile?.({ path: filePath, identity: [after.dev, after.ino, after.size, after.mtimeMs, after.ctimeMs] });
     return count;
   } finally {
     await handle.close();
@@ -125,7 +149,7 @@ async function readContentAddressedArtifactProjection(options) {
   const expectedLabel = requiredString(options?.label, "label");
   if (!contract.json_object_labels.includes(expectedLabel)) throw new Error("artifact label is not declared for JSON object projection");
   const manifestBytes = await readStableContentAddressedBytes(path.join(blobsRoot, manifestHash), manifestHash,
-    manifestMaximum, "artifact manifest");
+    manifestMaximum, "artifact manifest", options.onVerifiedFile);
   const manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes));
   if (!isObject(manifest)) throw new Error("artifact manifest must be a JSON object");
   const label = requiredString(manifest.label, "artifact manifest label");
@@ -137,7 +161,7 @@ async function readContentAddressedArtifactProjection(options) {
   const filePath = path.join(blobsRoot, payloadHash);
   const parser = new BoundedJsonProjection({ ...contract, max_source_bytes: sourceMaximum });
   const count = await readStableContentAddressedChunks(filePath, payloadHash, sourceMaximum,
-    "artifact payload projection source byte bound", bytes => parser.write(bytes));
+    "artifact payload projection source byte bound", bytes => parser.write(bytes), options.onVerifiedFile);
   const projected = parser.finish();
   return { label, manifestHash, payloadHash, payloadPath, payload: projected.payload,
       projection: { ...contract, original_bytes: count, projected_bytes: projected.projectedBytes.length,
@@ -312,4 +336,5 @@ module.exports = {
   payloadArtifactBindings,
   readContentAddressedArtifactPayload,
   readContentAddressedArtifactProjection,
+  verifiedArtifactFilesUnchanged,
 };

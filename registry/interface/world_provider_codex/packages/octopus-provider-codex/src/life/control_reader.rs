@@ -35,7 +35,7 @@ pub(crate) async fn control_reader_life(
         for own in batch {
             let seq = own.movement.seq.0;
             scanned_through = scanned_through.max(seq.saturating_add(1));
-            match control_reader_source(&reader, &own) {
+            match control_reader_source(&reader, &own, &descriptor) {
                 Some(source) => {
                     pending.insert(seq, source);
                 }
@@ -156,7 +156,7 @@ pub(crate) fn decode_admitted_turn_control(
     envelope: &InterfaceInvocationEnvelope,
 ) -> Result<Option<CodexTurnControl>, InterfaceBoundaryError> {
     let label = envelope.read_artifact_manifest()?.label;
-    let pinned = if is_inflight_turn_control_candidate_label(&label)
+    let pinned = if is_inflight_turn_control_candidate_label(&label, descriptor)
         && !is_explicit_turn_control_label(&label)
     {
         Some(ctx.pinned_run_record_bytes(envelope)
@@ -170,10 +170,11 @@ pub(crate) fn decode_admitted_turn_control(
 pub(crate) fn control_reader_source(
     reader: &LedgerTailReader,
     own: &octopus_world_pyecho_life_runtime::OwnOutboundMovement,
+    descriptor: &InterfaceDescriptor,
 ) -> Option<PendingControlReaderSource> {
     let envelope = reader.envelope(own).ok()?;
     let label = envelope.artifact_file.read_manifest().ok()?.label;
-    if !is_inflight_turn_control_candidate_label(&label) {
+    if !is_inflight_turn_control_candidate_label(&label, descriptor) {
         return None;
     }
     let run = own.metadata().ok()?.runtime.as_ref()?.run.clone();

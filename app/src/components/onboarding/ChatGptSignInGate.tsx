@@ -48,7 +48,7 @@ export function ChatGptSignInGate() {
     <section className="chatgpt-signin-panel">
       <div className="chatgpt-signin-heading">
         <span className="chatgpt-signin-logo" aria-hidden="true" dangerouslySetInnerHTML={{ __html: openaiLogo }} />
-        <h1 id="chatgpt-signin-title" className={waiting ? "sr-only" : "chatgpt-signin-title"}>Sign in to ChatGPT</h1>
+        <h1 id="chatgpt-signin-title" className={waiting ? "sr-only" : "chatgpt-signin-title"}>{!state.account && state.error && !busy ? "ChatGPT account unavailable" : "Sign in to ChatGPT"}</h1>
         {waiting ? <p className="chatgpt-signin-body">Continue signing in with your browser</p> : null}
       </div>
       {!waiting && (state.error || state.account?.authType === "apiKey" || state.account?.authType === "amazonBedrock") ? <p className="chatgpt-signin-body">

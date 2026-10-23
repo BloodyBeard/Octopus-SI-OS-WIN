@@ -43,7 +43,6 @@ pub struct MemoryHost<'a> {
     pub effect_root: Option<&'a Path>,
     pub maximum_bytes: u64,
     pub observed_run: Option<&'a str>,
-    pub run_records_root: Option<&'a Path>,
 }
 
 #[derive(Deserialize)]
@@ -153,11 +152,7 @@ impl<'a> Memory<'a> {
             .map_err(|error| failure(format!("memory collection '{}': {error}", host.collection)))?;
         let collection = crate::collection_tools::open(host.artifact_root, source).map_err(failure)?;
         let ee_id = match host.observed_run {
-            Some(run) => observed_placement(
-                host.run_records_root.ok_or_else(|| failure("memory door serving an observed run has no granted run_records_root".into()))?,
-                run,
-                host.maximum_bytes,
-            ).map_err(failure)?,
+            Some(run) => crate::memory_observation::scope(input, host, run).map_err(failure)?,
             None => runtime.ee.to_string(),
         };
         let caller = ScopeContext {
@@ -405,6 +400,9 @@ impl<'a> Memory<'a> {
             .map_err(|error| self.execution(error.to_string()))?;
         if plan.get("schema_version") != Some(&json!(1)) || plan.get("artifact") != Some(&artifact) {
             return Err(self.execution("memory save plan differs from its invocation"));
+        }
+        if plan["memory"]["scope_ee_ids"] != json!([self.caller.ee_id]) {
+            return Err(self.execution("memory save plan differs from its admitted experience scope"));
         }
         Ok(Some(plan))
     }
@@ -725,25 +723,6 @@ fn exchange(left: &Path, right: &Path) -> std::io::Result<()> {
 #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
 fn exchange(_left: &Path, _right: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "atomic exchange is unavailable on this platform"))
-}
-
-fn observed_placement(root: &Path, run: &str, maximum_bytes: u64) -> Result<String, String> {
-    if run.is_empty() || run.trim() != run || run.contains(['/', '\\']) || run == "." || run == ".." {
-        return Err("memory door names an invalid observed run".into());
-    }
-    let path = root.join(format!("{run}.json"));
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| format!("observed run '{run}' cannot be read: {error}"))?;
-    if !metadata.is_file() || metadata.len() > maximum_bytes {
-        return Err(format!("observed run '{run}' is not a bounded regular record"));
-    }
-    let record: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|error| error.to_string())?)
-        .map_err(|error| format!("observed run '{run}' is malformed: {error}"))?;
-    if record.get("id").and_then(Value::as_str) != Some(run) {
-        return Err(format!("observed run record '{run}' names another run"));
-    }
-    record.get("ee").and_then(Value::as_str).filter(|ee| !ee.is_empty() && ee.trim() == *ee)
-        .map(str::to_string).ok_or_else(|| format!("observed run '{run}' has no placement"))
 }
 
 fn ee_lineage(root: &Path, ee: &str) -> Result<Vec<String>, String> {

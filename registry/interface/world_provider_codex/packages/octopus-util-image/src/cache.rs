@@ -1,12 +1,12 @@
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use lru::LruCache;
 use sha1::Digest;
 use sha1::Sha1;
-use tokio::sync::Mutex;
-use tokio::sync::MutexGuard;
 
 pub struct BlockingLruCache<K, V> {
     inner: Mutex<LruCache<K, V>>,
@@ -27,15 +27,13 @@ where
     where
         V: Clone,
     {
-        if let Some(mut guard) = lock_if_runtime(&self.inner) {
-            if let Some(v) = guard.get(&key) {
-                return v.clone();
-            }
-            let v = value();
-            guard.put(key, v.clone());
-            return v;
+        let mut guard = self.blocking_lock();
+        if let Some(v) = guard.get(&key) {
+            return v.clone();
         }
-        value()
+        let v = value();
+        guard.put(key, v.clone());
+        v
     }
 
     pub fn get_or_try_insert_with<E>(
@@ -46,15 +44,13 @@ where
     where
         V: Clone,
     {
-        if let Some(mut guard) = lock_if_runtime(&self.inner) {
-            if let Some(v) = guard.get(&key) {
-                return Ok(v.clone());
-            }
-            let v = value()?;
-            guard.put(key, v.clone());
-            return Ok(v);
+        let mut guard = self.blocking_lock();
+        if let Some(v) = guard.get(&key) {
+            return Ok(v.clone());
         }
-        value()
+        let v = value()?;
+        guard.put(key, v.clone());
+        Ok(v)
     }
 
     #[must_use]
@@ -68,12 +64,12 @@ where
         Q: Hash + Eq + ?Sized,
         V: Clone,
     {
-        let mut guard = lock_if_runtime(&self.inner)?;
+        let mut guard = self.blocking_lock();
         guard.get(key).cloned()
     }
 
     pub fn insert(&self, key: K, value: V) -> Option<V> {
-        let mut guard = lock_if_runtime(&self.inner)?;
+        let mut guard = self.blocking_lock();
         guard.put(key, value)
     }
 
@@ -82,36 +78,23 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let mut guard = lock_if_runtime(&self.inner)?;
+        let mut guard = self.blocking_lock();
         guard.pop(key)
     }
 
     pub fn clear(&self) {
-        if let Some(mut guard) = lock_if_runtime(&self.inner) {
-            guard.clear();
-        }
+        self.blocking_lock().clear();
     }
 
     pub fn with_mut<R>(&self, callback: impl FnOnce(&mut LruCache<K, V>) -> R) -> R {
-        if let Some(mut guard) = lock_if_runtime(&self.inner) {
-            callback(&mut guard)
-        } else {
-            let mut disabled = LruCache::unbounded();
-            callback(&mut disabled)
-        }
+        callback(&mut self.blocking_lock())
     }
 
-    pub fn blocking_lock(&self) -> Option<MutexGuard<'_, LruCache<K, V>>> {
-        lock_if_runtime(&self.inner)
+    pub fn blocking_lock(&self) -> MutexGuard<'_, LruCache<K, V>> {
+        // This cache has a synchronous API; no guard crosses an await point.
+        // An async mutex + block_in_place panics in the provider's current-thread runtime.
+        self.inner.lock().expect("image cache mutex poisoned")
     }
-}
-
-fn lock_if_runtime<K, V>(m: &Mutex<LruCache<K, V>>) -> Option<MutexGuard<'_, LruCache<K, V>>>
-where
-    K: Eq + Hash,
-{
-    tokio::runtime::Handle::try_current().ok()?;
-    Some(tokio::task::block_in_place(|| m.blocking_lock()))
 }
 
 #[must_use]
@@ -153,15 +136,14 @@ mod tests {
     }
 
     #[test]
-    fn disabled_without_runtime() {
+    fn stores_without_runtime() {
         let cache = BlockingLruCache::new(NonZeroUsize::new(2).expect("capacity"));
         cache.insert("first", 1);
-        assert!(cache.get(&"first").is_none());
+        assert_eq!(cache.get(&"first"), Some(1));
 
-        assert_eq!(cache.get_or_insert_with("first", || 2), 2);
-        assert!(cache.get(&"first").is_none());
+        assert_eq!(cache.get_or_insert_with("first", || 2), 1);
 
-        assert!(cache.remove(&"first").is_none());
+        assert_eq!(cache.remove(&"first"), Some(1));
         cache.clear();
 
         let result = cache.with_mut(|inner| {
@@ -169,8 +151,16 @@ mod tests {
             inner.get(&"tmp").cloned()
         });
         assert_eq!(result, Some(3));
-        assert!(cache.get(&"tmp").is_none());
+        assert_eq!(cache.get(&"tmp"), Some(3));
 
-        assert!(cache.blocking_lock().is_none());
+        assert_eq!(cache.blocking_lock().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn caches_images_on_the_provider_runtime() {
+        let cache = BlockingLruCache::new(NonZeroUsize::new(2).expect("capacity"));
+        assert_eq!(cache.get_or_try_insert_with("image", || Ok::<_, ()>(7)), Ok(7));
+        assert_eq!(cache.get_or_insert_with("image", || panic!("cached image recomputed")), 7);
+        assert_eq!(cache.get(&"image"), Some(7));
     }
 }

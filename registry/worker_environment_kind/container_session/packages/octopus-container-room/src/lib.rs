@@ -3036,6 +3036,7 @@ else:
         let instance_root_base = root.path().join("rooms");
         std::fs::create_dir_all(&instance_root_base).unwrap();
         let formation = WorkerEnvironmentFormation {
+            door_additional_root_bindings: Default::default(),
             worker_environment_id: WorkerEnvironmentId::derive(b"container-test"),
             run: "run_container".to_string(),
             ee: "ee_container".to_string(),

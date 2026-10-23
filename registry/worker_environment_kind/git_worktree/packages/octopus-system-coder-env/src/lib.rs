@@ -547,6 +547,7 @@ impl SystemCoderEnv {
             root_slots.insert(slot.clone(), AbsPath::new(path)?);
         }
         let ctx = EnvContext {
+            additional_root_slots: formation.door_additional_root_bindings.iter().map(|(slot, paths)| Ok((slot.clone(), paths.iter().map(|path| AbsPath::new(path)).collect::<Result<Vec<_>, _>>()?))).collect::<Result<_, WorkerEnvError>>()?,
             root_slots,
             env: BTreeMap::new(),
         };

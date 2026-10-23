@@ -46,6 +46,7 @@ window.octopusTransport = {
 };
 const live = load("projectionLive.ts");
 const { useChatCapabilityCatalog } = load("components/chat/useChatCapabilityCatalog.ts", {
+  "../../shell/latestProjectionRead": load("shell/latestProjectionRead.ts"),
   "../../chatRuns": { formatProjectionError: String, loadChatExecutionContexts: () => deferred(contextReads), loadChatWorkerEnvironmentRooms: async () => [] },
   "../../projectionClient": { hasProjectionBridge: () => true, readProjection: async () => ({}), readRuntimeProviderInterfaces: () => deferred(catalogReads), readProviderInterfaceRateLimits: () => deferred(usageReads) },
   "../../projectionLive": live, "../../runtimeClient": { formatRuntimeError: (error) => error.message },

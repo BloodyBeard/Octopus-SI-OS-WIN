@@ -2,6 +2,7 @@ module.exports = { operatorChatIndexProjection };
 
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
+const { isHomeVoiceInput } = require("./operatorChatVoiceInput.cjs");
 const { indexedMovementRunId, indexedUnsignedInteger, ledgerRowsForRun, movementBoundaryInterface, movementKindText, movementRunId, normalizeIndexedProjectionMovement, openValidatedLedgerIndex } = require("./movementRows.cjs");
 const { operatorChatEventIdentity } = require("./operatorChatEvents.cjs");
 const { isOperatorChatProviderFailureRow, preserveProjectionEvidenceError } = require("./registryRows.cjs");
@@ -111,7 +112,7 @@ function operatorChatIndexProjection(store) {
       for (const row of indexedRows.get(runId) ?? []) {
         if (row.kind === "InterfaceArrival") {
           entry.activity.push(row);
-          if (!entry.writable || (
+          if (!entry.writable || isHomeVoiceInput(entry, row) || (
             inboundLabels.has(ledgerArtifactLabel(row))
             && movementBoundaryInterface(row, "from") === entry.chatInterfaceId
           )) {
@@ -158,24 +159,20 @@ function operatorChatIndexProjection(store) {
     if (!index) return null;
     try {
       const rowsByRun = new Map([...runIds].map((runId) => [runId, []]));
-      const ids = [...runIds];
-      for (let offset = 0; offset < ids.length; offset += 128) {
-        const chunk = ids.slice(offset, offset + 128);
-        const placeholders = chunk.map(() => "?").join(", ");
-        const rows = index.database.prepare(
-          `SELECT
-            seq, lamport, recorded_at_unix_ms, trace, kind,
-            from_kind, from_id, to_kind, to_id,
-            artifact_id, artifact_content,
-            runtime_run, runtime_checkpoint, runtime_interface
-          FROM movements
-          WHERE kind IN ('InterfaceArrival', 'InterfaceOutbound')
-            AND seq < ?
-            AND (
-              runtime_run IN (${placeholders})
-            )
-          ORDER BY seq ASC`,
-        ).all(index.watermark, ...chunk);
+      const statement = index.database.prepare(
+        `SELECT
+          seq, lamport, recorded_at_unix_ms, trace, kind,
+          from_kind, from_id, to_kind, to_id,
+          artifact_id, artifact_content,
+          runtime_run, runtime_checkpoint, runtime_interface
+        FROM movements
+        WHERE runtime_run = ?
+          AND seq < ?
+          AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
+        ORDER BY seq ASC`,
+      );
+      for (const requestedRunId of runIds) {
+        const rows = statement.all(requestedRunId, index.watermark);
         for (const row of rows) {
           const projected = normalizeIndexedProjectionMovement(row, index.ledgerPath);
           const runId = indexedMovementRunId(row);
@@ -209,7 +206,7 @@ function operatorChatIndexProjection(store) {
     const rowsByRun = new Map([...runIds].map((runId) => [runId, []]));
     const stat = await fs.stat(ledgerPath);
     if (stat.size < startOffset) return null;
-    if (stat.size === startOffset) return rowsByRun;
+    if (stat.size === startOffset) return { rowsByRun, nextMovementSeq: expectedSeq - 1 };
     let pending = Buffer.alloc(0);
     for await (const chunk of fsSync.createReadStream(ledgerPath, { start: startOffset })) {
       const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;

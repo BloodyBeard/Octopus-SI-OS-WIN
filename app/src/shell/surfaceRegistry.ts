@@ -208,6 +208,7 @@ export function useClientSurfaces(accessProfile: "live" | "lab"): SurfaceRegistr
     customSurfaces.sort((left, right) => left.order - right.order || left.label.localeCompare(right.label));
     return {
       loading: documents.loading || extensions.loading,
+      hydrated: documents.hydrated && extensions.hydrated,
       surfaces: [...builtinSurfaceDescriptors, ...builtinExtensionSurfaces, ...customSurfaces],
       documents: [...documents.documents, ...extensions.workspaceSurfaces, ...extensions.voiceSurfaces],
       voiceSurfaces: uniqueExtensionSurfaces(
@@ -236,5 +237,5 @@ export function useClientSurfaces(accessProfile: "live" | "lab"): SurfaceRegistr
       errors,
       extensions,
     };
-  }, [documents.documents, documents.errors, documents.loading, documents.root, documents.verdicts, documents.voiceSurfaces, documents.workerEnvironmentSurfaces, documents.workspaceSurfaces, extensions]);
+  }, [documents.documents, documents.errors, documents.hydrated, documents.loading, documents.root, documents.verdicts, documents.voiceSurfaces, documents.workerEnvironmentSurfaces, documents.workspaceSurfaces, extensions]);
 }

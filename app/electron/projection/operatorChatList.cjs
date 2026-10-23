@@ -3,10 +3,14 @@ module.exports = { operatorChatListProjection };
 const path = require("node:path");
 const { projectHomeVoiceContext } = require("../homeVoiceProjection.cjs");
 const { operatorActivityRows } = require("../operatorActivity.cjs");
+const { readChangeJournalDocument } = require("./changeJournal.cjs");
+const { activationDriverRef, scheduledInterfaceDisplayName } = require("./cronActivation.cjs");
+const { cachedOperatorChatArtifactText } = require("./operatorChatCache.cjs");
+const { readConnectedApplicationIdsByRun } = require("./applicationPackages.cjs");
 const { compareMovementOrder, movementBoundaryInterface, openValidatedLedgerIndex, optionalUnsignedInteger, readIndexedTaskSearchCandidates, taskSearchSnippet } = require("./movementRows.cjs");
 const { operatorActivityAgent, operatorActivityMessage, operatorChatExpandedStreamRows, operatorChatResponseKey, operatorChatRunProvider, operatorChatSearchMessage, operatorChatTurnText } = require("./operatorChatEvents.cjs");
 const { eeInstanceRows, octopusOsInterfaceSidecars } = require("./registryRows.cjs");
-const { arrayValue, ledgerArtifactId, ledgerArtifactLabel, numberValue, objectOrEmpty, requiredString, rowTimeMs, stringValue } = require("./values.cjs");
+const { arrayValue, contentHashHex, ledgerArtifactId, ledgerArtifactLabel, numberValue, objectOrEmpty, requiredString, rowTimeMs, stringValue } = require("./values.cjs");
 
 function operatorChatListProjection(store) {
   async function operatorChatsList(projection) {
@@ -22,7 +26,7 @@ function operatorChatListProjection(store) {
     return promise;
   }
 
-  async function operatorChatTitle(entry, sidecars, protocol, includeInputTitle = true) {
+  async function operatorChatTitle(projection, entry, sidecars, protocol, includeInputTitle = true) {
     const authoredTitle = entry.surfaceRole === "task"
       ? stringValue(sidecars.get(entry.chatInterfaceId)?.presentation?.name)
       : "";
@@ -31,8 +35,26 @@ function operatorChatListProjection(store) {
       .filter((row) => !entry.writable || ledgerArtifactLabel(row) === protocol.inputLabel)
       .sort((a, b) => rowTimeMs(a) - rowTimeMs(b))[0];
     if (firstInbound) {
-      const text = operatorChatTurnText(await store.resolveLedgerArtifactPayload(firstInbound, { projection: protocol.artifactReadProjection }), "in");
-      if (text) return text.replace(/\s+/g, " ").trim().slice(0, 48);
+      const text = await cachedOperatorChatArtifactText({ home: projection.octopusHome, entry, row: firstInbound, protocol,
+        direction: "in", limit: 48, warnings: projection.warnings,
+        resolve: (row, onVerifiedFiles) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection, onVerifiedFiles }) });
+      if (text) return text;
+    }
+    if (entry.surfaceRole === "task") {
+      try {
+        const journal = await readChangeJournalDocument(projection.octopusHome, entry.runId);
+        if (stringValue(journal?.document.summary)) return journal.document.summary;
+      } catch {
+        return "Run journal is unreadable";
+      }
+      for (const movement of entry.activity) {
+        if (movement.kind !== "InterfaceArrival" || !store.artifactLabelMatches(ledgerArtifactLabel(movement), "cron.current_time", true)) continue;
+        const interfaceId = movementBoundaryInterface(movement, "from");
+        const descriptor = projection.descriptorIndexes?.interface?.get(interfaceId);
+        const activation = arrayValue(arrayValue(descriptor?.activation_sidecars)[0]?.activations)
+          .find((row) => activationDriverRef(row) === "cron_life");
+        if (activation) return scheduledInterfaceDisplayName(interfaceId, stringValue(activation.config?.run_template?.id));
+      }
     }
     return entry.runId;
   }
@@ -46,7 +68,7 @@ function operatorChatListProjection(store) {
     const rows = await Promise.all((await store.operatorChatRunIndex(projection)).filter(entry => scoped.has(entry.runId)).map(async entry => {
       const owner = scoped.get(entry.runId);
       if (owner.interface_id !== entry.chatInterfaceId) throw new Error("Control target differs from its scoped client interface");
-      const title = await operatorChatTitle(entry, sidecars, protocol, includeTitles);
+      const title = await operatorChatTitle(projection, entry, sidecars, protocol, includeTitles);
       const movements = entry.activity.length ? entry.activity : [...entry.inbound, ...entry.outbound];
       return { run_id: entry.runId, chat_interface_id: entry.chatInterfaceId, title,
         updated_at_ms: movements.reduce((last, row) => Math.max(last, rowTimeMs(row)), 0),
@@ -61,16 +83,7 @@ function operatorChatListProjection(store) {
     const protocol = objectOrEmpty(projection.operatorChatProtocol);
     const projectColors = new Map(arrayValue(store.operatorOsScope(projection).project_presentations)
       .map((presentation) => [stringValue(presentation.ee_id), stringValue(presentation.color)]));
-    const connectedApplicationsByRun = new Map();
-    for (const application of arrayValue(store.operatorOsApplications(projection).applications)) {
-      const applicationId = stringValue(application?.id);
-      if (!applicationId) continue;
-      for (const runId of arrayValue(application?.connected_run_ids).map(stringValue).filter(Boolean)) {
-        const ids = connectedApplicationsByRun.get(runId) ?? [];
-        ids.push(applicationId);
-        connectedApplicationsByRun.set(runId, ids);
-      }
-    }
+    const connectedApplicationsByRun = await readConnectedApplicationIdsByRun(projection, store.operatorOsScope(projection));
     const eeById = new Map(eeInstanceRows(projection, false).map((row) => [stringValue(row.ee_id), row]));
     const chats = await Promise.all((await store.operatorChatRunIndex(projection)).map(async (entry) => {
       const movements = entry.activity.length ? entry.activity : [...entry.inbound, ...entry.outbound];
@@ -79,7 +92,7 @@ function operatorChatListProjection(store) {
         (latest, row) => Math.max(latest, numberValue(row.seq, 0)),
         0,
       );
-      const title = await operatorChatTitle(entry, clientSidecars, protocol);
+      const title = await operatorChatTitle(projection, entry, clientSidecars, protocol);
       const provider = operatorChatRunProvider(projection, entry);
       const record = entry.record;
       const eeId = stringValue(record?.ee_id);
@@ -91,11 +104,18 @@ function operatorChatListProjection(store) {
       const turn = entry.writable
         ? await store.operatorChatTurnState(projection, entry, protocol)
         : { open: false, state: "idle" };
-      const lastTerminalMessage = await operatorChatLastTerminalMessage(entry, protocol);
+      const lastTerminalMessage = await operatorChatLastTerminalMessage(entry, protocol, projection.warnings);
       const activityAgent = operatorActivityAgent(projection, eeId, entry.workerChoiceInterfaceId || workerInterfaceId);
+      const titleInput = entry.surfaceRole === "task" && entry.writable && !archived
+        && !stringValue(clientSidecars.get(chatInterfaceId)?.presentation?.name)
+        ? entry.inbound.filter((row) => ledgerArtifactLabel(row) === protocol.inputLabel)
+          .reduce((first, row) => !first || row.seq < first.seq ? row : first, null) : null;
       return {
         run_id: entry.runId,
         title,
+        title_generation_needed: Boolean(titleInput),
+        title_source: titleInput ? { artifact_id: ledgerArtifactId(titleInput),
+          content_hash: contentHashHex(titleInput.artifact?.content), movement_seq: titleInput.seq } : null,
         chat_interface_id: chatInterfaceId,
         client_surface_role: entry.surfaceRole,
         writable: entry.writable && !archived,
@@ -144,7 +164,7 @@ function operatorChatListProjection(store) {
     return chats.sort((a, b) => b.updated_at_ms - a.updated_at_ms);
   }
 
-  async function operatorChatLastTerminalMessage(entry, protocol) {
+  async function operatorChatLastTerminalMessage(entry, protocol, warnings) {
     const rows = entry.outbound
       .filter((candidate) => (
         ledgerArtifactLabel(candidate) === protocol.terminalOutputLabel
@@ -155,8 +175,9 @@ function operatorChatListProjection(store) {
     const artifactId = ledgerArtifactId(row);
     const movementSeq = numberValue(row?.seq, 0);
     if (!row || !artifactId || !movementSeq) return {};
-    const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
-    const text = operatorChatTurnText(payload, "out").replace(/\s+/g, " ").trim().slice(0, 240);
+    const text = await cachedOperatorChatArtifactText({ home: store.octopusHome(), entry, row, protocol,
+      direction: "out", limit: 240, warnings,
+      resolve: (row, onVerifiedFiles) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection, onVerifiedFiles }) });
     return {
       artifact_id: artifactId,
       created_at_ms: rowTimeMs(row),

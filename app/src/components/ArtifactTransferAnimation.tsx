@@ -1,4 +1,4 @@
-import { useReducedMotion } from "motion/react";
+import { useShouldReduceMotion } from "../appearance";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { InterfaceSummary, ProjectionStatus } from "../data/topology";
 import { hasProjectionBridge, readProjection } from "../projectionClient";
@@ -191,7 +191,7 @@ export function useArtifactTransfers(projection: ProjectionStatus) {
 }
 
 export function useArtifactTransferFeed(projection: ProjectionStatus): { feed: ArtifactTransferFeed; error: string } {
-  const reducedMotion = useReducedMotion();
+  const reducedMotion = useShouldReduceMotion();
   const enabled = projection.mode === "live" && reducedMotion === false && hasProjectionBridge();
   const [store] = useState(createArtifactTransferStore);
   const [error, setError] = useState("");

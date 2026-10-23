@@ -288,66 +288,85 @@ async function readWorkspaceSetupState(options) {
     } catch (error) {
       recoveryErrors.push(errorMessage(error));
     }
-    const receipts = [];
-    for (const entry of await fs.readdir(roots.receiptsRoot, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) {
-        recoveryErrors.push(`workspace receipt root contains an invalid entry '${entry.name}'`);
-        continue;
-      }
-      try {
-        const receipt = await readReceiptFile(path.join(roots.receiptsRoot, entry.name));
-        await verifyWorkspaceReceiptIdentity(roots, receipt);
-        receipts.push(receipt);
-      } catch (error) {
-        recoveryErrors.push(errorMessage(error));
-      }
+    return inspectWorkspaceRoots(roots, recoveryErrors);
+  });
+}
+
+async function inspectWorkspaceSetupState(options) {
+  const roots = await normalizeRoots(options);
+  for (const directory of [roots.stateRoot, roots.receiptsRoot, roots.projectReceiptsRoot]) {
+    if (await directoryExists(directory) && await fs.realpath(directory) !== directory) {
+      throw new Error("Workspace receipt directory traverses a symbolic link");
     }
-    receipts.sort((left, right) => right.completed_at.localeCompare(left.completed_at));
-    if (receipts.length > 1) {
-      recoveryErrors.push(`workspace receipt root contains ${receipts.length} configured workspaces`);
-    }
-    const receiptedProjectEeIds = new Set();
-    for (const entry of await fs.readdir(roots.projectReceiptsRoot, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) {
-        recoveryErrors.push(`workspace Project receipt root contains an invalid entry '${entry.name}'`);
-        continue;
-      }
-      try {
-        const receipt = await readProjectReceiptFile(path.join(roots.projectReceiptsRoot, entry.name));
-        verifyProjectReceiptContract(roots, receipt);
-        const workspace = receipts[0];
-        if (workspace && (
-          receipt.root_ee_id !== workspace.root_ee_id
-          || receipt.home_run_id !== workspace.home_run_id
-          || receipt.home_interface_id !== workspace.home_interface_id
-        )) {
-          throw new Error(`Workspace Project receipt '${entry.name}' belongs to another workspace`);
-        }
-        if (workspace && receipt.action === "create_project") receiptedProjectEeIds.add(receipt.outcome.ee_id);
-      } catch (error) {
-        recoveryErrors.push(errorMessage(error));
-      }
+  }
+  return inspectWorkspaceRoots(roots, []);
+}
+
+async function workspaceReceiptEntries(root) {
+  try { return await fs.readdir(root, { withFileTypes: true }); }
+  catch (error) { if (error.code === "ENOENT") return []; throw error; }
+}
+
+async function inspectWorkspaceRoots(roots, recoveryErrors) {
+  const receipts = [];
+  for (const entry of await workspaceReceiptEntries(roots.receiptsRoot)) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) {
+      recoveryErrors.push(`workspace receipt root contains an invalid entry '${entry.name}'`);
+      continue;
     }
     try {
-      const topology = await findWorkspaceTopology(roots);
-      const expectedRoots = new Set([...receipts.map((receipt) => receipt.root_ee_id), ...receiptedProjectEeIds]);
-      const expectedRuns = new Set(receipts.map((receipt) => receipt.home_run_id));
-      const expectedInterfaces = new Set(receipts.map((receipt) => receipt.home_interface_id));
-      const orphanedRoots = topology.operatorSpaceEeIds.filter((eeId) => !expectedRoots.has(eeId));
-      const orphanedRuns = topology.homeRunIds.filter((runId) => !expectedRuns.has(runId));
-      const orphanedInterfaces = topology.homeInterfaceIds.filter((interfaceId) => !expectedInterfaces.has(interfaceId));
-      if (orphanedRoots.length) recoveryErrors.push(`workspace contains operator spaces without receipts: ${orphanedRoots.join(", ")}`);
-      if (orphanedRuns.length) recoveryErrors.push(`workspace contains Home runs without receipts: ${orphanedRuns.join(", ")}`);
-      if (orphanedInterfaces.length) recoveryErrors.push(`workspace contains Home interfaces without receipts: ${orphanedInterfaces.join(", ")}`);
+      const receipt = await readReceiptFile(path.join(roots.receiptsRoot, entry.name));
+      await verifyWorkspaceReceiptIdentity(roots, receipt);
+      receipts.push(receipt);
     } catch (error) {
       recoveryErrors.push(errorMessage(error));
     }
-    return {
-      status: recoveryErrors.length ? "degraded" : receipts.length ? "configured" : "not_configured",
-      receipt: receipts[0] ?? null,
-      errors: recoveryErrors,
-    };
-  });
+  }
+  receipts.sort((left, right) => right.completed_at.localeCompare(left.completed_at));
+  if (receipts.length > 1) {
+    recoveryErrors.push(`workspace receipt root contains ${receipts.length} configured workspaces`);
+  }
+  const receiptedProjectEeIds = new Set();
+  for (const entry of await workspaceReceiptEntries(roots.projectReceiptsRoot)) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) {
+      recoveryErrors.push(`workspace Project receipt root contains an invalid entry '${entry.name}'`);
+      continue;
+    }
+    try {
+      const receipt = await readProjectReceiptFile(path.join(roots.projectReceiptsRoot, entry.name));
+      verifyProjectReceiptContract(roots, receipt);
+      const workspace = receipts[0];
+      if (workspace && (
+        receipt.root_ee_id !== workspace.root_ee_id
+        || receipt.home_run_id !== workspace.home_run_id
+        || receipt.home_interface_id !== workspace.home_interface_id
+      )) {
+        throw new Error(`Workspace Project receipt '${entry.name}' belongs to another workspace`);
+      }
+      if (workspace && receipt.action === "create_project") receiptedProjectEeIds.add(receipt.outcome.ee_id);
+    } catch (error) {
+      recoveryErrors.push(errorMessage(error));
+    }
+  }
+  try {
+    const topology = await findWorkspaceTopology(roots, true);
+    const expectedRoots = new Set([...receipts.map((receipt) => receipt.root_ee_id), ...receiptedProjectEeIds]);
+    const expectedRuns = new Set(receipts.map((receipt) => receipt.home_run_id));
+    const expectedInterfaces = new Set(receipts.map((receipt) => receipt.home_interface_id));
+    const orphanedRoots = topology.operatorSpaceEeIds.filter((eeId) => !expectedRoots.has(eeId));
+    const orphanedRuns = topology.homeRunIds.filter((runId) => !expectedRuns.has(runId));
+    const orphanedInterfaces = topology.homeInterfaceIds.filter((interfaceId) => !expectedInterfaces.has(interfaceId));
+    if (orphanedRoots.length) recoveryErrors.push(`workspace contains operator spaces without receipts: ${orphanedRoots.join(", ")}`);
+    if (orphanedRuns.length) recoveryErrors.push(`workspace contains Home runs without receipts: ${orphanedRuns.join(", ")}`);
+    if (orphanedInterfaces.length) recoveryErrors.push(`workspace contains Home interfaces without receipts: ${orphanedInterfaces.join(", ")}`);
+  } catch (error) {
+    recoveryErrors.push(errorMessage(error));
+  }
+  return {
+    status: recoveryErrors.length ? "degraded" : receipts.length ? "configured" : "not_configured",
+    receipt: receipts[0] ?? null,
+    errors: recoveryErrors,
+  };
 }
 
 async function recoverWorkspaceTransactions(options) {
@@ -686,12 +705,27 @@ async function ensureStateRoots(roots) {
   }
 }
 
+function parseProjectSourceFolders(value) {
+  if (!Array.isArray(value) || value.length > 64) throw new Error("Choose at most 64 source folders.");
+  const folders = value.map((folder) => {
+    if (typeof folder !== "string" || !path.isAbsolute(folder) || folder.includes("\0")) throw new Error("Source folders must be absolute directory paths.");
+    return path.normalize(folder);
+  });
+  return [...new Set(folders)];
+}
+
+async function validateProjectSourceFolders(folders) {
+  for (const folder of folders) {
+    if (!(await fs.stat(folder)).isDirectory()) throw new Error(`Source folder '${folder}' is not a directory.`);
+  }
+}
+
 function parseProjectMutationRequest(value) {
   const request = exactObject(
     value,
     [
       "action", "operationId", "workspace", "parentEeId", "expectedParentDigest", "templateName",
-      "name", "goal", "presentation", "eeId", "expectedProjectDigest", "projects",
+      "name", "goal", "presentation", "eeId", "expectedProjectDigest", "projects", "sourceFolders",
     ],
     ["action", "operationId", "workspace"],
     "Workspace project mutation",
@@ -706,6 +740,7 @@ function parseProjectMutationRequest(value) {
     const presentation = exactObject(request.presentation, ["icon", "color"], ["icon", "color"], "Project presentation");
     canonical = {
       action: "create_project",
+      sourceFolders: parseProjectSourceFolders(request.sourceFolders ?? []),
       operationId,
       workspace,
       parentEeId: requiredId(request.parentEeId, "Project parent EE"),
@@ -733,12 +768,13 @@ function parseProjectMutationRequest(value) {
     const projects = request.projects.map((value, index) => {
       const project = exactObject(
         value,
-        ["eeId", "name", "icon", "color"],
+        ["eeId", "name", "icon", "color", "sourceFolders", "expectedProjectDigest"],
         ["eeId", "name", "icon", "color"],
         `Workspace Project presentation ${index + 1}`,
       );
       return {
         eeId: requiredId(project.eeId, `Workspace Project presentation ${index + 1} EE`),
+        ...(project.sourceFolders === undefined ? {} : { sourceFolders: parseProjectSourceFolders(project.sourceFolders), expectedProjectDigest: requiredDigest(project.expectedProjectDigest, "Project digest") }),
         name: requiredHumanText(project.name, `Workspace Project presentation ${index + 1} name`, 80),
         icon: requiredHumanText(project.icon, `Workspace Project presentation ${index + 1} icon`, 64),
         color: requiredHumanText(project.color, `Workspace Project presentation ${index + 1} color`, 64),
@@ -912,6 +948,9 @@ async function planProjectCreate(roots, scope, request, planOperatorSurface) {
     goal: request.goal,
     config: projectChildConfig(parentDocument.value.config),
   };
+  await validateProjectSourceFolders(request.sourceFolders);
+  projectEe.config.octopus_os ??= {};
+  projectEe.config.octopus_os.source_folders = request.sourceFolders;
   const eeContent = eeDocument(projectEe);
   const projectProfile = projectAuthoringProfile(sourceProfile, eeId);
   const homeRun = await readJson(path.join(roots.runsRoot, `${scope.homeRunId}.json`), "Home provider selection");
@@ -1027,6 +1066,20 @@ async function planProjectPresentationUpdate(roots, scope, request) {
   if (stableJson(profileIds) !== stableJson(projectIds) || stableJson(existingPresentationIds) !== stableJson(projectIds)) {
     throw new Error("Workspace Project presentation cannot update an incomplete Home topology");
   }
+  const folderWrites = [];
+  for (const project of request.projects.filter((project) => project.sourceFolders !== undefined)) {
+    await validateProjectSourceFolders(project.sourceFolders);
+    const file = path.join(roots.eeInstancesRoot, `${project.eeId}.json`);
+    const current = await readJson(file, `Project '${project.eeId}'`);
+    if (current.digest !== project.expectedProjectDigest || current.value.ee_id !== project.eeId) {
+      throw new Error("Project changed before its source folders could be saved. Try again.");
+    }
+    const next = structuredClone(current.value);
+    next.config ??= {};
+    next.config.octopus_os ??= {};
+    next.config.octopus_os.source_folders = project.sourceFolders;
+    folderWrites.push(projectWrite(file, current.digest, `${JSON.stringify(next, null, 2)}\n`, `ee:${project.eeId}`, false));
+  }
   const nextSidecar = structuredClone(sidecar.value);
   nextSidecar.presentation.projects = request.projects.map((project) => ({
     ee_id: project.eeId,
@@ -1037,6 +1090,7 @@ async function planProjectPresentationUpdate(roots, scope, request) {
   return {
     outcome: { action: "update_project_presentation", projectEeIds: request.projects.map((project) => project.eeId) },
     writes: [
+      ...folderWrites,
       projectWrite(
         sidecar.path,
         sidecar.digest,
@@ -2373,7 +2427,10 @@ async function stageWorkspaceTransaction(roots, request, writes, receipt, schema
 
 async function stageClientAuthoringTransaction(roots, plan) {
   if (plan.condition && plan.condition.octopus_home !== roots.octopusHomeRoot) throw new Error("Client publication condition belongs to another Home");
-  if (plan.retirement) assertRetirementPaths(roots, plan.retirement, plan.writes, plan.removals);
+  if (plan.retirement) {
+    assertRetirementPaths(roots, plan.retirement, plan.writes, plan.removals);
+    await assertRetirementConnectionWrites(roots, plan.retirement, plan.writes);
+  }
   const transactionRoot = path.join(roots.transactionsRoot, plan.operationId);
   if (!pathInside(roots.transactionsRoot, transactionRoot)) {
     throw new Error("Client authoring transaction path escapes its state root");
@@ -2597,7 +2654,17 @@ async function captureRetirementDirectoryInventory(roots, plan) {
       }
       await read(path.join(removal.destination, "worker_environment.json"));
     }
-    if (owner && !companionIds.has(owner)) await read(path.join(roots.interfaceRoot, owner, "octopus_os.json"));
+    if (owner && !companionIds.has(owner)) {
+      const intakes = Object.entries(states).filter(([id, state]) => state?.input_intake
+        && (id === owner || state.input_intake.writer?.door === owner));
+      if (intakes.length > 1) throw new Error("Retirement tool has ambiguous input ownership");
+      if (intakes.length) {
+        const [intake, state] = intakes[0];
+        await read(path.join(roots.interfaceRoot, intake, "interface.json"));
+        await read(path.join(roots.interfaceRoot, state.input_intake.provider_interface, "interface.json"));
+        await read(path.join(roots.interfaceRoot, source.worker, "policy.json"));
+      } else await read(path.join(roots.interfaceRoot, owner, "octopus_os.json"));
+    }
     if (persistent) await read(path.join(roots.interfaceRoot, owner, "code_mode.json"));
   }
   return { schema_version: 1, removals: removals.sort((a, b) => a.path.localeCompare(b.path)),
@@ -2617,8 +2684,10 @@ function assertRetirementPaths(roots, selection, writes, removals) {
       throw new Error("Task retirement plan lacks an exact selected Run removal");
     }
   }
-  if (writes.some((write) => pathInside(roots.runsRoot, write.destination) && !selected.has(write.destination))) {
-    throw new Error("Task retirement plan changes a Run outside its selected ownership");
+  if (writes.some((write) => pathInside(roots.runsRoot, write.destination) && !selected.has(write.destination)
+    && ((Object.hasOwn(write, "content") ? write.content : write.after_digest) === null
+      || (write.publishBarrier ?? write.publish_barrier)))) {
+    throw new Error("Task retirement may only disconnect retained Runs outside its selected ownership");
   }
   for (const removal of removals) {
     for (const root of [roots.interfaceRoot, roots.privateInterfacesRoot, roots.interfaceHandInRoot]) {
@@ -2629,6 +2698,25 @@ function assertRetirementPaths(roots, selection, writes, removals) {
         || !selection.interface_ids.includes(path.basename(removal.destination)))) {
         throw new Error("Task retirement plan removes an interface outside its held ownership");
       }
+    }
+  }
+}
+
+async function assertRetirementConnectionWrites(roots, selection, writes, transactionRoot = null) {
+  const selected = new Set(selection.records.map(row => row.file));
+  const { disconnectedTaskRecord } = require("./projection/taskConnections.cjs");
+  for (const write of writes) {
+    if (!pathInside(roots.runsRoot, write.destination) || selected.has(write.destination)) continue;
+    const before = await readFileNoFollow(transactionRoot
+      ? transactionFile(transactionRoot, write.before_file, "connection original") : write.destination);
+    const after = transactionRoot
+      ? await readFileNoFollow(transactionFile(transactionRoot, write.after_file, "disconnected run")) : Buffer.from(write.content);
+    if (sha256(before) !== (write.expectedBeforeDigest ?? write.before_digest)
+      || transactionRoot && sha256(after) !== write.after_digest) throw new Error("Task connection preimage changed");
+    const record = JSON.parse(before.toString("utf8")), next = JSON.parse(after.toString("utf8"));
+    if (write.destination !== path.join(roots.runsRoot, `${requiredId(record.id, "Connected Run")}.json`)
+      || stableJson(disconnectedTaskRecord(record, new Set(selection.interface_ids)).next) !== stableJson(next)) {
+      throw new Error("Task retirement changes more than its exact outgoing connections");
     }
   }
 }
@@ -2646,6 +2734,7 @@ async function retirementContext(roots, transactionRoot, journal) {
   const retirement = journal.retirement;
   if (!retirement.directory_inventory) throw directoryUncertain("Task retirement lacks its saved native owner inventory");
   assertRetirementPaths(roots, retirement.selection, journal.writes, journal.removals);
+  await assertRetirementConnectionWrites(roots, retirement.selection, journal.writes, transactionRoot);
   assertRetirementInventory(roots, journal);
   const originals = [];
   for (const row of retirement.selection.records) {
@@ -2656,8 +2745,11 @@ async function retirementContext(roots, transactionRoot, journal) {
       throw new Error("Task retirement original bytes changed or are not exact UTF-8");
     }
     const record = JSON.parse(content);
+    const providerBound = Object.hasOwn(record.interface_state ?? {}, row.provider_interface)
+      || (["prediction", "title"].includes(row.role) && record.checkpoints?.some(checkpoint =>
+        checkpoint.outbound_interface_bindings?.some(binding => binding.interface === row.provider_interface)));
     if (record.id !== row.run || record.worker !== row.worker || record.ee !== row.ee
-      || !Object.hasOwn(record.interface_state ?? {}, row.provider_interface)) {
+      || !providerBound) {
       throw new Error("Task retirement original Run differs from its identity pin");
     }
     originals.push({ file: row.file, expected_digest: row.expected_digest, content });
@@ -2864,6 +2956,14 @@ async function applyClientAuthoringRemoval(roots, transactionRoot, removal, jour
       throw directoryUncertain(`Client authoring removal '${removal.tag}'`);
     }
     const expected = parseDirectoryPreimage(await publisher.snapshotDirectory(removal.destination));
+    if (held && journal.retirement && (pathInside(roots.privateInterfacesRoot, removal.destination)
+      || pathInside(roots.interfaceHandInRoot, removal.destination))) {
+      if (expected.identity.device !== removal.expected_dev || expected.identity.inode !== removal.expected_ino) {
+        throw new Error("Workspace runtime directory identity changed before quiescence");
+      }
+      removal.tree_entries = expected.entries.map(entry => ({ relative_path: entry.relative_path, type: entry.kind, digest: entry.digest }));
+      removal.tree_digest = sha256(Buffer.from(stableJson(removal.tree_entries)));
+    }
     assertDirectoryTree(expected, removal.expected_dev, removal.expected_ino, removal.tree_entries);
     if (!removal.publication) removal.publication = directoryPlan(`${journal.operation_id}:remove:${crypto.randomUUID()}:${index}`,
       removal.destination, tombstone, expected);
@@ -3980,9 +4080,9 @@ function parseProjectReceipt(value) {
   if (receipt.completed_at && !Number.isFinite(Date.parse(receipt.completed_at))) {
     throw new Error("Workspace Project receipt has an invalid completion time");
   }
-  const expectedWriteCount = receipt.action === "update_project_presentation" ? 1 : 3;
-  if (!Array.isArray(receipt.writes) || receipt.writes.length !== expectedWriteCount) {
-    throw new Error(`Workspace Project receipt must prove exactly ${expectedWriteCount} write${expectedWriteCount === 1 ? "" : "s"}`);
+  if (!Array.isArray(receipt.writes) || !receipt.writes.length
+    || (receipt.action !== "update_project_presentation" && receipt.writes.length !== 3)) {
+    throw new Error("Workspace Project receipt has an invalid write count");
   }
   const writes = receipt.writes.map((entry, index) => {
     const row = exactObject(
@@ -4046,6 +4146,10 @@ function parseProjectReceipt(value) {
   }
   if (receipt.action === "update_project_presentation" && barrier?.digest === null) {
     throw new Error("Workspace Project presentation receipt cannot delete the Home sidecar");
+  }
+  if (receipt.action === "update_project_presentation"
+    && (writes.length > outcome.project_ee_ids.length + 1 || writes.some((write) => write.digest === null))) {
+    throw new Error("Workspace Project presentation receipt must prove only its sidecar and edited Projects");
   }
   return {
     schema: receipt.schema,
@@ -4304,8 +4408,12 @@ function verifyProjectReceiptContract(roots, receipt) {
   const sidecarPath = path.join(roots.interfaceRoot, receipt.home_interface_id, "octopus_os.json");
   const barrier = receipt.writes.find((write) => write.publish_barrier);
   if (receipt.action === "update_project_presentation") {
-    if (receipt.writes[0].path !== sidecarPath || barrier?.path !== sidecarPath) {
+    if (barrier?.path !== sidecarPath) {
       throw new Error("Workspace Project presentation receipt does not publish the Home sidecar");
+    }
+    const projectPaths = new Map(receipt.outcome.project_ee_ids.map((id) => [path.join(roots.eeInstancesRoot, `${id}.json`), `ee:${id}`]));
+    if (receipt.writes.some((write) => !write.publish_barrier && projectPaths.get(write.path) !== write.tag)) {
+      throw new Error("Workspace Project presentation receipt writes outside its exact Projects");
     }
     return;
   }
@@ -4418,9 +4526,10 @@ async function assertWorkspaceAbsent(roots, existingEeId) {
   if (topology.homeInterfaceIds.length) throw new Error(`Workspace setup refuses existing Home interface '${topology.homeInterfaceIds[0]}' without its requested receipt`);
 }
 
-async function findWorkspaceTopology(roots) {
+async function findWorkspaceTopology(roots, allowMissing = false) {
+  const entriesAt = async directory => allowMissing && !await directoryExists(directory) ? [] : publicDirectoryEntries(directory);
   const operatorSpaceEeIds = [];
-  for (const entry of await publicDirectoryEntries(roots.eeInstancesRoot)) {
+  for (const entry of await entriesAt(roots.eeInstancesRoot)) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const file = path.join(roots.eeInstancesRoot, entry.name);
     const record = (await readJson(file, `EE instance ${entry.name}`)).value;
@@ -4431,7 +4540,7 @@ async function findWorkspaceTopology(roots) {
   }
 
   const homeRunIds = [];
-  for (const entry of await publicDirectoryEntries(roots.runsRoot)) {
+  for (const entry of await entriesAt(roots.runsRoot)) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const file = path.join(roots.runsRoot, entry.name);
     const record = (await readJson(file, `Run record ${entry.name}`)).value;
@@ -4444,7 +4553,7 @@ async function findWorkspaceTopology(roots) {
     homeRunIds.push(runId);
   }
 
-  const interfaces = await publicDirectoryEntries(roots.interfaceRoot);
+  const interfaces = await entriesAt(roots.interfaceRoot);
   const homeInterfaceIds = [];
   for (const entry of interfaces) {
     if (!entry.isDirectory()) continue;
@@ -5166,5 +5275,6 @@ module.exports = {
   workspaceInitializeRequestDigest,
   mutateWorkspaceProject,
   readWorkspaceSetupState,
+  inspectWorkspaceSetupState,
   recoverWorkspaceTransactions,
 };

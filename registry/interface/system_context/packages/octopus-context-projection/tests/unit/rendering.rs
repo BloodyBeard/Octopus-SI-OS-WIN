@@ -37,3 +37,51 @@ fn oversized_fields_keep_their_beginning_and_end_within_the_bound() {
     assert!(fields(&payload, &["/absent".to_string()], 256, true).is_err());
     assert_eq!(fields(&payload, &["/absent".to_string()], 256, false).unwrap().0, json!({}));
 }
+
+#[test]
+fn complete_experience_fits_after_original_input_and_provenance_are_attached() {
+    let text = format!("first-{}-last", "\"\\\nя".repeat(9000));
+    let mut output = json!({"source":{"run":"source","terminal_artifact":{"id":"terminal"}},
+        "selected_input":{"source_artifact":{"id":"input"},"source_movement_seq":7,
+            "fields":{"/text":text},"original_fields":{"/text":text},"provenance":{"seq":7}},
+        "terminal_fields":{"/text":text}, "evidence":[{"fields":{"/text":text}}],
+        "omission":{"unselected_entries":(0..4096).map(|seq| json!({"source_movement_seq":seq,"source_artifact":{"id":format!("unselected-{seq}")}})).collect::<Vec<_>>(),
+            "trimmed_evidence_entries":0,"selected_fields_trimmed":false}});
+    let provenance = output["selected_input"]["provenance"].clone();
+    fit_rendered_context("Capture knowledge", &mut output, 131072, 32768).unwrap();
+    assert!(serde_json::to_vec(&output).unwrap().len() <= 131072);
+    assert_eq!(output["selected_input"]["source_artifact"]["id"], "input");
+    assert_eq!(output["selected_input"]["provenance"], provenance);
+    assert_eq!(output["source"]["terminal_artifact"]["id"], "terminal");
+    assert_eq!(output["omission"]["trimmed_unselected_entries"], 4096);
+    assert_eq!(output["omission"]["selected_fields_trimmed"], true);
+    for pointer in ["/selected_input/fields/~1text", "/selected_input/original_fields/~1text", "/terminal_fields/~1text"] {
+        let kept = output.pointer(pointer).unwrap().as_str().unwrap();
+        assert!(kept.starts_with("first-") && kept.ends_with("-last"));
+    }
+    let rendered: Value = serde_json::from_str(output["text"].as_str().unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(rendered["selected_input"], output["selected_input"]);
+    assert_eq!(rendered["omission"]["unselected_entry_count"], 4096);
+    assert_eq!(rendered["omission"]["selected_fields_trimmed"], true);
+    let first = output.clone();
+    fit_rendered_context("Capture knowledge", &mut output, 131072, 32768).unwrap();
+    assert_eq!(output, first);
+    assert!(fit_rendered_context("Capture knowledge", &mut output, 64, 32768).unwrap_err().contains("provenance"));
+}
+
+#[test]
+fn dropping_trimmed_evidence_recomputes_the_remaining_field_omission() {
+    let mut output = json!({"selected_input":{"fields":{"/text":"task"}},
+        "terminal_fields":{"/text":"answer"},
+        "evidence":[{"fields":{"/text":"x".repeat(4096)},
+            "trimmed_fields":[{"pointer":"/text","bytes":8192}]}],
+        "omission":{"selected_fields_trimmed":true,"selected_evidence_trimmed":false,
+            "trimmed_evidence_entries":0,"unselected_entries":[]}});
+    fit_rendered_context("Capture knowledge", &mut output, 2000, 1024).unwrap();
+    assert_eq!(output["evidence"], json!([]));
+    assert_eq!(output["omission"]["selected_fields_trimmed"], false);
+    assert_eq!(output["omission"]["trimmed_evidence_entries"], 1);
+    assert_eq!(output["omission"]["selected_evidence_trimmed"], true);
+    let rendered: Value = serde_json::from_str(output["text"].as_str().unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(rendered["omission"]["selected_fields_trimmed"], false);
+}

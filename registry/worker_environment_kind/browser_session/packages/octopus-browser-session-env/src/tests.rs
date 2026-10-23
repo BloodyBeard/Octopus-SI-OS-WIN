@@ -181,6 +181,7 @@ fn formation(
     let worker = InterfaceId::new(WORKER);
     let formed = registry
         .form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &door,
             door_descriptor_hash: "browser-test-door-hash",
             door_driver_ref: "system_browser",
@@ -1295,6 +1296,7 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
         let kinds = vec![WorkerEnvironmentKindId::new("browser_session")];
         let door = InterfaceId::new(exact_door); let worker = InterfaceId::new(WORKER);
         let formed = registry.form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &door, door_descriptor_hash: "browser-test-door-hash", door_driver_ref: "system_browser",
             tool: exact_id, tool_descriptor_hashes: &hashes, tool_process_bins: &bins, tool_worker_environment_kinds: &kinds,
             worker: &worker, ee: "ee_browser_test", run: "run_browser_test", granted_worker_environment_kinds: &kinds,

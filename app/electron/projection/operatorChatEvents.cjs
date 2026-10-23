@@ -546,7 +546,7 @@ function operatorChatEventKind(label, protocol, payload) {
     return phase === "commentary" ? "commentary_delta" : "message_delta";
   }
   if (label === "turn.agent_message") {
-    return phase === "commentary" ? "commentary" : phase === "partial_answer" ? "message" : "event";
+    return phase === "commentary" ? "commentary" : ["partial_answer", "final_answer"].includes(phase) ? "message" : "event";
   }
   return {
     "turn.reasoning": "reasoning",

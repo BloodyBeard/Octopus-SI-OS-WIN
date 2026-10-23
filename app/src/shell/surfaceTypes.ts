@@ -71,6 +71,7 @@ export type ClientSurfaceDescriptor = {
 
 export type SurfaceRegistryState = {
   loading: boolean;
+  hydrated: boolean;
   surfaces: ClientSurfaceDescriptor[];
   documents: AdmittedClientSurfaceDocument[];
   voiceSurfaces: AdmittedClientSurfaceDocument[];

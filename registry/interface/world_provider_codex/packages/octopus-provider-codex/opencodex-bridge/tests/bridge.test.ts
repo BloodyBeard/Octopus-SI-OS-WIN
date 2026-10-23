@@ -321,6 +321,7 @@ test("claude-cli turns run through the signed-in CLI with a scoped env and the b
   expect(args).toEqual(expect.arrayContaining(["-p", "--tools", "", "--strict-mcp-config", "--setting-sources", "--no-session-persistence", "--model", "claude-sonnet-5", "--mcp-config"]));
   const env = readFileSync(join(home, "env"), "utf8");
   expect(env).toContain(`HOME=${home}`);
+  expect(env).toContain(`CLAUDE_CODE_TMPDIR=${home}`);
   expect(env).toContain("USER=octopus-test");
   expect(env).not.toContain("ANTHROPIC_");
   expect(readFileSync(join(home, "stdin"), "utf8")).toContain("hello claude");

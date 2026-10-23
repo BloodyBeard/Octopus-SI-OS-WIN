@@ -12,7 +12,7 @@ const { createChatgptSignIn } = require("../electron/chatgptSignIn.cjs");
 const { createProjectionStore } = require("../electron/projection.cjs");
 const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
 const { adoptLocalPackageUpdates, recoverLocalPackageTransactions, registerLocalPackageMutationGuard } = require("../electron/localPackages.cjs");
-const { recoverWorkspaceTransactions, readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
+const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
 
@@ -339,8 +339,6 @@ function projectionStore(environment) {
     localPackageRegistry: () => environment.packageRoots.sourceRegistryRoot,
     localPackageLibrary: () => environment.packageRoots.libraryRoot,
     octopusHome: () => environment.home, runtimeLaunchEnvironment: () => environment.launchEnv,
-    readWorkspaceSetupState: (options) => readWorkspaceSetupState({ ...options,
-      publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) }),
     projectEePolicies: async () => {
       const { stdout } = await execute(environment.runtimeBinary, ["project-ee-policies"], {
         cwd: environment.installationRoot,

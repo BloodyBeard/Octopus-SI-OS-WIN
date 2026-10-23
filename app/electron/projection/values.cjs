@@ -242,6 +242,7 @@ function validWorkerEnvironmentFormation(formation) {
     "granted_tools", "door_root_bindings", "readable_root_slots",
     "writable_root_slots", "network_ceiling", "requires_release",
   ];
+  if (Object.hasOwn(formation, "door_additional_root_bindings")) expectedKeys.push("door_additional_root_bindings");
   const keys = Object.keys(formation).sort();
   if (keys.length !== expectedKeys.length || expectedKeys.some((key) => !keys.includes(key))) return false;
   const identities = [
@@ -268,6 +269,12 @@ function validWorkerEnvironmentFormation(formation) {
     name.trim() !== name || !name.endsWith(".json") || name.includes("/") || name.includes("\\")
     || typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)
   ))) return false;
+  const additional = formation.door_additional_root_bindings;
+  if (additional !== undefined && (!isPlainRecord(additional) || Object.entries(additional).some(([slot, paths]) => (
+    !Object.hasOwn(formation.door_root_bindings, slot) || !Array.isArray(paths) || paths.length === 0
+    || paths.some((root) => typeof root !== "string" || !path.isAbsolute(root))
+    || new Set([formation.door_root_bindings[slot], ...paths]).size !== paths.length + 1
+  )))) return false;
   const rootBindings = objectOrEmpty(formation.door_root_bindings);
   return [...formation.readable_root_slots, ...formation.writable_root_slots]
     .every((slot) => Object.prototype.hasOwnProperty.call(rootBindings, slot));

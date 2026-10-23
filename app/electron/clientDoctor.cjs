@@ -1,4 +1,3 @@
-const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const {
@@ -32,10 +31,10 @@ async function runClientDoctor(options) {
       await check.validate(installation, installation.file_snapshot, path.join(roots.activeRegistryRoot, "interface", check.packageId, "client.cjs"));
     } catch (error) {
       findings.push(finding(
-        "client.package_owner_stale",
+        "client.package_owner_invalid",
         check.id,
         errorMessage(error),
-        `Inspect package '${check.packageId}', back up its exact active owners, then perform an owner-authorized package repair with pinned source and installed digests and retain the receipt.`,
+        `Inspect the installed '${check.packageId}' owner and correct its missing files or invalid client contract. Preserve local edits.`,
       ));
     }
   }
@@ -55,14 +54,14 @@ async function runClientDoctor(options) {
     ));
   }
   for (const entry of catalog.packages ?? []) {
-    if (!entry.materialized && !entry.partially_materialized && !["valid", "stale"].includes(entry.receipt_state)) continue;
+    if (!entry.error && !entry.materialized && !entry.partially_materialized && !["valid", "stale"].includes(entry.receipt_state)) continue;
     checks += 1;
     if (entry.installed === true && entry.receipt_state === "valid" && !entry.error) continue;
     findings.push(finding(
       "package.installation_inconsistent",
       entry.id,
       entry.error || `Installed package '${entry.id}' has receipt state '${entry.receipt_state}' and materialized=${entry.materialized === true}.`,
-      `Inspect package '${entry.id}' and its exact source/installed differences. With the runtime stopped, the client update path adopts unchanged package owners; conflicting local edits require an explicit reviewed package repair.`,
+      `Inspect the missing or invalid owners of package '${entry.id}'. Preserve local edits when restoring an owner or applying an update.`,
       { package_id: entry.id, receipt_state: entry.receipt_state, materialized: entry.materialized === true,
         partially_materialized: entry.partially_materialized === true, source_digest: entry.source_digest,
         installed_digest: entry.installed_digest, receipt_digest: entry.receipt_digest },
@@ -72,8 +71,13 @@ async function runClientDoctor(options) {
   const owners = contextPackageOwners(catalog.packages ?? []);
   for (const [artifactId, bindings] of bound) {
     checks += 1;
-    const diagnosis = await diagnoseBoundContextArtifact(roots, owners, artifactId, bindings);
-    if (diagnosis) findings.push(diagnosis);
+    try {
+      const diagnosis = await diagnoseBoundContextArtifact(roots, owners, artifactId, bindings);
+      if (diagnosis) findings.push(diagnosis);
+    } catch (error) {
+      findings.push(finding("context.bound_artifact_invalid", artifactId, errorMessage(error),
+        "Correct the active descriptor identity, label or JSON structure.", { bindings: [...bindings].sort() }));
+    }
   }
   const errors = findings.map(renderFinding);
   return {
@@ -214,71 +218,21 @@ function contextPackageOwners(packages) {
 }
 
 async function diagnoseBoundContextArtifact(roots, owners, artifactId, bindings) {
-  const source = await artifactDescriptorState(roots.sourceRegistryRoot, artifactId);
   const active = await artifactDescriptorState(roots.activeRegistryRoot, artifactId);
-  const evidence = { bindings: [...bindings].sort(), source, active };
-  const ownerEntries = owners.get(artifactId) ?? [];
-  const nextStep = `Back up active artifact '${artifactId}', establish one exact source package owner, then perform a separately owner-authorized production repair with pinned digests and retain its receipt.`;
-  if (ownerEntries.length === 0) {
-    if (!active.present) {
-      return finding(
-        "context.bound_artifact_active_missing",
-        artifactId,
-        `Bound context artifact '${artifactId}' has no active descriptor.`,
-        "Inspect the authored binding and restore its intended descriptor or correct that exact binding; source ownership is not required for a local artifact.",
-        evidence,
-      );
-    }
-    return null;
+  const evidence = { bindings: [...bindings].sort(), active };
+  if (!active.present) {
+    return finding(
+      "context.bound_artifact_active_missing", artifactId,
+      `Bound context artifact '${artifactId}' has no active descriptor.`,
+      "Restore the intended descriptor or correct the authored binding.", evidence,
+    );
   }
+  const ownerEntries = owners.get(artifactId) ?? [];
   if (ownerEntries.length > 1) {
     return finding(
-      "context.bound_artifact_ambiguous_owner",
-      artifactId,
+      "context.bound_artifact_ambiguous_owner", artifactId,
       `Bound context artifact '${artifactId}' is claimed by multiple local packages: ${ownerEntries.map(({ packageRecord }) => packageRecord.id).join(", ")}.`,
-      "Choose one canonical source package owner before any production repair.",
-      evidence,
-    );
-  }
-  const [{ packageRecord, member }] = ownerEntries;
-  evidence.package_id = packageRecord.id;
-  evidence.package_receipt_state = packageRecord.receipt_state ?? "missing";
-  evidence.member_source_digest = member.source_digest ?? "";
-  evidence.member_installed_digest = member.installed_digest ?? "";
-  if (!source.present || !member.source_digest) {
-    return finding(
-      "context.bound_artifact_source_missing",
-      artifactId,
-      `Bound context artifact '${artifactId}' is owned by package '${packageRecord.id}', but its canonical source owner is missing or unreadable.`,
-      nextStep,
-      evidence,
-    );
-  }
-  if (!active.present || member.materialized !== true || !member.installed_digest) {
-    return finding(
-      "context.bound_artifact_active_missing",
-      artifactId,
-      `Bound context artifact '${artifactId}' is owned by package '${packageRecord.id}', but the active owner is missing.`,
-      nextStep,
-      evidence,
-    );
-  }
-  if (member.source_digest !== member.installed_digest) {
-    return finding(
-      "context.bound_artifact_digest_stale",
-      artifactId,
-      `Bound context artifact '${artifactId}' is stale: package '${packageRecord.id}' source digest ${member.source_digest} differs from active digest ${member.installed_digest}.`,
-      nextStep,
-      evidence,
-    );
-  }
-  if (packageRecord.receipt_state !== "valid") {
-    return finding(
-      "context.bound_artifact_receipt_invalid",
-      artifactId,
-      `Bound context artifact '${artifactId}' matches source bytes, but package '${packageRecord.id}' has receipt state '${String(packageRecord.receipt_state || "missing")}'.`,
-      nextStep,
-      evidence,
+      "Choose one canonical distribution owner before updating this artifact.", evidence,
     );
   }
   return null;
@@ -286,26 +240,31 @@ async function diagnoseBoundContextArtifact(roots, owners, artifactId, bindings)
 
 async function isContextArtifact(roots, artifactId) {
   if (!SAFE_ID.test(artifactId)) return false;
-  const source = await artifactDescriptorState(roots.sourceRegistryRoot, artifactId);
-  const active = await artifactDescriptorState(roots.activeRegistryRoot, artifactId);
-  return source.label === "context.reference"
-    || active.label === "context.reference"
-    || !source.present && !active.present;
+  try {
+    const active = await artifactDescriptorState(roots.activeRegistryRoot, artifactId);
+    return active.label === "context.reference" || !active.present;
+  } catch {
+    // Include malformed bindings so the structured diagnostic identifies the owner.
+    return true;
+  }
 }
 
 async function artifactDescriptorState(registryRoot, artifactId) {
-  if (!SAFE_ID.test(artifactId)) return { present: false, digest: "", label: "" };
+  if (!SAFE_ID.test(artifactId)) return { present: false, label: "" };
   const file = path.join(registryRoot, "artifact", artifactId, "artifact.json");
   try {
     const bytes = await fs.readFile(file);
     const descriptor = JSON.parse(bytes.toString("utf8"));
+    if (!descriptor || Array.isArray(descriptor) || descriptor.id !== artifactId
+      || descriptor.label !== undefined && (typeof descriptor.label !== "string" || !descriptor.label.trim())) {
+      throw new Error("artifact descriptor identity or label is invalid");
+    }
     return {
       present: true,
-      digest: crypto.createHash("sha256").update(bytes).digest("hex"),
       label: typeof descriptor.label === "string" ? descriptor.label : "",
     };
   } catch (error) {
-    if (error?.code === "ENOENT") return { present: false, digest: "", label: "" };
+    if (error?.code === "ENOENT") return { present: false, label: "" };
     throw new Error(`context artifact '${artifactId}' descriptor '${file}' cannot be inspected: ${errorMessage(error)}`);
   }
 }

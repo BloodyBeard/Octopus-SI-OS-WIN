@@ -12,7 +12,7 @@ const { readContentAddressedArtifactPayload, readContentAddressedArtifactProject
 const { createClientAttachmentStagingStore, stageClientAttachmentPaths } = require("../electron/clientAttachments.cjs");
 const { submitClientInterfaceArtifact } = require("../electron/clientArtifacts.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
-const { mutateWorkspaceProject, readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
+const { mutateWorkspaceProject } = require("../electron/workspaceSetup.cjs");
 const { taskRetirementBarrier } = require("./environment.cjs");
 const shared = require("../build/cli/shared.cjs");
 
@@ -29,8 +29,6 @@ function createClient(environment, dependencies = {}) {
     localPackageRegistry: () => env.packageRoots.sourceRegistryRoot,
     localPackageLibrary: () => env.packageRoots.libraryRoot,
     octopusHome: () => env.home,
-    readWorkspaceSetupState: (options) => readWorkspaceSetupState({ ...options,
-      publication: env.packageRoots.publication, retirementBarrier: taskRetirementBarrier(env) }),
     projectEePolicies: async () => {
       const { stdout } = await execute(env.runtimeBinary, ["project-ee-policies"], {
         env: { ...process.env, ...env.launchEnv },
@@ -48,6 +46,7 @@ function createClient(environment, dependencies = {}) {
     clientPath: () => path.join(registryRoot, "interface", "world_operator_chat", "client.cjs"),
   });
   const metadata = dependencies.metadata ?? createClientProviderMetadata({
+    sourceRegistryRoot: () => env.packageRoots.sourceRegistryRoot,
     registryRoot: () => registryRoot,
     accountClient: () => environment.accountClient(),
   });
@@ -193,12 +192,13 @@ function createClient(environment, dependencies = {}) {
     if (current && providerId !== current.providerId) throw new Error("Continue this task with its existing provider. Select another provider for a new task.");
     const model = input.model ?? current?.model ?? agent.providerModel;
     const effort = input.effort ?? current?.effort ?? agent.reasoningEffort;
+    const serviceTier = input.serviceTier ?? current?.serviceTier ?? agent?.serviceTier;
     const providers = await catalogue();
     const provider = providers.find((row) => row.id === providerId);
     const admittedProvider = current ? provider : provider && worker?.providerInterfaceIds.includes(providerId)
       ? shared.providerForExecutionContext(provider, worker) : null;
     if (!admittedProvider) throw new Error("The selected provider is not available to this Agent.");
-    validateProviderModelSelection([admittedProvider], { providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort });
+    validateProviderModelSelection([admittedProvider], { providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort, serviceTier });
     const capabilities = current ? {} : shared.executionContextTaskCapabilities(
       all, projectId, workerId,
       input.applicationIds ?? agent.applicationIds,
@@ -229,7 +229,7 @@ function createClient(environment, dependencies = {}) {
         ...capabilities,
         runId: current?.id,
         messageId: input.messageId || `msg_${randomUUID().replaceAll("-", "")}`,
-        providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort,
+        providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort, serviceTier,
         eeId: projectId, workerInterfaceId: workerId,
         clientSurfaceRole: current?.clientSurfaceRole || "task",
         text: input.text ?? "",
@@ -439,14 +439,14 @@ function createClient(environment, dependencies = {}) {
     const provider = providers.find((row) => row.id === providerId);
     if (!provider || !source.providerInterfaceIds.includes(providerId)) throw new Error("Choose a provider available to this Project.");
     validateProviderModelSelection([shared.providerForExecutionContext(provider, source)], {
-      providerInterfaceId: providerId, providerModel: input.model, reasoningEffort: input.effort ?? "",
+      providerInterfaceId: providerId, providerModel: input.model, reasoningEffort: input.effort ?? "", serviceTier: input.serviceTier,
     });
     const scope = await read("projection.operator.os.scope");
     return mutate({
       action: "create_agent_template", operationId: randomUUID(), workspace: workspaceIdentity(scope, true),
       projectEeId: context.eeId, sourceWorkerInterfaceId: source.id,
       name: input.name, icon: "default", providerInterfaceId: providerId, providerModel: input.model,
-      reasoningEffort: input.effort ?? "",
+      reasoningEffort: input.effort ?? "", serviceTier: input.serviceTier,
       applicationIds: input.applicationIds ?? source.applications.filter((row) => row.selectedByDefault).map((row) => row.id),
       driverNames: input.driverNames ?? source.drivers.filter((row) => row.selectedByDefault).map((row) => row.name),
     });

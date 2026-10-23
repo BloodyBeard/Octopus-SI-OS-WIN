@@ -258,7 +258,7 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
     let mut validated_edit = false;
     let mut delivery_artifact: Option<PreparedIntakeArtifact> = None;
     let mut writer_artifact: Option<PreparedIntakeArtifact> = None;
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     loop {
         if ctx.cancel.is_cancelled() {
             return Ok(());

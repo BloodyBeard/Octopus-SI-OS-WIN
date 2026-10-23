@@ -28,9 +28,12 @@ const ui = {
   OcMenuItem: ({ label, description, onClick, disabled }) => React.createElement("button", { onClick, disabled }, label, description),
 };
 const usageModel = loadTs("account/chatgptUsageModel.ts");
+const loadingViews = loadTs("design-system/LoadingSkeleton.tsx", {
+  "../appearance": { useShouldReduceMotion: () => true },
+});
 const usageViews = loadTs("components/account/AccountUsage.tsx", {
   "../../account/chatgptUsageModel": usageModel, "../../design-system/components": ui,
-  "../navigation/OctopusSpinner": { OctopusSpinner: () => null },
+  "../../design-system/LoadingSkeleton": loadingViews,
   "../IconGlyphs": { Glyph: ({ name }) => React.createElement("svg", { "data-glyph": name }) },
 });
 const logoutView = loadTs("components/account/AccountLogoutDialog.tsx", { "../../design-system/components": ui });
@@ -253,6 +256,7 @@ test("client clears native signed-out identity and rejects stale reads and stale
   controller.connect(); await controller.refresh();
   bridge.chatgptAccount = () => new Promise((resolve) => { resolveOld = resolve; });
   const oldRead = controller.refresh();
+  assert.equal(controller.getSnapshot().account, null, "pending discovery cannot authorize from the previous account");
   await controller.logout(); resolveOld(signedIn); await oldRead;
   assert.equal(controller.getSnapshot().account.signedIn, false);
   assert.equal(controller.getSnapshot().account.email, null);
@@ -282,6 +286,7 @@ test("client clears native signed-out identity and rejects stale reads and stale
     "../../assets/openai-logo.svg?raw": { default: "" },
   });
   const { AccountSettingsSection } = loadTs("components/settings/AccountSettingsSection.tsx", {
+    "../../design-system/LoadingSkeleton": loadingViews,
     "../../account/useChatgptAccount": accountHook,
     "../../account/useChatgptUsage": { useChatgptUsage: () => emptyUsage },
     "../../account/chatgptUsageModel": usageModel,
@@ -318,8 +323,11 @@ test("client clears native signed-out identity and rejects stale reads and stale
   assert.match(controller.getSnapshot().error, /Native unavailable/);
   const unavailableMarkup = renderToStaticMarkup(React.createElement(AccountSettingsSection));
   assert.match(unavailableMarkup, /Unavailable/); assert.doesNotMatch(unavailableMarkup, /Signed out/);
+  assert.match(renderToStaticMarkup(React.createElement(ChatGptSignInGate)), /ChatGPT account unavailable/);
   bridge.chatgptAccount = async () => signedOut; await controller.refresh();
   assert.match(renderToStaticMarkup(React.createElement(AccountSettingsSection)), /Signed out/);
+  assert.match(renderToStaticMarkup(React.createElement(ChatGptSignInGate)), /Sign in to ChatGPT/);
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(ChatGptSignInGate)), /ChatGPT account unavailable/);
   const onboarding = loadTs("onboarding/chatgptSignIn.ts");
   assert.equal(onboarding.chatgptSignInCompleted(), false);
   onboarding.recordChatgptSignIn(); assert.equal(onboarding.chatgptSignInCompleted(), true);
@@ -472,40 +480,38 @@ test("account menu prefers top placement and retains viewport collision handling
   assert.equal(right.side, "right"); assert.equal(right.left, 70); assert.equal(right.top, 350);
 });
 
-test("local expiry returns to unlock before account discovery and ignores stale access reads", async () => {
+test("local expiry returns to unlock before Home verification and ignores stale access reads", async () => {
   const dom = new (require("jsdom").JSDOM)('<div id="root"></div>', { url: "https://client.test" });
   const previous = new Map();
-  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })) {
+  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, IS_REACT_ACT_ENVIRONMENT: true })) {
     previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   }
   const locked = { configured: true, authenticated: false, profile: null, expiresAt: null };
   const live = { ...locked, authenticated: true, profile: "live", expiresAt: new Date(Date.now() + 60_000).toISOString() };
-  let status = locked, read = async () => status, access, expiry, enabled, account = null;
+  let status = locked, read = async () => status, access, expiry, homeChecks = 0;
   window.setTimeout = (callback) => { expiry = callback; return 1; }; window.clearTimeout = () => { expiry = null; };
   const { useClientAccess } = loadTs("useClientAccess.ts", { "./clientAccess": { readClientAccessStatus: () => read() } });
   const { App } = loadTs("App.tsx", {
     "./useClientAccess": { useClientAccess: () => (access = useClientAccess()) },
     "./clientAccess": { readTouchIdStatus: async () => ({ available: false }) },
-    "./account/useChatgptAccount": { useChatgptAccount: (value) => { enabled = value; return { account }; } },
-    "./onboarding/chatgptSignIn": { chatgptSignInAvailable: () => true },
     "./onboarding/onboardingStorage": { recordOnboardingVisit: () => ({ completed: true }) },
     "./runtimeHost": { useRuntimeHost: () => ({ ready: true, available: true, phase: "ready" }) },
     "./clientPreferences": { ClientPreferencesProvider: ({ children }) => children },
-    "./components/onboarding/WorkspaceSetupGate": { WorkspaceSetupGate: ({ children }) => children },
+    "./components/onboarding/WorkspaceSetupGate": { WorkspaceSetupGate: ({ children }) => { homeChecks += 1; return children; } },
     $fallback: (name) => name.startsWith(".") ? new Proxy({}, { get: (_, key) => () => String(key) }) : undefined,
   });
   const root = require("react-dom/client").createRoot(document.getElementById("root"));
   const act = (callback) => React.act(async () => { callback(); await tick(); });
   try {
     await act(() => root.render(React.createElement(App)));
-    assert.match(document.body.textContent, /PasswordGate/); assert.equal(enabled, false);
+    assert.match(document.body.textContent, /PasswordGate/); assert.equal(homeChecks, 0);
     status = live; await act(() => access.setAccess(live));
-    assert.match(document.body.textContent, /ChatGptSignInGate/); assert.equal(enabled, true);
-    account = signedIn; await act(() => access.setAccess({ ...live }));
+    assert.ok(homeChecks > 0);
     assert.match(document.body.textContent, /OperatorShell/);
+    const previousChecks = homeChecks;
     status = locked; await act(() => expiry());
-    assert.match(document.body.textContent, /PasswordGate/); assert.equal(enabled, false);
+    assert.match(document.body.textContent, /PasswordGate/); assert.equal(homeChecks, previousChecks);
     status = live; await act(() => access.setAccess(live));
     let finish; read = () => new Promise(resolve => { finish = resolve; });
     await act(() => window.dispatchEvent(new window.Event("focus")));
@@ -513,12 +519,144 @@ test("local expiry returns to unlock before account discovery and ignores stale 
     assert.match(document.body.textContent, /OperatorShell/);
     read = async () => locked; await act(() => window.dispatchEvent(new window.Event("focus")));
     assert.match(document.body.textContent, /PasswordGate/);
-    status = { ...locked, configured: false }; read = async () => status; account = null;
-    await act(() => access.setAccess(status)); assert.match(document.body.textContent, /ChatGptSignInGate/);
+    status = { ...locked, configured: false }; read = async () => status;
+    await act(() => access.setAccess(status)); assert.match(document.body.textContent, /PasswordGate/);
   } finally {
     await act(() => root.unmount()); dom.window.close();
     for (const [key, descriptor] of previous) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
     }
+  }
+});
+
+test("completed Home uses checked local receipts offline and cancels proof across Home targets", { timeout: 10000 }, async () => {
+  const fsp = require("node:fs/promises"), crypto = require("node:crypto");
+  const temporary = await fsp.mkdtemp(path.join(require("node:os").tmpdir(), "octopus-home-gate-"));
+  const stable = value => value && typeof value === "object" && !Array.isArray(value)
+    ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`
+    : Array.isArray(value) ? `[${value.map(stable).join(",")}]` : JSON.stringify(value);
+  const digest = value => crypto.createHash("sha256").update(value).digest("hex");
+  const operationId = "workspace_gate_fixture", requestDigest = digest("workspace-request");
+  const { createClientSetupStore } = require("../electron/clientSetup.cjs");
+  const owners = Object.fromEntries(Object.entries({ packages: "package_install_evidence", extensions: "extension_lifecycle_receipt",
+    workspace: "workspace_receipt", provider: "provider_observation" }).map(([step, kind]) => [step, {
+    probe: async () => [{ kind, id: `${step}.proof`, evidence: { owner: step }, digest: digest(stable({ owner: step })) }],
+    apply: async () => { throw new Error("fixture proof must already exist"); },
+  }]));
+  const store = createClientSetupStore({ root: temporary, owners });
+  await store.begin({ operationId, plan: {
+    pack: { id: "codex", manifest_digest: digest("pack"), selected_recommended: [] },
+    packages: [{ id: "world_provider_codex", source_digest: digest("package"), desired_state: "installed" }], extensions: [],
+    provider: { interface_id: "world_provider_codex", required_state: "account_readable" },
+    workspace: { request_digest: requestDigest, request: { action: "initialize_workspace", operationId }, project_defaults: [] },
+  } });
+  await store.resume(operationId);
+  const receiptFile = path.join(temporary, "receipts", `${operationId}.json`), receiptBytes = await fsp.readFile(receiptFile);
+  const dom = new (require("jsdom").JSDOM)('<div id="root"></div>', { url: "https://client.test" });
+  const previous = new Map();
+  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, IS_REACT_ACT_ENVIRONMENT: true })) {
+    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  let releaseInitialAccount;
+  let home = "/home", accountResult = new Promise(resolve => { releaseInitialAccount = resolve; }), accountChanged;
+  let currentSetup = () => store.readCurrent(), configured = true, scopeHome = "home_run", catalogReads = 0, setupWrites = 0;
+  window.octopusTransport = {
+    chatgptAccount: async () => { const result = await accountResult; if (result instanceof Error) throw result; return result; },
+    onChatgptAccountChanged: callback => { accountChanged = callback; return () => { accountChanged = null; }; },
+  };
+  const onboarding = loadTs("onboarding/chatgptSignIn.ts");
+  const accountHook = loadTs("account/useChatgptAccount.ts", {
+    "./chatgptAccountState": loadTs("account/chatgptAccountState.ts"), "../onboarding/chatgptSignIn": onboarding,
+  });
+  const logo = { OctopusLoadingState: ({ label }) => label, OctopusLoadingLogo: () => null };
+  const { ChatGptSignInGate } = loadTs("components/onboarding/ChatGptSignInGate.tsx", {
+    "../../account/useChatgptAccount": accountHook, "../OctopusLoadingLogo": logo, "../../assets/openai-logo.svg?raw": { default: "" },
+  });
+  const { AccountSettingsSection } = loadTs("components/settings/AccountSettingsSection.tsx", {
+    "../../design-system/LoadingSkeleton": loadingViews,
+    "../../account/useChatgptAccount": accountHook, "../../account/useChatgptUsage": { useChatgptUsage: () => emptyUsage },
+    "../../account/chatgptUsageModel": usageModel, "../../design-system/components": ui, "../account/AccountUsage": usageViews,
+    "../account/AccountLogoutDialog": logoutView, "./SettingsHeading": { SettingsHeading: () => null }, "./settingsCatalog": { settingsTargetProps: () => ({}) },
+  });
+  const { WorkspaceSetupGate } = loadTs("components/onboarding/WorkspaceSetupGate.tsx", {
+    "../../account/useChatgptAccount": accountHook, "./ChatGptSignInGate": { ChatGptSignInGate },
+    "../chat/chatWorkspaceCapabilities": {}, "../../onboarding/chatgptSignIn": onboarding,
+    "../../extensions/useClientExtensions": { useClientExtensions: () => ({ loading: true, extensions: [], errors: [] }) },
+    "../../onboarding/workspaceSetup": { readWorkspaceSetupDraft: () => null },
+    "../../projectionClient": {
+      readCurrentClientSetup: () => currentSetup(),
+      readWorkspaceSetupState: async () => ({ status: configured ? "configured" : "not_configured", errors: [], receipt: !configured ? null : {
+        operationId, requestDigest, rootEeId: "root_ee", homeRunId: "home_run", homeInterfaceId: "home_interface", projects: [],
+      } }),
+      readProjection: async method => {
+        if (method === "projection.operator.os.local_packages") { catalogReads++; return { packs: [], packages: [], errors: [] }; }
+        assert.equal(method, "projection.operator.os.scope");
+        return { status: configured ? "ready" : "unbound", root_ee_id: configured ? "root_ee" : "",
+          home_run_id: configured ? scopeHome : "", home_interface_id: configured ? "home_interface" : "", root_environment: null, projects: [], errors: [] };
+      },
+      onClientSetupProgress: () => () => {},
+      beginClientSetup: async () => { setupWrites++; throw new Error("unexpected setup write"); },
+      resumeClientSetup: async () => { setupWrites++; throw new Error("unexpected setup resume"); },
+    },
+    "../../projectionLive": { useProjectionStructureGeneration: () => 0 }, "../../design-system/components": ui,
+    "../OctopusLoadingLogo": logo, "./WorkspaceSetupOverlay": { WorkspaceSetupOverlay: () => "Review setup", createDefaultWorkspaceSetupDraft: () => ({}) },
+  });
+  const { App } = loadTs("App.tsx", {
+    "./useClientAccess": { useClientAccess: () => ({ access: { configured: true, authenticated: true, profile: "live" } }) },
+    "./runtimeHost": { useRuntimeHost: () => ({ ready: true, available: true, phase: "ready", home }) },
+    "./onboarding/onboardingStorage": { recordOnboardingVisit: () => ({ completed: true }) },
+    "./clientPreferences": { ClientPreferencesProvider: ({ children }) => children },
+    "./components/onboarding/WorkspaceSetupGate": { WorkspaceSetupGate },
+    "./components/shell/OperatorShell": { OperatorShell: () => React.createElement("section", { "data-shell": "" }, "Local workspace", React.createElement(AccountSettingsSection)) },
+    $fallback: name => name.startsWith(".") ? new Proxy({}, { get: () => () => null }) : undefined,
+  });
+  const root = require("react-dom/client").createRoot(document.getElementById("root"));
+  const act = async callback => React.act(async () => { await callback(); await tick(); });
+  const show = () => act(() => root.render(React.createElement(App)));
+  const waitFor = async predicate => { for (let i = 0; i < 100 && !predicate(); i++) await act(() => new Promise(resolve => setTimeout(resolve, 5))); assert.ok(predicate(), document.body.textContent); };
+  const shell = () => document.querySelector("[data-shell]");
+  try {
+    await show(); await waitFor(shell);
+    assert.equal(catalogReads, 0);
+    await act(() => releaseInitialAccount(new Error("workspace routing discovery timed out")));
+    await waitFor(() => shell() && document.body.textContent.includes("Unavailable"));
+    assert.match(document.body.textContent, /workspace routing discovery timed out/);
+    assert.equal(catalogReads, 0); assert.equal(onboarding.chatgptSignInCompleted(), false);
+    accountResult = signedOut; await act(() => accountChanged());
+    assert.ok(shell()); assert.match(document.body.textContent, /Signed out/);
+    let releaseOldAccount;
+    accountResult = new Promise(resolve => { releaseOldAccount = resolve; }); await act(() => accountChanged());
+    home = "/second-complete"; accountResult = new Error("second Home account unavailable"); await show();
+    await waitFor(() => shell() && document.body.textContent.includes("second Home account unavailable"));
+    await act(() => releaseOldAccount(signedIn));
+    assert.equal(onboarding.chatgptSignInCompleted(), false);
+    assert.match(document.body.textContent, /second Home account unavailable/); assert.equal(catalogReads, 0);
+    const invalid = JSON.parse(receiptBytes); invalid.plan_digest = "0".repeat(64);
+    await fsp.writeFile(receiptFile, JSON.stringify(invalid)); home = "/corrupt"; await show();
+    await waitFor(() => document.body.textContent.includes("plan digest is invalid")); assert.equal(shell(), null);
+    await fsp.writeFile(receiptFile, receiptBytes); scopeHome = "another_run"; home = "/mismatch"; await show();
+    await waitFor(() => document.body.textContent.includes("Completed setup does not match Home")); assert.equal(shell(), null);
+    scopeHome = "home_run";
+    let releaseOld, releaseNew;
+    currentSetup = () => new Promise(resolve => { releaseOld = resolve; }); home = "/old-pending"; await show();
+    assert.equal(shell(), null);
+    currentSetup = () => new Promise(resolve => { releaseNew = resolve; }); home = "/new-pending"; configured = false; await show();
+    await act(async () => releaseOld(await store.readCurrent())); assert.equal(shell(), null);
+    accountResult = new Error("workspace routing discovery timed out"); currentSetup = async () => null;
+    await act(() => releaseNew(null)); await waitFor(() => document.body.textContent.includes("ChatGPT account unavailable"));
+    assert.equal(catalogReads, 0); assert.equal(shell(), null);
+    accountResult = { ...signedOut, octopusHome: home }; await act(() => accountChanged());
+    assert.match(document.body.textContent, /Sign in to ChatGPT/); assert.doesNotMatch(document.body.textContent, /ChatGPT account unavailable/);
+    accountResult = signedIn; await act(() => accountChanged());
+    assert.match(document.body.textContent, /observation belongs to another Home/); assert.equal(catalogReads, 0);
+    accountResult = { ...signedIn, octopusHome: home }; await act(() => accountChanged());
+    await waitFor(() => document.body.textContent.includes("Review setup")); assert.equal(shell(), null); assert.equal(catalogReads, 1);
+    configured = true; home = "/missing-aggregate"; accountResult = { ...signedIn, octopusHome: home }; await show();
+    await waitFor(() => document.body.textContent.includes("Workspace verification is incomplete")); assert.equal(shell(), null);
+    assert.equal(setupWrites, 0);
+  } finally {
+    await act(() => root.unmount()); dom.window.close(); await fsp.rm(temporary, { recursive: true, force: true });
+    for (const [key, descriptor] of previous) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
   }
 });

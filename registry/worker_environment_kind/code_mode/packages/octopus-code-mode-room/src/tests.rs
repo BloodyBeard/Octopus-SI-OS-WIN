@@ -229,6 +229,7 @@ fn formation_with_tools(
     let worker = InterfaceId::new(WORKER);
     let formed = registry
         .form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &door,
             door_descriptor_hash: "code-mode-test-door-hash",
             door_driver_ref: "code_mode_env",

@@ -236,7 +236,7 @@ async fn invoke(
     let authority = octopus_verifiers::process_authority::ProcessAuthority::resolve(
         roots.values().cloned().chain([source().join("registry"), interface_dir.to_path_buf()]),
         [private.path().to_path_buf()], [executable.clone(), tool], [], [], [],
-        false, false, false, true, octopus_descriptors::ProcessSandboxMode::Enforced,
+        false, false, false, true, false, octopus_descriptors::ProcessSandboxMode::Enforced,
     ).unwrap();
     let profiles = tempfile::tempdir().unwrap();
     let prepared = authority.prepare(executable.to_str().unwrap(),
@@ -290,6 +290,7 @@ async fn invoke_tool(
     let worker = record["worker"].as_str().unwrap().into();
     let formation = kind_registry
         .form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &interface.id,
             door_descriptor_hash: &hash(json!(interface)),
             door_driver_ref: &interface.interface_driver_ref,

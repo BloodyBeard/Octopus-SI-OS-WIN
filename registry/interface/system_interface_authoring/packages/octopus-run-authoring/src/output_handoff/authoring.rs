@@ -371,6 +371,7 @@ impl ProviderOutputHandoff {
             settlement_of: None,
             dispatch_fenced: true,
             withdrawal: None,
+            replacement: None,
             standing,
         };
         provider_state.insert(

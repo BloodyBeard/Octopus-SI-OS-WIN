@@ -68,15 +68,15 @@ function fixture(rows) {
   global.scheduleFixture = f;
   return f;
 }
-async function mount({ active = true, scope = "Experiment", secondary = false } = {}) {
+async function mount({ active = true, scope = "Experiment", secondary = false, drafts = [] } = {}) {
   const ui = await compiled;
   const Navigation = sidebarChrome(ui);
   const host = document.createElement("div"); document.body.append(host);
   const root = createRoot(host); roots.push(root);
-  const render = async (next = scope) => act(async () => root.render(React.createElement(ui.ScheduledWorkspaceProvider, { active, key: next },
+  const render = async (next = scope) => act(async () => root.render(React.createElement(ui.ScheduledWorkspaceProvider, { active, key: next, onCreateTask: (text) => drafts.push(text) },
     !secondary && React.createElement(Navigation), React.createElement(ui.LiveScheduledView, { navigationInPane: secondary, searchFocusTick: 0 }))));
   await render();
-  return { host, render };
+  return { host, render, drafts };
 }
 function button(host, label) { return [...host.querySelectorAll("button")].find((element) => element.getAttribute("aria-label") === label || element.textContent.trim() === label); }
 function menuItem(label) { return [...document.querySelectorAll('[role^="menuitem"]')].find((element) => element.textContent.trim().replace(/\s/g, " ") === label); }
@@ -95,7 +95,7 @@ async function choose(menuLabel, option) { await click(button(dialog(), menuLabe
 
 test("Triggers keeps navigation, selection, search and authoring in one workspace", async () => {
   const f = fixture([...Array.from({ length: 8 }, (_, index) => schedule(index)), schedule(8, "disabled"), schedule(9, "invalid")]);
-  const { host } = await mount();
+  const { host, drafts } = await mount();
   assert.deepEqual(f.reads, ["projection.scheduled_interfaces.list"]);
   const switcher = host.querySelector('[aria-label="Tasks views"]');
   assert.equal(button(switcher, "Triggers").getAttribute("aria-pressed"), "true");
@@ -124,53 +124,40 @@ test("Triggers keeps navigation, selection, search and authoring in one workspac
   await click(button(host.querySelector("[data-scheduled-sidebar]"), "Triggers"));
   await click(host.querySelector("[data-scheduled-landing] [data-automation-card] button"));
   assert.equal(f.writes.length, 0, "suggestions only open a draft");
-  assert.equal(dialog().querySelector("h2").textContent, "Create a trigger");
-  assert.equal(dialog().querySelector("textarea").value.startsWith("Prepare a concise daily brief"), true);
-  assert.equal(button(dialog(), "Repeat schedule").textContent, "Weekdays");
-  assert.match(button(dialog(), "Time").textContent, /^9:00\sAM/);
-  await choose("Repeat schedule", "Daily");
-  await choose("Time", "8:30 AM");
-  await click(button(dialog(), "Create"));
-  assert.equal(f.writes.length, 1);
-  assert.equal(f.writes[0].action, "create");
-  assert.equal(f.writes[0].sourceInterfaceId, "world_task_0");
-  assert.equal(f.writes[0].sourceActivationDigest, "0".repeat(64));
-  assert.equal(f.writes[0].draft.cron, "30 8 * * *");
-  assert.equal(f.writes[0].draft.fireOnStart, false);
-  assert.equal(f.writes[0].draft.timezone, "UTC");
   assert.equal(dialog(), null);
-  assert.equal(detail(host).querySelector("[data-automation-card] .truncate").textContent, "New brief");
+  assert.match(drafts[0], /^Create a trigger: /);
+  assert.match(drafts[0], /Prepare a concise daily brief/);
+  assert.match(drafts[0], /weekdays at 9:00 AM/i);
+  assert.equal(f.writes.length, 0);
 });
 
-test("the dialog maps interval, custom cron and Advanced fields onto the trigger draft", async () => {
+test("new triggers open an ordinary chat draft without needing an installed template", async () => {
+  const f = fixture([]);
+  const { host, drafts } = await mount();
+  await click(button(host, "New trigger"));
+  assert.deepEqual(drafts, ["Create a trigger that "]);
+  assert.equal(dialog(), null);
+  assert.equal(f.writes.length, 0);
+});
+
+test("the editor preserves interval and custom schedule controls for existing triggers", async () => {
   const f = fixture([schedule(0)]);
   const { host } = await mount();
-  await click(button(host, "New trigger"));
-  assert.equal(dialog().querySelector("textarea").value, "");
-  assert.equal(button(dialog(), "Create").disabled, true);
+  await click(rows(host)[0]);
+  await click(button(detail(host), "Open"));
   await input(dialog().querySelector("textarea"), "Check the weather.");
-  assert.equal(button(dialog(), "Repeat schedule").textContent, "Daily");
   await choose("Repeat schedule", "Interval");
   await commit(dialog().querySelector('input[aria-label="Repeat interval"]'), "2");
+  await click(button(dialog(), "Save"));
+  assert.equal(f.writes[0].action, "update");
+  assert.equal(f.writes[0].interfaceId, "world_task_0");
+  assert.equal(f.writes[0].draft.intervalSeconds, 7200);
+  await click(button(detail(host), "Open"));
   await choose("Repeat schedule", "Custom");
-  const rule = document.querySelector('input[placeholder="0 9 * * 1-5"]');
-  await input(rule, "*/15 9-17 * * 1-5");
-  await click(button(document, "Save"));
-  assert.equal(button(dialog(), "Repeat schedule").textContent, "Custom");
-  await click(button(dialog(), "Advanced"));
-  await input(dialog().querySelector('input[aria-label="Interface id"]'), "world_weather_watch");
-  await click(button(dialog(), "Run once on start"));
-  await click(button(dialog(), "Create"));
-  assert.equal(f.writes[0].interfaceId, "world_weather_watch");
-  assert.deepEqual({ type: f.writes[0].draft.type, cron: f.writes[0].draft.cron, fireOnStart: f.writes[0].draft.fireOnStart, instructions: f.writes[0].draft.instructions },
-    { type: "cron", cron: "*/15 9-17 * * 1-5", fireOnStart: true, instructions: "Check the weather." });
-  f.writes = []; f.rows = [schedule(0)];
-  await click(button(host, "New trigger"));
-  await input(dialog().querySelector("textarea"), "Poll.");
-  await choose("Repeat schedule", "Interval");
-  await commit(dialog().querySelector('input[aria-label="Repeat interval"]'), "2");
-  await click(button(dialog(), "Create"));
-  assert.deepEqual({ type: f.writes[0].draft.type, intervalSeconds: f.writes[0].draft.intervalSeconds }, { type: "interval", intervalSeconds: 7200 });
+  await input(document.querySelector('input[placeholder="0 9 * * 1-5"]'), "*/15 9-17 * * 1-5");
+  await click(button(document.querySelector('input[placeholder="0 9 * * 1-5"]').closest("form"), "Save"));
+  await click(button(dialog(), "Save"));
+  assert.equal(f.writes[1].draft.cron, "*/15 9-17 * * 1-5");
 });
 
 test("filters, pause, empty and read-only states retain exact declared interface identity", async () => {
@@ -187,9 +174,8 @@ test("filters, pause, empty and read-only states retain exact declared interface
   assert.deepEqual(f.writes[0], { action: "set_enabled", interfaceId: "world_task_1", expectedDigest: "1".repeat(64), enabled: true });
   assert.match(detail(host).querySelector("[data-scheduled-confirmation]").textContent, /^Your trigger is scheduled/);
   f.rows = []; await render("empty");
-  assert.equal(button(host, "New trigger").disabled, true);
-  assert.ok([...host.querySelectorAll("[data-scheduled-landing] [data-automation-card] button")].every((element) => element.disabled));
-  assert.match(host.textContent, /complete trigger template/);
+  assert.equal(button(host, "New trigger").disabled, false);
+  assert.ok([...host.querySelectorAll("[data-scheduled-landing] [data-automation-card] button")].every((element) => !element.disabled));
   f.rows = [schedule(0)]; f.writable = false; await render("read-only");
   assert.equal(button(host, "New trigger").disabled, true);
   await click(rows(host)[0]); assert.equal(button(detail(host), "Open").disabled, true);
@@ -255,7 +241,7 @@ test("one-shot timestamps validate calendar dates and preserve nanosecond deadli
   for (const invalid of ['2026-02-30T00:00:00Z', '2026-10-04T00:00:00-00:00', '2026-10-04T00:00:00', '2263-01-01T00:00:00Z']) assert.throws(() => parseScheduledDueAt(invalid));
 });
 
-test("an installed inactivity template creates a trigger, reports honest state and undoes a journaled run", async () => {
+test("an installed inactivity template opens a chat draft, reports honest state and undoes a journaled run", async () => {
   const inactivity = { seconds: 3600, interface_match: { interface_type: "world", role: "user", interface_driver_ref: "app_server" } };
   const template = { ...schedule(0), interface_id: "world_system_review", display_name: "System review", status: "template", template: true, clone_eligible: true, schedule: { type: "inactivity", ...inactivity }, next_run_at_ms: null, next_run_source: "" };
   const journal = { digest: "a".repeat(64), outcome: "changed", summary: "Saved the export procedure as a skill.", undoable: true, undone: false, checks: [{ check: "doctor", result: "passed", evidence: "seq 9" }],
@@ -264,18 +250,15 @@ test("an installed inactivity template creates a trigger, reports honest state a
     inactivity_state: { status: "waiting", current: true, last_activity_at_ms: Date.now() }, next_run_at_ms: Date.now() + 3_600_000, next_run_source: "driver_state",
     deliveries: [{ seq: 12, at_ms: Date.now() - 60_000, run_id: "run_review_1", chat_interface_id: "world_operator_chat_review", journal }] };
   const f = fixture([template]);
-  const { host } = await mount();
+  const { host, drafts } = await mount();
   assert.equal(rows(host).length, 0);
   const suggestion = [...host.querySelectorAll("[data-scheduled-landing] [data-automation-card] button")].find((element) => element.textContent.includes("System review"));
   assert.match(suggestion.textContent, /After 1 hour without activity/);
   await click(suggestion);
-  assert.equal(button(dialog(), "Repeat schedule").textContent, "After inactivity");
-  const quiet = dialog().querySelector('input[aria-label="Quiet period"]');
-  assert.equal(quiet.value, "1");
-  await commit(quiet, "2");
-  await click(button(dialog(), "Create"));
-  assert.deepEqual(f.writes[0].draft.inactivity, { ...inactivity, seconds: 7200 });
-  assert.equal(f.writes[0].sourceInterfaceId, "world_system_review");
+  assert.match(drafts[0], /System review/);
+  assert.match(drafts[0], /After 1 hour without activity/);
+  assert.equal(f.writes.length, 0);
+  assert.equal(dialog(), null);
   f.rows = [template, trigger]; f.writes = [];
   const view = await mount();
   await click(rows(view.host)[0]);

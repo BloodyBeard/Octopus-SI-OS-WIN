@@ -30,6 +30,18 @@ const authoring = require("../src/client-surfaces/home-widget-authoring.json");
 const scope = { runId: "home-run", interfaceId: "home-client" };
 const now = Date.parse("2026-10-04T10:00:00.000Z");
 function widget(revision = 1) { return { ...structuredClone(authoring.example), revision }; }
+
+test("native video admission accepts HTTPS media and rejects executable, local and credentialed sources", () => {
+  for (const [url, accepted] of [
+    ["https://media.example/video.mp4", true], ["https://media.example/video.webm?version=2", true],
+    ["https://user:password@media.example/video.mp4", false], ["http://localhost/video.mp4", false],
+    ["file:///private/video.mp4", false], ["javascript:alert(1)", false], ["https://media.example/\\video.mp4", false],
+  ]) {
+    const document = widget();
+    document.render = { kind: "native", root: { type: "video", source: url, title: "Video" } };
+    assert.equal(admitClientSurfaceSource(source(document)).verdict.passed, accepted, url);
+  }
+});
 function source(document, patch = {}) {
   const text = JSON.stringify(document);
   return { path: "artifact:widget", artifactId: "widget", digest: `sha256:${require("node:crypto").createHash("sha256").update(text).digest("hex")}`, text, bytes: Buffer.byteLength(text), modifiedAt: new Date(now).toISOString(), sequence: document.revision, ...scope, ...patch };

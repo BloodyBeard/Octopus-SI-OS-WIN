@@ -21,7 +21,7 @@ const transactions = async directory => {
 
 async function runFixture(input) {
   const { mode, home, repository, binary, selection, removals, preserved, provider_directory: providerDirectory } = input;
-  assert.ok(["commit", "interrupt", "recover"].includes(mode));
+  assert.ok(["commit", "interrupt", "recover", "settle-private", "change-public"].includes(mode));
   const registry = path.join(home, "registry");
   const transactionRoot = path.join(home, "client-state/workspace/transactions");
   const { commitProjectionClientAuthoring } = require(path.join(repository, "app/electron/clientWorkspaceAuthoring.cjs"));
@@ -50,6 +50,10 @@ async function runFixture(input) {
       assert.equal(context.roots.interface_private_state_root, path.join(home, "interfaces"));
       assert.deepEqual(context.selection, selection);
       await native.verifyBefore(context);
+      if (mode === "settle-private") {
+        await fs.writeFile(path.join(home, "interfaces", path.basename(providerDirectory), "lifecycle-finalized"), "settled\n");
+      }
+      if (mode === "change-public") await fs.writeFile(path.join(providerDirectory, "unexpected-public-edit"), "changed\n");
     },
     async withHeldProof(context, operation) {
       acquisitions += 1;

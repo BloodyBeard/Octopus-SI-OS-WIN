@@ -726,8 +726,7 @@ mod tests {
     use crate::ExecServerRuntimePaths;
     use crate::ProcessId;
     use crate::client_api::ExecServerTransportParams;
-    use crate::client_api::StdioExecServerCommand;
-    use crate::environment_provider::EnvironmentDefault;
+        use crate::environment_provider::EnvironmentDefault;
     use crate::environment_provider::EnvironmentProviderSnapshot;
     use octopus_util_pathuri::PathUri;
     use pretty_assertions::assert_eq;
@@ -1121,7 +1120,7 @@ mod tests {
     async fn environment_manager_leaves_stdio_environment_lazy() {
         let environment = Environment::remote_with_transport(
             ExecServerTransportParams::StdioCommand {
-                command: StdioExecServerCommand {
+                command: crate::client_api::StdioExecServerCommand {
                     program: "codex-missing-exec-server-for-test".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),

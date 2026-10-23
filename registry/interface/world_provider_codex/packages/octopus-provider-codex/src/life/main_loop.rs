@@ -66,7 +66,7 @@ pub(crate) async fn codex_life(
     let interrupted_effects = InterruptedEffectArbiter::new(ctx.clone());
     upgrade_deferred_provider_turn_journals(&ctx, &descriptor).await?;
     let mut deferred_turns = load_deferred_provider_turns(&ctx, &descriptor)?;
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     restore_consumed_provider_inputs(
         &ctx,
         &descriptor,
@@ -275,16 +275,22 @@ pub(crate) async fn codex_life(
                     own.movement.seq.0
                 )
             })?;
-            if manifest.label == crate::handler::composer_prediction::REQUEST_LABEL {
+            if manifest.label == crate::handler::composer_prediction::REQUEST_LABEL
+                || manifest.label == crate::handler::client_generation::REQUEST_LABEL {
                 if !matches!(runtime_auth.connection_mode, ProviderConnectionMode::Native) {
-                    return Err("composer predictions require a native Codex binding".into());
+                    return Err("client generation requires a native Codex binding".into());
                 }
                 if driver.is_none() {
                     driver = Some(connect_declared_interface_driver(&ctx, &descriptor, &runtime_auth, Some(&envelope))
                         .await.map_err(|error| error.message)?);
                 }
-                if let Err(error) = crate::handler::composer_prediction::run(&ctx, driver.as_ref().unwrap(),
-                    &runtime_auth.manager, &envelope, own.movement.seq.0).await {
+                let result = if manifest.label == crate::handler::client_generation::REQUEST_LABEL {
+                    crate::handler::client_generation::run(&ctx, driver.as_ref().unwrap(), &envelope, own.movement.seq.0).await
+                } else {
+                    crate::handler::composer_prediction::run(&ctx, driver.as_ref().unwrap(),
+                        &runtime_auth.manager, &envelope, own.movement.seq.0).await
+                };
+                if let Err(error) = result {
                     if error.retires_driver() {
                         if error.result_admitted() {
                             commit_main_reader(&mut reader, &own, &main_reader_progress)?;
@@ -295,7 +301,12 @@ pub(crate) async fn codex_life(
                         shutdown_driver(&ctx, &mut driver).await?;
                         return Err(error.to_string());
                     }
-                    ctx.hand_admitted_failure(own.movement.seq.0, "composer_prediction_failed", serde_json::json!({"error":error.to_string()})).await?;
+                    let failure = if manifest.label == crate::handler::client_generation::REQUEST_LABEL {
+                        "client_generation_failed"
+                    } else {
+                        "composer_prediction_failed"
+                    };
+                    ctx.hand_admitted_failure(own.movement.seq.0, failure, serde_json::json!({"error":error.to_string()})).await?;
                 }
                 commit_main_reader(&mut reader, &own, &main_reader_progress)?;
                 continue;
@@ -360,7 +371,7 @@ pub(crate) async fn codex_life(
                     .ok()
                     .flatten()
                     .is_some_and(|control| control_action(&control) == "resume");
-            if is_inflight_turn_control_candidate_label(&manifest.label)
+            if is_inflight_turn_control_candidate_label(&manifest.label, &descriptor)
                 && control_journal_exists(&ctx, own.movement.seq.0)?
             {
                 match decode_admitted_turn_control(&ctx, &descriptor, &envelope) {
@@ -488,7 +499,7 @@ pub(crate) async fn codex_life(
                         }
                     }
                     Ok(None) => {}
-                    Err(error) if is_inflight_turn_control_candidate_label(&manifest.label) => {
+                    Err(error) if is_inflight_turn_control_candidate_label(&manifest.label, &descriptor) => {
                         handle_malformed_control_source(
                             &ctx,
                             &descriptor,

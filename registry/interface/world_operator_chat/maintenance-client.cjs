@@ -17,7 +17,7 @@ function decodeMaintenanceDeclaration(plan, target) {
     "source_worker_interface", "source_provider_interface", "source_client_interface", "source_relay_interface",
     "projection_interface", "experience_interface", "terminal_label", "input_label", "outcome_interface", "capture_interface", "outcome_label",
     "projection_run", "collection_source", "collection_entries_root", "publication_door_interface", "publication_tool",
-    "provider_output_labels", "initial_record", "initial_record_content", "lifecycle_ownership"], ["ee"]);
+    "provider_output_labels", "initial_record", "initial_record_content", "lifecycle_ownership"], ["ee", "outcome_error_label"]);
   if (d.schema_version !== 1 || target.id !== plan.run_id || target.worker !== plan.worker_interface_id
     || d.source_run !== target.id || d.source_worker_interface !== target.worker
     || d.source_provider_interface !== owner || d.source_client_interface !== plan.chat_interface_id) {
@@ -29,6 +29,10 @@ function decodeMaintenanceDeclaration(plan, target) {
   text(d.publication_tool, "publication tool");
   text(d.terminal_label, "terminal label"); text(d.input_label, "input label"); text(d.outcome_label, "outcome label");
   distinct([d.terminal_label, d.input_label, d.outcome_label], "maintenance labels");
+  if (d.outcome_error_label !== undefined) {
+    text(d.outcome_error_label, "outcome error label");
+    distinct([d.terminal_label, d.input_label, d.outcome_label, d.outcome_error_label], "maintenance labels");
+  }
   const labels = exactArray(d.provider_output_labels, "provider output labels");
   if (!labels.includes(d.terminal_label) || d.terminal_label === d.input_label) {
     fail("terminal and projected inputs must have distinct declared ownership");
@@ -100,6 +104,12 @@ function plannedMaintenanceRuns(plan, target, registryRoot, createsCompanions) {
   const captureOutput = route(projected.record, projectionTopology, "provider_artifact_output", d.projection_interface, d.capture_interface, d.outcome_label);
   narrow(captureOutput.interface_binding, d.projection_interface, d.outcome_label);
   onlyOutbound(captureOutput, d.capture_interface, d.outcome_label, true);
+  if (d.outcome_error_label !== undefined) {
+    const failure = route(projected.record, projectionTopology, "provider_artifact_output", d.projection_interface, d.capture_interface, d.outcome_error_label);
+    narrow(failure.interface_binding, d.projection_interface, d.outcome_error_label);
+    onlyOutbound(failure, d.capture_interface, d.outcome_error_label, true);
+    if (failure.required_verified_artifacts?.length) fail("outcome diagnostics cannot carry a capture-success requirement");
+  }
 
   const descriptors = descriptorReader(plan, registryRoot);
   if (createsCompanions) {
@@ -162,7 +172,8 @@ function plannedMaintenanceRuns(plan, target, registryRoot, createsCompanions) {
     if (outcome[key] !== value) fail(`outcome projection ${key} differs from its declaration`);
   }
   if (!same(outcome.input_routes, [{ interface_binding: observerInput.interface_binding }])
-    || !same(projector.interface_driver_config.private_config.client_projection_output_labels, [d.input_label, d.outcome_label])) {
+    || !same(projector.interface_driver_config.private_config.client_projection_output_labels,
+      [d.input_label, d.outcome_label, ...(d.outcome_error_label === undefined ? [] : [d.outcome_error_label])])) {
     fail("outcome projection changes its exact experience input or output labels");
   }
   const sourceParams = { source_run: target.id, source_worker_interface: target.worker,

@@ -313,7 +313,7 @@ async fn run_image_generation_interface_life(ctx: InterfaceLiftContext) -> Resul
         client,
     };
     let mut reader = LedgerTailReader::open_named(&ctx, "image-generation")?;
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     loop {
         if ctx.cancel.is_cancelled() {
             return Ok(());

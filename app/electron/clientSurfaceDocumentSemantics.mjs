@@ -127,6 +127,9 @@ function inspectNode(node, depth, nodePath, issues) {
       message: "native images must be embedded AVIF, GIF, JPEG, PNG, or WebP data URLs",
     });
   }
+  if (node.type === "video" && !isSafeClientSurfaceVideoSource(node.source)) {
+    issues.push({ code: "render.video.source.unavailable", path: `${nodePath}/source`, message: "native video requires an explicit HTTPS URL without credentials" });
+  }
   if (node.type === "table") {
     const columnKeys = new Set();
     node.columns.forEach((column, index) => {
@@ -191,4 +194,13 @@ function isBoundedJson(value, maximumBytes) {
   } catch {
     return false;
   }
+}
+
+
+export function isSafeClientSurfaceVideoSource(value) {
+  if (typeof value !== "string" || value.length > 2048 || !value.startsWith("https://") || /[\s\\]/u.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && Boolean(url.hostname) && !url.username && !url.password;
+  } catch { return false; }
 }

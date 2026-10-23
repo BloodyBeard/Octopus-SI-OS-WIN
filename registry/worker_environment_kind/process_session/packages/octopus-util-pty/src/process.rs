@@ -209,7 +209,7 @@ impl ProcessHandle {
         }
     }
 
-    fn request_terminate_checked(&self) -> io::Result<()> {
+    pub fn request_terminate(&self) -> io::Result<()> {
         let mut killer_opt = self
             .killer
             .lock()
@@ -230,14 +230,6 @@ impl ProcessHandle {
             .map_or(Ok(true), |killer| killer.termination_scope_has_exited())
     }
 
-    pub fn request_terminate(&self) {
-        if let Ok(mut killer_opt) = self.killer.lock() {
-            if let Some(mut killer) = killer_opt.take() {
-                let _ = killer.kill();
-            }
-        }
-    }
-
     pub fn signal(&self, signal: ProcessSignal) -> io::Result<()> {
         let Ok(mut killer_opt) = self.killer.lock() else {
             return Ok(());
@@ -254,8 +246,14 @@ impl ProcessHandle {
         result
     }
 
-    pub fn terminate(&self) {
-        self.request_terminate();
+    pub fn terminate(&self) -> io::Result<()> {
+        self.request_terminate()?;
+        // macOS keeps root wait ownership and any later cleanup failure until
+        // terminate_and_wait confirms closure or the handle itself is dropped.
+        #[cfg(not(target_os = "macos"))]
+        if let Ok(mut killer) = self.killer.lock() {
+            killer.take();
+        }
 
         if let Ok(mut h) = self.reader_handle.lock() {
             if let Some(handle) = h.take() {
@@ -277,6 +275,7 @@ impl ProcessHandle {
                 drop(handle);
             }
         }
+        Ok(())
     }
 
     pub async fn terminate_and_wait(&self, timeout: Duration) -> io::Result<()> {
@@ -289,7 +288,7 @@ impl ProcessHandle {
         let deadline = tokio::time::Instant::now() + timeout;
         self.close_stdin();
         if !self.has_exited() || !self.termination_scope_has_exited()? {
-            self.request_terminate_checked()?;
+            self.request_terminate()?;
         }
         let wait_handle = self
             .wait_handle
@@ -358,7 +357,7 @@ impl ProcessHandle {
 
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
-        self.terminate();
+        let _ = self.terminate();
     }
 }
 
@@ -551,3 +550,7 @@ pub fn spawn_from_driver(driver: ProcessDriver) -> SpawnedProcess {
         exit_rx: exit_rx_out,
     }
 }
+
+#[cfg(test)]
+#[path = "termination_tests.rs"]
+mod termination_tests;

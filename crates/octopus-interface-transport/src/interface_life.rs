@@ -16,6 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use crate::process_authority::{
     ProcessAuthoritySpecExecution, resolve_process_exact_path, resolve_required_repository_file,
 };
+use crate::life_process::{LifeProcess, exit_result, finish_stderr};
 use octopus_descriptors::{ArtifactId, InterfaceId, ProcessAuthoritySpec};
 use octopus_interfaces::{
     DeliveryVerdict, InterfaceArtifactFile, InterfaceArtifactManifest, InterfaceInvocationEnvelope,
@@ -24,6 +25,7 @@ use octopus_ledger::ArtifactRef;
 use octopus_runtime::{ContentHash, run_index::RunRecordsIndex};
 use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{InterfaceActivationArrival, InterfaceActivationEvidence, SystemInterfaceEmission};
 
@@ -276,6 +278,18 @@ pub struct InterfaceLiftContext {
 #[derive(Clone, Default)]
 pub(crate) struct InterfaceLifeReadiness {
     sender: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<(), String>>>>>,
+    publication: Option<tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
+}
+
+pub struct InterfaceLifeReadyPublication {
+    sender: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+}
+
+impl InterfaceLifeReadyPublication {
+    pub fn complete(self, result: Result<(), String>) -> Result<(), String> {
+        self.sender.send(Some(result))
+            .map_err(|_| "interface life readiness publication receiver was dropped".to_string())
+    }
 }
 
 impl InterfaceLifeReadiness {
@@ -284,6 +298,7 @@ impl InterfaceLifeReadiness {
         (
             Self {
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
+                publication: None,
             },
             receiver,
         )
@@ -344,8 +359,37 @@ impl InterfaceLiftContext {
         (self, receiver)
     }
 
-    pub fn signal_ready(&self) -> Result<(), String> {
-        self.readiness.signal(Ok(()))
+    pub fn with_readiness_publication_channel(
+        self,
+    ) -> (Self, tokio::sync::oneshot::Receiver<Result<(), String>>, InterfaceLifeReadyPublication) {
+        let (mut ctx, receiver) = self.with_readiness_channel();
+        let (sender, published) = tokio::sync::watch::channel(None);
+        ctx.readiness.publication = Some(published);
+        (ctx, receiver, InterfaceLifeReadyPublication { sender })
+    }
+
+    pub async fn signal_ready(&self) -> Result<(), String> {
+        if self.cancel.is_cancelled() {
+            return Err("interface life readiness publication cancelled".into());
+        }
+        self.readiness.signal(Ok(()))?;
+        let Some(mut publication) = self.readiness.publication.clone() else {
+            return Ok(());
+        };
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err("interface life readiness publication cancelled".into());
+            }
+            if let Some(result) = publication.borrow_and_update().clone() {
+                return result;
+            }
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => return Err("interface life readiness publication cancelled".into()),
+                changed = publication.changed() => changed
+                    .map_err(|_| "interface life readiness publisher closed without confirmation".to_string())?,
+            }
+        }
     }
 
     pub fn signal_startup_failed(&self, error: impl Into<String>) -> Result<(), String> {
@@ -2549,7 +2593,7 @@ pub fn spawn_process_life(
                 }
             }
           }
-          ctx.signal_ready()?;
+          ctx.signal_ready().await?;
           tokio::select! {
               _ = ctx.cancel.cancelled() => Ok(()),
               result = processes.join_next() => {
@@ -2750,16 +2794,18 @@ fn spawn_process_command_life(
             readable_exact.push(path_with_suffix(path, "-wal"));
             readable_exact.push(path_with_suffix(path, "-shm"));
         }
-        let resolved = command_config.authority.resolve(
+        let resolved_interface_descriptor = ctx.resolved_interface_descriptor()?;
+        let additional = octopus_interfaces::additional_host_root_paths(&resolved_interface_descriptor, &ctx.root_slots)?;
+        let (authority, authority_roots) = octopus_interfaces::expand_host_root_authority(&command_config.authority, &ctx.root_slots, &additional)?;
+        let resolved = authority.resolve(
             &executable_base,
-            &ctx.root_slots,
+            &authority_roots,
             &environment,
             readable,
             [var_dir.clone()],
             std::iter::empty(),
             readable_exact,
         )?;
-        let resolved_interface_descriptor = ctx.resolved_interface_descriptor()?;
         let host_io_limits = command_config.io_limits;
         host_io_limits.validate()?;
         let interface_host_slots = resolved_interface_descriptor
@@ -2768,6 +2814,7 @@ fn spawn_process_command_life(
             .into_iter()
             .flat_map(|config| config.host_slots.keys());
         let mut exposed_root_slots = resolved.root_slots;
+        exposed_root_slots.retain(|slot, _| ctx.root_slots.contains_key(slot));
         for slot in command_config
             .coordinate_root_slots
             .iter()
@@ -2848,18 +2895,15 @@ fn spawn_process_command_life(
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| format!("life process start time is before the Unix epoch: {error}"))?
             .as_nanos();
-        let mut child = command
-            .spawn()
+        let mut child = LifeProcess::spawn(&mut command)
+            .await
             .map_err(|e| format!("life spawn '{}' failed: {e}", executable.display()))?;
-        let child_pid = child
-            .id()
-            .ok_or_else(|| "life process has no host process id after spawn".to_string())?;
+        let child_pid = child.id();
         let capture_sequence = STDERR_CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let stderr_path = var_dir.join(format!(
             "interface-life.stderr.{started_at}.{child_pid}.{capture_sequence}.log"
         ));
         let mut stderr_task = None;
-        let mut child_exited = false;
         let life_result = async {
         let stderr = child
             .stderr
@@ -2869,7 +2913,7 @@ fn spawn_process_command_life(
         let maximum_bytes = host_io_limits.max_stderr_bytes;
         let stderr_capture_path = stderr_path.clone();
         let (stderr_failure_tx, mut stderr_failure_rx) = tokio::sync::oneshot::channel();
-        stderr_task = Some(tokio::spawn(async move {
+        stderr_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             let result = drain_bounded_stderr_to_private_file(
                 stderr,
                 maximum_bytes,
@@ -2882,7 +2926,7 @@ fn spawn_process_command_life(
                 let _ = stderr_failure_tx.send(error.clone());
             }
             result
-        }));
+        })));
         let mut stderr_open = true;
 
         let mut stdin = child
@@ -2900,12 +2944,7 @@ fn spawn_process_command_life(
                     break Ok(());
                 }
                 status = child.wait() => {
-                    child_exited = true;
-                    break match status {
-                        Ok(status) if status.success() => Ok(()),
-                        Ok(status) => Err(format!("life process exited with {status}")),
-                        Err(error) => Err(format!("life process wait failed: {error}")),
-                    };
+                    break exit_result(status);
                 }
                 stderr = &mut stderr_failure_rx, if stderr_open => {
                     match stderr {
@@ -2916,7 +2955,10 @@ fn spawn_process_command_life(
                 line = lines.next_line() => {
                     let line = match line {
                         Ok(Some(line)) => line,
-                        Ok(None) => break Err("life process closed its protocol output before exit".to_string()),
+                        Ok(None) => break tokio::select! {
+                            _ = ctx.cancel.cancelled() => Ok(()),
+                            result = child.protocol_closed() => result,
+                        },
                         Err(error) => break Err(format!("life stdout read failed: {error}")),
                     };
                     let trimmed = line.trim();
@@ -2942,7 +2984,7 @@ fn spawn_process_command_life(
             }
         }
         }.await;
-        let termination_result = terminate_life_process(&mut child, child_pid, child_exited).await;
+        let termination_result = child.terminate().await;
         let mut errors = Vec::new();
         if let Err(error) = life_result {
             errors.push(error);
@@ -2950,11 +2992,9 @@ fn spawn_process_command_life(
         if let Err(error) = termination_result {
             errors.push(error);
         }
-        if let Some(stderr_task) = stderr_task { match stderr_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => errors.push(error),
-            Err(error) => errors.push(format!("life stderr task failed: {error}")),
-        } }
+        if let Some(stderr_task) = stderr_task {
+            if let Err(error) = finish_stderr(stderr_task).await { errors.push(error); }
+        }
         if !errors.is_empty() && stderr_path.is_file() {
             errors.push(format!(
                 "private stderr captured at '{}'",
@@ -2967,42 +3007,6 @@ fn spawn_process_command_life(
             Err(errors.join("; "))
         }
     }) as InterfaceLifeFuture
-}
-
-async fn terminate_life_process(
-    child: &mut tokio::process::Child,
-    process_group: u32,
-    child_exited: bool,
-) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let group = libc::pid_t::try_from(process_group)
-            .map_err(|_| "life process group is outside the host pid range".to_string())?;
-        if group <= 0 {
-            return Err("life process group must be positive".to_string());
-        }
-        if unsafe { libc::killpg(group, libc::SIGKILL) } == -1 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(format!("life process group termination failed: {error}"));
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = process_group;
-    if !child_exited {
-        #[cfg(unix)]
-        child
-            .wait()
-            .await
-            .map_err(|error| format!("life process reap failed: {error}"))?;
-        #[cfg(not(unix))]
-        child
-            .kill()
-            .await
-            .map_err(|error| format!("life process termination failed: {error}"))?;
-    }
-    Ok(())
 }
 
 fn resolve_executable_base(
@@ -3083,7 +3087,7 @@ async fn handle_spawned_life_output(
     output: SpawnedLifeOutput,
 ) -> Result<(), String> {
     match output {
-        SpawnedLifeOutput::Ready => ctx.signal_ready()?,
+        SpawnedLifeOutput::Ready => ctx.signal_ready().await?,
         SpawnedLifeOutput::Arrival {
             request_id,
             artifact_manifest_path,
@@ -3563,7 +3567,11 @@ mod tests {
     #[tokio::test]
     async fn life_cleanup_releases_descendant_stderr_after_cancel_or_leader_exit() {
         use tokio::io::AsyncReadExt;
-        for leader_exits in [false, true] {
+        for (leader_exits, drop_owner) in [
+            (false, false), (true, false),
+            #[cfg(target_os = "macos")]
+            (true, true),
+        ] {
             let root = tempfile::tempdir().unwrap();
             let interface = InterfaceId::new("world_cleanup_test");
             let ownership = crate::InterfaceLifeOwnership::try_acquire_life(root.path(), &interface).unwrap().unwrap();
@@ -3582,8 +3590,7 @@ mod tests {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = command.spawn().unwrap();
-            let group = child.id().unwrap();
+            let mut child = LifeProcess::spawn(&mut command).await.unwrap();
             let mut ready = [0; 5];
             child
                 .stdout
@@ -3598,13 +3605,15 @@ mod tests {
                 assert!(child.wait().await.unwrap().success());
             }
             assert!(crate::InterfaceLifeOwnership::try_acquire(root.path(), &interface).unwrap().is_none());
-            terminate_life_process(&mut child, group, leader_exits)
-                .await
-                .unwrap();
+            let mut stderr = child.stderr.take().unwrap();
+            if drop_owner { drop(child); } else {
+                child.terminate().await.unwrap();
+                child.terminate().await.unwrap();
+            }
             let mut bytes = Vec::new();
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                child.stderr.take().unwrap().read_to_end(&mut bytes),
+                stderr.read_to_end(&mut bytes),
             )
             .await
             .expect("descendants must not retain the stopped interface's stderr")
@@ -4366,7 +4375,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn life_ownership_covers_process_readiness_cancellation_and_failed_readiness() {
-        for lose_readiness in [false, true] {
+        for (lose_readiness, sandbox_mode) in [
+            (false, "disabled"), (true, "disabled"),
+            #[cfg(target_os = "macos")]
+            (false, "enforced"),
+            #[cfg(target_os = "macos")]
+            (true, "enforced"),
+        ] {
             let root = tempfile::tempdir().unwrap();
             let interface = InterfaceId::new("world_owned_process");
             let mut context = ctx(root.path(), interface.as_str());
@@ -4388,7 +4403,7 @@ mod tests {
                     "io_limits": test_host_io_limits(),
                     "read_handles": [],
                     "authority": {
-                        "sandbox_mode": "disabled", "read_root_slots": [], "write_root_slots": [],
+                        "sandbox_mode": sandbox_mode, "read_root_slots": [], "write_root_slots": [],
                         "executable_root_slots": [], "read_paths": [], "write_paths": [],
                         "executable_paths": ["/bin/sh", "/bin/sleep"], "executable_commands": [],
                         "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],

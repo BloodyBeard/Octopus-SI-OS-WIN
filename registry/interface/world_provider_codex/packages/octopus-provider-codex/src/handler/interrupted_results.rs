@@ -26,13 +26,17 @@ pub(crate) fn materialize_turn_control_result(
     result: CodexTurnControlResult,
 ) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
     if result.continuity.is_some()
-        && (!result.acknowledged || !matches!(result.action.as_str(), "interrupt" | "stop"))
+        && (!result.acknowledged || !matches!(result.action.as_str(), "interrupt" | "stop" | "steer"))
     {
         return Err(InterfaceDriverError::FailedClosed(
-            "only acknowledged interruption may author a control continuity revision".into(),
+            "only acknowledged steering or interruption may author a control continuity revision".into(),
         ));
     }
-    let label = if result.acknowledged && matches!(result.action.as_str(), "queue_message" | "steer") {
+    if result.action == "steer" && result.continuity.as_ref().is_some_and(|state| state.turn_input.is_none()) {
+        return Err(InterfaceDriverError::FailedClosed("steering continuity lost its exact input artifact".into()));
+    }
+    let label = if result.acknowledged && result.continuity.is_none()
+        && matches!(result.action.as_str(), "queue_message" | "steer") {
         TURN_INPUT_ACKNOWLEDGED_LABEL
     } else if result.acknowledged {
         TURN_CONTROL_ACKNOWLEDGED_LABEL
@@ -328,7 +332,8 @@ pub(crate) fn retained_native_output_payloads(payload: &serde_json::Value, conte
         if observed_state != expected_state {
             return Err("retained native output conflicts with settled terminal continuity".into());
         }
-        expected.value["label"] = serde_json::json!(expected.label);
+        normalize_output_identity(&mut expected, state.turn_input.as_ref())
+            .map_err(|error| error.to_string())?;
         if observed != expected.value {
             return Err("retained native output differs from its exact typed terminal snapshot".into());
         }

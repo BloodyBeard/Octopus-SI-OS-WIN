@@ -288,9 +288,7 @@ function TaskDeleteDialog({
     <OcDialog ariaLabelledBy="octopus-task-delete-title" initialFocusRef={cancelRef} onClose={onCancel} open={open} panelClassName="p-5" size="compact">
       <OcDialogHeader className="p-0" title="Delete task?" titleId="octopus-task-delete-title" />
       <p className="mt-2 text-base text-token-description-foreground">
-        {run.writable
-          ? `“${title}” is a real Octopus run. Deleting it removes the run record, its exact private interfaces, tools, and interface state. Ledger and blob evidence remain available.`
-          : `“${title}” is a real read-only Octopus run. Deleting it removes only the unreferenced run record; shared interfaces and descriptors remain. Ledger and blob evidence remain available.`}
+        {`Delete “${title}”? This cannot be undone. Archive it instead if you want to keep the conversation for later.`}
       </p>
       <OcDialogFooter className="mt-5 min-h-0 border-0 p-0">
         <OcButton buttonRef={cancelRef} onClick={onCancel} variant="ghost">Cancel</OcButton>

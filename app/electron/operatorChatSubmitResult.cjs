@@ -20,7 +20,7 @@ function operatorChatSubmitFailure(error, { submissionStarted = true } = {}) {
         ? "Octopus Home chat package needs repair before sending."
         : OPERATOR_CHAT_SUBMIT_ERROR_MESSAGE,
       retryable: !contractMismatch,
-      deliveryState: submissionStarted ? "unknown" : "not_sent",
+      deliveryState: !submissionStarted || error?.deliveryState === "not_sent" ? "not_sent" : "unknown",
     },
   };
 }

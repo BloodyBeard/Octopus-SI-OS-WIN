@@ -24,6 +24,7 @@ octopus-system-coder-env = { path = "../../../git_worktree/packages/octopus-syst
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
 
 [dev-dependencies]
+octopus-verifiers = { path = "../../../../../crates/octopus-verifiers" }
 octopus-git-sandbox = { package = "octopus-git-sandbox-substrate", path = "../../../git_worktree/packages/octopus-git-sandbox-substrate" }
 octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 tempfile = "3"

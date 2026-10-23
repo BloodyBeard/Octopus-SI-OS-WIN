@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { OcIconButton, OcMenuItem, OcMenuMessage } from "../../design-system/components";
@@ -280,7 +281,7 @@ function ArtifactOpenControl({ file }: { file: ArtifactFile }) {
               role="menuitem"
             />
           ))}
-          {targetsLoading ? <OcMenuMessage>Loading available apps…</OcMenuMessage> : null}
+          {targetsLoading ? <OcLoadingRows label="Loading available apps…" rows={2} /> : null}
           {targetsError && !targetsLoading ? <OcMenuMessage>{targetsError}</OcMenuMessage> : null}
           {targetsLoading || targetsError || targets?.applications.length ? <div className="my-1 h-px bg-token-border" /> : null}
           <OcMenuItem disabled={Boolean(pending)} label="Open in folder" onClick={() => void reveal()} role="menuitem" />

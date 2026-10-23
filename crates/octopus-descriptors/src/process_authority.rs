@@ -77,6 +77,8 @@ pub struct ProcessAuthoritySpec {
     pub allow_application_launch: bool,
     #[serde(default)]
     pub allow_sandbox_delegation: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_process_signals: bool,
 }
 
 #[derive(
@@ -177,6 +179,7 @@ impl ProcessAuthoritySpec {
             && (!self.allow_local_ipc || original.allow_local_ipc)
             && (!self.allow_application_launch || original.allow_application_launch)
             && (!self.allow_sandbox_delegation || original.allow_sandbox_delegation)
+            && (!self.allow_process_signals || original.allow_process_signals)
     }
 
     pub fn has_argument_paths(&self) -> bool {
@@ -393,6 +396,25 @@ fn validate_relative_subpath(field: &str, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_authority_preserves_pinned_canonical_bytes() {
+        let prior: serde_json::Value = serde_json::from_str(r#"{"sandbox_mode":"enforced","read_root_slots":[],"write_root_slots":[],"executable_root_slots":[],"optional_read_root_slots":[],"optional_write_root_slots":[],"optional_executable_root_slots":[],"read_paths":[],"write_paths":[],"executable_paths":[],"executable_root_subpaths":[],"executable_commands":[],"read_env_paths":[],"write_env_paths":[],"executable_env_paths":[],"optional_read_env_paths":[],"optional_write_env_paths":[],"read_env_subpaths":[],"write_env_subpaths":[],"executable_env_subpaths":[],"read_argument_paths":[],"write_argument_paths":[],"executable_argument_paths":[],"allow_network":false,"allow_local_ipc":false,"allow_application_launch":false,"allow_sandbox_delegation":false}"#).unwrap();
+        let decoded: ProcessAuthoritySpec = serde_json::from_value(prior.clone()).unwrap();
+        let before = serde_json::to_vec(&prior).unwrap();
+        let after = serde_json::to_vec(&serde_json::to_value(decoded).unwrap()).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(blake3::hash(&after), blake3::hash(&before));
+    }
+
+    #[test]
+    fn a_copy_cannot_add_host_signal_authority() {
+        let original = ProcessAuthoritySpec::default();
+        let authorized = ProcessAuthoritySpec { allow_process_signals: true, ..original.clone() };
+        assert!(!authorized.narrows(&original));
+        assert!(original.narrows(&authorized));
+        assert!(authorized.narrows(&authorized));
+    }
 
     #[test]
     fn executable_root_subpaths_reject_parent_traversal() {

@@ -6,7 +6,7 @@ const { JSDOM } = require("jsdom");
 
 const dom = new JSDOM('<div id="root"></div>', { url: "http://fixture.invalid", pretendToBeVisual: true });
 const w = dom.window;
-for (const key of ["window", "document", "HTMLElement", "Element", "SVGElement", "Node", "Event", "MouseEvent", "localStorage"]) {
+for (const key of ["window", "document", "HTMLElement", "Element", "SVGElement", "Node", "Event", "MouseEvent", "navigator", "localStorage"]) {
   Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? w : w[key] });
 }
 globalThis.ResizeObserver = w.ResizeObserver = class { observe() {} disconnect() {} };
@@ -138,7 +138,7 @@ test("an authenticated live window waits on the first probe, then shows the shel
   assert.deepEqual([boot.launchMounts, boot.launchUnmounts], [1, 0]);
 });
 
-test("Client Lab and an access-required probe never show the launch gate, and a local unlock comes before the account gate", async () => {
+test("Client Lab and an access-required probe never show the launch gate, and local unlock comes before Home verification", async () => {
   await showApp({ configured: true, authenticated: true, profile: "lab" }, runtime("unmanaged"));
   assert.ok(shown(".stub-operator-shell"));
   assert.equal(shown(".stub-launch"), false);
@@ -155,7 +155,8 @@ test("Client Lab and an access-required probe never show the launch gate, and a 
   assert.equal(shown(".stub-chatgpt-gate"), false);
   boot.setAccess(live);
   await settle();
-  assert.ok(shown(".stub-chatgpt-gate"));
+  assert.ok(shown(".stub-operator-shell"));
+  assert.equal(shown(".stub-chatgpt-gate"), false);
 });
 
 test("the launch scene shows the launch shell, greets first, and exits only after the greeting", async () => {
@@ -230,4 +231,64 @@ test("runtime host state updates the topology status in place without another pr
   root.render(null);
   await settle(5);
   assert.equal(bridge.listenerCount(), 0);
+});
+
+
+test("failed initial topology read recovers when the runtime becomes ready without a file event", async () => {
+  root.render(null); await settle(5);
+  let reads = 0;
+  const bridge = runtimeBridge(runtime("unmanaged"), {
+    projectionRead: async () => {
+      if (++reads === 1) throw new Error("startup read failed");
+      return { generation: 4, snapshotRaw: { projection: {} }, eeRaw: { ee_instances: [{ ee_id: "home-ee" }] }, runDetailsRaw: {} };
+    },
+    runtimeStatus: async () => ({ phase: "unmanaged", up: false }),
+    onProjectionChanged: () => () => {},
+  });
+  root.render(React.createElement(await RuntimeTopologyProbe)); await settle(40);
+  assert.equal(boot.topology.projection.mode, "error");
+  bridge.emit(runtime("ready")); await settle(40);
+  assert.equal(reads, 2, "runtime readiness must recover a failed read");
+  assert.equal(boot.topology.environments[0].id, "home-ee");
+  assert.equal(boot.topology.projection.mode, "live");
+  bridge.emit(runtime("ready")); await settle();
+  assert.equal(reads, 2, "a healthy projection does not poll on host observations");
+});
+
+
+test("topology retains the last world and read error until a focus or explicit retry succeeds", async () => {
+  root.render(null); await settle(5);
+  let reads = 0, fail = false, release;
+  const logged = [];
+  const bridge = runtimeBridge(runtime("ready"), {
+    projectionRead: async () => {
+      reads++;
+      if (release) await new Promise(resolve => { release = resolve; });
+      if (fail) throw new Error("temporary projection failure");
+      return { generation: 7, snapshotRaw: { projection: {} }, eeRaw: { ee_instances: [{ ee_id: "home-ee" }] }, runDetailsRaw: {} };
+    },
+    runtimeStatus: async () => ({ phase: "ready", up: true }),
+    onProjectionChanged: () => () => {},
+    logClientEvent: async event => logged.push(event),
+  });
+  root.render(React.createElement(await RuntimeTopologyProbe)); await settle(40);
+  assert.equal(boot.topology.loading, false);
+  fail = true; boot.topology.refresh(); await settle();
+  assert.equal(boot.topology.environments[0].id, "home-ee");
+  assert.equal(boot.topology.readError, "temporary projection failure");
+  bridge.emit(runtime("degraded")); await settle();
+  assert.equal(boot.topology.projection.label, "Projection read failed", "host observations do not hide a failed file read");
+  assert.equal(logged.at(-1).event, "renderer.topology.read_failed");
+  fail = false; release = true;
+  window.dispatchEvent(new Event("focus")); await settle();
+  assert.equal(reads, 3);
+  assert.equal(boot.topology.loading, true);
+  release(); release = null; await settle();
+  assert.equal(boot.topology.readError, "");
+  assert.notEqual(boot.topology.projection.label, "Projection read failed", "same-generation successful read clears the failure");
+  window.dispatchEvent(new Event("focus")); await settle();
+  assert.equal(reads, 3, "returning to a healthy window does not re-read");
+  root.render(null); await settle(5);
+  window.dispatchEvent(new Event("focus")); await settle();
+  assert.equal(reads, 3);
 });

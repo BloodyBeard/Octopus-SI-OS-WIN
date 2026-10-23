@@ -35,11 +35,13 @@ Options:
   --project <id> --agent <id>      Choose the Project and named Agent
   --provider <id> --model <id>     Explicit provider/model selection
   --effort <level>                Reasoning effort offered by that model
+  --service-tier <id>             Service tier offered by the model
   --policy <id>                  Installed policy for a new Project
   --attach <path>                 Attach a file or folder; repeatable
   --json                          JSON results; NDJSON for streamed work
   --no-wait                       Return the input admission receipt
   --timeout <seconds>             Stop waiting at a deadline, leave task running
+                                  up: omitted or 0 uses the 120-second default
   --output-last-message <file>    Write the final reply to a new file
   --archived                      List archived tasks
   --yes                           Confirm task deletion
@@ -71,6 +73,7 @@ function argumentsFor(argv) {
       "project-name": { type: "string" }, "pack": { type: "string" },
       "non-interactive": { type: "boolean", default: false },
       "sign-in": { type: "boolean", default: false },
+      "service-tier": { type: "string" },
     },
   });
   const seconds = result.values.timeout === undefined ? 0 : Number(result.values.timeout);
@@ -96,7 +99,7 @@ async function main(argv = process.argv.slice(2), io = process) {
     environment = createEnvironment({ home: flags.home, bundle: flags.bundle });
     const selection = {
       projectId: flags.project, agentId: flags.agent,
-      providerId: flags.provider, model: flags.model, effort: flags.effort,
+      providerId: flags.provider, model: flags.model, effort: flags.effort, serviceTier: flags["service-tier"],
       files: flags.attach,
     };
     const words = [...parsed.positionals];
@@ -108,7 +111,8 @@ async function main(argv = process.argv.slice(2), io = process) {
     };
     if (command === "status") { report(await environment.status()); return 0; }
     if (command === "up") {
-      report(await environment.start({ onProgress: (value) => progress(io, json, value.phase.replaceAll("_", " ")) }));
+      report(await environment.start({ timeoutMs: parsed.timeoutMs > 0 ? parsed.timeoutMs : undefined,
+        onProgress: (value) => progress(io, json, value.phase.replaceAll("_", " ")) }));
       return 0;
     }
     let terminal;
@@ -124,7 +128,7 @@ async function main(argv = process.argv.slice(2), io = process) {
         report(await environment.setup({
           ui, nonInteractive: flags["non-interactive"], packId: flags.pack,
           workspaceName: flags["workspace-name"], projectName: flags["project-name"],
-          model: flags.model, reasoningEffort: flags.effort,
+          model: flags.model, reasoningEffort: flags.effort, serviceTier: flags["service-tier"],
           signIn: flags["non-interactive"] ? flags["sign-in"] : true, recommended: [],
         }));
       } finally { ui.close?.(); }

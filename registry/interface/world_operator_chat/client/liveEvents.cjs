@@ -33,7 +33,7 @@ function operatorChatLiveActivityPayload(label, config, value) {
     payload,
     text: eventKind === "compaction"
       ? ""
-      : eventKind.endsWith("_delta")
+      : eventKind.endsWith("_delta") || eventKind === "message" || eventKind === "commentary"
         ? operatorChatLiveEventText(payload, eventKind)
         : operatorChatLiveEventText(payload, eventKind) || label,
     error: payload.ok === false || Boolean(payload.error),
@@ -49,7 +49,7 @@ function operatorChatLiveEventKind(label, config, payload) {
     return phase === "commentary" ? "commentary_delta" : "message_delta";
   }
   if (label === "turn.agent_message") {
-    return phase === "commentary" ? "commentary" : phase === "partial_answer" ? "message" : "event";
+    return phase === "commentary" ? "commentary" : ["partial_answer", "final_answer"].includes(phase) ? "message" : "event";
   }
   return {
     "turn.reasoning": "reasoning",

@@ -206,8 +206,6 @@ pub enum EeError {
     ChildTemplateNotAllowed { parent: String, child: String },
     #[error("EE instance {0} already exists (open requires a fresh scope id)")]
     DuplicateEe(EeId),
-    #[error("persisted EE instance {0} has no parent EE")]
-    MissingParent(EeId),
     #[error("persisted EE instance {0} has an empty goal")]
     EmptyGoal(EeId),
 }
@@ -242,27 +240,25 @@ impl EeTree {
         if !self.templates.contains_key(&instance.template) {
             return Err(EeError::UnknownTemplate(instance.template));
         }
-        let parent_ee = instance
-            .parent_ee
-            .as_ref()
-            .ok_or_else(|| EeError::MissingParent(instance.ee_id.clone()))?;
-        let parent = self
-            .instances
-            .get(parent_ee)
-            .ok_or_else(|| EeError::UnknownEe(parent_ee.clone()))?;
-        let parent_template = self
-            .templates
-            .get(&parent.template)
-            .ok_or_else(|| EeError::UnknownTemplate(parent.template.clone()))?;
-        if !parent_template
-            .allowed_child_ee_templates
-            .iter()
-            .any(|allowed| allowed.as_str() == instance.template.as_str())
-        {
-            return Err(EeError::ChildTemplateNotAllowed {
-                parent: parent_template.id.as_str().to_string(),
-                child: instance.template.as_str().to_string(),
-            });
+        if let Some(parent_ee) = instance.parent_ee.as_ref() {
+            let parent = self
+                .instances
+                .get(parent_ee)
+                .ok_or_else(|| EeError::UnknownEe(parent_ee.clone()))?;
+            let parent_template = self
+                .templates
+                .get(&parent.template)
+                .ok_or_else(|| EeError::UnknownTemplate(parent.template.clone()))?;
+            if !parent_template
+                .allowed_child_ee_templates
+                .iter()
+                .any(|allowed| allowed.as_str() == instance.template.as_str())
+            {
+                return Err(EeError::ChildTemplateNotAllowed {
+                    parent: parent_template.id.as_str().to_string(),
+                    child: instance.template.as_str().to_string(),
+                });
+            }
         }
         self.instances.insert(instance.ee_id.clone(), instance);
         Ok(())
@@ -521,6 +517,30 @@ mod tests {
             interface_policy_overrides: Default::default(),
             bootstrap_root: false,
         }
+    }
+
+    #[test]
+    fn persisted_roots_form_independent_policy_chains() {
+        let mut tree = EeTree::new();
+        tree.insert_template(tmpl("initial", &["a"]));
+        tree.insert_template(tmpl("service", &["b", "c"]));
+        let instance = |id: &str, template: &str| EeInstance {
+            ee_id: EeId::new(id), template: EeTemplateId::new(template), parent_ee: None,
+            goal: id.into(), config: Default::default(), policy_narrowing: Default::default(),
+        };
+        tree.insert_persisted_instance(instance("ee_initial", "initial")).unwrap();
+        let mut service = instance("ee_service", "service");
+        service.policy_narrowing.allowed_tools = Some(vec!["b".into(), "d".into()]);
+        tree.insert_persisted_instance(service.clone()).unwrap();
+        assert_eq!(tree.ancestors(&service.ee_id).unwrap(), vec![service.ee_id.clone()]);
+        let formed = form_policy(ceiling(&["a", "b", "c", "d"]),
+            &tree.policy_layers(&service.ee_id).unwrap(), &[], FormationPin::default());
+        assert_eq!(formed.context.tools, CapSet::from_allowed([ToolId::new("b")]));
+        assert!(tree.insert_persisted_instance(service).is_err());
+        assert!(tree.insert_persisted_instance(instance("unknown", "absent")).is_err());
+        let mut child = instance("child", "service");
+        child.parent_ee = Some(EeId::new("ee_initial"));
+        assert!(matches!(tree.insert_persisted_instance(child), Err(EeError::ChildTemplateNotAllowed { .. })));
     }
 
     #[test]

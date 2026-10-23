@@ -2,12 +2,12 @@ import { createContext, useCallback, useContext, useState, type ReactNode } from
 import type { OctopusScheduledMutationRequest } from "../../electron";
 import { canMutateScheduledInterfaces, mutateScheduledInterface } from "../../projectionClient";
 import { appToast } from "../../toasts";
-import { draftFromScheduledInterface, draftFromTemplate, mutationDraft } from "./scheduleModel";
+import { describeSchedule, draftFromScheduledInterface, mutationDraft } from "./scheduleModel";
 import type { ScheduledSuggestion } from "./scheduledSuggestions";
 import type { ScheduledDelivery, ScheduledEditorDraft, ScheduledEditorMode, ScheduledInterfaceProjection } from "./types";
 import { useScheduledInterfaces } from "./useScheduledInterfaces";
 
-function useScheduledWorkspaceState(active: boolean) {
+function useScheduledWorkspaceState(active: boolean, onCreateTask: (text: string) => void) {
   const projection = useScheduledInterfaces(active);
   const [selectedId, setSelectedId] = useState("");
   const [editor, setEditor] = useState<{ mode: ScheduledEditorMode; draft: ScheduledEditorDraft; revision: number } | null>(null);
@@ -21,12 +21,9 @@ function useScheduledWorkspaceState(active: boolean) {
   const triggers = projection.tasks.filter((task) => !task.template);
   const templates = projection.tasks.filter((task) => task.valid && task.cloneEligible)
     .sort((left, right) => Number(right.template) - Number(left.template) || left.displayName.localeCompare(right.displayName));
-  const timeTemplate = templates.find((task) => task.schedule?.type !== "inactivity") ?? null;
   const selected = triggers.find((task) => task.interfaceId === selectedId) ?? null;
-  const createUnavailableReason = !canEdit ? "Open a connected desktop client to create a trigger."
-    : projection.loading ? "Loading triggers…"
-      : templates.length === 0 ? "A complete trigger template is needed before creating a trigger." : "";
-  const timeSuggestionUnavailableReason = createUnavailableReason || (timeTemplate ? "" : "Install a time-based trigger template to use these suggestions.");
+  const createUnavailableReason = !canMutateScheduledInterfaces() ? "Open a connected desktop client to create a trigger." : "";
+  const timeSuggestionUnavailableReason = createUnavailableReason;
 
   async function mutate(request: OctopusScheduledMutationRequest, failureTitle: string, after: () => void) {
     setPending(true);
@@ -50,20 +47,12 @@ function useScheduledWorkspaceState(active: boolean) {
   }
 
   function startCreate(suggestion?: ScheduledSuggestion) {
-    const source = suggestion?.templateInterfaceId
-      ? templates.find((task) => task.interfaceId === suggestion.templateInterfaceId)
-      : suggestion ? timeTemplate : timeTemplate ?? templates[0];
-    if (pending || createUnavailableReason || !source) return;
-    const draft = draftFromTemplate(source);
-    const timeBased = source.schedule?.type !== "inactivity";
-    setEditor((previous) => ({
-      mode: { kind: "create", source },
-      draft: suggestion?.templateInterfaceId ? draft
-        : suggestion ? { ...draft, instructions: suggestion.instructions, type: "cron", cron: suggestion.cron }
-          : { ...draft, instructions: "", ...(timeBased ? { type: "cron" as const, cron: "0 9 * * *" } : {}) },
-      revision: (previous?.revision ?? 0) + 1,
-    }));
-    setEditorError("");
+    if (pending || createUnavailableReason) return;
+    const source = templates.find((task) => task.interfaceId === suggestion?.templateInterfaceId);
+    const timing = source ? describeSchedule(source) : suggestion?.schedule;
+    onCreateTask(suggestion
+      ? `Create a trigger: ${suggestion.title}.\n\n${suggestion.instructions}${timing ? `\n\nWhen: ${timing}.` : ""}`
+      : "Create a trigger that ");
   }
 
   function startEdit(task: ScheduledInterfaceProjection) {
@@ -114,8 +103,8 @@ function useScheduledWorkspaceState(active: boolean) {
 
 const ScheduledWorkspaceContext = createContext<ReturnType<typeof useScheduledWorkspaceState> | null>(null);
 
-export function ScheduledWorkspaceProvider({ active, children }: { active: boolean; children: ReactNode }) {
-  const state = useScheduledWorkspaceState(active);
+export function ScheduledWorkspaceProvider({ active, onCreateTask, children }: { active: boolean; onCreateTask: (text: string) => void; children: ReactNode }) {
+  const state = useScheduledWorkspaceState(active, onCreateTask);
   return <ScheduledWorkspaceContext.Provider value={state}>{children}</ScheduledWorkspaceContext.Provider>;
 }
 

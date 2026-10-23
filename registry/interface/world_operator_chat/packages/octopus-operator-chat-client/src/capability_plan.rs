@@ -65,6 +65,7 @@ pub(crate) fn plan_capability_doors(
     topology: &FormedCapabilityTopology,
     identity: &PlannedIdentity,
     requested_host_slots: &BTreeMap<String, BTreeMap<String, PathBuf>>,
+    source_folders: &[PathBuf],
     writes: &mut Vec<PlannedClientWrite>,
 ) -> Result<(), String> {
     let mut consumed_host_slots = BTreeSet::new();
@@ -94,10 +95,23 @@ pub(crate) fn plan_capability_doors(
             for (slot, path) in overrides {
                 let slot = safe_segment(slot, "door_host_slots slot")?;
                 require_absolute("door_host_slots path", path)?;
-                config.host_slots.insert(
-                    slot,
-                    octopus_interfaces::HostSlotOverride { path: path.clone() },
-                );
+                let additional_paths = config.host_slots.get(&slot).filter(|binding| binding.path == *path)
+                    .map(|binding| binding.additional_paths.clone()).unwrap_or_default();
+                config.host_slots.insert(slot, octopus_interfaces::HostSlotOverride { additional_paths, path: path.clone() });
+            }
+        }
+        if let Some(primary) = source_folders.first() {
+            let mut uses_workspace = false;
+            for kind in &binding.worker_environment_kinds {
+                let file = registry_root.join("worker_environment_kind").join(kind.as_str()).join("worker_environment_kind.json");
+                let descriptor: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                uses_workspace |= ["read_root_refs", "write_root_refs"].iter().any(|field| descriptor["boundary_defaults"][field]
+                    .as_array().is_some_and(|roots| roots.iter().any(|root| root["path"].as_str() == Some("workspace_root"))));
+            }
+            if uses_workspace && !interface_root.join(door_id).join("interface.json").exists() {
+                driver_config.get_or_insert_default().host_slots.insert("workspace_root".into(), octopus_interfaces::HostSlotOverride {
+                    path: primary.clone(), additional_paths: source_folders[1..].to_vec(),
+                });
             }
         }
         if let Some(owner) = identity.code_mode_owners.get(source_interface_id.as_str()) {
@@ -328,4 +342,17 @@ pub(crate) fn plan_capability_sidecars(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn project_source_folders(ee_instances_root: &Path, ee_id: &str) -> Result<Vec<PathBuf>, String> {
+    let file = ee_instances_root.join(format!("{}.json", safe_segment(ee_id, "Project EE")?));
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(file).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let Some(folders) = value.pointer("/config/octopus_os/source_folders") else { return Ok(Vec::new()); };
+    let folders: Vec<PathBuf> = serde_json::from_value(folders.clone()).map_err(|e| format!("invalid Project source folders: {e}"))?;
+    let mut seen = BTreeSet::new();
+    for folder in &folders {
+        require_absolute("Project source folder", folder)?;
+        if !folder.is_dir() || !seen.insert(folder.clone()) { return Err("Project source folders must be existing, distinct directories".into()); }
+    }
+    Ok(folders)
 }

@@ -1,6 +1,7 @@
     use super::*;
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/native_terminal_handoff.rs"));
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/turn_deferral.rs"));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/declared_input.rs"));
 
     use futures::{SinkExt, StreamExt};
     use octopus_interface_transport::InterfaceHostIoLimits;
@@ -282,6 +283,29 @@
             max_payload_bytes: 1_048_576,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn resume_requires_the_current_admitted_stopping_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = descriptor();
+        let ctx = context(root.path(), &descriptor);
+        let run = RunId::new("run-a");
+        let result = CodexTurnControlResult { control_id: "stop-a".into(), action: "stop".into(), acknowledged: true,
+            thread_id: Some("thread-a".into()), turn_id: Some("turn-a".into()), detail: json!({"interrupted":true}), continuity: Some(continuity(5, None)) };
+        persist_control_journal(&ctx, 0, &run, "stop-a", "stop", TurnControlJournalPhase::Delivered { result: result.clone() }).unwrap();
+        let receipt = materialize_turn_control_result(&ctx.interface_var_dir().join("emitted"), 0, result.clone()).unwrap();
+        let source = movement(0, MovementKind::InterfaceOutbound, Endpoint::Interface(InterfaceId::new("world_operator")),
+            Endpoint::Interface(descriptor.id.clone()), ArtifactRef { id: ArtifactId::new("stop"), content: ContentHash::of_bytes(b"stop") });
+        let admitted = movement(1, MovementKind::InterfaceArrival, Endpoint::Interface(descriptor.id.clone()),
+            Endpoint::Interface(InterfaceId::new("system_worker_test")), cache_artifact(&ctx, &receipt));
+        write_movements(&ctx.movements_path, &[source.clone(), admitted]);
+        assert_eq!(resume_control_continuity(&ctx, &run, 2, 5).unwrap(), continuity(5, None));
+        assert!(resume_control_continuity(&ctx, &run, 2, 6).is_err());
+        assert!(resume_control_continuity(&ctx, &run, 1, 5).is_err());
+        assert!(resume_control_continuity(&ctx, &RunId::new("another-run"), 2, 5).is_err());
+        write_movements(&ctx.movements_path, &[source]);
+        assert!(resume_control_continuity(&ctx, &run, 2, 5).is_err());
     }
 
     fn movement(
@@ -1647,7 +1671,7 @@
                 seq: 0,
             };
             let decode = |envelope: &InterfaceInvocationEnvelope| {
-                let Some(CodexTurnControl::Steer { control_id, input }) = decode_admitted_turn_control(&ctx, &descriptor, envelope).unwrap()
+                let Some(CodexTurnControl::Steer { control_id, input, .. }) = decode_admitted_turn_control(&ctx, &descriptor, envelope).unwrap()
                     else { panic!("exact selected operator source must remain steering") };
                 assert_eq!(control_id, "message-a");
                 let octopus_appserver_proto::UserInput::Text { text, .. } = &input[0] else { panic!("missing selected-file metadata") };

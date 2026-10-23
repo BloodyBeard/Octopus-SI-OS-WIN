@@ -384,11 +384,20 @@ async function run() {
       size: 10,
       sha256: exactDigest,
     };
+    await fs.mkdir(path.dirname(clientFile.path), { recursive: true });
+    await fs.writeFile(clientFile.path, "exports.local = true;\n");
+    await writeJson(path.join(path.dirname(clientFile.path), "client.json"), {
+      schema_version: 2, interface: "world_operator_chat",
+      run: { ee: "ee_test", worker: "system_worker_test", context_artifact_bindings: [] },
+    });
+    await writeJson(path.join(path.dirname(clientFile.path), "life.json"), { processes: [{ bin: "owner://bin/client" }] });
+    const configurationFiles = ["client.json", "life.json"].map(relative_path => ({ relative_path,
+      path: path.join(path.dirname(clientFile.path), relative_path) }));
     const clientSnapshot = (sha256 = exactDigest) => ({ members: [{
       registry_kind: "interface",
       owner: "world_operator_chat",
       source_files: [clientFile],
-      installed_files: [{ ...clientFile, sha256 }],
+      installed_files: [{ ...clientFile, sha256 }, ...configurationFiles],
     }] });
     const clientDoctor = await runClientDoctor({
       roots,
@@ -421,17 +430,15 @@ async function run() {
         }],
       }),
     });
-    assert.equal(staleClientDoctor.passed, 0);
-    assert.equal(staleClientDoctor.findings[0].code, "client.package_owner_stale");
-    assert.match(staleClientDoctor.findings[0].next_step, /owner-authorized package repair/);
-    assert.match(staleClientDoctor.errors[0], /differs from its package source/);
+    assert.deepEqual(staleClientDoctor, { schema_version: 2, checks: 1, passed: 1, findings: [], errors: [] },
+      "locally edited client bytes are not a broken installation");
     const unboundPackageDoctor = await runClientDoctor({ roots,
       inspectInstallation: async () => ({ id: "world_operator_chat", available: true, file_snapshot: clientSnapshot(),
         member_states: [{ registry_kind: "interface", owner: "world_operator_chat", materialized: true,
           source_digest: exactDigest, installed_digest: exactDigest }] }),
       inspectCatalog: async () => ({ errors: [], packages: [{ id: "driver.unbound", materialized: true,
         installed: false, receipt_state: "stale", source_digest: exactDigest, installed_digest: exactDigest,
-        receipt_digest: "b".repeat(64), error: "source-owned executable receipt is stale" }] }),
+        receipt_digest: "b".repeat(64), error: "installed package is missing an owner" }] }),
     });
     assert.equal(unboundPackageDoctor.findings[0].code, "package.installation_inconsistent");
     assert.equal(unboundPackageDoctor.findings[0].evidence.package_id, "driver.unbound");
@@ -672,8 +679,9 @@ async function run() {
       ...roots,
       packageId: "application.test_provider",
     });
-    assert.equal(currentInstallation.installed, false);
-    assert.equal(currentInstallation.receipt_state, "stale");
+    assert.equal(currentInstallation.installed, true);
+    assert.equal(currentInstallation.receipt_state, "valid");
+    assert.equal(currentInstallation.update_available, true);
     const staleRepairExpectation = repairExpectation(currentInstallation);
     runCrashChild("rollback-repair", root);
     const [pendingRepair] = await transactionEntries(roots);
@@ -706,8 +714,8 @@ async function run() {
       ...roots,
       packageId: "application.test_provider",
     });
-    assert.equal(currentInstallation.installed, false);
-    assert.equal(currentInstallation.receipt_state, "stale");
+    assert.equal(currentInstallation.installed, true);
+    assert.equal(currentInstallation.receipt_state, "valid");
     assert.deepEqual(
       JSON.parse(await fs.readFile(path.join(roots.activeRegistryRoot, "interface", "world_test_provider", "interface.json"), "utf8")).source_names,
       ["test_provider"],
@@ -717,13 +725,13 @@ async function run() {
       ...roots,
       packageId: "application.test_provider",
     });
-    assert.equal(currentInstallation.receipt_state, "stale");
+    assert.equal(currentInstallation.receipt_state, "valid");
     runCrashChild("rollback-repair-materialize", root);
     currentInstallation = await readLocalPackageInstallation({
       ...roots,
       packageId: "application.test_provider",
     });
-    assert.equal(currentInstallation.receipt_state, "stale");
+    assert.equal(currentInstallation.receipt_state, "valid");
     runCrashChild("forward-repair", root);
     currentInstallation = await readLocalPackageInstallation({
       ...roots,
@@ -797,7 +805,7 @@ async function updateBaselineFixture() {
     const manifestPath = path.join(roots.libraryRoot, "packages", `${id}.json`), manifest = JSON.parse(await fs.readFile(manifestPath));
     manifest.members.push({ registry_kind: "worker_environment_kind", owner: "system_room" });
     await writeJson(manifestPath, manifest);
-    await writeJson(path.join(sourceKind, "worker_environment_kind.json"), { id: "system_room", tool_process_bins: ["sh"] });
+    await writeJson(path.join(sourceKind, "worker_environment_kind.json"), { worker_environment_kind_id: "system_room", tool_process_bins: ["sh"] });
     await fs.writeFile(path.join(sourceOwner, "driver"), "source binary\n", { mode: 0o755 });
     const initial = packageRecord(await readLocalPackageCatalog(roots));
     await applyLocalApplicationPack({ ...roots, operationId: "baseline_install_001", packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { [id]: initial.source_digest } });
@@ -809,7 +817,7 @@ async function updateBaselineFixture() {
     await writeJson(path.join(activeOwner, "interface.json"), { id: "world_test_provider", local_authoring: true });
     await fs.mkdir(path.join(activeOwner, "packages"));
     await fs.writeFile(path.join(activeOwner, "packages", "local.py"), "authored code\n");
-    await writeJson(path.join(activeKind, "worker_environment_kind.json"), { id: "system_room", tool_process_bins: ["sh", "python3"] });
+    await writeJson(path.join(activeKind, "worker_environment_kind.json"), { worker_environment_kind_id: "system_room", tool_process_bins: ["sh", "python3"] });
     await fs.mkdir(path.dirname(path.join(activeKind, script)), { recursive: true });
     await fs.writeFile(path.join(activeKind, script), "print('interval_union')\n", { mode: 0o750 });
     const authoredKind = await fs.readFile(path.join(activeKind, "worker_environment_kind.json"));
@@ -929,7 +937,7 @@ async function updateBaselineFixture() {
     unproved.members[0].digest = "f".repeat(64); await writeJson(cleanReceiptPath, unproved);
     const unchangedReceipt = await fs.readFile(cleanReceiptPath), unprovedResult = await adoptLocalPackageUpdates(clean);
     assert.equal(unprovedResult.changed, false); assert.deepEqual(unprovedResult.receiptUpgrades, []);
-    assert.equal(unprovedResult.localChanges[0].receiptState, "stale"); assert.deepEqual(await fs.readFile(cleanReceiptPath), unchangedReceipt);
+    assert.equal(packageRecord(await readLocalPackageCatalog(clean)).receipt_state, "valid"); assert.deepEqual(await fs.readFile(cleanReceiptPath), unchangedReceipt);
     await writeJson(cleanReceiptPath, migration);
     const reviewedReceipt = await fs.readFile(cleanReceiptPath);
     await assert.rejects(adoptLocalPackageUpdates({ ...clean, assertMutable: async () => { throw new Error("runtime is running"); } }), /runtime is running/);
@@ -957,6 +965,55 @@ async function updateBaselineFixture() {
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
+async function editableInstalledOwnerFixture() {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-editable-owner-")));
+  try {
+    const roots = await createFixture(root), id = "application.test_provider";
+    const original = packageRecord(await readLocalPackageCatalog(roots));
+    await applyLocalApplicationPack({ ...roots, operationId: "editable_install_001", packId: "test-pack", selectedRecommended: [],
+      expectedSourceDigests: { [id]: original.source_digest } });
+    const rolePath = path.join(roots.activeRegistryRoot, "artifact/artifact-test-context/artifact.json");
+    const sourceRole = path.join(roots.sourceRegistryRoot, "artifact/artifact-test-context/artifact.json");
+    const receiptPath = path.join(roots.stateRoot, "receipts", `${id}.json`), receipt = await fs.readFile(receiptPath);
+    const localRole = { id: "artifact-test-context", label: "context.reference", text: "Use retained evidence before concluding an operation failed." };
+    await writeJson(rolePath, localRole);
+    await writeJson(path.join(roots.activeRegistryRoot, "interface/system_worker_review/policy.json"), {
+      id: "system_worker_review", role_artifacts: [localRole.id],
+    });
+    await writeJson(path.join(roots.activeRegistryRoot, "artifact/artifact-topology/artifact.json"), {
+      id: "artifact-topology", schema_version: 1, routes: [],
+    });
+    await writeJson(path.join(roots.octopusHomeRoot, "state/runs/run_topology.json"), {
+      id: "run_topology", status: "idle", active_checkpoints: ["cp_topology"],
+      checkpoints: [{ id: "cp_topology", artifact_bindings: [{ id: "artifact-topology" }] }],
+    });
+    const diagnosis = () => runClientDoctor({ roots, inspectInstallation: async () => { throw new Error("fixture has no chat client"); } });
+    const relevantFindings = async () => (await diagnosis()).findings.filter(finding => finding.subject !== "operator_chat.client_owner");
+    const changed = packageRecord(await readLocalPackageCatalog(roots));
+    assert.equal(changed.installed, true); assert.equal(changed.locally_modified, true);
+    assert.deepEqual(await relevantFindings(), []);
+    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
+    assert.deepEqual(await fs.readFile(receiptPath), receipt, "local edits do not require a new installation receipt");
+    await writeJson(sourceRole, { id: localRole.id, payload: { text: "test context" }, release_note: "new release" });
+    assert.equal(packageRecord(await readLocalPackageCatalog(roots)).update_available, true);
+    assert.deepEqual(await relevantFindings(), [], "an available update does not invalidate installed code");
+    await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping source-owned changes/);
+    assert.deepEqual(JSON.parse(await fs.readFile(rolePath)), localRole);
+    await writeJson(sourceRole, { id: localRole.id, payload: { text: "test context" } });
+    await fs.writeFile(path.join(roots.sourceRegistryRoot, "interface/world_test_provider/release.txt"), "new release\n");
+    await adoptLocalPackageUpdates(roots);
+    const merged = JSON.parse(await fs.readFile(rolePath));
+    assert.deepEqual(merged, localRole);
+    assert.equal(await fs.readFile(path.join(roots.activeRegistryRoot, "interface/world_test_provider/release.txt"), "utf8"), "new release\n");
+    assert.equal(packageRecord(await readLocalPackageCatalog(roots)).update_available, false);
+    await writeJson(rolePath, { ...merged, id: "wrong-owner" });
+    assert.ok((await relevantFindings()).some(finding => finding.code === "context.bound_artifact_invalid"));
+    await fs.unlink(rolePath);
+    assert.ok((await relevantFindings()).some(finding => finding.code === "context.bound_artifact_active_missing"));
+    assert.ok((await relevantFindings()).some(finding => finding.code === "package.installation_inconsistent"));
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
 if (process.argv[2] === "--child") {
   crashChild(process.argv[3], process.argv[4]).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
@@ -964,6 +1021,7 @@ if (process.argv[2] === "--child") {
   });
 } else {
   (process.argv[2] === "--concurrent-update" ? concurrentUpdateFixture() : process.argv[2] === "--update-baselines" ? updateBaselineFixture() : process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : process.argv[2] === "--clone-isolation" ? cloneIsolationFixture() : run()).then(async () => {
+    if (!process.argv[2]) await editableInstalledOwnerFixture();
     if (!process.argv[2]) await concurrentUpdateFixture();
     if (!process.argv[2]) await updateBaselineFixture();
     if (!process.argv[2]) await cloneIsolationFixture();

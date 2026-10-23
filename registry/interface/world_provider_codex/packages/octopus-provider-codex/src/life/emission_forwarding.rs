@@ -50,6 +50,16 @@ pub(crate) async fn forward_provider_emissions(
             );
         }
         match stream_emission {
+            ProviderStreamEmission::Progress(emission) => {
+                if resolving_interrupted_result {
+                    return Err(
+                        "interrupted result cannot emit progress outside its exact closure".into(),
+                    );
+                }
+                forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
+                hand_stream_emission(&handoff, (emission, None, Vec::new()), false).await?;
+                forwarded.outputs += 1;
+            }
             ProviderStreamEmission::CurrentRunRecord {
                 expected_before,
                 reply,

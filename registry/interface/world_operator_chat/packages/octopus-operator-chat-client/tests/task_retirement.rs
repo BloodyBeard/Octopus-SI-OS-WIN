@@ -116,7 +116,19 @@ fn fixture(root: &Path) -> RetirementFixture {
             "path":directory,"identity":{"device":metadata.dev(),"inode":metadata.ino()}}));
         let file = directory.join("tool.json");
         let descriptor: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        for file in [file, root.join("registry/interface").join(descriptor["interface"].as_str().unwrap()).join("octopus_os.json")] {
+        let owner = descriptor["interface"].as_str().unwrap();
+        let intake = source["interface_state"].as_object().unwrap().iter()
+            .find(|(_, state)| state["input_intake"]["writer"]["door"].as_str() == Some(owner));
+        let mut files = vec![file];
+        if let Some((id, state)) = intake {
+            files.extend([root.join("registry/interface").join(id).join("interface.json"),
+                root.join("registry/interface").join(state["input_intake"]["provider_interface"].as_str().unwrap()).join("interface.json"),
+                root.join("registry/interface").join(source["worker"].as_str().unwrap()).join("policy.json")]);
+            for id in [id.as_str(), owner] {
+                std::fs::remove_file(root.join("registry/interface").join(id).join("octopus_os.json")).unwrap();
+            }
+        } else { files.push(root.join("registry/interface").join(owner).join("octopus_os.json")); }
+        for file in files {
             let content = std::fs::read_to_string(&file).unwrap();
             evidence.insert(file.clone(), json!({"file":file,"expected_digest":digest(content.as_bytes()),"content":content}));
         }
@@ -147,6 +159,38 @@ fn fixture(root: &Path) -> RetirementFixture {
         .into_iter().map(|relative| root.join(relative)).collect();
     preserved.push(snapshot);
     RetirementFixture { plan, context, removals, preserved }
+}
+
+fn with_client_companion(root: &Path, mut fixture: RetirementFixture, role: &str) -> RetirementFixture {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
+    let output = Command::new("node").arg(repo.join("app/scripts/support/composer-prediction-fixture.cjs"))
+        .arg(root).arg(fixture.context["selection"]["source_run"].as_str().unwrap())
+        .arg(&fixture.plan.provider_interface_id).arg(role).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let record: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let file = root.join("state/runs").join(format!("{}.json", record["id"].as_str().unwrap()));
+    let content = std::fs::read_to_string(&file).unwrap();
+    let hash = digest(content.as_bytes());
+    let source = fixture.context["selection"]["source_run"].clone();
+    fixture.context["selection"]["records"].as_array_mut().unwrap().push(json!({"run":record["id"],
+        "file":file,"expected_digest":hash,"worker":record["worker"],"ee":record["ee"],"role":role,
+        "provider_interface":record["checkpoints"][0]["outbound_interface_bindings"][0]["interface"],"target_run":source}));
+    fixture.context["originals"].as_array_mut().unwrap().push(json!({"file":file,"expected_digest":hash,"content":content}));
+    fixture.context["retired"].as_array_mut().unwrap().push(json!({"file":file,"expected_digest":null}));
+    let mut owned = vec![record["worker"].as_str().unwrap(), record["checkpoints"][0]["interface_binding"]["interface"].as_str().unwrap(),
+        record["checkpoints"][1]["interface_binding"]["interface"].as_str().unwrap()];
+    if role == "title" { owned.push(record["checkpoints"][0]["outbound_interface_bindings"][0]["interface"].as_str().unwrap()); }
+    for id in owned {
+        fixture.context["selection"]["interface_ids"].as_array_mut().unwrap().push(json!(id));
+        fixture.removals.push(root.join("registry/interface").join(id));
+    }
+    fixture.context["selection"]["interface_ids"].as_array_mut().unwrap().sort_by_key(|id| id.as_str().unwrap().to_owned());
+    fixture.context["selection"]["records"].as_array_mut().unwrap().sort_by_key(|row| row["run"].as_str().unwrap().to_owned());
+    for key in ["originals", "retired"] {
+        fixture.context[key].as_array_mut().unwrap().sort_by_key(|row| row["file"].as_str().unwrap().to_owned());
+    }
+    fixture.context["selection_digest"] = json!(digest(&octopus_descriptors::canonical_bytes(&fixture.context["selection"])));
+    fixture
 }
 
 #[test]
@@ -191,6 +235,10 @@ fn real_retirement_holds_and_cold_proof_preserve_the_exact_ledger_boundary() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("reclaimed before moving"));
     assert!(transaction.exists() && tombstone.exists());
     context["prior_proof"] = proof.clone();
+    let mut wrong_sequence = context.clone();
+    wrong_sequence["prior_proof"]["ledger_boundary"]["sequence"] = json!(1);
+    let (child, _, refused) = start(&wrong_sequence); assert!(refused.is_none());
+    assert!(String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr).contains("sequence boundary"));
     let mut changed = context.clone();
     changed["directory_inventory"]["removals"][0]["identity"]["inode"] = json!(0);
     let (child, _, refused) = start(&changed); assert!(refused.is_none());
@@ -237,6 +285,48 @@ fn real_retirement_holds_and_cold_proof_preserve_the_exact_ledger_boundary() {
     let (child, _, proof) = start(&context);
     assert!(proof.is_none());
     assert!(String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr).contains("prefix changed"));
+}
+
+#[test]
+fn held_retirement_revalidates_grants_and_new_rows_after_caching_a_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let RetirementFixture { plan, context, .. } = fixture(&root);
+    for write in plan.run_writes.iter().chain([&plan.run_write]) { std::fs::remove_file(&write.path).unwrap(); }
+    let metadata = root.join("ledger/metadata");
+    std::fs::create_dir_all(&metadata).unwrap();
+    let mut movement: octopus_ledger::Movement = serde_json::from_value(json!({"seq":0,"lamport":1,
+        "recorded_at_unix_ms":1,"trace":"unrelated","kind":MovementKind::InterfaceArrival,
+        "from":Endpoint::Interface("other_source".into()),"to":Endpoint::Interface("other_target".into()),"artifact":null})).unwrap();
+    movement.invocation_metadata = Some(octopus_ledger::InvocationMetadata::new(octopus_ledger::GrantProjection {
+        tools: vec!["large-declared-tool".repeat(512)], ..Default::default()
+    }).into());
+    let row = octopus_ledger::encode_durable_movement_row(&movement, 0, |bytes| {
+        let hash = octopus_ledger::ContentHash::of_bytes(bytes);
+        std::fs::write(metadata.join(hash.to_hex()), bytes).unwrap(); Ok(hash)
+    }).unwrap();
+    let ledger = root.join("ledger/movements.jsonl");
+    std::fs::write(&ledger, format!("{row}\n")).unwrap();
+    let (mut child, mut reader, proof) = start(&context); assert!(proof.is_some());
+    assert_eq!(command(&mut child, &mut reader, json!({"operation":"assert_held"})), proof.unwrap());
+    let mut next = movement.clone(); next.seq = octopus_ledger::Seq(1); next.invocation_metadata = None;
+    std::fs::write(&ledger, format!("{row}\n{}\n", serde_json::to_string(&next).unwrap())).unwrap();
+    assert_eq!(command(&mut child, &mut reader, json!({"operation":"assert_held"}))["ledger_boundary"]["sequence"], 2);
+    let grant = std::fs::read_dir(&metadata).unwrap().next().unwrap().unwrap().path();
+    let original = std::fs::read(&grant).unwrap();
+    std::fs::write(&grant, vec![b' '; original.len()]).unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "{{\"operation\":\"assert_held\"}}").unwrap();
+    let mut refused = String::new(); assert_eq!(reader.read_line(&mut refused).unwrap(), 0);
+    drop(child.stdin.take()); assert!(!child.wait_with_output().unwrap().status.success());
+    std::fs::write(&grant, original).unwrap();
+    let (mut child, mut reader, proof) = start(&context); assert!(proof.is_some());
+    next.seq = octopus_ledger::Seq(2); next.from = Endpoint::Interface(plan.provider_interface_id.into());
+    std::fs::OpenOptions::new().append(true).open(&ledger).unwrap()
+        .write_all(format!("{}\n", serde_json::to_string(&next).unwrap()).as_bytes()).unwrap();
+    writeln!(child.stdin.as_mut().unwrap(), "{{\"operation\":\"assert_held\"}}").unwrap();
+    assert_eq!(reader.read_line(&mut refused).unwrap(), 0);
+    drop(child.stdin.take()); let output = child.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("new movement evidence"));
 }
 
 #[cfg(unix)]
@@ -297,7 +387,7 @@ fn cjs_result(output: std::process::Output) -> Value {
 fn native_retirement_barrier_commits_the_real_cjs_transaction() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let fixture = fixture(&root);
+    let fixture = with_client_companion(&root, with_client_companion(&root, fixture(&root), "prediction"), "title");
     let result = cjs_result(cjs_fixture_command(&root, &fixture, "commit"));
     assert_eq!(result["preflights"], 1);
     assert_eq!(result["acquisitions"], 1);
@@ -310,11 +400,29 @@ fn native_retirement_barrier_commits_the_real_cjs_transaction() {
 
 #[cfg(unix)]
 #[test]
+fn retirement_snapshots_private_state_after_quiescence_but_refuses_public_tree_changes() {
+    for mode in ["settle-private", "change-public"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let fixture = fixture(&root);
+        let output = cjs_fixture_command(&root, &fixture, mode);
+        if mode == "settle-private" {
+            assert_eq!(cjs_result(output)["remaining_transactions"], 0);
+        } else {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("staged public tree"));
+            assert!(root.join("registry/interface").join(&fixture.plan.provider_interface_id).exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn native_retirement_barrier_recovers_a_killed_cjs_caller_after_published_cleanup() {
     use std::os::unix::process::ExitStatusExt;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let fixture = fixture(&root);
+    let fixture = with_client_companion(&root, fixture(&root), "prediction");
     let preserved = fixture.preserved.iter().map(|path| (path, std::fs::read(path).unwrap())).collect::<Vec<_>>();
     let output = cjs_fixture_command(&root, &fixture, "interrupt");
     assert_eq!(output.status.signal(), Some(libc::SIGKILL), "{}", String::from_utf8_lossy(&output.stderr));

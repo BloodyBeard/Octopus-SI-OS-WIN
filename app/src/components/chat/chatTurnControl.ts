@@ -102,11 +102,11 @@ export function operatorTurnResumeAvailable(
       continue;
     }
     if (message.eventKind === "interrupted_result" && message.terminal) {
-      available = value(message.eventData.native_terminal_status) !== "completed";
+      available = message.eventData.turn_interrupted === true;
       continue;
     }
     if (message.terminal && message.error) {
-      available = true;
+      available = false;
       continue;
     }
     if (message.role === "assistant" && message.eventKind === "message" && message.terminal) {

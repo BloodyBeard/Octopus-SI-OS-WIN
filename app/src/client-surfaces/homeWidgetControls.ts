@@ -28,7 +28,7 @@ export function saveHomeWidgetStrings(key: string, values: ReadonlySet<string>):
   window.dispatchEvent(new StorageEvent("storage", { key, newValue: value }));
 }
 
-type Controls = {
+export type HomeWidgetControls = {
   accessProfile: "live" | "lab";
   runId: string;
   interfaceId: string;
@@ -36,7 +36,7 @@ type Controls = {
   extensions: ClientExtensionRegistryState;
 };
 
-function inventory(options: Controls) {
+function inventory(options: HomeWidgetControls) {
   const hidden = strings(homeWidgetHiddenKey(options.accessProfile));
   const dismissed = strings(homeWidgetDismissalsKey(options.accessProfile, options.runId, options.interfaceId)) ?? new Set<string>();
   const selected = selectHomeSurfaceDocuments(options.surfaces.filter(item => !item.sourceExtensionId), options, Date.now());
@@ -50,6 +50,7 @@ function inventory(options: Controls) {
       origin: contribution.kind === "builtin" ? "builtin" : "extension",
       state: !extension.installed ? "removed" : hidden === null || hidden.has(widgetId) ? "hidden" : "visible",
       installed: extension.installed, available: extension.configured && (extension.admission === "builtin" || extension.admission === "reviewed"),
+      configured: extension.configured, review: extension.admission,
       extensionId: extension.manifest.id, item: undefined as AdmittedClientSurfaceDocument | undefined,
     };
   });
@@ -59,12 +60,20 @@ function inventory(options: Controls) {
       widget_id: item.document.id, title: item.document.title, source_digest: item.sourceDigest, origin: "published",
       state: dismissed.has(removedHomeWidgetIdentity(identity)) ? "removed" : dismissed.has(identity) ? "hidden" : "visible",
       installed: false, available: true, extensionId: "", item,
+      configured: true, review: "admitted",
     };
   });
   return [...rows, ...published];
 }
 
-export async function applyHomeWidgetAction(options: Controls, action: WidgetAction, operationId: string) {
+export function readHomeWidgetInventory(options: HomeWidgetControls) {
+  if (!options.runId || !options.interfaceId || !options.extensions.hydrated) {
+    throw new Error("The selected Home widget registry is not ready.");
+  }
+  return inventory(options).map(({ extensionId: _extensionId, item: _item, ...row }) => row);
+}
+
+export async function applyHomeWidgetAction(options: HomeWidgetControls, action: WidgetAction, operationId: string) {
   if (options.accessProfile !== "live" || !options.runId || !options.interfaceId || !options.extensions.hydrated) {
     throw new Error("The selected Home widget registry is not ready.");
   }

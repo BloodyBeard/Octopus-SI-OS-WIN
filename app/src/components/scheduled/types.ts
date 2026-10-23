@@ -32,6 +32,7 @@ export type ScheduledDelivery = {
   atMs: number;
   runId: string;
   chatInterfaceId: string;
+  title: string;
   journal: ChangeJournal | null;
 };
 

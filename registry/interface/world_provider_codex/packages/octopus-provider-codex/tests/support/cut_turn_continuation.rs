@@ -161,7 +161,7 @@ done
         let mut call = None;
         while let Some(output) = output_rx.recv().await {
             match output {
-                ProviderStreamEmission::Turn(emission) | ProviderStreamEmission::TerminalGroup { terminal: emission, .. } => {
+                ProviderStreamEmission::Turn(emission) | ProviderStreamEmission::Progress(emission) | ProviderStreamEmission::TerminalGroup { terminal: emission, .. } => {
                     let label = emission.artifact.read_manifest().unwrap().label;
                     if label == TOOL_CALL_LABEL {
                         call = Some(serde_json::from_slice::<serde_json::Value>(&emission.artifact.read_payload_bytes().unwrap()).unwrap());

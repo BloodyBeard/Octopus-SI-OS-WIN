@@ -21,6 +21,7 @@ mod bound_surface;
 mod file_write;
 mod file_read;
 mod memory_bound;
+mod memory_observation;
 mod skill_bound;
 
 pub use artifact_bound_process::run_artifact_bound_tool_process;

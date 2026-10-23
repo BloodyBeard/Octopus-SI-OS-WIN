@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { parsePatchFiles, preloadHighlighter } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import { useEffect, useMemo, useState } from "react";
@@ -76,7 +77,7 @@ export default function WorkingPatchDiff({ added, changeKind, deleted, patch, pa
     return () => { active = false; };
   }, [darkTheme, lightTheme]);
 
-  if (!ready && !parsed.error && !loadError) return <div className="activity-file-diff-loading">Loading diff…</div>;
+  if (!ready && !parsed.error && !loadError) return <OcLoadingRows className="activity-file-diff-loading" label="Loading diff…" />;
   return (
     <div className="activity-file-patch">
       <div className="activity-file-patch-header">

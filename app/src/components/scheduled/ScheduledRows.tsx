@@ -113,6 +113,7 @@ export function runTitle(delivery: ScheduledDelivery): string {
   const journal = delivery.journal;
   if (journal?.error) return "Run journal is unreadable";
   if (journal?.undone) return journal.summary ? `Undone · ${journal.summary}` : "Run changes undone";
+  if (delivery.title) return delivery.title;
   if (journal?.summary) return journal.summary;
   if (journal?.outcome === "unchanged") return "No update from this run";
   if (journal) {

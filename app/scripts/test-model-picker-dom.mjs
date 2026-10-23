@@ -55,9 +55,17 @@ const bootstrapProps={providers:[],providerInterfaceId:provider.id,providerModel
 const renderPicker=props=>act(async()=>{root.render(React.createElement(React.StrictMode,null,React.createElement(ProviderModelPicker,props)));});
 await renderPicker(bootstrapProps);
 assert.ok(document.querySelector('[data-provider-picker-trigger]').disabled);
-assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/Loading…/);
+assert.equal(document.querySelector('[data-provider-picker-trigger]').getAttribute('aria-busy'),'true');
+assert.ok(document.querySelector('[data-provider-picker-trigger] [role="status"][aria-label="Loading models…"] .oc-skeleton[aria-hidden="true"]'));
 await renderPicker({...bootstrapProps,loading:false});
 assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/unavailable/);
+assert.equal(document.querySelector('[data-provider-picker-trigger] .oc-skeleton'),null);
+await renderPicker({...bootstrapProps,loading:true,providers:[provider],activeProvider:provider});
+assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/6 Astra/);
+assert.equal(document.querySelector('[data-provider-picker-trigger] .oc-skeleton'),null);
+await renderPicker({...bootstrapProps,loading:false,providers:[{...provider,models:[],modelCatalogError:'Catalog unavailable'}],activeProvider:{...provider,models:[],modelCatalogError:'Catalog unavailable'}});
+assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/unavailable/);
+assert.equal(document.querySelector('[data-provider-picker-trigger] .oc-skeleton'),null);
 await renderPicker({...bootstrapProps,loading:false,onRefreshModels:()=>refresh++});
 await act(async()=>document.querySelector('[data-provider-picker-trigger]').click());
 assert.equal(refresh,1);
@@ -99,6 +107,7 @@ for(const scale of [.98,.991,1]){
 }
 console.log('PASS opening scale animation does not move the popup anchor');
 await send(q('[data-model-picker-view-toggle]'),'click');assert.equal(view(),'advanced');assert.ok(q('[role="menu"]'));console.log('PASS list toggle keeps menu open');
+const beforeBack=selected.length;await send(q('[aria-label="Back to Power"]'),'click');assert.equal(view(),'simple');assert.ok(q('[data-reasoning-slider]'));assert.equal(selected.length,beforeBack);await send(q('[data-model-picker-view-toggle]'),'click');await send(document.activeElement,'keydown',{key:'ArrowLeft'});assert.equal(view(),'simple');await send(q('[data-model-picker-view-toggle]'),'click');
 const rows=[...document.querySelectorAll('[role="menuitemradio"]')];
 await act(async()=>rows[0].focus());
 assert.equal(rows[0].querySelectorAll('button, [tabindex]').length,0);assert.equal(rows[0].querySelector('[title]'),null);
@@ -121,7 +130,7 @@ await send(document.activeElement,'keydown',{key:'Tab',shiftKey:true});assert.eq
 await send(trigger(),'keydown',{key:'Enter'});assert.equal(document.activeElement,q('[data-model-picker-view-toggle]'));await send(document.activeElement,'keydown',{key:'Tab'});await send(document.activeElement,'keydown',{key:'ArrowLeft'});assert.equal(trigger().dataset.selectedReasoningEffort,'high');await send(document.activeElement,'keydown',{key:'Tab'});assert.equal(q('[role="menu"]'),null);assert.equal(document.activeElement,trigger());
 await send(trigger(),'pointerdown');await send(document.activeElement,'keydown',{key:'Tab'});assert.equal(document.activeElement,q('[data-model-picker-view-toggle]'));await send(document.activeElement,'keydown',{key:'Tab'});assert.equal(document.activeElement,q('[data-reasoning-slider]'));await send(document.activeElement,'keydown',{key:'Enter'});assert.equal(q('[role="menu"]'),null);assert.equal(document.activeElement,trigger());console.log('PASS keyboard/pointer opening, bidirectional Tab to Power, arrow reachability, effort update and boundary dismissal');
 await send(trigger(),'keydown',{key:'ArrowDown'});
-await send(q('[data-model-picker-view-toggle]'),'keydown',{key:'Enter'});assert.equal(view(),'advanced');await send(document.activeElement,'keydown',{key:'ArrowDown'});assert.equal(document.activeElement.getAttribute('role'),'menuitemradio');await send(document.activeElement,'keydown',{key:'5'});assert.equal(document.activeElement.dataset.modelId,'gpt-5.6-sol');console.log('PASS keyboard view transition, visible roving and typeahead');
+await send(q('[data-model-picker-view-toggle]'),'keydown',{key:'Enter'});assert.equal(view(),'advanced');await send(document.activeElement,'keydown',{key:'ArrowDown'});assert.equal(document.activeElement.getAttribute('aria-label'),'Back to Power');await send(document.activeElement,'keydown',{key:'ArrowDown'});assert.equal(document.activeElement.getAttribute('role'),'menuitemradio');await send(document.activeElement,'keydown',{key:'5'});assert.equal(document.activeElement.dataset.modelId,'gpt-5.6-sol');console.log('PASS keyboard view transition, visible roving and typeahead');
 await send(q('#outside'),'pointerdown',{pointerType:'touch'});assert.ok(q('[role="menu"]'));await send(q('#outside'),'click');assert.equal(q('[role="menu"]'),null);console.log('PASS outside dismissal');
 anchorTop=20;anchorLeft=1190;
 await send(trigger(),'keydown',{key:'ArrowDown'});

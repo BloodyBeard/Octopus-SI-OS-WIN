@@ -308,6 +308,7 @@
             .insert(
                 "repo_root".to_string(),
                 octopus_interfaces::HostSlotOverride {
+                    additional_paths: Vec::new(),
                     path: PathBuf::from("/tmp/personal-project"),
                 },
             );
@@ -442,6 +443,14 @@
             },
         };
         let plan = plan_operator_chat_topology(&request).expect("the real registry plans a chat");
+        let mut cli_request = request.clone();
+        cli_request.provider_interface_id = "world_provider_claude_cli".into();
+        cli_request.worker_interface_id = Some("system_worker_operator_task".into());
+        cli_request.selected_worker_environment_kinds = vec!["system_room".into()];
+        let cli_plan = plan_operator_chat_topology(&cli_request).expect("Claude tasks include their memory observer under the same provider grant");
+        let cli_provider = cli_plan.interface_writes.iter().find(|write| write.tag == format!("interface:{}", cli_plan.model_interface_id)).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&cli_provider.content).unwrap()["copy_of"], "world_provider_claude_cli");
+        assert!(cli_plan.run_writes.iter().any(|write| write.tag.starts_with("run:run_memory_observer_")));
         assert_exact_writer_detachment(&plan, request.run_records_root.as_ref().unwrap());
         assert_computer_use_planned_identities(&registry_root, ee_dir.path());
         assert_browser_only_persistent_plan(&registry_root, ee_dir.path());
@@ -1325,7 +1334,7 @@
         }
         assert!(!driver["required_packages"].as_array().unwrap().contains(&serde_json::json!("world_operator_chat")));
         let source_policy = read("registry/interface/system_worker_operator_home/policy.json");
-        assert_eq!(source_policy["role_artifacts"], serde_json::json!(["artifact-worker-role-template", "artifact-grounding-system-architecture", "artifact-worker-role-operator-home", "artifact-home-task-authoring", "artifact-spawn-literacy", "artifact-home-widget-authoring", "artifact-context-collection-guide", "artifact-memory-guide"]));
+        assert_eq!(source_policy["role_artifacts"], serde_json::json!(["artifact-worker-role-template", "artifact-grounding-system-architecture", "artifact-worker-role-operator-home", "artifact-home-task-authoring", "artifact-trigger-authoring", "artifact-spawn-literacy", "artifact-home-widget-authoring", "artifact-context-collection-guide", "artifact-memory-guide"]));
         let overlay = tempfile::tempdir().unwrap();
         copy_planner_descriptors(registry_root, overlay.path());
         let registry_root = overlay.path();
@@ -1389,16 +1398,30 @@
                 .is_some_and(|binding| binding.interface.as_str() == plan.model_interface_id))
                 .any(|cp| cp.artifact_bindings.iter().any(|binding| binding.id.as_str() == catalog_id && binding.access.read)));
             if role == "home" {
+                assert!(provider["interface_driver_config"]["private_config"]["instruction_artifacts"].as_array().unwrap()
+                    .contains(&serde_json::json!(format!("artifact-home-delivery-{id}"))));
                 let delivery: serde_json::Value = serde_json::from_str(&plan.interface_writes.iter()
                     .find(|write| write.tag == format!("artifact:artifact-home-delivery-{id}")).unwrap().content).unwrap();
-                assert_eq!(delivery["delivery"]["authoring"]["ee_instances_root"], serde_json::json!(request.ee_instances_root));
-                assert!(delivery["text"].as_str().unwrap().contains(&request.ee_instances_root.display().to_string()));
+                assert!(delivery.to_string().len() < 12_000, "ordinary client controls fit a bounded artifact read");
+                let coordinates_id = delivery["delivery"]["authoring_artifact"].as_str().unwrap();
+                let coordinates: serde_json::Value = serde_json::from_str(&plan.interface_writes.iter()
+                    .find(|write| write.tag == format!("artifact:{coordinates_id}")).unwrap().content).unwrap();
+                assert_eq!(coordinates["authoring"]["ee_instances_root"], serde_json::json!(request.ee_instances_root));
+                assert!(authored.checkpoints.iter().any(|cp| cp.artifact_bindings.iter()
+                    .any(|binding| binding.id.as_str() == coordinates_id && binding.access.read)));
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
                 let provider_context = octopus_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
                 let stable = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::Stable
                     && cp.interface_binding.interface.as_str() == plan.chat_interface_id).unwrap();
-                assert!(stable.interface_binding.admits("operator.message") && stable.interface_binding.admits("client.action.result"));
+                assert!(stable.interface_binding.admits("operator.message") && !stable.interface_binding.admits("client.action.result"));
+                let client_result = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref().is_some_and(|binding| binding.interface.as_str() == plan.chat_interface_id && binding.admits("client.action.result"))).unwrap();
+                let client_tool: ToolDescriptor = parse_strict(plan.interface_writes.iter()
+                    .find(|write| write.tag == format!("tool:{}", plan.capability_tools["client.mcp"]))
+                    .unwrap().content.as_bytes()).unwrap();
+                assert_eq!(client_result.outbound_interface_bindings.len(), 1);
+                assert_eq!(client_result.outbound_interface_bindings[0].interface, client_tool.interface);
+                assert!(!client_result.outbound_interface_bindings.iter().any(|binding| binding.interface.as_str() == plan.model_interface_id));
                 assert!(stable.include_context);
                 for label in ["client.surface.document", "client.action", "realtime.session.update"] {
                     let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)
@@ -1406,8 +1429,8 @@
                     assert!(template.static_artifact_bindings.iter().all(|id| provider_context.iter().any(|binding| &binding.id == id)), "{label}");
                     assert!(!template.include_context);
                     assert!(template.static_artifact_bindings.contains(&instruction_source.id));
-                    assert!(template.outbound_interface_bindings.iter()
-                        .any(|binding| binding.interface.as_str() == plan.model_interface_id && binding.admits(label)), "{label}");
+                    assert_eq!(template.outbound_interface_bindings.iter()
+                        .any(|binding| binding.interface.as_str() == plan.model_interface_id && binding.admits(label)), label != "client.action", "{label}");
                     let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)
                         && cp.outbound_interface_bindings == template.outbound_interface_bindings).unwrap();
                     assert!(checkpoint.artifact_bindings.iter().any(|binding| binding.id == instruction_source.id && binding.access.read));
@@ -1813,6 +1836,13 @@
         let private_root = tempfile::tempdir().expect("temp private interface root");
         let project_root = tempfile::tempdir().expect("temp project root");
         boot_operator_space_ee_instances(ee_dir.path());
+        let secondary_root = tempfile::tempdir().expect("temp secondary source folder");
+        let folders = vec![project_root.path().canonicalize().unwrap(), secondary_root.path().canonicalize().unwrap()];
+        let ee_file = ee_dir.path().join("ee_operator_space.json");
+        let mut ee: serde_json::Value = serde_json::from_slice(&std::fs::read(&ee_file).unwrap()).unwrap();
+        ee["config"]["octopus_os"]["source_folders"] = serde_json::json!(folders);
+        std::fs::write(&ee_file, serde_json::to_vec(&ee).unwrap()).unwrap();
+
         let mut request = OperatorChatPlanRequest {
             registry_root,
             ee_instances_root: ee_dir.path().to_path_buf(),
@@ -1963,10 +1993,9 @@
                 .content,
         )
         .expect("exact direct workspace door parses");
-        assert_eq!(
-            workspace.interface_driver_config.unwrap().host_slots["workspace_root"].path,
-            project_root.path()
-        );
+        let roots = &workspace.interface_driver_config.unwrap().host_slots["workspace_root"];
+        assert_eq!(roots.path, folders[0]);
+        assert_eq!(roots.additional_paths, folders[1..]);
         let private_policy: WorkerInterfacePolicy = serde_json::from_str(
             &plan
                 .interface_writes

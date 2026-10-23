@@ -93,7 +93,9 @@ export function ChatView({
   }, [chat.activeRunId, topology.environments]);
   const openTraceFile = useCallback((path: string, toolId?: string) => {
     try {
-      onOpenFiles(traceFileOpenTarget(path, activeRunProjection, toolId));
+      const target = traceFileOpenTarget(path, activeRunProjection, toolId);
+      if ("workerEnvironmentId" in target) dispatchOpenWorkerEnvironmentPane(target);
+      else onOpenFiles(target);
     } catch (error) {
       appToast.warning(error instanceof Error ? error.message : String(error));
     }
@@ -659,16 +661,29 @@ function chatViewClassName(composerVisible: boolean, headerMode: "window" | "pan
   return `chat-view${composerVisible ? "" : " is-read-only"}${headerMode === "pane" ? " has-pane-header" : " is-embedded"}`;
 }
 
-function traceFileOpenTarget(value: string, run: RunProjection | null, toolId?: string): FilesOpenTarget {
+function traceFileOpenTarget(value: string, run: RunProjection | null, toolId?: string): FilesOpenTarget | Omit<WorkerEnvironmentPaneTarget, "schemaVersion"> {
   const path = value.trim();
-  if (/^(?:\/|[A-Za-z]:[\\/])/.test(path)) return { absolutePath: path, kind: "file" };
+  const environments = run?.workerEnvironments.length
+    ? run.workerEnvironments
+    : run?.workerEnvironment.id ? [run.workerEnvironment] : [];
+  function targetForAbsolutePath(absolutePath: string): FilesOpenTarget | Omit<WorkerEnvironmentPaneTarget, "schemaVersion"> {
+    const normalized = absolutePath.replaceAll("\\", "/");
+    const matches = environments.filter((environment) => !toolId || environment.tools.includes(toolId))
+      .flatMap((environment) => environment.surfaces.flatMap((surface) => {
+        if (surface.kind !== "files" || surface.mode !== "direct" || !surface.root.trim()) return [];
+        const root = surface.root.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+        if (normalized !== root && !normalized.startsWith(`${root}/`)) return [];
+        const filePath = normalized.slice(root.length).replace(/^\//, "");
+        if (filePath.split("/").includes("..") || filePath.includes("\0")) throw new Error("Invalid file path.");
+        return [{ root, target: { workerEnvironmentId: environment.id, surfaceId: surface.id, panelKind: "file" as const, filePath } }];
+      })).sort((a, b) => b.root.length - a.root.length);
+    return matches[0]?.target ?? { absolutePath, kind: "file" };
+  }
+  if (/^(?:\/|[A-Za-z]:[\\/])/.test(path)) return targetForAbsolutePath(path);
   const relative = path.replaceAll("\\", "/").replace(/^\.\/+/, "");
   if (!relative || relative.includes("\0") || relative.split("/").includes("..")) {
     throw new Error("This file link does not identify a path inside its working directory.");
   }
-  const environments = run?.workerEnvironments.length
-    ? run.workerEnvironments
-    : run?.workerEnvironment.id ? [run.workerEnvironment] : [];
   const roots = [...new Set(environments
     .filter((environment) => !toolId || environment.tools.includes(toolId))
     .flatMap((environment) => environment.surfaces
@@ -683,7 +698,7 @@ function traceFileOpenTarget(value: string, run: RunProjection | null, toolId?: 
       ? "This file has more than one working directory. Open it from the task's Files view."
       : "This file's working directory is unavailable. Open it from the task's Files view.");
   }
-  return { absolutePath: `${roots[0]}${relative}`, kind: "file" };
+  return targetForAbsolutePath(`${roots[0]}${relative}`);
 }
 
 function projectedWorkerEnvironmentRoots(

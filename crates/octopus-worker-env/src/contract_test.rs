@@ -136,6 +136,7 @@ impl WorkerEnvDriver for RecordingDriver {
 fn ctx_at(root: &str) -> EnvContext {
     let root = AbsPath::new(Path::new(root)).unwrap();
     EnvContext {
+        additional_root_slots: Default::default(),
         root_slots: BTreeMap::from([("repo_root".to_string(), root)]),
         env: BTreeMap::new(),
     }
@@ -151,6 +152,7 @@ fn ctx_with_door_slots(root: &str, door_slots: &[&str]) -> EnvContext {
         );
     }
     EnvContext {
+        additional_root_slots: Default::default(),
         root_slots,
         env: BTreeMap::new(),
     }
@@ -320,6 +322,7 @@ fn exact_door_and_worker_are_formed_from_the_concrete_grant_not_the_shared_kind(
     let form = |door: &octopus_descriptors::InterfaceId,
                 worker: &octopus_descriptors::InterfaceId| {
         registry.form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: door,
             door_descriptor_hash: "hash-door",
             door_driver_ref: "system_coder_env",
@@ -474,7 +477,10 @@ fn worktree_formation(
         .map(|tool| (tool.clone(), "target/debug/octopus-coder-tool".to_string()))
         .collect::<BTreeMap<_, _>>();
     let door_root_bindings = ctx.provided_root_bindings();
+    let additional = ctx.additional_root_slots.iter().map(|(slot, paths)|
+        (slot.clone(), paths.iter().map(|path| path.as_path().to_path_buf()).collect())).collect();
     reg.form(&WorkerEnvironmentFormationRequest {
+        door_additional_root_bindings: &additional,
         door_interface: &door,
         door_descriptor_hash: "hash-door",
         door_driver_ref: "system_coder_env",
@@ -515,6 +521,17 @@ fn formation_identity_is_room_wide_across_tools() {
         Some(&Path::new("/srv/room/door-0").to_path_buf())
     );
     assert_ne!(exec.worker_environment_id, moved.worker_environment_id);
+    let mut expanded = ctx.clone();
+    expanded.additional_root_slots.insert("coder.worktree_path".into(), vec![AbsPath::new(Path::new("/srv/second-project")).unwrap()]);
+    let multiple = worktree_formation(&reg, &expanded, None, "coder.exec");
+    multiple.validate().unwrap();
+    assert_ne!(multiple.formation_pin, exec.formation_pin);
+    let encoded = serde_json::to_value(&exec).unwrap();
+    assert!(encoded.get("door_additional_root_bindings").is_none());
+    let mut changed = multiple.clone();
+    changed.door_additional_root_bindings.clear();
+    assert!(changed.validate().is_err());
+
 }
 
 #[test]
@@ -556,6 +573,7 @@ fn declared_instance_config_is_canonical_and_part_of_formation_identity() {
     let door_root_bindings = ctx.provided_root_bindings();
     let form = || {
         reg.form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &door,
             door_descriptor_hash: "hash-door",
             door_driver_ref: "system_coder_env",
@@ -697,6 +715,12 @@ fn lease_rejects_a_door_root_coordinate_changed_after_formation() {
     });
     let changed_ctx = ctx_with_door_slots("/srv/other", &["coder.worktree_path"]);
     let result = block_on(crate::lease(&spec, &formation, driver, changed_ctx, None));
+    assert!(matches!(result, Err(WorkerEnvError::MalformedFormation(_))));
+    let mut changed_ctx = formed_ctx.clone();
+    changed_ctx.additional_root_slots.insert("coder.worktree_path".into(), vec![AbsPath::new(Path::new("/srv/unformed")).unwrap()]);
+    let result = block_on(crate::lease(&spec, &formation, Arc::new(RecordingDriver {
+        family: "process_exec", seen_caps: std::sync::Mutex::new(None), seen_root_bindings: std::sync::Mutex::new(None),
+    }), changed_ctx, None));
     assert!(matches!(result, Err(WorkerEnvError::MalformedFormation(_))));
 }
 

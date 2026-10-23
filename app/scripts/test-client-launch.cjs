@@ -147,7 +147,7 @@ test("a live workspace gate opens behind the logo until its workspace is read; a
   const { WorkspaceSetupGate } = await gateBundle;
   w.octopusTransport = new Proxy({}, { get: (_, name) => typeof name === "string" && name.startsWith("on") ? () => () => {} : () => new Promise(() => {}) });
   const shell = React.createElement("div", { "data-shell": "" });
-  root.render(React.createElement(WorkspaceSetupGate, { accessProfile: "live" }, shell));
+  root.render(React.createElement(WorkspaceSetupGate, { accessProfile: "live", runtimeHome: "/home" }, shell));
   await settle();
   assert.ok(query('[role="status"][aria-label="Opening Octopus"] .octopus-loading-logo'));
   assert.ok(!query("[data-shell]"));

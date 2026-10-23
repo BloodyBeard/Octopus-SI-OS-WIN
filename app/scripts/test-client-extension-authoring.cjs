@@ -106,7 +106,9 @@ test("a refused revision reports exact issues and runtime issues follow the curr
 
 test("inspect_client is a declared client.mcp operation and describes the host from the running schemas", () => {
   const operation = catalogue.handler_config.mcp.tools.find((tool) => tool.name === "inspect_client");
-  assert.deepEqual(operation.operation, { kind: "emit", label: "client.action", payload_argument: "action" });
+  const publish = catalogue.handler_config.mcp.tools.find((tool) => tool.name === "publish_widget");
+  assert.deepEqual(publish.input_schema.$defs.client_surface, documentSchema, "the model and renderer must receive the same widget schema");
+  assert.deepEqual(operation.operation, { kind: "emit", label: "client.action", payload_argument: "action", await_client_result: true });
   assert.equal(operation.input_schema.properties.action.properties.action.const, "inspect_client");
   assert.ok(parseClientAction(inspect({ extension_id: "home.attention", source: { method: "projection.runs.list", params: { limit: 1 } } })));
   assert.throws(() => parseClientAction(inspect({ source: { method: "projection.runs.list", url: "x" } })), /inspect_client/);
@@ -115,7 +117,7 @@ test("inspect_client is a declared client.mcp operation and describes the host f
   const inventory = buildClientInventory({ snapshot: { generation: 0, root: "/home/client/extensions", manifests: [], state: {}, stateStatus: "valid", lifecycle: {}, credentials: {}, actionStatuses: [], errors: [] }, surfaces: [], runtimeIssues: [] });
   assert.deepEqual(inventory.host.targets["voice.widget"].slot, documentSchema.$defs.voiceTarget.properties.slot.enum);
   assert.deepEqual(inventory.host.glyphs, documentSchema.$defs.glyph.enum);
-  for (const node of ["list", "table", "metric", "progress", "button"]) assert.ok(inventory.host.render.native.nodes.includes(node));
+  for (const node of ["list", "table", "metric", "progress", "button", "video"]) assert.ok(inventory.host.render.native.nodes.includes(node));
   assert.deepEqual(inventory.host.sources.projection.map((source) => source.method), [...CLIENT_SURFACE_READ_METHODS]);
   assert.ok(inventory.host.sources.projection.every((source) => source.params && source.returns));
 });

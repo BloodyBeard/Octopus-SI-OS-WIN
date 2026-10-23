@@ -74,7 +74,8 @@ pub(crate) fn recover_provider_turn_continuity(
             &manifest.label,
             None,
             &BTreeMap::new(),
-            selected_files.as_ref()
+            selected_files.as_ref(),
+            &config.private_config,
         )?,
         ProviderInput::Turn(_)
     ) {
@@ -89,6 +90,7 @@ pub(crate) fn recover_provider_turn_continuity(
         runtime.run.as_str(),
         &context_output_labels,
         &session_snapshot_labels,
+        std::slice::from_ref(&input.artifact),
     )
 }
 
@@ -117,8 +119,11 @@ pub(crate) fn recover_provider_result_continuity(
     let payloads = resolve_instruction_context(input.metadata()?, &payloads)
         .map_err(InterfaceDriverError::FailedClosed)?.remaining_payloads;
     let contexts = CodexAppServerInterfaceDriver::resolve_bound_session_contexts(&payloads, &runtime.interface, &snapshots, snapshot)?;
-    let bound = recover_codex_continuity_resolved(&payloads, &contexts, &runtime.interface, run.as_str(), &labels, &snapshots)?;
-    let Some(source) = reconcile_operator_session_continuity(descriptor, input, bound, current_session)? else { return Ok(None); };
+    let sources = continuity_input_sources(&record, input)?;
+    let continuity_payloads = continuity_context_payloads(&record, input, &payloads)?;
+    let bound = recover_codex_continuity_resolved(&continuity_payloads, &contexts, &runtime.interface, run.as_str(), &labels, &snapshots, &sources)?;
+    let current = recover_codex_continuity_from_current_session(current_session, &sources, &runtime.interface, run.as_str(), &labels)?;
+    let Some(source) = reconcile_input_session_continuity(&record, input, bound, current, current_session)? else { return Ok(None); };
     if source.interrupted_pending.is_some() || source.pending.as_ref().is_none_or(|pending| !interrupted_pending_has_external_result(pending)) {
         return Ok(None);
     }
@@ -137,7 +142,7 @@ pub(crate) fn completed_source_pending_continuity(
 ) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
     let runtime = invocation_runtime_metadata(input)?;
     let labels = codex_context_output_labels(descriptor)?;
-    let state = recover_codex_continuity_from_current_session(session, &input.artifact, &runtime.interface, runtime.run.as_str(), &labels)?;
+    let state = recover_codex_continuity_from_current_session(session, std::slice::from_ref(&input.artifact), &runtime.interface, runtime.run.as_str(), &labels)?;
     let Some(state) = state.filter(|state| state.pending.as_ref().is_some_and(interrupted_pending_has_external_result)) else { return Ok(None); };
     let record: serde_json::Value = serde_json::from_slice(current).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
     if record.get("id").and_then(serde_json::Value::as_str) != Some(runtime.run.as_str())

@@ -24,7 +24,7 @@ async fn remote_mcp_catalog_life(ctx: InterfaceLiftContext) -> Result<(), String
     emit_operation_catalog(&ctx, &operations)
         .await
         .map_err(|error| error.to_string())?;
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     project_remote_catalog(&ctx, &config).await
 }
 
@@ -83,7 +83,7 @@ async fn serve_remote_operations(
 ) -> Result<(), String> {
     let mut reader = LedgerTailReader::open_named(ctx, "mcp-operations")?;
     let output_root = ctx.interface_var_dir().join("operation-results");
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     loop {
         if ctx.cancel.is_cancelled() {
             return Ok(());

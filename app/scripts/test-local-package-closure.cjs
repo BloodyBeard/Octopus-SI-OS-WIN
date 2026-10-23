@@ -120,6 +120,41 @@ async function assertInterfaceImportClosure() {
     const external = await readLocalPackageSourcePackage({ sourceRegistryRoot: source, libraryRoot: library, packageId: "application.importer" });
     assert.deepEqual(external.members.map(member => member.owner), ["world_importer"]);
     const dependency = await readLocalPackageSourcePackage({ sourceRegistryRoot: source, libraryRoot: library, packageId: "application.code_owner" });
+    const peer = path.join(source, "interface", "world_peer");
+    const peerManifest = path.join(library, "packages", "application.peer.json");
+    await writeJson(path.join(peer, "interface.json"), { id: "world_peer" });
+    await writeJson(path.join(peer, "life.json"), { processes: [{ bin: "interface://world_code_owner/packages/bin/life" }] });
+    await writeJson(peerManifest, { ...manifest(false), id: "application.peer", product_id: "world_peer",
+      required_packages: ["application.code_owner"], members: [{ registry_kind: "interface", owner: "world_peer", primary: true }] });
+    const scans = new Map(), reads = new Map(), readdir = fs.readdir, readFile = fs.readFile;
+    fs.readdir = async function (file, ...args) { scans.set(file, (scans.get(file) ?? 0) + 1); return readdir.call(this, file, ...args); };
+    fs.readFile = async function (file, ...args) { reads.set(file, (reads.get(file) ?? 0) + 1); return readFile.call(this, file, ...args); };
+    let catalog;
+    try { catalog = await readLocalPackageCatalog(roots); }
+    finally { fs.readdir = readdir; fs.readFile = readFile; }
+    assert.equal(catalog.packages.length, 3);
+    assert.ok(catalog.packages.every(entry => entry.available && !entry.installed && entry.receipt_state === "missing"));
+    assert.equal(scans.get(path.join(library, "packages")), 1, "one catalog read loads its library once");
+    assert.equal(scans.get(owner), 1, "shared interface dependencies have one source snapshot per catalog read");
+    assert.equal(reads.get(manifestFile), 1, "dependency validation reuses the catalog's parsed library");
+    const dependentRecords = value => value.packages.filter(entry => ["application.importer", "application.peer"].includes(entry.id));
+    await writeJson(path.join(owner, "interface.json"), { id: "world_wrong_owner" });
+    assert.ok(dependentRecords(await readLocalPackageCatalog(roots)).every(entry => !entry.available && /drifted descriptor id/.test(entry.error)));
+    await writeJson(path.join(owner, "interface.json"), { id: "world_code_owner" });
+    await fs.rm(executable);
+    assert.ok(dependentRecords(await readLocalPackageCatalog(roots)).every(entry => !entry.available && /does not exist/.test(entry.error)));
+    await fs.symlink(path.join(owner, "interface.json"), executable);
+    assert.ok((await readLocalPackageCatalog(roots)).packages.every(entry => !entry.available && /symbolic link/.test(entry.error)));
+    await fs.rm(executable);
+    await fs.writeFile(executable, "owner executable\n");
+    assert.deepEqual(await readLocalPackageCatalog(roots), catalog, "a later read must recover after invalid source files are repaired");
+    const dependencyManifest = path.join(library, "packages", "application.code_owner.json");
+    const originalManifest = await fs.readFile(dependencyManifest, "utf8");
+    await writeJson(dependencyManifest, { ...JSON.parse(originalManifest), version: "1.0.1" });
+    assert.equal((await readLocalPackageCatalog(roots)).packages.find(entry => entry.id === "application.code_owner").version, "1.0.1");
+    await fs.writeFile(dependencyManifest, originalManifest);
+    await fs.rm(peerManifest);
+    await fs.rm(peer, { recursive: true });
     await installLocalPackages({ ...roots, operationId: "closure_install_002",
       packageIds: ["application.importer", "application.code_owner"], expectedSourceDigests: {
         "application.importer": external.source_digest, "application.code_owner": dependency.source_digest,

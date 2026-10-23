@@ -2,6 +2,7 @@ use super::*;
 
 mod invocation;
 pub(super) use invocation::{bound_source, definition_source, source_was_bridged};
+pub(super) use invocation::rebased_value as rebased_invocation_value;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1425,7 +1426,9 @@ pub(super) fn checked_topology_advance(
         next.checkpoints
             .retain(|template| template.role != RunAuthoringCheckpointRole::VerifiedInput);
     }
-    if old != next || before == after {
+    let routing_changed = output_connections::is_extension(&old, &next)
+        || output_connections::is_withdrawal(&old, &next);
+    if (old != next && !routing_changed) || before == after {
         return Ok(false);
     }
     if chain.is_empty() {

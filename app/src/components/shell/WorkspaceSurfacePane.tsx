@@ -24,7 +24,9 @@ export type WorkspacePaneTab = PaneTabPresentation & {
 };
 
 export type WorkspacePaneAddAction = {
+  description?: string;
   glyph: GlyphName;
+  group?: { id: string; title: string; glyph: GlyphName };
   id: string;
   moreOnly?: boolean;
   section?: string;
@@ -194,12 +196,7 @@ export function WorkspaceSurfacePane({
         {controlsInWindowHeader && windowControlsHost ? createPortal(header, windowControlsHost) : null}
 
         <OcDropdown anchorRef={addButtonRef} align="end" aria-label="New tab" onOpenChange={setAddMenuOpen} open={addMenuOpen && addActions.length > 0} style={{ width: 280 }}>
-          {addActions.map((action, index) => (
-            <div key={action.id}>
-              {index > 0 && action.section !== addActions[index - 1].section ? <div aria-hidden="true" className="workspace-pane-tab-menu-separator" /> : null}
-              <OcMenuItem label={action.title} leadingIcon={action.glyph} onClick={() => selectAction(action.id)} role="menuitem" trailing={action.shortcut ? <kbd className="workspace-pane-shortcut">{action.shortcut}</kbd> : undefined} />
-            </div>
-          ))}
+          <WorkspacePaneActionMenu actions={addActions} onAction={selectAction} />
         </OcDropdown>
       </div>
     </WorkspacePaneHeaderActionsProvider>
@@ -213,8 +210,8 @@ export function WorkspacePaneLauncher({ actions, onAction }: {
   const headingId = useId();
   const [moreOpen, setMoreOpen] = useState(false);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
-  const tools = actions.filter((action) => !action.moreOnly);
-  const additionalActions = actions.filter((action) => action.moreOnly);
+  const tools = actions.filter((action) => !action.moreOnly && !action.group);
+  const additionalActions = actions.filter((action) => action.moreOnly || action.group);
   const visibleActions = tools.slice(0, tools.length > 6 || additionalActions.length ? 5 : 6);
   const moreActions = [...tools.slice(visibleActions.length), ...additionalActions];
   return (
@@ -252,13 +249,68 @@ export function WorkspacePaneLauncher({ actions, onAction }: {
         </button> : null}
         </div>
         <OcDropdown anchorRef={moreButtonRef} align="end" aria-label="More tools" onOpenChange={setMoreOpen} open={moreOpen} style={{ width: 280 }}>
-          {moreActions.map((action, index) => <div key={action.id}>
-            {index > 0 && action.section !== moreActions[index - 1].section ? <div aria-hidden="true" className="workspace-pane-tab-menu-separator" /> : null}
-            <OcMenuItem label={action.title} leadingIcon={action.glyph} onClick={() => { setMoreOpen(false); onAction(action.id); }} role="menuitem"
-              trailing={action.shortcut ? <kbd className="workspace-pane-shortcut">{action.shortcut}</kbd> : undefined} />
-          </div>)}
+          <WorkspacePaneActionMenu actions={moreActions} onAction={(id) => { setMoreOpen(false); onAction(id); }} />
         </OcDropdown>
       </section>
     </div>
   );
+}
+
+function WorkspacePaneActionMenu({ actions, onAction }: {
+  actions: WorkspacePaneAddAction[];
+  onAction: (actionId: string) => void;
+}) {
+  const [groupId, setGroupId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const previousGroupRef = useRef<string | null>(null);
+  const groups = new Map<string, WorkspacePaneAddAction[]>();
+  const entries: WorkspacePaneAddAction[] = [];
+  for (const action of actions) {
+    if (!action.group) { entries.push(action); continue; }
+    const existing = groups.get(action.group.id);
+    if (existing) existing.push(action);
+    else {
+      groups.set(action.group.id, [action]);
+      entries.push({ ...action.group, id: `group:${action.group.id}`, group: action.group, section: action.section });
+    }
+  }
+  const selected = groupId ? groups.get(groupId) : undefined;
+  const group = selected?.[0].group;
+  const visible = selected ?? entries;
+
+  useLayoutEffect(() => {
+    const current = group?.id ?? null;
+    const previous = previousGroupRef.current;
+    if (previous === current) return;
+    previousGroupRef.current = current;
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+    const target = current ? items[0] : items.find((item) => item.dataset.actionId === `group:${previous}`);
+    target?.focus({ preventScroll: true });
+  }, [group?.id]);
+
+  return <div ref={menuRef} onKeyDown={(event) => {
+    if (!group || !["Escape", "ArrowLeft"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setGroupId(null);
+  }}>
+    {group ? <>
+      <OcMenuItem aria-label="Back to tools" label={group.title} leadingIcon="navigateBack" role="menuitem" onClick={(event) => {
+        event.preventDefault();
+        setGroupId(null);
+      }} />
+      <div aria-hidden="true" className="workspace-pane-tab-menu-separator" />
+    </> : null}
+    {visible.map((action, index) => <div key={action.id}>
+      {!group && index > 0 && action.section !== visible[index - 1].section ? <div aria-hidden="true" className="workspace-pane-tab-menu-separator" /> : null}
+      <OcMenuItem label={action.title} description={group ? action.description : undefined} leadingIcon={action.glyph} role="menuitem"
+        data-action-id={action.id} data-text-value={action.title} title={action.description ? `${action.title}\n${action.description}` : action.title}
+        onClick={(event) => {
+          if (!group && action.group) { event.preventDefault(); setGroupId(action.group.id); }
+          else onAction(action.id);
+        }}
+        trailing={!group && action.group ? <><span>{groups.get(action.group.id)?.length}</span><Glyph className="-rotate-90" name="chevronDown" size={14} /></>
+          : action.shortcut ? <kbd className="workspace-pane-shortcut">{action.shortcut}</kbd> : undefined} />
+    </div>)}
+  </div>;
 }

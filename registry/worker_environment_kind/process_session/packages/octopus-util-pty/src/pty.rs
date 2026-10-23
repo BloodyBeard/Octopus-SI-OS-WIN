@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::fs::File;
+#[cfg(not(target_os = "macos"))]
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -27,12 +28,15 @@ use portable_pty::native_pty_system;
 use portable_pty::CommandBuilder;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+#[cfg(not(target_os = "macos"))]
 use tokio::task::JoinHandle;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use crate::process::exit_code_from_status;
+#[cfg(not(target_os = "macos"))]
 use crate::process::ChildTerminator;
 use crate::process::ProcessHandle;
+#[cfg(not(target_os = "macos"))]
 use crate::process::ProcessSignal;
 use crate::process::PtyHandles;
 use crate::process::PtyMasterHandle;
@@ -49,12 +53,14 @@ pub fn conpty_supported() -> bool {
     true
 }
 
+#[cfg(not(target_os = "macos"))]
 struct PtyChildTerminator {
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     #[cfg(unix)]
     process_group_id: Option<u32>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl ChildTerminator for PtyChildTerminator {
     fn signal(&mut self, signal: ProcessSignal) -> std::io::Result<()> {
         match signal {
@@ -95,12 +101,12 @@ impl ChildTerminator for PtyChildTerminator {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 struct RawPidTerminator {
     process_group_id: u32,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 impl ChildTerminator for RawPidTerminator {
     fn signal(&mut self, signal: ProcessSignal) -> std::io::Result<()> {
         match signal {
@@ -194,10 +200,15 @@ async fn spawn_process_portable(
         command_builder.env(key, value);
     }
 
-    let mut child = pair.slave.spawn_command(command_builder)?;
-    #[cfg(unix)]
+    let child = pair.slave.spawn_command(command_builder)?;
+    #[cfg(not(target_os = "macos"))]
+    let mut child = child;
+    #[cfg(all(unix, not(target_os = "macos")))]
     let process_group_id = child.process_id();
+    #[cfg(not(target_os = "macos"))]
     let killer = child.clone_killer();
+    #[cfg(target_os = "macos")]
+    let group = Arc::new(crate::owned_process_group::OwnedProcessGroup::from_pty_child(child)?);
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -252,9 +263,12 @@ async fn spawn_process_portable(
 
     let (exit_tx, exit_rx) = oneshot::channel::<i32>();
     let exit_status = Arc::new(AtomicBool::new(false));
+    #[cfg(not(target_os = "macos"))]
     let wait_exit_status = Arc::clone(&exit_status);
     let exit_code = Arc::new(StdMutex::new(None));
+    #[cfg(not(target_os = "macos"))]
     let wait_exit_code = Arc::clone(&exit_code);
+    #[cfg(not(target_os = "macos"))]
     let wait_handle: JoinHandle<()> = tokio::task::spawn_blocking(move || {
         let code = match child.wait() {
             Ok(status) => status.exit_code() as i32,
@@ -266,6 +280,10 @@ async fn spawn_process_portable(
         }
         let _ = exit_tx.send(code);
     });
+    #[cfg(target_os = "macos")]
+    let wait_handle = crate::owned_process_group::spawn_waiter(
+        Arc::clone(&group), Arc::clone(&exit_status), Arc::clone(&exit_code), exit_tx, true,
+    );
 
     let handles = PtyHandles {
         _slave: if cfg!(windows) {
@@ -278,6 +296,9 @@ async fn spawn_process_portable(
 
     let handle = ProcessHandle::new(
         writer_tx,
+        #[cfg(target_os = "macos")]
+        Box::new(group),
+        #[cfg(not(target_os = "macos"))]
         Box::new(PtyChildTerminator {
             killer,
             #[cfg(unix)]
@@ -365,9 +386,14 @@ async fn spawn_process_preserving_fds(
             });
     }
 
-    let mut child = command.spawn()?;
+    let child = command.spawn()?;
+    #[cfg(not(target_os = "macos"))]
+    let mut child = child;
     drop(slave);
+    #[cfg(not(target_os = "macos"))]
     let process_group_id = child.id();
+    #[cfg(target_os = "macos")]
+    let group = Arc::new(crate::owned_process_group::OwnedProcessGroup::from_child(child));
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -380,9 +406,12 @@ async fn spawn_process_preserving_fds(
 
     let (exit_tx, exit_rx) = oneshot::channel::<i32>();
     let exit_status = Arc::new(AtomicBool::new(false));
+    #[cfg(not(target_os = "macos"))]
     let wait_exit_status = Arc::clone(&exit_status);
     let exit_code = Arc::new(StdMutex::new(None));
+    #[cfg(not(target_os = "macos"))]
     let wait_exit_code = Arc::clone(&exit_code);
+    #[cfg(not(target_os = "macos"))]
     let wait_handle: JoinHandle<()> = tokio::task::spawn_blocking(move || {
         let code = match child.wait() {
             Ok(status) => exit_code_from_status(status),
@@ -394,6 +423,10 @@ async fn spawn_process_preserving_fds(
         }
         let _ = exit_tx.send(code);
     });
+    #[cfg(target_os = "macos")]
+    let wait_handle = crate::owned_process_group::spawn_waiter(
+        Arc::clone(&group), Arc::clone(&exit_status), Arc::clone(&exit_code), exit_tx, false,
+    );
 
     let handles = PtyHandles {
         _slave: None,
@@ -405,6 +438,9 @@ async fn spawn_process_preserving_fds(
 
     let handle = ProcessHandle::new(
         writer_tx,
+        #[cfg(target_os = "macos")]
+        Box::new(group),
+        #[cfg(not(target_os = "macos"))]
         Box::new(RawPidTerminator { process_group_id }),
         reader_handle,
         Vec::new(),

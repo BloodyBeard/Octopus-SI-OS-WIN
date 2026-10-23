@@ -299,7 +299,8 @@ impl ProviderOutputHandoff {
                 }
             },
         )?;
-        let added_outputs = output_connections::is_extension(&bound_topology, &current_topology);
+        let changed_outputs = output_connections::is_extension(&bound_topology, &current_topology)
+            || output_connections::is_withdrawal(&bound_topology, &current_topology);
         let revised_inputs = input_revision::is_revision(&bound_topology, &current_topology);
         let revised_payloads = coauthor_chain.iter().any(|transition| {
             !transition.placement && transition.writer.owner == config.provider_interface
@@ -312,7 +313,7 @@ impl ProviderOutputHandoff {
             &initial_record, &current_record, &bound_topology, &current_topology,
             &consumed_templates[0], &runtime.checkpoint, source_movement_seq, &coauthor_chain,
         )?;
-        let retired_verified_input = !independent_input_unchanged && !added_outputs && !revised_inputs && !revised_payloads && !amended_capabilities && !advanced_result_inputs
+        let retired_verified_input = !independent_input_unchanged && !changed_outputs && !revised_inputs && !revised_payloads && !amended_capabilities && !advanced_result_inputs
             && (current_config != config || current_topology != bound_topology);
         if retired_verified_input {
             validate_retired_verified_input(

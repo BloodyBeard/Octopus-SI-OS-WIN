@@ -1,3 +1,4 @@
+import { OcLoadingRows, OcLoadingText } from "../../design-system/LoadingSkeleton";
 import { motion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type {
@@ -664,7 +665,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
                 <OctopusFilterField inputId="os-files-tree-search" label="Filter files" onQueryChange={setQuery} placeholder="Filter files…" searchQuery={query} />
               </div>
               <div className="os-files-octopus-tree">
-                {artifactTarget ? artifactLoading ? <OctopusPanelNote>Resolving artifact payload…</OctopusPanelNote>
+                {artifactTarget ? artifactLoading ? <OctopusPanelNote><OcLoadingText label="Resolving artifact payload…" /></OctopusPanelNote>
                   : artifactError ? <p className="os-files-tree-message is-error">Payload unavailable</p>
                     : searchActive && !treePaths.length ? <OctopusPanelNote>No matching files</OctopusPanelNote>
                       : !treePaths.length ? <OctopusPanelNote>Payload unavailable</OctopusPanelNote>
@@ -691,7 +692,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
                         selectedPath={file?.path}
                       />
                     : treeError ? <p className="os-files-tree-message is-error">{treeError}</p>
-                      : loadingPaths.has("") && !treePaths.length ? <OctopusPanelNote>Loading directory entries…</OctopusPanelNote>
+                      : loadingPaths.has("") && !treePaths.length ? <OcLoadingRows label="Loading directory entries…" />
                         : !treePaths.length ? <OctopusPanelNote>No files in this folder</OctopusPanelNote>
                           : <OctopusFileTree
                               directScrolling

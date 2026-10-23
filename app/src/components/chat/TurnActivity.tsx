@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "motion/react";
 import { useShouldReduceMotion } from "../../appearance";
-import { CadencedShimmerText } from "../CadencedShimmerText";
+import { CadencedShimmerText, ShimmerActivityScope } from "../CadencedShimmerText";
 import { Glyph } from "../IconGlyphs";
 import { MessageContent } from "./MessageContent";
 import { reasoningSummaryHeading } from "./reasoningSummary";
@@ -189,7 +189,6 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
     });
   };
 
-  const historyUnits = units;
   const hasWork = units.length > 0;
   const startingTask = syntheticSubmitting
     && !hasWork
@@ -250,67 +249,48 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
       units={units}
     />
   );
-  const historyContent = (
-    <ActivityUnits
-      activeGroupId={activeGroupId}
-      renderActivity={renderActivity}
-      showThinkingFallback={false}
-      thinkingFallbackMessage={thinkingFallbackMessage}
-      toolPresentations={toolPresentations}
-      units={historyUnits}
-    />
-  );
-
-  if (statusBoundaryVisible && finalStarted && !failed && !stopped && historyUnits.length > 0) {
-    return (
-      <section
-        className="octopus-turn-activity min-h-0 min-w-0 text-token-text-secondary"
-        data-state={failed ? "failed" : stopped ? "stopped" : "complete"}
-      >
-        <WorkedForToggle elapsed={elapsed} expanded={historyExpanded} onToggle={toggleHistory} />
-        <div aria-hidden="true" className="octopus-worked-for-rule" />
-        {historyDisclosureState !== "collapsed" ? (
-          <motion.div
-            animate={historyFullyExpanded ? { height: "auto", opacity: 1 } : { height: 0, opacity: 0 }}
-            aria-hidden={!historyFullyExpanded}
-            className="octopus-turn-history"
-            initial={false}
-            inert={!historyFullyExpanded || undefined}
-            onAnimationComplete={() => {
-              setHistoryDisclosureState((current) => current === "closing" ? "collapsed" : current);
-            }}
-            style={{ overflow: "hidden", pointerEvents: historyFullyExpanded ? "auto" : "none" }}
-            transition={{ duration: reducedMotion ? 0 : 0.3, ease: [0.19, 1, 0.22, 1] }}
-          >
-            <ActivityGap />
-            {historyContent}
-          </motion.div>
-        ) : null}
-        {failed && terminalTraceError ? (
-          <>
-            <ActivityGap />
-            <TerminalErrorActivity message={terminalTraceError} renderActivity={renderActivity} />
-          </>
-        ) : null}
-        <ActivityGap />
-      </section>
-    );
-  }
-
+  const collapsibleHistory = statusBoundaryVisible && finalStarted && !failed && !stopped && hasWork;
+  const contentsExpanded = !collapsibleHistory || historyFullyExpanded;
   return (
     <section
       className="octopus-turn-activity flex min-h-0 min-w-0 flex-col text-token-text-secondary"
       data-state={working ? "working" : stopped ? "stopped" : failed ? "failed" : "complete"}
+      onClickCapture={(event) => {
+        const target = event.target;
+        const toggle = target instanceof Element ? target.closest("button[aria-expanded]") : null;
+        if (!turnFinished && toggle?.getAttribute("aria-expanded") === "false") setHistoryDisclosureState("expanded");
+      }}
     >
-      {showWorkedForBoundary ? (
+      {collapsibleHistory ? (
+        <>
+          <WorkedForToggle elapsed={elapsed} expanded={historyExpanded} onToggle={toggleHistory} />
+          <div aria-hidden="true" className="octopus-worked-for-rule" />
+        </>
+      ) : showWorkedForBoundary ? (
         <WorkedForBoundary
           elapsed={elapsed}
           reducedMotion={reducedMotion}
           status={working ? "working" : stopped ? stoppedByOperator ? "stopped" : "interrupted" : "worked"}
         />
       ) : null}
-      {showWorkedForBoundary && (hasWork || showThinkingFallback) ? <ActivityGap /> : null}
-      {activityContent}
+      {!collapsibleHistory || historyDisclosureState !== "collapsed" ? (
+        <motion.div
+          key="activity-content"
+          animate={contentsExpanded ? { height: "auto", opacity: 1 } : { height: 0, opacity: 0 }}
+          aria-hidden={!contentsExpanded}
+          className="octopus-turn-history"
+          initial={false}
+          inert={!contentsExpanded || undefined}
+          onAnimationComplete={() => {
+            setHistoryDisclosureState((current) => current === "closing" ? "collapsed" : current);
+          }}
+          style={{ overflow: collapsibleHistory ? "hidden" : "visible", pointerEvents: contentsExpanded ? "auto" : "none" }}
+          transition={{ duration: reducedMotion ? 0 : 0.3, ease: [0.19, 1, 0.22, 1] }}
+        >
+          {showWorkedForBoundary && (hasWork || showThinkingFallback) ? <ActivityGap /> : null}
+          <ShimmerActivityScope active={working}>{activityContent}</ShimmerActivityScope>
+        </motion.div>
+      ) : null}
       {failed && terminalTraceError ? (
         <>
           {units.length > 0 ? <ActivityGap /> : null}
@@ -653,7 +633,6 @@ function ReasoningSummaryActivity({ entry, message }: {
       defaultExpanded={entry.active}
       followActive
       icon={null}
-      interactive={!entry.active}
       summary={summary}
       summaryKey={`${entry.id}:${lifecycle}:${entry.active ? "" : elapsed ?? ""}`}
     >
@@ -772,6 +751,7 @@ export function ActivityDisclosure({
   ));
   const openingFrameRef = useRef<number | null>(null);
   const previouslyActiveRef = useRef(active);
+  const manuallyExpandedRef = useRef<boolean | null>(null);
 
   useEffect(() => () => {
     if (openingFrameRef.current !== null) window.cancelAnimationFrame(openingFrameRef.current);
@@ -785,6 +765,7 @@ export function ActivityDisclosure({
     }
     const previouslyActive = previouslyActiveRef.current;
     previouslyActiveRef.current = active;
+    if (canExpand && manuallyExpandedRef.current !== null) return;
     if (openingFrameRef.current !== null) {
       window.cancelAnimationFrame(openingFrameRef.current);
       openingFrameRef.current = null;
@@ -812,6 +793,7 @@ export function ActivityDisclosure({
   const lifecycle = active ? "active" : tone === "danger" ? "error" : "complete";
   const toggle = () => {
     if (!disclosure) return;
+    manuallyExpandedRef.current = !expanded;
     if (expanded) {
       setDisclosureState("closing");
       return;
@@ -1254,11 +1236,14 @@ function coalesceActivities(messages: ChatRenderMessage[], preserveMovements = f
   const entries: ActivityEntry[] = [];
   const positions = new Map<string, number>();
   const codeCells = new Map<string, string>();
+  const processes = new Map<string, string>();
   for (const message of messages) {
     const family = activityFamily(message);
+    const processKey = preserveMovements ? "" : commandProcessKey(message);
     const continuedCell = preserveMovements ? "" : codeModeCell(message, CODE_MODE_CONTINUATION_TOOLS);
-    const signature = codeCells.get(continuedCell)
+    const signature = processes.get(processKey) ?? codeCells.get(continuedCell)
       ?? (preserveMovements ? `movement:${message.id}` : activitySignature(message));
+    if (processKey) processes.set(processKey, signature);
     const runCell = preserveMovements ? "" : codeModeCell(message, CODE_MODE_RUN_TOOLS);
     if (runCell) codeCells.set(runCell, signature);
     const position = positions.get(signature);
@@ -1460,6 +1445,7 @@ function activityDetailMessages(entry: ActivityEntry): ChatRenderMessage[] {
         ...record(first.eventData),
         ...record(last.eventData),
         ...continuedCodeCell(record(last.eventData), continuations),
+        ...continuedCommandProcess(entry.messages),
         arguments: record(first.eventData).arguments ?? record(last.eventData).arguments,
         _lifecycle_evidence: entry.messages.map((message) => ({
           artifact_id: message.artifactId ?? "",
@@ -1474,6 +1460,34 @@ function activityDetailMessages(entry: ActivityEntry): ChatRenderMessage[] {
 
 const CODE_MODE_RUN_TOOLS = new Set(["code_mode.run"]);
 const CODE_MODE_CONTINUATION_TOOLS = new Set(["code_mode.wait", "code_mode.resume"]);
+
+function commandProcessKey(message: ChatRenderMessage): string {
+  if (message.eventKind !== "dynamic_tool") return "";
+  const data = record(message.eventData);
+  const processId = text(commandResultBody(data).process_id) || text(record(data.arguments).process_id);
+  return processId ? JSON.stringify([message.runId, message.interfaceId, record(data._activity_origin).interface_id, processId]) : "";
+}
+
+function continuedCommandProcess(messages: ChatRenderMessage[]): Record<string, unknown> {
+  const settled = messages.filter((message) => text(commandResultBody(record(message.eventData)).process_id));
+  if (!settled.length) return {};
+  const first = record(messages[0].eventData);
+  const latest = record(settled.at(-1)!.eventData);
+  const body = commandResultBody(latest);
+  const chunks = new Map<string, unknown>();
+  for (const message of settled) {
+    const output = record(commandResultBody(record(message.eventData)).output);
+    for (const [index, chunk] of (Array.isArray(output.chunks) ? output.chunks : []).entries()) {
+      const row = record(chunk);
+      chunks.set(typeof row.source_seq === "number" ? `seq:${row.source_seq}` : `${message.id}:${index}`, chunk);
+    }
+  }
+  return {
+    tool: first.tool,
+    body: { ...body, output: { ...record(body.output), chunks: [...chunks.values()] } },
+    status: latest.status, ok: latest.ok, error: latest.error,
+  };
+}
 
 function codeModeCell(message: ChatRenderMessage, tools: ReadonlySet<string>): string {
   if (message.eventKind !== "dynamic_tool") return "";
@@ -1789,7 +1803,8 @@ function systemActivityMessage(message: ChatRenderMessage): boolean {
 
 function activityIsActive(message: ChatRenderMessage): boolean {
   if (message.eventKind === "tool" || (message.eventKind === "dynamic_tool" && commandHasProcessEvidence(record(message.eventData)))) {
-    return commandActivityModel(message).phase === "running";
+    const model = commandActivityModel(message);
+    return model.phase === "running" && !(model.yielded && model.processId);
   }
   if (message.pending) return true;
   const data = record(message.eventData);

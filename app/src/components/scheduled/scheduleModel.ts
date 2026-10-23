@@ -72,6 +72,7 @@ function normalizeDelivery(value: unknown): ScheduledDelivery | null {
     atMs: nullableTimestamp(row.at_ms) ?? 0,
     runId: stringValue(row.run_id),
     chatInterfaceId: stringValue(row.chat_interface_id),
+    title: stringValue(row.title),
     journal: normalizeJournal(row.journal),
   };
 }

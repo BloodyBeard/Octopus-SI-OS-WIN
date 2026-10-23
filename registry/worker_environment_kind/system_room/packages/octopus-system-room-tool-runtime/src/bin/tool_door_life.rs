@@ -4,7 +4,7 @@ async fn main() {
         .map(octopus_descriptors::InterfaceId::new)
         .expect("OCTOPUS_INTERFACE_ID is required by the system-room door life");
     if let Err(error) = octopus_tool_door_runtime::run_spawned_interface_life(
-        octopus_tool_door_runtime::owned_tool_door_interface_life(
+        octopus_tool_door_runtime::owned_tool_door_interface_life_with_output(
             octopus_tool_door_runtime::ToolDoorOwner {
                 worker_environment_kind: octopus_descriptors::WorkerEnvironmentKindId::new(
                     "system_room",
@@ -14,6 +14,8 @@ async fn main() {
                 private_read_max_bytes: 4096,
                 root_slot_transform: None,
             },
+            octopus_tool_door_runtime::default_tool_door_artifact_decoder,
+            Some(octopus_system_room_tool_runtime::client_result_callback()),
         )
         .expect("owned tool-door configuration is valid"),
     )

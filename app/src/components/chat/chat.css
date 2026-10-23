@@ -2706,6 +2706,11 @@ mark.octopus-thread-find-active {
   color: var(--color-token-text-secondary);
   font-size: var(--octopus-chat-font-size, 14px);
   line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.octopus-worked-for-toggle {
+  font-variant-numeric: tabular-nums;
 }
 
 .octopus-worked-for-boundary > div {

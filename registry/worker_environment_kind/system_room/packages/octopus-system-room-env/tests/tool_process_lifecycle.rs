@@ -232,6 +232,7 @@ async fn file_write_process_case(ordered: bool) {
     let worker = InterfaceId::new("system_worker_flash");
     let formation = registry
         .form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &door,
             door_descriptor_hash: &canonical_hash(&interface),
             door_driver_ref: &interface.interface_driver_ref,
@@ -431,6 +432,7 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
     let door = interface.id.clone();
     let worker = InterfaceId::new("system_worker_fixture");
     let formation = registry.form(&WorkerEnvironmentFormationRequest {
+        door_additional_root_bindings: &Default::default(),
         door_interface: &door, door_descriptor_hash: &canonical_hash(&interface),
         door_driver_ref: &interface.interface_driver_ref, tool: &tool,
         tool_descriptor_hashes: &tool_hashes, tool_process_bins: &tool_bins,
@@ -521,7 +523,12 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             assert!(emitted_path.starts_with(process_var_dir.join(format!("invocations/{request_id}/artifact/emitted"))));
             let emitted = InterfaceArtifactFile::new(emitted_path).unwrap().read_bounded(1024*1024, 1024*1024).unwrap();
             assert_eq!(emitted.manifest.label, if request_id >= 9 { "client.action" } else { "client.surface.document" });
-            assert_eq!(serde_json::from_slice::<Value>(&emitted.payload_bytes).unwrap(), if request_id >= 9 { widget_requests[request_id as usize - 9].clone() } else { document.clone() });
+            let emitted_body: Value = serde_json::from_slice(&emitted.payload_bytes).unwrap();
+            if request_id >= 9 {
+                assert_eq!(emitted_body["schema"], "octopus.client_action_request");
+                assert_eq!(emitted_body["tool_call"]["id"], format!("tool.call:{}",content.to_hex()));
+                assert_eq!(emitted_body["action"], widget_requests[request_id as usize - 9]);
+            } else { assert_eq!(emitted_body, document); }
             write_message(&mut stdin, &json!({"kind":"delivery_verdict","request_id":request_id,
                 "event_id":emission["event_id"],"verdict":if request_id != 7 {json!({"admitted":{"seq":991}})} else {refused.clone()},
             })).await;
@@ -562,7 +569,12 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             match request_id {
                 2 => { assert_eq!(body["id"], "context:visible"); assert_eq!(body["text"], "bound context"); }
                 3 | 4 | 8 => assert!(body["error"].as_str().is_some(), "{body}"),
-                6 | 9 | 10 => assert_eq!(body, &json!({"admitted":{"seq":991}})),
+                6 => assert_eq!(body, &json!({"admitted":{"seq":991}})),
+                9 | 10 => {
+                    assert_eq!(body["schema"], "octopus.client_action_pending");
+                    assert_eq!(body["admission"], json!({"admitted":{"seq":991}}));
+                    assert_eq!(body["tool_call"]["id"], format!("tool.call:{}",content.to_hex()));
+                },
                 7 => assert_eq!(body, &refused),
                 _ => unreachable!(),
             }

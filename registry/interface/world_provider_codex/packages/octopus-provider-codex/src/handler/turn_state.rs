@@ -93,6 +93,8 @@ pub(crate) struct CodexContinuityState {
     pub(crate) context_generation: u64,
     pub(crate) static_context_fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) turn_input: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending: Option<CodexPendingContinuity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) interrupted_pending: Option<CodexPendingContinuity>,

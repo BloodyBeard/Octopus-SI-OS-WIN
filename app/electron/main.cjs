@@ -112,6 +112,7 @@ const { planClientAgentTemplate } = require("./clientAgentCatalog.cjs");
 const { createNativeBrowserSurfaceAdapter, createBrowserPresentationHost, createBrowserDownloadHistory } = require("./browserSurface.cjs");
 const {
   initializeWorkspace,
+  inspectWorkspaceSetupState,
   mutateWorkspaceProject,
   readWorkspaceSetupState: readWorkspaceSetupStateTransaction,
   recoverWorkspaceTransactions,
@@ -458,7 +459,7 @@ function getProjectionStore(profile) {
       localPackageLibrary: resolveLocalPackageLibrary,
       octopusHome: resolveOctopusHome,
       beforeRead: profile === "live" ? prepareLiveProjectionRead : undefined,
-      readWorkspaceSetupState: profile === "live" ? readWorkspaceSetupState : undefined,
+      inspectWorkspaceSetupState: profile === "live" ? inspectWorkspaceSetupState : undefined,
       nativeBrowserTargetsForProjection: profile === "live" ? nativeBrowserTargetsForProjection : undefined,
       nativeBrowserDownloadsForProjection: profile === "live" ? nativeBrowserDownloadsForProjection : undefined,
       nativeDesktopPresentationsForProjection: profile === "live" ? id => (nativeDesktopPresentations?.snapshot() ?? []).filter(value => value.worker_environment_id === id) : undefined,
@@ -486,16 +487,6 @@ function getProjectionStore(profile) {
 }
 
 async function prepareLiveProjectionRead() {
-  const octopusHome = resolveOctopusHome();
-  await recoverWorkspaceTransactions({
-    octopusHomeRoot: octopusHome,
-    registryRoot: path.join(octopusHome, "registry"),
-    publication: workspaceStorage(octopusHome),
-    retirementBarrier: {
-      verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
-      withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
-    },
-  });
   await initializeRuntimeHost();
 }
 
@@ -602,9 +593,8 @@ function guardNativeBrowserPackage() {
 function requireNativeBrowserPackageOwner(installation) {
   const owners = installation.member_states?.filter((member) => member.registry_kind === "worker_environment_kind" && member.owner === "browser_session") ?? [];
   const [owner] = owners;
-  if (!installation.available || owners.length !== 1 || !owner.materialized
-    || !/^[a-f0-9]{64}$/.test(owner.source_digest) || owner.source_digest !== owner.installed_digest) {
-    throw new Error("The installed browser code is missing or differs from its package source. Repair the browser package before native browser use.");
+  if (!installation.available || owners.length !== 1 || !owner.materialized) {
+    throw new Error("The installed browser owner is missing. Restore the browser package before native browser use.");
   }
 }
 
@@ -684,7 +674,7 @@ async function planDesktopApplicationPreferences(request) {
   return withLocalPackageInstallation({ ...roots, packageId: "driver.desktop_session" }, async (installation) => {
     const owner = installation.member_states?.find((member) => member.registry_kind === "worker_environment_kind" && member.owner === "desktop_session");
     if (!installation.available || !installation.installed || installation.receipt_state !== "valid" || !/^[a-f0-9]{64}$/.test(installation.receipt_digest)
-      || !owner?.materialized || !/^[a-f0-9]{64}$/.test(owner.source_digest) || owner.source_digest !== owner.installed_digest) throw new Error("Computer Use setup requires its current installed package and valid receipt.");
+      || !owner?.materialized) throw new Error("Computer Use setup requires its current installed package and valid receipt.");
     const modulePath = path.join(roots.activeRegistryRoot, "worker_environment_kind", "desktop_session", "packages", "octopus-system-gui-env", "native", "setup-preferences.cjs");
     if (await fs.promises.realpath(modulePath) !== modulePath) throw new Error("The installed Computer Use setup module must not contain symbolic links.");
     const helper = require(modulePath);
@@ -721,7 +711,7 @@ function getDesktopSurfaceHost(sender) {
           if (!installation.available || !installation.installed || installation.receipt_state !== "valid" || !/^[a-f0-9]{64}$/.test(installation.receipt_digest)) throw new Error("Saved application permissions require the verified installed Computer Use driver.");
           for (const [kind, id] of [["interface", "system_gui"], ["worker_environment_kind", "desktop_session"]]) {
             const member = installation.member_states?.find(value => value.registry_kind === kind && value.owner === id);
-            if (!member?.materialized || !/^[a-f0-9]{64}$/.test(member.source_digest) || member.source_digest !== member.installed_digest) throw new Error("The default Computer Use driver package has changed.");
+            if (!member?.materialized) throw new Error("The default Computer Use driver owner is missing.");
           }
           return operation("system_gui");
         });
@@ -764,9 +754,7 @@ function getNativeDesktopSettings() {
         const member = installation.member_states?.find(value => value.registry_kind === "worker_environment_kind" && value.owner === "desktop_session");
         const descriptor = installation.member_states?.find(value => value.registry_kind === "interface" && value.owner === "system_gui");
         if (resolveOctopusHome() !== home || !installation.available || !installation.installed || installation.receipt_state !== "valid"
-          || !/^[a-f0-9]{64}$/.test(installation.receipt_digest) || !member?.materialized || member.source_digest !== member.installed_digest
-          || !/^[a-f0-9]{64}$/.test(member.installed_digest) || !descriptor?.materialized || descriptor.source_digest !== descriptor.installed_digest
-          || !/^[a-f0-9]{64}$/.test(descriptor.installed_digest)) throw new Error("Computer Use setup requires its current verified installed driver.");
+          || !/^[a-f0-9]{64}$/.test(installation.receipt_digest) || !member?.materialized || !descriptor?.materialized) throw new Error("Computer Use setup requires its current verified installed driver.");
         return operation(installation.receipt_digest, member.installed_digest);
       });
       const preferences = await getDesktopSurfaceHost().defaultPreferenceStore(() => {
@@ -2685,10 +2673,11 @@ async function initializeRuntimeHost() {
         };
       const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: packageRoots.stateRoot, guard: assertStopped });
       try {
-        await recoverLocalPackageTransactions(packageRoots);
-        await adoptLocalPackageUpdates(packageRoots);
         const state = await host.probe();
         if (state.pid === null) {
+          await assertStopped();
+          await recoverLocalPackageTransactions(packageRoots);
+          await adoptLocalPackageUpdates(packageRoots);
           await assertStopped();
           const registryRoot = path.join(octopusHome, "registry");
           await recoverWorkspaceTransactions({ octopusHomeRoot: octopusHome, registryRoot,
@@ -2703,7 +2692,7 @@ async function initializeRuntimeHost() {
             if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
             const store = createClientProjectionStore("live", { resolveRepoRoot, sourceRegistry: resolveSourceRegistry,
               localPackageRegistry: resolveLocalPackageRegistry, localPackageLibrary: resolveLocalPackageLibrary,
-              octopusHome: () => octopusHome, projectEePolicies, readWorkspaceSetupState });
+              octopusHome: () => octopusHome, projectEePolicies, inspectWorkspaceSetupState });
             try {
               const scope = await store.read(projectionReadRequest("projection.operator.os.scope"));
               if (scope.status === "invalid") throw new Error(`Native package adoption scope is invalid: ${scope.errors.join("; ")}`);
@@ -3116,12 +3105,12 @@ ipcMain.handle("octopus:client-directory-select", async (event, token, request) 
   const result = await dialog.showOpenDialog(win, {
     buttonLabel,
     message: title,
-    properties: mode === "file" ? ["openFile"] : ["openDirectory", "createDirectory"],
+    properties: [...(mode === "file" ? ["openFile"] : ["openDirectory", "createDirectory"]), ...(request?.allowMultiple === true ? ["multiSelections"] : [])],
   });
   const selected = result.filePaths[0];
   return result.canceled || !selected
-    ? { canceled: true, path: "" }
-    : { canceled: false, path: selected };
+    ? { canceled: true, path: "", paths: [] }
+    : { canceled: false, path: selected, paths: result.filePaths };
 });
 
 ipcMain.handle("octopus:client-file-save", async (event, token, request) => {
@@ -4313,6 +4302,35 @@ ipcMain.handle("octopus:composer-prediction", async (event, token, request) => {
   }
 });
 
+ipcMain.handle("octopus:task-title", async (event, token, request) => {
+  const home = resolveOctopusHome();
+  const current = () => {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (resolveOctopusHome() !== home || event.sender.isDestroyed()) throw new Error("Task title lost its current Home or window");
+  };
+  current();
+  const read = (method, params) => getProjectionStore("live").read(projectionReadRequest(method, params));
+  const readSource = async (runId) => {
+    current();
+    const { chats } = await read("projection.operator.chats.list", {});
+    const chat = chats.find((row) => row.run_id === runId);
+    if (!chat?.title_generation_needed || !chat.writable || chat.archived) return null;
+    const input = chat.title_source;
+    return input ? { chat, input } : null;
+  };
+  const { requestTaskTitle } = await loadOperatorChatClient();
+  try {
+    return await requestTaskTitle({ octopusHome: () => home, readSource, assertCurrent: current,
+      readArtifacts: async (params) => (await read("projection.interface_artifacts.list", params)).artifacts,
+      commit: (plan) => { current(); return commitProjectionClientAuthoring(home, path.join(home, "registry"), plan); },
+      handInArtifact: (input) => { current(); return handInArtifact({ ...input, octopusHome: home }); },
+    }, request);
+  } catch (error) {
+    void appendClientLog("warning", "task.title_failed", { message: String(error?.message ?? error) });
+    throw error;
+  }
+});
+
 ipcMain.handle("octopus:runtime-status", async (_event, token, request) => {
   const lab = labRuntimeHostState(token);
   if (lab) {
@@ -4443,6 +4461,7 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
         selectedWorkerEnvironmentKinds: request?.selectedWorkerEnvironmentKinds,
         selectedTools: request?.selectedTools,
         clientSurfaceRole: request?.clientSurfaceRole,
+        clientContext: request?.clientContext,
         continuation: request?.continuation,
         text: request?.text,
         attachments: stagedAttachments,
@@ -4540,6 +4559,7 @@ ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
         ...input,
         blobsRoot: path.join(octopusHome, "ledger", "blobs"),
       }),
+      readProjection: (method) => getProjectionStore("live").read(projectionReadRequest(method)),
       preparePayloadArtifactBindings: ({ payloadArtifactBindings: selectedBase }) => prepareContentAddressedPayloadBindings({
         blobsRoot: path.join(octopusHome, "ledger", "blobs"),
         attachments: stagedAttachments,
@@ -4559,6 +4579,7 @@ ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
       eeId: request?.eeId,
       workerInterfaceId: request?.workerInterfaceId,
       clientSurfaceRole: request?.clientSurfaceRole,
+      clientContext: request?.clientContext,
       ...(requestedPayloads === undefined ? {} : { payloadArtifactBindings: requestedPayloads }),
       text: request?.text,
       attachments: stagedAttachments,

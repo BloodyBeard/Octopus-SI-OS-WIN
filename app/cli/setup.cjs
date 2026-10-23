@@ -86,6 +86,7 @@ function createSetupOwners(environment, options = {}) {
   let projection = null;
   const getProjection = () => projection ??= projectionStore(environment);
   const metadata = createClientProviderMetadata({ registryRoot: () => registryRoot,
+    sourceRegistryRoot: () => environment.packageRoots.sourceRegistryRoot,
     accountClient: () => environment.accountClient(), reference: setupReference });
 
   async function planSurface({ eeInstancesRoot, request }) {
@@ -102,8 +103,7 @@ function createSetupOwners(environment, options = {}) {
     return withLocalPackageInstallation({ ...environment.packageRoots, packageId }, async (installation) => {
       const member = installation.member_states?.find((row) => row.registry_kind === "worker_environment_kind" && row.owner === owner);
       if (!installation.available || !installation.installed || installation.receipt_state !== "valid"
-        || !DIGEST.test(installation.receipt_digest) || !member?.materialized
-        || !DIGEST.test(member.source_digest) || member.source_digest !== member.installed_digest) {
+        || !DIGEST.test(installation.receipt_digest) || !member?.materialized) {
         throw new Error(`Setup requires the current installed '${packageId}' package and valid receipt.`);
       }
       const file = path.join(registryRoot, "worker_environment_kind", owner, relativeFile);
@@ -121,18 +121,19 @@ function createSetupOwners(environment, options = {}) {
         chatId: `agent_preflight_${token}`, cycle: `agent_preflight_${token}`,
         eeId: projectEeId, clientSurfaceRole: "task", workerInterfaceId: source.recipe.worker_interface_id,
         providerInterfaceId: choice.providerInterfaceId, providerModel: choice.providerModel,
-        reasoningEffort: choice.reasoningEffort, doorHostSlots: {},
+        reasoningEffort: choice.reasoningEffort, serviceTier: choice.serviceTier, doorHostSlots: {},
         contextArtifactBindings: source.recipe.context_artifact_bindings,
         selectedWorkerEnvironmentKinds: source.recipe.selected_worker_environment_kinds,
       } });
       if (surface.authoringProfile.ee_id !== projectEeId || surface.authoringProfile.worker_choice_interface !== source.sourceInterface.id
         || surface.providerModel !== choice.providerModel) throw new Error("Agent preset planning changed its Project, worker, or model.");
+      if (choice.serviceTier && surface.serviceTier !== choice.serviceTier) throw new Error("Agent preset planning changed its selected service tier");
       if (source.recipe.selected_application_ids.length) throw new Error("The selected Agent preset needs an Application binding planner that this client does not provide.");
       return { ...planClientAgentTemplate({ operationId, projectEeId, sourceInterface: source.sourceInterface,
         sourcePolicy: source.sourcePolicy, sourceProfile: surface.authoringProfile,
         settings: { schema_version: 1, worker_interface: source.sourceInterface.id, project_ee_id: projectEeId,
           provider_interface_id: choice.providerInterfaceId, provider_model: choice.providerModel,
-          reasoning_effort: choice.reasoningEffort, application_ids: source.recipe.selected_application_ids,
+          reasoning_effort: choice.reasoningEffort, ...(choice.serviceTier ? { service_tier: choice.serviceTier } : {}), application_ids: source.recipe.selected_application_ids,
           worker_environment_kinds: source.recipe.selected_worker_environment_kinds },
         name: source.recipe.name, icon: source.recipe.icon }), verify: source.verify };
     });
@@ -314,6 +315,7 @@ async function collectChoices(environment, pack, options) {
   const provider = providers.find((row) => row.id === pack.workspace_setup.home.provider_interface_id);
   if (!provider) throw new Error("The Application Pack's Home provider is absent from the source package registry.");
   const metadata = createClientProviderMetadata({ registryRoot: () => environment.packageRoots.sourceRegistryRoot,
+    sourceRegistryRoot: () => environment.packageRoots.sourceRegistryRoot,
     accountClient: () => environment.accountClient(), reference: setupReference });
   const [discovered] = await metadata.catalog([provider]);
   if (discovered.modelCatalogError) throw new Error(discovered.modelCatalogError);
@@ -327,9 +329,10 @@ async function collectChoices(environment, pack, options) {
     ? options.nonInteractive ? modelRow.defaultReasoningEffort : await choose(options, "reasoning", "Choose a reasoning level",
       modelRow.supportedReasoningEfforts.map((value) => ({ value, label: value })), undefined, modelRow.defaultReasoningEffort)
     : "");
-  validateProviderModelSelection([discovered], { providerInterfaceId: provider.id, providerModel: model, reasoningEffort });
+  const serviceTier = options.serviceTier;
+  validateProviderModelSelection([discovered], { providerInterfaceId: provider.id, providerModel: model, reasoningEffort, serviceTier });
   return { operationId: options.operationId ?? randomUUID(), workspaceName, workspaceGoal: options.workspaceGoal ?? workspaceName,
-    projects, model, reasoningEffort, recommended, agentPresets: options.agentPresets };
+    projects, model, reasoningEffort, serviceTier, recommended, agentPresets: options.agentPresets };
 }
 
 function compileSetupPlan(pack, choices) {
@@ -352,6 +355,7 @@ function compileSetupPlan(pack, choices) {
       packId: pack.id, presetId: id, expectedPackManifestDigest: pack.manifest_digest,
       projectKeys: [...projectKeys].sort(), providerInterfaceId: preset.provider_interface_id,
       providerModel: choices.model, reasoningEffort: choices.reasoningEffort,
+      ...(choices.serviceTier ? { serviceTier: choices.serviceTier } : {}),
     }];
   });
   const request = {
@@ -359,7 +363,8 @@ function compileSetupPlan(pack, choices) {
     operationId: choices.operationId,
     root: { key: "root", templateName: "existence", name: humanText(choices.workspaceName, "Workspace name", 80), goal: humanText(choices.workspaceGoal, "Workspace goal", 240) },
     home: { name: "Home", providerInterfaceId: recipe.provider_interface_id, providerModel: choices.model,
-      workerInterfaceId: recipe.worker_interface_id, reasoningEffort: choices.reasoningEffort, doorHostSlots: structuredClone(recipe.door_host_slots ?? {}),
+      workerInterfaceId: recipe.worker_interface_id, reasoningEffort: choices.reasoningEffort,
+      ...(choices.serviceTier ? { serviceTier: choices.serviceTier } : {}), doorHostSlots: structuredClone(recipe.door_host_slots ?? {}),
       contextArtifactBindings: recipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: recipe.selected_worker_environment_kinds },
     task: { workerInterfaceId: taskRecipe.worker_interface_id, contextArtifactBindings: taskRecipe.context_artifact_bindings,
       selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds },
@@ -389,7 +394,7 @@ async function verifySetupPlan(environment, plan) {
   const expected = compileSetupPlan(pack, {
     operationId: request.operationId, workspaceName: request.root.name, workspaceGoal: request.root.goal,
     projects: request.projects.map((row) => ({ ...row, ...row.presentation })),
-    model: request.home.providerModel, reasoningEffort: request.home.reasoningEffort,
+    model: request.home.providerModel, reasoningEffort: request.home.reasoningEffort, serviceTier: request.home.serviceTier,
     recommended: plan.pack.selected_recommended, agentPresets: (request.agentPresets ?? []).map((row) => row.presetId),
   });
   if (stableJson(plan) !== stableJson(expected)) throw new Error("Saved setup choices no longer match the Application Pack's recipe and source files.");
@@ -446,11 +451,11 @@ async function choose(options, id, prompt, choices, value, defaultValue) {
   return value;
 }
 
-function hasNewChoices(options) { return ["packId", "workspaceName", "workspaceGoal", "projectName", "projects", "model", "reasoningEffort", "agentPresets"].some((key) => options[key] !== undefined) || options.recommended?.length > 0; }
+function hasNewChoices(options) { return ["packId", "workspaceName", "workspaceGoal", "projectName", "projects", "model", "reasoningEffort", "serviceTier", "agentPresets"].some((key) => options[key] !== undefined) || options.recommended?.length > 0; }
 function assertSavedChoices(options, plan) {
   const expected = { packId: plan.pack.id, workspaceName: plan.workspace.request.root.name,
     workspaceGoal: plan.workspace.request.root.goal, model: plan.workspace.request.home.providerModel,
-    reasoningEffort: plan.workspace.request.home.reasoningEffort };
+    reasoningEffort: plan.workspace.request.home.reasoningEffort, serviceTier: plan.workspace.request.home.serviceTier };
   for (const [field, value] of Object.entries(expected)) {
     if (options[field] !== undefined && options[field] !== value) throw new Error(`Saved setup already chose ${field}. Rerun without replacement choices.`);
   }

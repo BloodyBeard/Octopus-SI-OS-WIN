@@ -239,6 +239,7 @@ export function paneWorkerEnvironmentSurfaceLabel(
 }
 
 export type WorkerEnvironmentPaneAction = {
+  description: string;
   glyph: ReturnType<typeof workerEnvironmentSurfaceGlyph>;
   id: string;
   panelKind: WorkerEnvironmentPanelKind;
@@ -315,6 +316,7 @@ export function workerEnvironmentPaneActions(
         const key = `${workerEnvironment.id}\0projection:${surface.id}`;
         const candidate = {
           action: {
+            description: [surface.root, workerEnvironment.id].filter(Boolean).join(" · "),
             glyph: workerEnvironmentSurfaceGlyph(surface),
             id: `${workerEnvironment.id}:projection:${surface.id}`,
             panelKind,
@@ -338,6 +340,7 @@ export function workerEnvironmentPaneActions(
     const key = `${resolved.workerEnvironment.id}\0document:${target.surface_id}`;
     candidates.set(key, {
       action: {
+        description: resolved.workerEnvironment.id,
         glyph: admitted.document.glyph,
         id: `${resolved.workerEnvironment.id}:document:${target.surface_id}:${admitted.sourceDigest}`,
         panelKind: "custom",
@@ -362,11 +365,19 @@ export function workerEnvironmentPaneActions(
   const rows = [...candidates.values()];
   const scoped = preferred.size ? rows.filter((candidate) => candidate.preferredRun) : [];
   const titleCounts = new Map<string, number>();
-  for (const candidate of scoped) titleCounts.set(candidate.action.title, (titleCounts.get(candidate.action.title) ?? 0) + 1);
+  const qualifiers = new Map<string, Set<string>>();
+  for (const candidate of scoped) {
+    titleCounts.set(candidate.action.title, (titleCounts.get(candidate.action.title) ?? 0) + 1);
+    const key = JSON.stringify([candidate.action.title, candidate.environmentLabel]);
+    if (!qualifiers.has(key)) qualifiers.set(key, new Set());
+    qualifiers.get(key)!.add(candidate.environmentId);
+  }
   return scoped.map((candidate) => ({
     ...candidate.action,
     title: (titleCounts.get(candidate.action.title) ?? 0) > 1
-      ? `${candidate.action.title} · ${paneEnvironmentQualifier(candidate.action.title, candidate.environmentLabel, candidate.environmentId)}`
+      ? `${candidate.action.title} · ${paneEnvironmentQualifier(candidate.action.title,
+        qualifiers.get(JSON.stringify([candidate.action.title, candidate.environmentLabel]))!.size > 1 ? "" : candidate.environmentLabel,
+        candidate.environmentId)}`
       : candidate.action.title,
   })).sort((left, right) => (
     (PANE_ACTION_ORDER[left.panelKind] ?? 9) - (PANE_ACTION_ORDER[right.panelKind] ?? 9)

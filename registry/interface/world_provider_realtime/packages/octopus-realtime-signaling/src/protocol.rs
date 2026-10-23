@@ -4,6 +4,9 @@ use crate::state::{Call, TranscriptEntry};
 use crate::{LiveProtocol, SessionUpdate, UpdateChannel};
 
 pub fn update_frames(protocol: LiveProtocol, update: &SessionUpdate) -> Result<Vec<Value>, String> {
+    if update.client_context.is_some() {
+        return Err("client_context belongs to delegation metadata, not the voice transport".into());
+    }
     if update.text.trim().is_empty() {
         return Err("Live update text must be nonempty".into());
     }
@@ -202,7 +205,8 @@ pub(crate) fn accept_event(
                 );
             }
             if call.delegations.insert(id.into()) {
-                output.push(("realtime.delegation".into(),call.event_body(json!({"delegation_id":id,"input_text":text,"transcript":call.transcript,"provider_event_id":event_id})),true));
+                if text.trim().is_empty() { return Err("Live delegation has no request text".into()); }
+                output.push(("realtime.delegation".into(),call.delegation_body(json!({"delegation_id":id,"input_text":text,"transcript":call.transcript,"provider_event_id":event_id})),true));
             }
         }
         "session.delegation.created" if protocol == LiveProtocol::OpenaiLive => {
@@ -217,7 +221,7 @@ pub(crate) fn accept_event(
             crate::validate_identity(id, "delegation identity")?;
             if call.delegations.insert(id.into()) {
                 output.extend(seal_transcripts(call, "delegation"));
-                output.push(("realtime.delegation".into(),call.event_body(json!({"delegation_id":id,"input_text":null,"transcript":call.transcript,"offset_ms":event.get("offset_ms"),"provider_event_id":event_id})),true));
+                output.push(("realtime.delegation".into(),call.delegation_body(json!({"delegation_id":id,"input_text":null,"transcript":call.transcript,"offset_ms":event.get("offset_ms"),"provider_event_id":event_id})),true));
             }
         }
         "session.thinking.appended"
@@ -244,6 +248,7 @@ pub(crate) fn accept_event(
             output.push(("realtime.session.updated".into(),call.event_body(json!({"update_id":update_id,"client_event_id":id,"status":"chunk_injected","heard_audio":false,"provider_event_id":event_id})),false));
         }
         "session.started" | "session.updated" => {
+            call.status = "attached".into();
             output.push(("realtime.session.state".into(),call.event_body(json!({"state":"attached","provider_event":event_type,"provider_event_id":event_id})),false));
         }
         _ => {}

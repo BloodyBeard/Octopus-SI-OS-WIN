@@ -761,7 +761,7 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         let next = next.ok_or("payload readiness history lost its pending handoff")?;
         validate_pending_items_are_active(&authored, &writer.owner, &next)?;
         let publication = previous.as_ref().is_some_and(|prior|context_publication::is_publication_completion(prior, &next));
-        if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next)) {
+        if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next) && !rejected_final::follows(prior, &next)) {
             if prior.publication_unfinished() && !publication { return Ok(false); }
             if !all_admitted(index, prior, &record, &writer.owner, transition.call.seq.0)? { return Ok(false); }
             for item in &prior.items {
@@ -773,7 +773,7 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         if candidates.contains_key(&next.source_movement_seq) {
             if transition.writer != *writer { return Err("payload readiness completion changed its provider writer".into()); }
             if completed.get(&next.source_movement_seq).is_some_and(|prior|prior.terminal && !publication
-                && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next)) {
+                && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next) && !rejected_final::follows(prior, &next)) {
                 return Err("payload readiness history repeats a completed input".into());
             }
             completed.insert(next.source_movement_seq, next.clone());

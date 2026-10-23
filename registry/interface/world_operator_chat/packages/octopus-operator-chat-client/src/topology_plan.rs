@@ -289,6 +289,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
         &topology,
         &identity,
         &request.door_host_slots,
+        &capability_plan::project_source_folders(ee_policy_root, &identity.ee_id)?,
         &mut writes,
     )?;
     plan_authoring_interfaces(&interface_root, &config, &topology, &identity, &mut writes)?;
@@ -355,7 +356,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
         &mut writes,
     )?;
     home_voice::plan_descriptors(registry_root, &config, &topology, &identity, &mut writes)?;
-    if let Some(binding) = home_outputs::plan(request, &identity, &private_worker_role_artifacts, &mut writes)? { selected_context.push(binding); }
+    selected_context.extend(home_outputs::plan(request, &identity, &private_worker_role_artifacts, &mut writes)?);
     if let Some(binding) = native_run_authoring::plan(native_run_authoring::PlanContext {
         registry_root,
         ee_instances_root: &request.ee_instances_root,
@@ -437,7 +438,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
             .map(|_| &previous_authoring_profile),
     )?;
     let run_record_content = catalogue.wire(&identity.model_interface_id, run_record_content)?;
-    let run_record_content = home_outputs::wire(&identity, &role_artifacts, &selected_context, run_record_content)?;
+    let run_record_content = home_outputs::wire(&identity, &topology, &role_artifacts, &selected_context, run_record_content)?;
     let (run_record_content, intake) = input_intake::wire(registry_root, &identity, &mut writes, run_record_content)?;
     let (run_record_content, mut voice_run_writes) = home_voice::wire(request, &config, &identity, &role_artifacts, &selected_context, run_record_content)?;
     let run_record_content = context_bindings::configure_tool_context(registry_root, &identity, run_record_content, request.existing_run_record.as_ref())?;

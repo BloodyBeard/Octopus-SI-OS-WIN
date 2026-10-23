@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::artifact_bound::ArtifactBoundHandler;
-use crate::artifact_send::{ArtifactSendError, decode_artifact_send_call, execute_artifact_send};
+use crate::artifact_send::{ArtifactSendError, decode_artifact_send_call, execute_artifact_send_with_reference};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,7 +32,7 @@ struct Entry {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
     Artifact { handler_config: Value },
-    Emit { label: String, payload_argument: String },
+    Emit { label: String, payload_argument: String, #[serde(default)] await_client_result: bool },
 }
 
 #[derive(Deserialize)]
@@ -87,7 +87,7 @@ impl Server {
                         return Err("client MCP artifact operations are bounded read, list or search".into());
                     }
                 }
-                Operation::Emit { label, payload_argument } => {
+                Operation::Emit { label, payload_argument, .. } => {
                     if label.trim().is_empty() || payload_argument.trim().is_empty() {
                         return Err("MCP emission requires an exact label and payload argument".into());
                     }
@@ -206,12 +206,21 @@ pub(super) async fn execute(
                 Operation::Artifact { handler_config } => ArtifactBoundHandler.execute(context, &ToolCall {
                     tool_id: call.tool_id.clone(), arguments, handler_config: handler_config.clone(),
                 }).await.map(|result| result.body).map_err(|error| error.to_string()),
-                Operation::Emit { label, payload_argument } => {
-                    let send = json!({"interface":arguments["interface"],"label":label,"payload":arguments[payload_argument]});
+                Operation::Emit { label, payload_argument, await_client_result } => {
+                    let action = &arguments[payload_argument];
+                    let payload = if *await_client_result {
+                        json!({"schema":"octopus.client_action_request","schema_version":1,
+                            "action":action,"tool_call":input.artifact})
+                    } else { action.clone() };
+                    let send = json!({"interface":arguments["interface"],"label":label,"payload":payload});
                     match decode_artifact_send_call(input, &send) {
                         Err(error) => Err(error.to_string()),
-                        Ok(send) => match execute_artifact_send(input, io, send).await {
-                            Ok(verdict) => Ok(verdict),
+                        Ok(send) => match execute_artifact_send_with_reference(input, io, send).await {
+                            Ok((verdict, reference)) if *await_client_result && verdict.get("admitted").is_some() =>
+                                Ok(json!({"schema":"octopus.client_action_pending","schema_version":1,
+                                    "tool_call":input.artifact,"request_artifact":reference.id,"request_id":action["request_id"],
+                                    "admission":verdict})),
+                            Ok((verdict, _)) => Ok(verdict),
                             Err(ArtifactSendError::Capability(error)) => Err(error),
                             Err(ArtifactSendError::Unavailable(error)) => return Err(ToolProcessError::Unavailable(error)),
                         },

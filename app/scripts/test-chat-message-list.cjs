@@ -282,6 +282,56 @@ test("a turn growing below the reader keeps their place in the same frame", asyn
   assert.equal(-list().scrollTop, before + 300, "the measurement is committed and the scroll anchored before the frame ends");
 });
 
+test("opening and closing work details holds the selected header through resize and streaming", async () => {
+  for (const count of [1, 60]) {
+    const messages = [...turns(count - 1, `anchor${count}`), user("anchor-user", "Inspect work"), tool("anchor-tool", "completed"), answer("anchor-answer", "Done")];
+    await show({ messages, conversationId: `disclosure-anchor-${count}` });
+    const viewport = list();
+    setBox(viewport, { clientHeight: 800, scrollHeight: count * 300 });
+    const turn = query('[data-thread-turn-key="anchor-user"] > div');
+    resize([[turn, 300]]);
+    const header = query('[data-thread-turn-key="anchor-user"] .octopus-worked-for-toggle');
+    let growth = 0;
+    header.getBoundingClientRect = () => ({ top: 140 - growth - viewport.scrollTop, height: 24, bottom: 164 - growth - viewport.scrollTop });
+    header.click();
+    await settle();
+    for (growth of [40, 170, 360]) {
+      resize([[turn, 300 + growth]]);
+      viewport.dispatchEvent(new w.Event("scroll"));
+      assert.equal(header.getBoundingClientRect().top, 140, `${count} turns, expanded by ${growth}px`);
+    }
+    header.click();
+    await settle();
+    for (growth of [170, 40, 0]) {
+      resize([[turn, 300 + growth]]);
+      assert.equal(header.getBoundingClientRect().top, 140, `${count} turns, collapsed to ${growth}px`);
+    }
+    header.click();
+    await settle();
+    growth = 240;
+    resize([[turn, 540]]);
+    await show({ messages: [...messages, event("anchor-progress", "commentary_delta", "More work")], responseStreaming: true, conversationId: `disclosure-anchor-${count}` });
+    assert.equal(header.getBoundingClientRect().top, 140, "a projection update must not reattach the reader to the bottom");
+    await userScroll(0);
+    growth = 300;
+    resize([[turn, 600]]);
+    assert.equal(viewport.scrollTop, 0, "explicitly returning to the bottom resumes following");
+  }
+});
+
+test("work details opened by the reader stay mounted and open when the answer arrives", async () => {
+  const messages = [user("read-work", "Inspect"), tool("read-tool", "completed")];
+  await show({ messages, responseStreaming: true, conversationId: "read-working" });
+  const toggle = query(".octopus-agent-activity-toggle");
+  toggle.click();
+  await settle();
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  await show({ messages: [...messages, answer("read-answer", "Done")], conversationId: "read-working" });
+  assert.equal(query(".octopus-agent-activity-toggle"), toggle, "the result transition must retain the activity being read");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(query(".octopus-worked-for-toggle").getAttribute("aria-expanded"), "true");
+});
+
 test("returning to a long task shows the same turns at their measured heights", async () => {
   await show({ messages: turns(60, "r"), conversationId: "restored" });
   setBox(list(), { clientHeight: 800, scrollHeight: 60 * 400 });
@@ -313,4 +363,18 @@ test("a docked summary shifts the thread and its composer together and tells wid
     assert.match(element.style.transform || "none", /^(none|translateX\(0px\))$/);
     assert.equal(element.style.getPropertyValue("--thread-wide-block-inline-shift"), "0px");
   }
+});
+
+
+test("peer-triggered turns retain earlier answers and show the new activity without operator input", async () => {
+  const started = id => event(`start-${id}`, "turn_started", "", { _event: { turn_id: id }, turn: { id } });
+  const completed = id => event(`end-${id}`, "turn_completed", "", { _event: { turn_id: id }, turn: { id } });
+  const earlier = [started("first"), answer("peer-answer-1", "Waiting for the coordinating run"), completed("first")];
+  await show({ conversationId: "peer-turns", messages: [...earlier, started("second"), event("peer-work", "commentary", "Building with the supplied details")], responseStreaming: true });
+  assert.equal(mountedTurnKeys().length, 2);
+  assert.match(container.textContent, /Waiting for the coordinating run/);
+  assert.match(container.textContent, /Building with the supplied details/);
+  await show({ conversationId: "peer-turns", messages: [...earlier, started("second"), answer("peer-answer-2", "Widget installed"), completed("second")] });
+  assert.ok(messageGroup("peer-answer-1"));
+  assert.ok(messageGroup("peer-answer-2"));
 });

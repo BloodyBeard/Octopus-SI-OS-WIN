@@ -2,7 +2,7 @@ import type { HTMLAttributes, ReactNode } from "react";
 import type { ChatgptUsageState } from "../../account/chatgptUsageState";
 import { accountRemainingLabel, accountResetTime, accountUsageGroups } from "../../account/chatgptUsageModel";
 import { OcButton, OcSettingsRow } from "../../design-system/components";
-import { OctopusSpinner } from "../navigation/OctopusSpinner";
+import { OcLoadingRows, OcLoadingText } from "../../design-system/LoadingSkeleton";
 import "./account.css";
 
 type UsageViewState = ChatgptUsageState & { refresh?: () => Promise<unknown> };
@@ -29,14 +29,14 @@ function UsageNotice({ state }: { state: UsageViewState }) {
   return state.error ? <div className="account-inline-notice account-error" role="alert">
     <span>Usage is unavailable. {state.error}</span>
     <OcButton onClick={() => void state.refresh?.()}>Retry</OcButton>
-  </div> : <div className="account-inline-notice" role="status"><OctopusSpinner className="icon-xs" /><span>Loading usage…</span></div>;
+  </div> : <OcLoadingRows label="Loading usage…" rows={2} />;
 }
 
 export function AccountUsageSections({ state, signedIn, accountUnavailable = false, accountLoading = false }:
   { state: UsageViewState; signedIn: boolean; accountUnavailable?: boolean; accountLoading?: boolean }) {
   if (!signedIn || !state.value) return <AccountSection title="General usage limits">
-    {signedIn && (state.loading || state.error) ? <UsageNotice state={state} /> : <p className="account-section-footer" role="status">
-      {accountLoading ? "Checking account…" : accountUnavailable ? "Usage is unavailable until your account can be checked."
+    {accountLoading ? <OcLoadingRows label="Checking account…" rows={2} /> : signedIn && (state.loading || state.error) ? <UsageNotice state={state} /> : <p className="account-section-footer" role="status">
+      {accountUnavailable ? "Usage is unavailable until your account can be checked."
         : signedIn ? "No usage limits were reported for this account." : "Sign in with ChatGPT to view usage."}
     </p>}
   </AccountSection>;
@@ -59,7 +59,7 @@ export function AccountUsageSections({ state, signedIn, accountUnavailable = fal
         ? <p className="account-inline-notice">No usage limits were reported for this account.</p> : null}
     </div>
     <p className="account-section-footer">Shared by applications and Homes using this ChatGPT account.
-      {state.loading ? <span role="status"> Refreshing usage…</span> : <span> Updated {new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(new Date(state.value!.observedAtMs))}</span>}
+      {state.loading ? <> <OcLoadingText label="Refreshing usage…" /></> : <span> Updated {new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(new Date(state.value!.observedAtMs))}</span>}
     </p>
   </AccountSection>)}</>;
 }

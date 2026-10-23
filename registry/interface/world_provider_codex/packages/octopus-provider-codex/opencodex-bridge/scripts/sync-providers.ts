@@ -46,7 +46,7 @@ const EFFORT_DESCRIPTIONS: Record<Effort, string> = {
   max: "Maximum reasoning depth for the hardest problems",
 };
 const ADAPTERS = new Set(["anthropic", "azure", "claude-cli", "google", "openai-chat", "openai-responses"]);
-const CODEX_ONLY_PRIVATE_CONFIG = ["provider_operations", "web_search"];
+const CODEX_ONLY_PRIVATE_CONFIG = ["provider_operations", "web_search", "client_metadata"];
 const CODEX_NATIVE_SEARCH_TOOLS = ["web.search", "web.extract"];
 const CODEX_ONLY_OVERRIDES = [/^model_context_window=/, /^model_auto_compact_token_limit=/];
 const LIFE_BIN = "interface://world_provider_codex/packages/octopus-provider-codex/life-bin/octopus-provider-opencodex-life";

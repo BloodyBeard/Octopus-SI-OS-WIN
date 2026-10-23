@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OctopusOsFileEntry, OctopusOsFileRoot } from "../../electron";
 import { OcDropdown } from "../../design-system/OcDropdown";
@@ -118,7 +119,7 @@ function BreadcrumbDirectory({ activePath, directoryPath, expandActivePath, onSe
     return [...result];
   }, [directories, directoryPath, expanded, prefix]);
   if (error) return <div className="os-files-breadcrumb-message is-error" role="alert" title={error}>Couldn't load folder contents</div>;
-  if (!directories[directoryPath]) return <div className="os-files-breadcrumb-message" role="status">Loading…</div>;
+  if (!directories[directoryPath]) return <OcLoadingRows className="os-files-breadcrumb-message" label="Loading folder contents…" />;
   if (!paths.length) return <div className="os-files-breadcrumb-message">This folder is empty</div>;
   return <OctopusFileTree
     initialExpandedPaths={expanded}

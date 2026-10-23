@@ -213,6 +213,7 @@ declare global {
       readCodexUsage(request: OctopusCodexUsageReadRequest): Promise<OctopusCodexUsageSnapshot>;
       refreshProviderModels(request: OctopusProviderModelsRefreshRequest): Promise<OctopusProviderModelsRefreshResponse>;
       requestComposerPrediction(request: { runId: string }): Promise<{ id: string; text: string | null; runId: string } | null>;
+      requestTaskTitle(request: { runId: string }): Promise<{ title: string; runId: string } | null>;
       submitChatTurn(request: OctopusChatTurnRequest): Promise<OctopusChatTurnResponse>;
       readOperatorChatArtifacts(request: OctopusOperatorChatArtifactsRequest): Promise<OctopusOperatorChatArtifactsResponse>;
       submitOperatorTurnControl(request: OctopusOperatorTurnControlRequest): Promise<OctopusOperatorTurnControlResponse>;
@@ -262,10 +263,12 @@ export type OctopusClientAttachmentSelectionRequest = {
 export type OctopusClientDirectorySelection = {
   canceled: boolean;
   path: string;
+  paths: string[];
 };
 
 export type OctopusClientPathSelectionRequest = {
   mode: "file" | "directory";
+  allowMultiple?: boolean;
   title?: string;
   buttonLabel?: string;
 };
@@ -1512,6 +1515,7 @@ export type OctopusOsWorkspaceMutationRequest =
       parentEeId: string;
       expectedParentDigest: string;
       templateName: string;
+      sourceFolders?: string[];
       name: string;
       goal: string;
       presentation: { icon: string; color: string };
@@ -1598,6 +1602,8 @@ export type OctopusOsWorkspaceMutationRequest =
       };
       projects: Array<{
         eeId: string;
+        sourceFolders?: string[];
+        expectedProjectDigest?: string;
         name: string;
         icon: string;
         color: string;
@@ -1835,6 +1841,8 @@ export type OctopusClientSetupProgress = {
   percent: number;
 };
 
+export type OctopusClientContext = readonly Readonly<{ name: string; text: string }>[];
+
 export type OctopusChatTurnRequest = {
   endpoint?: string;
   timeoutMs?: number;
@@ -1889,6 +1897,7 @@ export type OctopusChatTurnRequest = {
     workerEnvironmentKind: string;
   }>;
   clientSurfaceRole: "home" | "task";
+  clientContext?: OctopusClientContext;
   continuation?: {
     sourceRunId: string;
     sourceArtifactId: string;
@@ -1914,6 +1923,7 @@ export type OctopusChatSteerRequest = {
   eeId?: string;
   workerInterfaceId?: string;
   clientSurfaceRole: "home" | "task";
+  clientContext?: OctopusClientContext;
   endpoint?: string;
   text: string;
   timeoutMs?: number;

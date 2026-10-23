@@ -32,7 +32,7 @@
       "read_paths": [], "write_paths": [], "executable_paths": [],
       "executable_commands": ["git", "sh", "bash", "zsh"],
       "read_env_paths": [], "write_env_paths": [], "executable_env_paths": ["PATH"],
-      "allow_network": true, "allow_local_ipc": true, "allow_sandbox_delegation": true
+      "allow_network": true, "allow_local_ipc": true, "allow_sandbox_delegation": true, "allow_process_signals": true
     }
   },
   "supported_worker_environment_kinds": ["filesystem_workspace"],

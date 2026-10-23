@@ -250,10 +250,10 @@ async function dataDirectoryFixture(root) {
   for (const [relative, body] of [["life-bin", "authored data\n"], ["entry/new.json", '{"text":"authored"}']]) {
     const file = ownerFile(roots, true, relative), prior = await fs.readFile(file).catch(error => { if (error.code !== "ENOENT") throw error; return null; });
     await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, body);
-    assert.equal((await record(roots)).receipt_state, "stale");
+    assert.equal((await record(roots)).receipt_state, "valid");
     if (prior) await fs.writeFile(file, prior); else await fs.unlink(file);
   }
-  await fs.chmod(ownerFile(roots, true, "life-bin"), 0o700); assert.equal((await record(roots)).receipt_state, "stale");
+  await fs.chmod(ownerFile(roots, true, "life-bin"), 0o700); assert.equal((await record(roots)).receipt_state, "valid");
   await fs.chmod(ownerFile(roots, true, "life-bin"), 0o755);
   await fs.writeFile(ownerFile(roots, true, "life-bin"), "damaged executable\n");
   await assert.rejects(repair(roots, "data_repair_001"), /repair cannot discard authored files/);
@@ -262,11 +262,11 @@ async function dataDirectoryFixture(root) {
     expectedInstalledDigests: { fixture: (await record(roots)).installed_digest } }), /removal cannot delete authored files/);
   const legacy = JSON.parse(initialReceipt); legacy.schema_version = 1;
   for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; delete member.configuration; }
-  await json(receiptPath, legacy); assert.equal((await record(roots)).receipt_state, "stale");
+  await json(receiptPath, legacy); assert.equal((await record(roots)).receipt_state, "valid");
   const reconstructible = JSON.parse(initialReceipt); for (const member of reconstructible.members) delete member.materialized_files;
   await json(receiptPath, reconstructible); await valid("entries/seed.bin"); await fs.writeFile(receiptPath, initialReceipt);
   await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", effort: "high" }, contract: 42 });
-  assert.equal((await record(roots)).receipt_state, "stale");
+  assert.equal((await record(roots)).receipt_state, "valid");
   await fs.writeFile(ownerFile(roots, false, "life-bin"), "release two\n");
   assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
   assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 42);
@@ -277,13 +277,13 @@ async function dataDirectoryFixture(root) {
   assert.equal(owner.materialized_files.some(file => file.path === "entries/new.json"), true);
   const unknown = structuredClone(updated); for (const member of unknown.members) delete member.materialized_files;
   await json(ownerFile(roots, true, "entries/new.json"), { text: "later publication" }); await valid("entries/new.json");
-  await json(receiptPath, unknown); assert.equal((await record(roots)).receipt_state, "stale"); await fs.writeFile(receiptPath, updatedReceipt);
+  await json(receiptPath, unknown); assert.equal((await record(roots)).receipt_state, "valid"); await fs.writeFile(receiptPath, updatedReceipt);
   await fs.unlink(ownerFile(roots, true, "entries/new.json"));
   assert.equal((await valid("entries/seed.bin")).local_changes.some(file => file.path === "entries/new.json"), false);
   await fs.writeFile(ownerFile(roots, true, "entries/seed.bin"), "later authored data\n"); await valid("entries/seed.bin");
   assert.equal((await adoptLocalPackageUpdates(roots)).changed, false); assert.deepEqual(await fs.readFile(receiptPath), updatedReceipt);
   await fs.writeFile(ownerFile(roots, false, "entries/seed.bin"), "incoming conflicting data\n");
-  assert.equal((await record(roots)).receipt_state, "stale");
+  assert.equal((await record(roots)).receipt_state, "valid");
   await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping source-owned changes.*entries\/seed.bin/);
   assert.deepEqual(await fs.readFile(receiptPath), updatedReceipt);
   assert.equal(await fs.readFile(ownerFile(roots, true, "entries/seed.bin"), "utf8"), "later authored data\n");
@@ -350,7 +350,7 @@ async function ownerAdditionFixtures(root) {
     const before = await fs.readFile(receiptPath); let pattern;
     if (refusal === "empty" || refusal === "foreign") {
       await fs.mkdir(added, { recursive: true }); if (refusal === "foreign") await json(path.join(added, "tool.json"), { retained: true });
-      pattern = /existing unowned target/;
+      pattern = refusal === "empty" ? /missing tool.json/ : /invalid descriptor identity/;
     } else if (refusal.startsWith("cross-")) {
       const other = { ...manifest, id: "z_foreign", product_id: "world_unused",
         members: [{ registry_kind: "interface", owner: refusal === "cross-manifest" ? "world_fixture" : "world_unused", primary: true }] };
@@ -607,14 +607,14 @@ async function releaseUpdateFixture(root) {
   const neighbor = path.join(roots.activeRegistryRoot, "interface", "private_task", "interface.json");
   await json(neighbor, { pending: "original" });
   const source = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8"), calls = [];
-  let live = false;
+  let live = false, expectedSetup = null;
   const context = {
     runtimeInitializationComplete: false, runtimeInitializationPromise: null, nativeBrowserHost: null,
     ensureRuntimeHost: () => ({ probe: async () => ({ phase: live ? "ready" : "unmanaged", ready: live, ownership: live ? "external" : "none", pid: live ? 42 : null, error: null }) }),
     resolveOctopusHome: () => root, clientSetupPackageRoots: () => roots, path, fs: fsSync,
     workspaceStorage: () => roots.publication,
     taskRetirementBarrier: async () => assert.fail("Package fixture must not retire tasks"),
-    readWorkspaceSetupState: async () => assert.fail("Package fixture must not inspect workspace topology"),
+    inspectWorkspaceSetupState: async () => assert.fail("Package fixture must not inspect workspace topology"),
     resolveRepoRoot: () => root, resolveSourceRegistry: () => roots.sourceRegistryRoot,
     resolveLocalPackageRegistry: () => roots.sourceRegistryRoot, resolveLocalPackageLibrary: () => roots.libraryRoot,
     projectEePolicies: () => assert.fail("Package fixture must not project client policies"),
@@ -626,7 +626,8 @@ async function releaseUpdateFixture(root) {
     registerLocalPackageMutationGuard, recoverLocalPackageTransactions, adoptLocalPackageUpdates,
     recoverWorkspaceTransactions: async () => calls.push("workspace"),
     startNativeBrowserEngine: async () => {
-      assert.equal(await fs.readFile(ownerFile(roots, true, "setup.cjs"), "utf8"), "module.exports = 4;\n");
+      if (expectedSetup === null) await assert.rejects(fs.readFile(ownerFile(roots, true, "setup.cjs")), { code: "ENOENT" });
+      else assert.equal(await fs.readFile(ownerFile(roots, true, "setup.cjs"), "utf8"), expectedSetup);
       calls.push("browser");
     },
     getOperatorChatClientLoader: () => ({ load: () => { calls.push("client"); return "loaded"; } }),
@@ -648,10 +649,10 @@ async function releaseUpdateFixture(root) {
   await fs.writeFile(ownerFile(roots, false, "life-bin"), "version four\n");
   const receiptPath = path.join(roots.stateRoot, "receipts", "fixture.json"), beforeReceipt = await fs.readFile(receiptPath);
   live = true;
-  await assert.rejects(context.loadOperatorChatClient(), /Close the running Octopus runtime/);
-  assert.deepEqual(calls, []); assert.deepEqual(await fs.readFile(receiptPath), beforeReceipt);
+  assert.equal(await context.loadOperatorChatClient(), "loaded");
+  assert.deepEqual(calls, ["browser", "client"]); assert.deepEqual(await fs.readFile(receiptPath), beforeReceipt);
   assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), "version one\n");
-  live = false;
+  live = false; expectedSetup = "module.exports = 4;\n"; context.runtimeInitializationComplete = false; calls.length = 0;
   await Promise.all([context.initializeRuntimeHost(), context.loadOperatorChatClient()]);
   assert.deepEqual(calls, ["workspace", "browser", "client"]);
   assert.deepEqual(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))), { id: "world_fixture", config: { model: "mine", endpoint: "private" }, contract: 4 });
@@ -794,7 +795,7 @@ async function run() {
     await json(ownerFile(roots, false, "interface.json"), { id: "world_fixture", config: { model: "new-default", effort: "high" }, contract: 2 });
     await fs.writeFile(ownerFile(roots, false, "life-bin"), "version two\n");
     current = await record(roots);
-    assert.equal(current.receipt_state, "stale");
+    assert.equal(current.receipt_state, "valid");
     const review = expected(current);
     await repairLocalPackages({ ...roots, operationId: "fixture_repair_001", packageIds: ["fixture"], expectedRepairs: review });
     assert.deepEqual(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))), { id: "world_fixture", config: { model: "selected", endpoint: "configured" }, contract: 2 });
@@ -823,7 +824,7 @@ async function run() {
       if (mode === "remove-rename") child("remove-restore", directory);
       const recovered = await record(roots);
       assert.equal(recovered.materialized, mode !== "install-rename");
-      assert.equal(recovered.receipt_state, mode === "install-rename" ? "missing" : mode === "repair-copy" ? "stale" : "valid");
+      assert.equal(recovered.receipt_state, mode === "install-rename" ? "missing" : "valid");
       assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
     }
     const collision = await fixture(path.join(root, "foreign-target"));
@@ -902,7 +903,7 @@ async function run() {
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 if (require.main === module) {
-  const focused = { "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures, "--owner-retirements": retirementFixtures,
+  const focused = { "--release-update": releaseUpdateFixture, "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures, "--owner-retirements": retirementFixtures,
     "--publication-recovery": publicationRecoveryFixture,
     "--configuration-evolution": configurationEvolutionFixture,
     "--absent-owner-race": absentOwnerRenameRaceFixture, "--conflict-resolutions": conflictResolutionFixtures }[process.argv[2]];

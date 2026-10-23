@@ -1,3 +1,4 @@
+import { OcLoadingRows, OcLoadingText } from "../design-system/LoadingSkeleton";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { OcButton, OcMenuItem, OcMenuSurface } from "../design-system/components";
@@ -245,7 +246,7 @@ function RegistryJsonColumn({ onOpenFiles, target }: { onOpenFiles: (target: Fil
       <header className="rg-col-head">
         <div>
           <div className="rg-col-title">{title}</div>
-          <div className="rg-col-meta">{loading ? "loading" : error ? "unavailable" : registryFileMeta(file)}</div>
+          <div className="rg-col-meta">{loading ? <OcLoadingText label="Loading descriptor metadata…">Metadata</OcLoadingText> : error ? "unavailable" : registryFileMeta(file)}</div>
         </div>
       </header>
       <div className="rg-detail-body">
@@ -263,7 +264,7 @@ function RegistryJsonColumn({ onOpenFiles, target }: { onOpenFiles: (target: Fil
             title="Descriptor unavailable"
           />
         ) : <div className="rg-error">{error}</div> : null}
-        {!error && loading ? <div className="rg-empty">Loading descriptor…</div> : null}
+        {!error && loading ? <OcLoadingRows label="Loading descriptor…" /> : null}
         {!error && !loading && file?.kind === "binary" ? (
           <div className="rg-empty">Binary registry files cannot be rendered as JSON.</div>
         ) : null}
@@ -422,7 +423,7 @@ function RegistryInterfaceColumn({ accessProfile, activePath, onContextMenu, onS
             title="Interfaces unavailable"
           />
         ) : null}
-        {loading && !items.length ? <div className="rg-empty">Loading registered interfaces…</div> : null}
+        {loading && !items.length ? <OcLoadingRows label="Loading registered interfaces…" /> : null}
         {!loading && issue?.kind !== "fatal" && !items.length ? <div className="rg-empty">No interfaces are registered.</div> : null}
         {!loading && items.length > 0 && !filteredItems.length ? <div className="rg-empty">No interfaces match this filter.</div> : null}
         {filteredItems.length ? (

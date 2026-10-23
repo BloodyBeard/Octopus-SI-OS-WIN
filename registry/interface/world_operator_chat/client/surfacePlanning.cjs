@@ -6,6 +6,8 @@ const { assertExactOperatorClientInterface } = require("./artifactBatches.cjs");
 const { chatIdentityFromRunRecord, readConversationState, resolveContinuationState } = require("./conversation.cjs");
 const { resolveRunRecordsRoot, writeContentAddressedPayload } = require("./operatorMessages.cjs");
 const { runOperatorRevisionCommand } = require("./operatorTurns.cjs");
+const { openNativeAdoptionBatch } = require("./nativeAdoptionBatch.cjs");
+const { validatePlannedHostBindings } = require("./hostBindings.cjs");
 const { readFileHashIfPresent, resolveRegistryRoot, waitForInterfaceSocket, withRunAuthoringLock } = require("./publication.cjs");
 const { readConfig, resolveEeInstancesRoot, resolveInstallationRoot, resolvePackageExecutable } = require("./roots.cjs");
 const { assertPublicationExpansion, interfaceEndpoint, operatorContextArtifactBindings, operatorDoorHostSlots, operatorExternalInputs, operatorExternalRelays, operatorModelOutputs, operatorPayloadArtifactBindings, operatorPublications, operatorSelectedTools, operatorSelectedWorkerEnvironmentKinds, operatorSurfaceRole, planOperatorChatTopology, plannedAdditionalRunWrites, plannedClientRemoval, plannedClientWrite, plannedExactIds, safeContractToken, safeSha256, validatePlannedRunRecord } = require("./topologyPlan.cjs");
@@ -434,6 +436,7 @@ async function planOperatorChatTaskAmendment(options, request) {
     tag: `run:${runId}`,
     expectedBeforeHash: expectedRunHash,
   });
+  await validatePlannedHostBindings({ octopusHome, registryRoot, plan: { writes, requiredToolIds: topologyPlan.required_tool_ids } });
   return {
     runId,
     writes,
@@ -444,6 +447,10 @@ async function planOperatorChatTaskAmendment(options, request) {
 }
 
 async function planOperatorChatPackageAdoption(options, request) {
+  return planPackageAdoption(options, request, (planner, payload) => runOperatorRevisionCommand(planner, "--plan-native-adoption", payload));
+}
+
+async function planPackageAdoption(options, request, planNative) {
   const config = await readConfig();
   const home = absolutePath(options.octopusHome(), "octopusHome");
   const registryRoot = resolveRegistryRoot(options);
@@ -462,7 +469,7 @@ async function planOperatorChatPackageAdoption(options, request) {
   if (!descriptor) throw new Error(`native package adoption provider '${provider}' is absent`);
   const eeInstancesRoot = await resolveEeInstancesRoot(home, options);
   const planner = resolvePackageExecutable(config, resolveInstallationRoot(options), registryRoot, "topology_planner");
-  const plan = await runOperatorRevisionCommand(planner, "--plan-native-adoption", {
+  const plan = await planNative(planner, {
     roots: { registry_root: registryRoot, ee_instances_root: eeInstancesRoot,
       run_records_root: runsRoot, interface_private_state_root: path.join(home, "interfaces") },
     ledger_root: path.join(home, "ledger"), client_template_interface: config.interface,
@@ -487,15 +494,21 @@ async function planOperatorChatPackageAdoption(options, request) {
   if (plan.status === "planned") {
     const toolWrites = writes.filter(write => toolPaths.has(write.path));
     const nativeWrites = writes.filter(write => !toolPaths.has(write.path) && write !== policyWrite && write !== runWrite);
+    const nativePathsValid = nativeWrites.length === 0
+      || nativeWrites.length === 1 && nativeWrites[0].path === providerPath
+      || nativeWrites.length === 2 && nativeWrites[0].path === catalogPath && nativeWrites[1].path === providerPath;
     const ordered = [...toolWrites, ...(policyWrite ? [policyWrite] : []), ...(runWrite ? [runWrite] : []), ...nativeWrites];
     if (!writes.length || new Set(writes.map((write) => write.path)).size !== writes.length
       || ordered.some((write, index) => write !== writes[index]) || policyWrite && !runWrite
-      || (nativeWrites.length && (nativeWrites.length !== 2 || writes.at(-2)?.path !== catalogPath || writes.at(-1)?.path !== providerPath))) {
-      throw new Error("native package adoption may write only declared private tools, its exact worker policy and target Run, followed by its exact catalog and provider declaration");
+      || !nativePathsValid) {
+      throw new Error("native package adoption may write only declared private tools, its exact worker policy and target Run, followed by its exact provider declaration with an optional preceding catalog");
     }
     for (const write of writes) {
       safeSha256(write.expected_before_hash, "native adoption write preimage");
       requiredString(write.content, "native adoption content");
+      if (write.path === providerPath && JSON.parse(write.content).id !== provider) {
+        throw new Error("provider contract adoption changed its exact private provider identity");
+      }
       const expected = toolPaths.get(write.path);
       if (expected) {
         const descriptor = JSON.parse(write.content);
@@ -554,10 +567,12 @@ async function planOperatorChatPackageAdoption(options, request) {
     ee = document.value.parent_ee_id;
   }
   const deliveryRoot = path.join(home, "interfaces", provider, "handoff-delivery");
+  const grantRoot = path.join(home, "ledger", "metadata");
   for (const preimage of preimages) {
     const file = absolutePath(preimage.path, "native adoption preimage path");
     const delivery = path.dirname(file) === deliveryRoot && /^[0-9a-f]{64}\.json$/.test(path.basename(file));
-    if (file !== preimage.path || !file.startsWith(`${registryRoot}${path.sep}`) && !evidencePaths.has(file) && !delivery) {
+    const grant = path.dirname(file) === grantRoot && /^[0-9a-f]{64}$/.test(path.basename(file)) && preimage.sha256 !== null;
+    if (file !== preimage.path || !file.startsWith(`${registryRoot}${path.sep}`) && !evidencePaths.has(file) && !delivery && !grant) {
       throw new Error("native adoption preimage is outside its exact run, Registry and tool completion evidence");
     }
     if (preimage.sha256 !== null) safeSha256(preimage.sha256, "native adoption preimage hash");
@@ -577,34 +592,47 @@ async function adoptOperatorChatPackageUpdates(options, request) {
   const onResult = requiredFunction(options?.onResult, "native adoption result projection");
   const seen = new Set();
   const results = [];
-  for (const row of requiredArray(request?.clientRuns, "native adoption clientRuns")) {
-    const runId = safeSegment(row.run_id, "native adoption run");
-    if (seen.has(runId)) throw new Error(`native adoption repeats run '${runId}'`);
-    seen.add(runId);
-    const result = await withRunAuthoringLock(runId, async () => {
-      await assertStopped();
-      const plan = await planOperatorChatPackageAdoption(options, { runId, expectedRunHash: row.record_digest });
-      if (plan.status === "planned") {
-        for (const preimage of plan.preimages) {
-          const current = await readFileHashIfPresent(preimage.path);
-          if ((current?.hash ?? null) !== preimage.sha256) throw new Error(`native adoption preimage changed at '${preimage.path}'`);
-        }
+  const rows = requiredArray(request?.clientRuns, "native adoption clientRuns");
+  if (!rows.length) return { changed: false, results };
+  const config = await readConfig();
+  const planner = resolvePackageExecutable(config, resolveInstallationRoot(options), resolveRegistryRoot(options), "topology_planner");
+  const batch = openNativeAdoptionBatch(planner, { timeoutMs: config.authoring.result_timeout_ms, signal: options.signal });
+  try {
+    for (const row of rows) {
+      const runId = safeSegment(row.run_id, "native adoption run");
+      if (seen.has(runId)) throw new Error(`native adoption repeats run '${runId}'`);
+      seen.add(runId);
+      const result = await withRunAuthoringLock(runId, async () => {
         await assertStopped();
-        await commit({ label: `adopt client package declarations for ${runId}`,
-          condition: { octopus_home: absolutePath(options.octopusHome(), "octopusHome"), preimages: plan.preimages },
-          writes: plan.writes.map((write) => ({file:write.path,content:write.content,beforeDigest:write.expected_before_hash,label:write.tag})),
-          removals: [], publishBarrierPath: plan.writes.at(-1).path });
-        for (const write of plan.writes) {
-          const current = await readFileHashIfPresent(write.path);
-          if (current?.hash !== sha256Hex(Buffer.from(write.content))) throw new Error(`native adoption readback differs at '${write.path}'`);
+        const plan = await planPackageAdoption(options, { runId, expectedRunHash: row.record_digest }, (binary, payload) => {
+          if (binary !== planner) throw new Error("Native adoption planner changed during its batch");
+          return batch.plan(payload);
+        });
+        if (plan.status === "planned") {
+          for (const preimage of plan.preimages) {
+            const current = await readFileHashIfPresent(preimage.path);
+            if ((current?.hash ?? null) !== preimage.sha256) throw new Error(`native adoption preimage changed at '${preimage.path}'`);
+          }
+          await assertStopped();
+          batch.assertActive();
+          await commit({ label: `adopt client package declarations for ${runId}`,
+            condition: { octopus_home: absolutePath(options.octopusHome(), "octopusHome"), preimages: plan.preimages },
+            writes: plan.writes.map((write) => ({file:write.path,content:write.content,beforeDigest:write.expected_before_hash,label:write.tag})),
+            removals: [], publishBarrierPath: plan.writes.at(-1).path });
+          for (const write of plan.writes) {
+            const current = await readFileHashIfPresent(write.path);
+            if (current?.hash !== sha256Hex(Buffer.from(write.content))) throw new Error(`native adoption readback differs at '${write.path}'`);
+          }
         }
-      }
-      return { runId, providerInterfaceId: plan.provider_interface_id,
-        status: plan.status === "planned" ? "adopted" : plan.status,
-        sourceMovementSeq: plan.source_movement_seq, reason: plan.reason };
-    });
-    results.push(result);
-    await onResult(result);
-  }
-  return { changed: results.some((row) => row.status === "adopted"), results };
+        return { runId, providerInterfaceId: plan.provider_interface_id,
+          status: plan.status === "planned" ? "adopted" : plan.status,
+          sourceMovementSeq: plan.source_movement_seq, reason: plan.reason };
+      });
+      results.push(result);
+      await onResult(result);
+    }
+    await batch.finish();
+    return { changed: results.some((row) => row.status === "adopted"), results };
+  } catch (error) { batch.abort(error); throw error; }
+  finally { await batch.close(); }
 }

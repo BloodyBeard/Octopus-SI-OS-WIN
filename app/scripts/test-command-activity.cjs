@@ -115,6 +115,23 @@ const declaredCommand = { "unrelated.custom.execute": { conversationVisible: tru
 const custom = (id, body, extra = {}) => tool(id, { tool: "unrelated.custom.execute", call_id: id, ok: true, status: "completed", arguments: { command: "arbitrary executable" }, body, ...extra });
 const native = (id, output, status = "completed") => event(id, "tool", { call_id: id, command: "arbitrary executable", status, output });
 
+test("process polling settles the original command and retains its output without merging another owner", async () => {
+  const started = tool("exec-start", { tool: "workspace.exec__room", call_id: "exec", status: "started", arguments: { command: "long-command" } });
+  const yielded = tool("exec-yield", { tool: "workspace.exec__room", call_id: "exec", status: "completed", ok: true,
+    body: { process_id: "process", completed: false, output: { running: true, chunks: [{ source_seq: 1, stream: "stdout", content: { text: "first output" } }] } } });
+  const poll = tool("poll", { tool: "workspace.write_stdin__room", call_id: "poll", status: "started", arguments: { process_id: "process", chars: "" } });
+  const done = tool("poll-done", { tool: "workspace.write_stdin__room", call_id: "poll", status: "completed", ok: true,
+    body: { process_id: "process", completed: true, output: { running: false, exited: true, exit_code: 0, chunks: [{ source_seq: 2, stream: "stdout", content: { text: "last output" } }] } } });
+  await show([ask("u"), started, yielded, poll, done]); await openGroups();
+  assert.equal(exec().length, 1);
+  assert.equal(exec()[0].dataset.commandState, "exited");
+  assert.match(exec()[0].textContent, /long-command/);
+  assert.match(exec()[0].textContent, /first output/);
+  assert.match(exec()[0].textContent, /last output/);
+  await show([ask("u"), started, yielded, { ...done, runId: "other" }]); await openGroups();
+  assert.equal(exec()[0].dataset.commandState, "running", "a different run cannot settle this process");
+});
+
 test("a tool result returns to the turn that started its exact call while unrelated results stay where they arrived", async () => {
   const user = ask("first"), queued = ask("queued", 3);
   const started = tool("call", { tool: "code_mode.run", call_id: "exact-call", status: "started", thread_id: "thread", turn_id: "native-turn", arguments: { script: "broken();" } });
@@ -144,6 +161,25 @@ test("a tool result returns to the turn that started its exact call while unrela
     await show([user, started, queued, foreign]);
     assert.equal(activityIn("queued"), true, JSON.stringify(foreign.eventData));
   }
+});
+
+test("finished turns stop activity animation without inventing a tool outcome", async () => {
+  const pending = tool("widget", { tool: "client.widgets", call_id: "widget", status: "started" });
+  await show([ask("u"), pending], { streaming: true });
+  await openGroups();
+  assert.ok(container.querySelector(".octopus-cadenced-shimmer"));
+  for (const end of [event("error", "turn_error", {}, { text: "Provider disconnected", error: true, terminal: true }),
+    event("done", "message", { phase: "final_answer" }, { text: "Done", terminal: true })]) {
+    await show([ask("u"), pending, end]);
+    const history = container.querySelector(".octopus-worked-for-toggle");
+    if (history) { history.click(); await settle(); }
+    await openGroups();
+    assert.equal(container.querySelector(".octopus-cadenced-shimmer"), null);
+  }
+  const { commandActivityModel } = await ui;
+  const result = custom("exited", { process_id: "p", output: { running: true, exit_code: 0 } });
+  assert.equal(commandActivityModel(result).phase, "exited");
+  assert.equal(commandActivityModel(result).running, false);
 });
 
 test("every supplied command shape shows its command, an absent one says so, and code runs as code", async () => {
@@ -410,8 +446,9 @@ test("commands report every outcome from their own evidence", async () => {
   assert.deepEqual([running.invocationStatus, running.phase, running.yielded], ["completed", "running", true]);
   await show([ask("u"), yielded], { streaming: true, toolPresentations: declaredCommand });
   await openGroups();
-  assert.equal(rows()[0].dataset.state, "active");
-  assert.match(execSummary(exec()[0]), /^Command still running/);
+  assert.equal(rows()[0].dataset.state, "complete", "the status read completed; the process remains explicitly running at its last observation");
+  assert.match(execSummary(exec()[0]), /^Command running at last check$/);
+  assert.equal(exec()[0].querySelector(".octopus-cadenced-shimmer"), null, "a returned process snapshot does not pretend to be live telemetry");
   assert.doesNotMatch(exec()[0].textContent, /Exit code|Success/);
   const controlled = custom("controlled", { ...yielded.eventData.body, control: { action: "interrupt", delivered: true } });
   assert.equal(commandActivityModel(controlled).phase, "running");

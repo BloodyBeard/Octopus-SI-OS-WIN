@@ -73,7 +73,7 @@ struct RetainedOutputChunk {
 }
 
 struct RunningProcess {
-    session: ExecCommandSession,
+    session: Arc<ExecCommandSession>,
     tty: bool,
     pipe_stdin: bool,
     accepted_stdin_write_ids: Arc<Mutex<AcceptedStdinWriteIds>>,
@@ -187,24 +187,28 @@ impl LocalProcess {
 
     pub(crate) async fn shutdown(&self, timeout: Duration) -> Result<(), JSONRPCErrorError> {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut processes = self.inner.processes.lock().await;
+        let processes = self.inner.processes.lock().await;
         self.inner
             .accepting_processes
             .store(false, Ordering::SeqCst);
+        let mut sessions = Vec::with_capacity(processes.len());
         for (process_id, process) in processes.iter() {
             let ProcessEntry::Running(process) = process else {
                 return Err(internal_error(format!(
                     "process {process_id} is still starting during session release"
                 )));
             };
+            sessions.push((process_id.clone(), Arc::clone(&process.session)));
+        }
+        drop(processes);
+        for (process_id, session) in sessions {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(internal_error(
                     "session process shutdown deadline elapsed".to_string(),
                 ));
             }
-            process
-                .session
+            session
                 .terminate_and_wait(remaining)
                 .await
                 .map_err(|error| {
@@ -213,8 +217,7 @@ impl LocalProcess {
                     ))
                 })?;
         }
-        processes.clear();
-        drop(processes);
+        self.inner.processes.lock().await.clear();
         self.inner.process_liveness.notify_waiters();
         Ok(())
     }
@@ -322,7 +325,11 @@ impl LocalProcess {
                 Some(ProcessEntry::Starting(current)) if Arc::ptr_eq(current, &start)
             ) {
                 drop(process_map);
-                spawned.session.terminate();
+                spawned.session.terminate().map_err(|error| {
+                    internal_error(format!(
+                        "cancelled process {process_id} termination failed: {error}"
+                    ))
+                })?;
                 return Err(invalid_request(format!(
                     "process {process_id} start was cancelled"
                 )));
@@ -330,7 +337,7 @@ impl LocalProcess {
             process_map.insert(
                 process_id.clone(),
                 ProcessEntry::Running(Box::new(RunningProcess {
-                    session: spawned.session,
+                    session: Arc::new(spawned.session),
                     tty: params.tty,
                     pipe_stdin: params.pipe_stdin,
                     accepted_stdin_write_ids: Arc::new(
@@ -538,7 +545,12 @@ impl LocalProcess {
             match process_map.get(&params.process_id) {
                 Some(ProcessEntry::Running(process)) => {
                     if process.exit_code.is_some() {
-                        return Ok(SignalResponse { delivered: false });
+                        #[cfg(target_os = "macos")]
+                        let closed = process.session.termination_scope_has_exited()
+                            .map_err(|error| internal_error(format!("process scope inspection failed: {error}")))?;
+                        #[cfg(not(target_os = "macos"))]
+                        let closed = true;
+                        if closed { return Ok(SignalResponse { delivered: false }); }
                     }
                     process
                         .session
@@ -564,9 +576,18 @@ impl LocalProcess {
             match process_map.get(&params.process_id) {
                 Some(ProcessEntry::Running(process)) => {
                     if process.exit_code.is_some() {
-                        return Ok(TerminateResponse { running: false });
+                        #[cfg(target_os = "macos")]
+                        let closed = process.session.termination_scope_has_exited()
+                            .map_err(|error| internal_error(format!("process scope inspection failed: {error}")))?;
+                        #[cfg(not(target_os = "macos"))]
+                        let closed = true;
+                        if closed { return Ok(TerminateResponse { running: false }); }
                     }
-                    process.session.terminate();
+                    process.session.terminate().map_err(|error| {
+                        internal_error(format!(
+                            "process {} termination failed: {error}", params.process_id
+                        ))
+                    })?;
                     true
                 }
                 Some(ProcessEntry::Starting(_)) => {
@@ -902,6 +923,30 @@ async fn watch_exit(
             .await;
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        let session = {
+            let processes = inner.processes.lock().await;
+            let Some(ProcessEntry::Running(process)) = processes.get(&process_id) else { return; };
+            Arc::clone(&process.session)
+        };
+        loop {
+            match session.termination_scope_has_exited() {
+                Ok(true) => break,
+                Ok(false) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) => {
+                    let processes = inner.processes.lock().await;
+                    if let Some(ProcessEntry::Running(process)) = processes.get(&process_id) {
+                        process.events.publish(ExecProcessEvent::Failed(format!(
+                            "process {process_id} scope closure failed: {error}"
+                        )));
+                    }
+                    output_notify.notify_waiters();
+                    return;
+                }
+            }
+        }
+    }
     maybe_emit_closed(process_id, Arc::clone(&inner)).await;
 }
 
@@ -931,6 +976,10 @@ async fn maybe_emit_closed(process_id: ProcessId, inner: Arc<Inner>) {
             return;
         }
 
+        #[cfg(target_os = "macos")]
+        if !matches!(process.session.termination_scope_has_exited(), Ok(true)) {
+            return;
+        }
         process.closed = true;
         let seq = process.next_seq;
         process.next_seq += 1;
@@ -1227,7 +1276,7 @@ mod tests {
         let previous = processes.insert(
             process_id.clone(),
             ProcessEntry::Running(Box::new(RunningProcess {
-                session: dummy_session(),
+                session: Arc::new(dummy_session()),
                 tty: false,
                 pipe_stdin: false,
                 accepted_stdin_write_ids: Arc::new(Mutex::new(AcceptedStdinWriteIds::default())),
@@ -1290,6 +1339,37 @@ mod tests {
             resizer: None,
         })
         .session
+    }
+
+    #[tokio::test]
+    async fn shutdown_wait_releases_process_map_and_can_retry_after_timeout() {
+        let backend = LocalProcess::default();
+        let process = spawn_test_process(&backend, "cleanup-retry").await;
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let (_stdout_tx, stdout_rx) = tokio::sync::broadcast::channel(1);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let requested = Arc::new(Notify::new());
+        let signal = Arc::clone(&requested);
+        let session = crate::pty::spawn_from_driver(ProcessDriver {
+            writer_tx, stdout_rx, stderr_rx: None, exit_rx,
+            terminator: Some(Box::new(move || signal.notify_one())),
+            writer_handle: None, resizer: None,
+        }).session;
+        if let ProcessEntry::Running(running) = backend.inner.processes.lock().await
+            .get_mut(&process.process_id).unwrap() {
+            running.session = Arc::new(session);
+        }
+        let waiting_backend = backend.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_backend.shutdown(Duration::from_millis(100)).await
+        });
+        timeout(Duration::from_secs(1), requested.notified()).await.unwrap();
+        assert!(backend.inner.processes.try_lock().is_ok(), "exit collection must stay unblocked");
+        assert!(waiting.await.unwrap().is_err());
+        assert!(backend.inner.processes.lock().await.contains_key(&process.process_id));
+        exit_tx.send(0).unwrap();
+        backend.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert!(backend.inner.processes.lock().await.is_empty());
     }
 
     async fn read_process_until_change(

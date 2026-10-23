@@ -253,6 +253,8 @@ function operatorChatContextProjection(store) {
         agent_catalog_digest: stringValue(osScope.agent_catalog_digest),
         default_task_access_mode: defaultTaskAccessMode,
         host_root_refs: objectOrEmpty(projection.hostRootRefs),
+        full_access_root: stringValue(projection.fullAccessRoot),
+        source_folders: arrayValue(environment.config?.octopus_os?.source_folders),
         formed_envelope: effectivePolicy,
         workers: availableWorkers,
       }];

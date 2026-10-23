@@ -162,6 +162,8 @@ fn setup(root: &Path) -> Store {
             delegations: BTreeSet::new(),
             updates: BTreeMap::new(),
             stops: BTreeMap::new(),
+            client_context: None,
+            session_configuration: None,
         },
     );
     store

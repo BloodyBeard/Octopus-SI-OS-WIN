@@ -62,6 +62,7 @@ pub(crate) enum TurnDrainOutcome {
 
 pub(crate) enum ProviderStreamEmission {
     Turn(ProviderEmission),
+    Progress(ProviderEmission),
     WithOutgoingBindings {
         emission: ProviderEmission,
         bindings: Vec<octopus_run_authoring::ProviderOutgoingBinding>,
@@ -169,6 +170,16 @@ impl ProviderOutputStream {
                 InterfaceDriverError::Transport(
                     "turn emission sink closed (the interface life is gone); aborting the turn"
                         .into(),
+                )
+            })
+    }
+
+    pub(crate) fn send_progress(&self, emission: ProviderEmission) -> Result<(), InterfaceDriverError> {
+        self.sender
+            .send(ProviderStreamEmission::Progress(emission))
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "turn progress sink closed before the observation could be handed".into(),
                 )
             })
     }

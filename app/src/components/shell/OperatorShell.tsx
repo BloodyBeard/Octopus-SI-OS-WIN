@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { AnimatePresence } from "motion/react";
 import { AppShell, readSidebarWidth } from "./AppShell";
 import { isVoiceCallActive } from "../voice/voicePresentation";
 import { SurfacePage } from "./SurfacePage";
@@ -8,6 +9,7 @@ import { ScheduledWorkspaceProvider } from "../scheduled/ScheduledWorkspace";
 import type { MarkActivityItem } from "../activity/markActivity";
 import { CLIENT_NOTIFICATION_ACTIVATE_EVENT, type ClientNotificationTarget } from "../../clientNotifications";
 import { SurfaceHost } from "./SurfaceHost";
+import { taskDraftActions } from "./taskDraftActions";
 import { RetainedTerminalTabs } from "./RetainedTerminalTabs";
 import { RetainedWorkerEnvironmentTabs } from "./RetainedWorkerEnvironmentTabs";
 import { terminalLaunchCwd } from "../../shell/terminalLaunchContext";
@@ -58,6 +60,7 @@ import type { OctopusClientAccessProfile, OctopusClientWindowCloseRequest } from
 import { useRuntimeTopology } from "../../runtimeTopology";
 import { useClientSurfaces } from "../../shell/surfaceRegistry";
 import { applyHomeWidgetAction } from "../../client-surfaces/homeWidgetControls";
+import { useClientObservation } from "../../client-surfaces/useClientObservation";
 import { useAdmittedClientActions } from "../../shell/useAdmittedClientActions";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import {
@@ -83,6 +86,7 @@ import {
   TASK_ORDER_STORAGE_KEY,
   defaultPinnedTaskIds,
   clientTaskTitle,
+  clientProjectScopeIds,
   ensureLabSidebarSeeds,
   migrateClientShellState,
   profileStorageKey,
@@ -229,6 +233,12 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const primaryDestinations = new Set(clientNavigationDestinations.map((destination) => destination.surfaceId));
     return surfaceRegistry.surfaces.filter((surface) => primaryDestinations.has(surface.id) || !hiddenSurfaceIds.has(surface.id));
   }, [clientPreferences.hiddenSurfaceIds, surfaceRegistry.surfaces]);
+  const clientContext = useClientObservation({
+    accessProfile, runId: homeRunId, interfaceId: agentProjectWorkspace.homeInterfaceId,
+    surfaces: surfaceRegistry.voiceSurfaces, extensions: surfaceRegistry.extensions,
+    availableSurfaces: visibleSurfaces.filter(surface => !isSidebarOnlySurface(surface)),
+    ready: surfaceRegistry.hydrated && !surfaceRegistry.errors.length && !agentProjectWorkspace.error,
+  });
   const initialSecondaryPaneState = useMemo(() => {
     if (clientWindowInitialTarget) {
       const tab = workspacePaneTabForTarget(clientWindowInitialTarget);
@@ -252,6 +262,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     clientWindowChatStorageScope(clientWindow.scope, "main"),
     "task",
     runtimeHost.home,
+    clientContext,
   );
   const homeChatWorkspace = useChatWorkspace(
     accessProfile,
@@ -260,6 +271,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     clientWindowChatStorageScope(clientWindow.scope, "home"),
     "home",
     runtimeHost.home,
+    clientContext,
   );
   const secondaryChatWorkspace = useChatWorkspace(
     accessProfile,
@@ -268,6 +280,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     clientWindowChatStorageScope(clientWindow.scope, "secondary"),
     "task",
     runtimeHost.home,
+    clientContext,
   );
   const taskWorkspaceNavigationRef = useRef({ main: chatWorkspace, secondary: secondaryChatWorkspace });
   taskWorkspaceNavigationRef.current = { main: chatWorkspace, secondary: secondaryChatWorkspace };
@@ -275,7 +288,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const voiceContext = useMemo(() => projectHomeVoiceContext(
     homeChatWorkspace.renderedMessages, homeRunId,
     homeChatWorkspace.activeRun?.runId === homeRunId ? homeChatWorkspace.activeRun.chatInterfaceId : "",
-  ), [homeChatWorkspace.renderedMessages, homeChatWorkspace.activeRun, homeRunId]);
+    homeChatWorkspace.activeRun?.runId === homeRunId ? homeChatWorkspace.activeRun.voiceContext?.delegationInterfaceId : "",
+    clientContext,
+  ), [homeChatWorkspace.renderedMessages, homeChatWorkspace.activeRun, homeRunId, clientContext]);
   useEffect(() => { void voiceSession.updateContext(voiceContext); }, [voiceSession.updateContext, voiceContext]);
   const setProjectFilterEeId = useCallback((eeId: string) => {
     const next = eeId.trim();
@@ -1032,7 +1047,11 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     { glyph: "terminal" as const, id: "operator:terminal", section: "workspace", shortcut: paneShortcut("open_terminal"), title: "Terminal" },
     { glyph: "folder" as const, id: "operator:files", section: "workspace", title: "Files" },
     ...workerEnvironmentActions.map((action) => ({
+      description: action.description,
       glyph: action.glyph,
+      group: action.panelKind === "files" ? { id: "task-files", title: "Task files", glyph: "folder" as const }
+        : ["connection", "runtime", "container", "worktree", "overview"].includes(action.panelKind)
+          ? { id: "environment-details", title: "Environment details", glyph: "ee" as const } : undefined,
       id: `we:${action.id}`,
       moreOnly: ["connection", "runtime", "container", "worktree", "overview", "custom"].includes(action.panelKind),
       section: "environment",
@@ -1081,12 +1100,25 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   }, [activeSecondaryTabId, secondaryChatWorkspace.activeRunId, secondaryTabs]);
 
   const openChat = useCallback((runId: string, newTaskProjectId?: string) => {
+    if (runId && projectFilterEeId) {
+      const run = chatWorkspace.runs.find((candidate) => candidate.runId === runId);
+      if (!run || !clientProjectScopeIds(agentProjectWorkspace.projects, projectFilterEeId).has(run.eeId)) setProjectFilterEeId("");
+    }
     if (runId) chatWorkspace.selectRun(runId);
     else chatWorkspace.createChat(newTaskProjectId);
     setSecondaryPaneOpen(false);
     setSecondaryPaneFocused(false);
     selectSurface("chat", runId);
-  }, [chatWorkspace, selectSurface]);
+  }, [agentProjectWorkspace.projects, chatWorkspace, projectFilterEeId, selectSurface, setProjectFilterEeId]);
+
+  function workspaceWithTaskDraftActions(source: typeof chatWorkspace) {
+    return { ...source, ...taskDraftActions(source, chatWorkspace, () => {
+      setProjectFilterEeId("");
+      setSecondaryPaneOpen(false);
+      setSecondaryPaneFocused(false);
+      selectSurface("chat", "");
+    }) };
+  }
 
   const openVoice = useCallback(() => {
     setSecondaryPaneOpen(false);
@@ -2133,7 +2165,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
 
   useAdmittedClientActions({
     enabled: accessProfile === "live" && clientWindow.primary && runtimeHost.available && runtimeHost.ready
-      && !surfaceRegistry.loading && !agentProjectWorkspace.loading && homeChatWorkspace.runsLoaded
+      && surfaceRegistry.hydrated && agentProjectWorkspace.status === "ready" && !agentProjectWorkspace.error && homeChatWorkspace.runsLoaded
       && homeChatWorkspace.activeRunId === homeRunId && homeChatWorkspace.activeRun?.runId === homeRunId
       && homeChatWorkspace.activeRun?.clientSurfaceRole === "home"
       && homeChatWorkspace.activeRun?.chatInterfaceId === agentProjectWorkspace.homeInterfaceId,
@@ -2248,7 +2280,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     dashboardTopologyMode={secondaryDashboardScope === "World" ? secondaryDashboardWorldTopologyMode : secondaryDashboardTopologyMode}
     dashboardFilters={secondaryDashboardFilters}
     selected={effectiveSecondarySelection}
-    chatWorkspace={secondarySurface?.rendererKind === "builtin.voice" ? homeChatWorkspace : secondaryChatWorkspace}
+    chatWorkspace={workspaceWithTaskDraftActions(secondarySurface?.rendererKind === "builtin.voice" ? homeChatWorkspace : secondaryChatWorkspace)}
     homeRunId={homeRunId}
     voiceSession={voiceSession}
     homeViewMode={secondaryHomeViewMode}
@@ -2360,7 +2392,14 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     : undefined;
 
   return (
-    <ScheduledWorkspaceProvider key={JSON.stringify([accessProfile, runtimeHost.home])} active={activeSurface.id === "scheduled" || (secondaryPaneOpen && secondarySurfaceId === "scheduled")}>
+    <ScheduledWorkspaceProvider key={JSON.stringify([accessProfile, runtimeHost.home])} active={activeSurface.id === "scheduled" || (secondaryPaneOpen && secondarySurfaceId === "scheduled")}
+      onCreateTask={(text) => {
+        chatWorkspace.createChat("", "", text);
+        setProjectFilterEeId("");
+        setSecondaryPaneOpen(false);
+        setSecondaryPaneFocused(false);
+        selectSurface("chat", "");
+      }}>
       <FilesPaneDialogs />
       <AppShell
         accessProfile={accessProfile}
@@ -2481,7 +2520,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
             dashboardTopologyMode={dashboardScope === "World" ? dashboardWorldTopologyMode : dashboardTopologyMode}
             dashboardFilters={dashboardFilters}
             selected={effectiveSelection}
-            chatWorkspace={activeSurface.rendererKind === "builtin.voice" ? homeChatWorkspace : chatWorkspace}
+            chatWorkspace={workspaceWithTaskDraftActions(activeSurface.rendererKind === "builtin.voice" ? homeChatWorkspace : chatWorkspace)}
             homeRunId={homeRunId}
             voiceSession={voiceSession}
             homeViewMode={homeViewMode}
@@ -2500,19 +2539,18 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
           />}
         </SurfaceRenderBoundary>
       </AppShell>
-      {clientPreferences.floatingCallPuck
+      <Suspense fallback={null}><AnimatePresence>{clientPreferences.floatingCallPuck
         && isVoiceCallActive(voiceSession.phase)
         && !(secondaryPaneOpen && secondaryPaneFocused
           ? secondarySurfaceId === "voice"
           : (activeSurface.id === "voice" && homeViewMode === "voice") || (secondaryPaneOpen && secondarySurfaceId === "voice")) ? (
-        <Suspense fallback={null}>
           <VoiceCallPuck
+            key="home-call"
             accessProfile={accessProfile}
             onOpenHome={() => { openVoice(); setHomeViewMode("voice"); }}
             session={voiceSession}
           />
-        </Suspense>
-      ) : null}
+      ) : null}</AnimatePresence></Suspense>
       {commandMenuOpen && !settingsOpen ? (
         <Suspense fallback={null}>
           <CommandMenu

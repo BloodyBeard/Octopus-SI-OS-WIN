@@ -11,7 +11,7 @@ const run = { run_id: "run_task", chat_interface_id: "chat_task", provider_inter
 const receipt = { runId: run.run_id, chatInterfaceId: run.chat_interface_id, modelInterfaceId: run.provider_bound_interface_id,
   messageId: "message", messageVerdict: { admitted: { seq: 100 } }, afterSeq: 100, cursor: { offset: 10, seq: 100 } };
 
-test("CLI projection readers recover native publication without the active client package", async () => {
+test("CLI projection readers leave publication recovery to its owning mutation", async () => {
   const { createEnvironment, projectionStore } = require("../cli/environment.cjs");
   const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
   const root = await fs.realpath(await fs.mkdtemp("/tmp/oct-cli-readers-")), repo = path.resolve(__dirname, "../..");
@@ -43,6 +43,11 @@ test("CLI projection readers recover native publication without the active clien
         const result = kind === "environment" ? await reader.read(projectionReadRequest("projection.operator.os.workspace_setup"))
           : await reader.read("projection.operator.os.workspace_setup");
         assert.equal(result.status, "not_configured", JSON.stringify(result));
+        assert.deepEqual(calls, []);
+        assert.deepEqual((await fs.readdir(transactions)).filter(name => name !== ".octopus-publication"), pending);
+        await require("../electron/workspaceSetup.cjs").recoverWorkspaceTransactions({
+          octopusHomeRoot: environment.home, registryRoot: registry, publication: environment.packageRoots.publication,
+        });
         const cleanup = JSON.parse(await fs.readFile(path.join(environment.home, "client-state/workspace/directory-cleanup", `${journal.operation_id}.json`)));
         assert.equal(cleanup.publication.reclaimed, true);
         assert.equal(cleanup.journal.writes[0].publication.receipt.operation_id, journal.writes[0].publication.operation_id);
@@ -341,4 +346,39 @@ test("noninteractive text is incremental, safe and complete; unsupported flags f
   assert.ok(errors.endsWith("Command · exited · exit 2\n"));
   assert.throws(() => argumentsFor(["setup", "--workspace-root", "/tmp"]), /Unknown option/);
   assert.throws(() => argumentsFor(["exec", "--timeout", "NaN"]), /between/);
+});
+
+test("CLI up forwards its explicit readiness deadline without starting a runtime", async () => {
+  const Module = require("node:module"), file = path.resolve(__dirname, "../cli/index.cjs");
+  const source = await fs.readFile(file, "utf8");
+  const environmentFile = path.resolve(__dirname, "../cli/environment.cjs");
+  const environment = new Module(environmentFile, module);
+  environment.filename = environmentFile; environment.paths = Module._nodeModulePaths(path.dirname(environmentFile));
+  const environmentRequire = Module.createRequire(environmentFile);
+  const probeReached = new Error("validated startup reached controlled probe");
+  environment.require = id => id === "../electron/runtimeHost.cjs" ? {
+    createRuntimeHost: () => ({ async probe() { throw probeReached; } }),
+  } : environmentRequire(id);
+  environment._compile(await fs.readFile(environmentFile, "utf8"), environmentFile);
+  await assert.rejects(environment.exports.start({}, { timeoutMs: 0 }), /positive integer/);
+  for (const [flags, expected] of [[[], undefined], [["--timeout", "300"], 300000], [["--timeout", "1.25"], 1250], [["--timeout", "0"], undefined]]) {
+    const unit = new Module(file, module); unit.filename = file; unit.paths = Module._nodeModulePaths(path.dirname(file));
+    const nativeRequire = Module.createRequire(file);
+    let started = 0, closed = 0, output = "";
+    unit.require = (id) => id === "./environment.cjs" ? { createEnvironment: () => ({
+      async start(options) {
+        started++; assert.equal(options.timeoutMs, expected);
+        await assert.rejects(environment.exports.start({}, options), error => error === probeReached);
+        return { phase: "ready" };
+      },
+      close() { closed++; },
+    }) } : id === "node:fs/promises" ? { ...fs, async access() {} } : nativeRequire(id);
+    unit._compile(source, file);
+    const code = await unit.exports.main(["up", "--json", ...flags], {
+      stdin: { isTTY: false }, stdout: { isTTY: false, write: text => { output += text; } }, stderr: { write() {} },
+    });
+    assert.equal(code, 0, output);
+    assert.equal(started, 1); assert.equal(closed, 1);
+    assert.equal(JSON.parse(output).phase, "ready");
+  }
 });

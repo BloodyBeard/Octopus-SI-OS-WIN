@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createLatestProjectionRead } from "../../shell/latestProjectionRead";
 import {
   formatProjectionError,
   loadChatExecutionContexts,
@@ -13,7 +14,7 @@ import {
   readProjection,
   readProviderInterfaceRateLimits,
 } from "../../projectionClient";
-import { useProjectionRegistryGeneration, useProjectionStructureGeneration } from "../../projectionLive";
+import { useProjectionChange, useProjectionRegistryGeneration, useProjectionStructureGeneration } from "../../projectionLive";
 import { formatRuntimeError } from "../../runtimeClient";
 import { readClientChatProjects, subscribeClientChatProjects } from "../../shell/clientWorkspaces";
 import { toolPresentationsFromProjection } from "./chatActivityProjection";
@@ -47,8 +48,20 @@ export function useChatCapabilityCatalog(
   const [providerUsageError, setProviderUsageError] = useState("");
   const projectionStructureGeneration = useProjectionStructureGeneration();
   const projectionRegistryGeneration = useProjectionRegistryGeneration();
+  const projectionChange = useProjectionChange();
+  const capabilityConfigurationGeneration = useRef(0);
+  if (projectionChange.kind === "structure" || projectionChange.kind === "files") {
+    capabilityConfigurationGeneration.current = projectionChange.generation;
+  }
   const scope = JSON.stringify([accessProfile, enabled, runtimeReady, runtimeHome]);
   const providerReadKey = JSON.stringify([scope, projectionRegistryGeneration]);
+  const capabilityReadKey = JSON.stringify([providerReadKey, projectPresentationGeneration, capabilityConfigurationGeneration.current]);
+  const capabilityContextRef = useRef(capabilityReadKey);
+  useLayoutEffect(() => { capabilityContextRef.current = capabilityReadKey; }, [capabilityReadKey]);
+  const capabilityReads = useMemo(() => createLatestProjectionRead<{
+    contexts: ChatExecutionContext[]; rooms: ChatWorkerEnvironmentRoom[];
+  }>(), [capabilityReadKey]);
+  useEffect(() => () => capabilityReads.invalidate(), [capabilityReads]);
   const providerContextRef = useRef({ scope, key: providerReadKey });
   const providerInterfacesRefreshing = enabled && (providerReadPending || completedProviderReadKey !== providerReadKey);
   useLayoutEffect(() => { providerContextRef.current = { scope, key: providerReadKey }; }, [providerReadKey, scope]);
@@ -160,7 +173,6 @@ export function useChatCapabilityCatalog(
       setExecutionContextError("");
       return;
     }
-    let cancelled = false;
     if (capabilityCatalogScopeRef.current !== scope) {
       capabilityCatalogScopeRef.current = scope;
       setExecutionContexts([]);
@@ -171,12 +183,16 @@ export function useChatCapabilityCatalog(
     const projectPresentations = readClientChatProjects(accessProfile);
     const projectDisplayNames = new Map(projectPresentations.map((project) => [project.id, project.name]));
     const projectColors = new Map(projectPresentations.map((project) => [project.id, project.color]));
-    Promise.all([
-      loadChatExecutionContexts(projectDisplayNames, projectColors),
-      loadChatWorkerEnvironmentRooms(),
-    ])
-      .then(([contexts, rooms]) => {
-        if (cancelled) return;
+    void capabilityReads.request(async () => {
+      const [contexts, rooms] = await Promise.all([
+        loadChatExecutionContexts(projectDisplayNames, projectColors),
+        loadChatWorkerEnvironmentRooms(),
+      ]);
+      return { contexts, rooms };
+    })
+      .then((result) => {
+        if (!result || capabilityContextRef.current !== capabilityReadKey) return;
+        const { contexts, rooms } = result;
         setExecutionContexts(contexts);
         setCompletedCapabilityReadKey(providerReadKey);
         setExecutionContextsLoaded(true);
@@ -184,15 +200,12 @@ export function useChatCapabilityCatalog(
         setExecutionContextError("");
       })
       .catch((failure) => {
-        if (!cancelled) {
+        if (capabilityContextRef.current === capabilityReadKey) {
           setExecutionContextsLoaded(false);
           setExecutionContextError(formatProjectionError(failure));
         }
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [accessProfile, enabled, projectPresentationGeneration, projectionStructureGeneration, providerReadKey, scope]);
+  }, [accessProfile, enabled, projectPresentationGeneration, projectionStructureGeneration, providerReadKey, scope, capabilityReads, capabilityReadKey]);
 
   useEffect(() => {
     if (!enabled || !hasProjectionBridge()) {

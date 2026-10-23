@@ -506,6 +506,7 @@
             thread_shape_fingerprint: "a".repeat(64),
             context_generation,
             static_context_fingerprint: "b".repeat(64),
+            turn_input: None,
             pending,
             interrupted_pending: None,
             tool_operator_request: None,
@@ -1438,7 +1439,7 @@
         ];
         let current = recover_codex_continuity_from_current_session(
             &artifacts,
-            &source.source_artifact,
+            std::slice::from_ref(&source.source_artifact),
             &InterfaceId::new("world_provider_codex"),
             "run-a",
             &codex_context_labels(),
@@ -1464,9 +1465,14 @@
             content: octopus_ledger::ContentHash::of_bytes(b"next-input"),
         };
         let recover = |entries: &[SessionContextArtifact]| recover_codex_continuity_from_current_session(
-            entries, &next_input, &InterfaceId::new("world_provider_codex"), "run-a", &codex_context_labels(),
+            entries, std::slice::from_ref(&next_input), &InterfaceId::new("world_provider_codex"), "run-a", &codex_context_labels(),
         );
         let closed = recover(&[ack.clone(), source.clone()]).unwrap().unwrap();
+        let forwarded_sources = [next_input.clone(), source.source_artifact.clone()];
+        let awaiting = recover_codex_continuity_from_current_session(&[ack.clone(), source.clone()],
+            &forwarded_sources, &InterfaceId::new("world_provider_codex"), "run-a", &codex_context_labels()).unwrap().unwrap();
+        assert_eq!(awaiting.context_generation, 7);
+        assert!(awaiting.interrupted_pending.is_some());
         assert_eq!(closed.context_generation, 8);
         assert!(closed.interrupted_pending.is_none());
         validate_recovered_thread_coordinates(
@@ -2103,6 +2109,8 @@
             3,
             None,
         ));
+        let source = serde_json::json!({"id": "realtime.delegation:original", "content": vec![3u8; 32]});
+        sink.continuity.lock().unwrap().continuity.as_mut().unwrap().turn_input = Some(serde_json::from_value(source.clone()).unwrap());
         sink.bind_live_stream("thr-exact", "turn-exact").unwrap();
         for _ in 0..3 {
             sink.send(CodexTurnOutput::client(
@@ -2169,6 +2177,12 @@
         ] {
             assert_eq!(terminal_payload[key], expected);
         }
+        assert_eq!(transient["payload"]["in_reply_to"], source);
+        assert_eq!(terminal_payload["in_reply_to"], source);
+        let recovered: CodexContinuityState = serde_json::from_value(terminal_payload[CODEX_CONTINUITY_FIELD].clone()).unwrap();
+        assert_eq!(serde_json::to_value(recovered.turn_input).unwrap(), source);
+        assert!(sink.send(CodexTurnOutput::client(AGENT_MESSAGE_DELTA_LABEL,
+            serde_json::json!({"text": "crossed", "in_reply_to": {"id": "another", "content": "d".repeat(64)}}))).is_err());
         let seal: serde_json::Value = serde_json::from_str(stream_payload.lines().last().unwrap()).unwrap();
         assert_eq!(seal["terminal_artifact_payload_blake3"], artifact_payload_blake3(&terminal.artifact).unwrap());
         assert_eq!(
@@ -3051,7 +3065,7 @@ while IFS= read -r _; do :; done
             let mut emissions = Vec::new();
             while let Some(output) = output_rx.recv().await {
                 match output {
-                    ProviderStreamEmission::Turn(emission) => emissions.push(emission),
+                    ProviderStreamEmission::Turn(emission) | ProviderStreamEmission::Progress(emission) => emissions.push(emission),
                     ProviderStreamEmission::TransportDispatch { admitted, .. } => {
                         admitted.send(Ok(())).unwrap();
                     }
@@ -3182,7 +3196,7 @@ while IFS= read -r _; do :; done
         let mut second_call = None;
         let mut resolved_commentary = false;
         while let Ok(emission) = queue_output_rx.try_recv() {
-            if let ProviderStreamEmission::Turn(emission) = emission {
+            if let ProviderStreamEmission::Turn(emission) | ProviderStreamEmission::Progress(emission) = emission {
                 if emission.artifact.read_manifest().unwrap().label == TURN_AGENT_MESSAGE_LABEL {
                     let value: serde_json::Value = serde_json::from_slice(&emission.artifact.read_payload_bytes().unwrap()).unwrap();
                     assert!(value[CODEX_CONTINUITY_FIELD].get("pending").is_none());
@@ -4015,6 +4029,7 @@ while IFS= read -r _; do :; done
             None,
             &BTreeMap::new(),
             None,
+            &serde_json::Map::new(),
         )
         .unwrap();
         assert!(matches!(
@@ -4028,6 +4043,7 @@ while IFS= read -r _; do :; done
                 None,
                 &BTreeMap::new(),
                 None,
+                &serde_json::Map::new(),
             )
             .is_err()
         );
@@ -4036,7 +4052,7 @@ while IFS= read -r _; do :; done
     #[test]
     fn operator_client_context_precedes_the_operator_text_and_fails_closed() {
         let decode = |payload: serde_json::Value| decode_provider_input(
-            &serde_json::to_vec(&payload).unwrap(), OPERATOR_MESSAGE_LABEL, None, &BTreeMap::new(), None);
+            &serde_json::to_vec(&payload).unwrap(), OPERATOR_MESSAGE_LABEL, None, &BTreeMap::new(), None, &serde_json::Map::new());
         let ProviderInput::Turn(turn) = decode(serde_json::json!({"text":"What next?","message_id":"m","attachments":[],
             "client_context":[{"name":"home_state","text":"Tasks: none active."}]})).unwrap() else { panic!("operator turn expected") };
         let texts = turn.iter().map(|item| match item { UserInput::Text { text, .. } => text.as_str(), _ => "" }).collect::<Vec<_>>();
@@ -4277,6 +4293,7 @@ while IFS= read -r _; do :; done
             Some(&InterfaceId::new("world_mcp_drive_exact")),
             &catalog.interface_operations,
             None,
+            &serde_json::Map::new(),
         )
         .unwrap();
         let ProviderInput::InterfaceContext(context) = context else {
@@ -4669,6 +4686,7 @@ while IFS= read -r _; do :; done
             None,
             &BTreeMap::new(),
             Some(&projection),
+            &serde_json::Map::new(),
         )
         .unwrap() else {
             panic!("ordinary operator input lost its turn");
@@ -4831,7 +4849,8 @@ while IFS= read -r _; do :; done
                 OPERATOR_MESSAGE_LABEL,
                 None,
                 &BTreeMap::new(),
-                Some(&empty)
+                Some(&empty),
+                &serde_json::Map::new(),
             )
             .is_err()
         );
@@ -4841,7 +4860,8 @@ while IFS= read -r _; do :; done
                 OPERATOR_MESSAGE_LABEL,
                 None,
                 &BTreeMap::new(),
-                None
+                None,
+                &serde_json::Map::new(),
             )
             .is_err()
         );
@@ -4880,7 +4900,8 @@ while IFS= read -r _; do :; done
                 OPERATOR_MESSAGE_LABEL,
                 None,
                 &BTreeMap::new(),
-                Some(&mismatched)
+                Some(&mismatched),
+                &serde_json::Map::new(),
             )
             .is_err()
         );
@@ -4890,7 +4911,8 @@ while IFS= read -r _; do :; done
                 OPERATOR_MESSAGE_LABEL,
                 None,
                 &BTreeMap::new(),
-                Some(&projection)
+                Some(&projection),
+                &serde_json::Map::new(),
             )
             .is_err()
         );
@@ -4950,6 +4972,7 @@ while IFS= read -r _; do :; done
             None,
             &BTreeMap::new(),
             Some(&metadata),
+            &serde_json::Map::new(),
         )
         .unwrap() else {
             panic!("supported input lost its turn");
@@ -4960,6 +4983,7 @@ while IFS= read -r _; do :; done
             None,
             &BTreeMap::new(),
             None,
+            &serde_json::Map::new(),
         )
         .unwrap() else {
             panic!("original input lost its turn");
@@ -6100,9 +6124,10 @@ while IFS= read -r _; do :; done
                 kind: PendingServerRequestKind::DynamicTool { call_id: "call-a".into(), tool: "coder.exec".into() },
                 effect_gate: gate.clone(), turn_interrupted: interrupted.clone(),
             };
-            let original = continuity("world_provider_codex", "run-a", "thread-a", 1, Some(CodexPendingContinuity::DynamicTool {
+            let mut original = continuity("world_provider_codex", "run-a", "thread-a", 1, Some(CodexPendingContinuity::DynamicTool {
                 turn_id: "turn-a".into(), call_id: "call-a".into(), tool: "coder.exec".into(), native_operation: None,
             }));
+            original.turn_input = Some(bound("original-user-message", serde_json::json!({"text":"perform the task"})).artifact);
             if !cold { driver.record_drain_outcome(&scope, TurnDrainOutcome::Suspended(pending.clone())).await.unwrap(); }
             driver.transport_state.lock().await.insert(scope.clone(), TransportState {
                 context_generation: 1, thread_id: Some("thread-a".into()), thread_shape_fingerprint: Some(original.thread_shape_fingerprint.clone()),
@@ -6205,6 +6230,17 @@ while IFS= read -r _; do :; done
                         let mut forged = closed.clone(); forged["native_terminal_source_continuity"][field] = serde_json::Value::Null;
                         assert!(interrupted_result_closure_payload(TURN_INTERRUPTED_RESULT_LABEL, &serde_json::to_vec(&forged).unwrap(), &recovered, &source.artifact, &labels).is_err());
                     }
+                }
+                for retained in closed["retained_native_outputs"].as_array().unwrap() {
+                    assert_eq!(retained["in_reply_to"], serde_json::to_value(&original.turn_input).unwrap());
+                }
+                for index in 0..closed["retained_native_outputs"].as_array().unwrap().len() {
+                    let mut forged = closed.clone();
+                    forged["retained_native_outputs"][index]["in_reply_to"]["id"] = serde_json::json!("other-user-message");
+                    assert!(retained_native_output_payloads(&forged, &labels).is_err());
+                    let mut missing = closed.clone();
+                    missing["retained_native_outputs"][index].as_object_mut().unwrap().remove("in_reply_to");
+                    assert!(retained_native_output_payloads(&missing, &labels).is_err());
                 }
                 assert_eq!(retained_outputs.len(), 2);
                 let answer: serde_json::Value = serde_json::from_slice(&retained_outputs[0].artifact.read_payload_bytes().unwrap()).unwrap();
@@ -6328,6 +6364,7 @@ while IFS= read -r _; do :; done
         let application = apply_control_to_target(
             CodexTurnControl::Steer {
                 control_id: "message-1".to_string(),
+                source_artifact: None,
                 input: vec![UserInput::Text {
                     text: "keep going".to_string(),
                     text_elements: Vec::new(),
@@ -6371,7 +6408,7 @@ while IFS= read -r _; do :; done
         let requests:PendingServerRequests=Arc::new(Mutex::new(BTreeMap::from([((scope.clone(),pending.key.clone()),pending.clone())])));
         let broker=CodexTurnControlBroker::new(Some(4));
         let barrier=ProviderHandoffBarrier::new(); barrier.finish(Ok(()));
-        let steer=||CodexTurnControl::Steer { control_id:"pending-message".into(), input:vec![UserInput::Text{text:"pending clarification".into(),text_elements:vec![]}] };
+        let steer=||CodexTurnControl::Steer { control_id:"pending-message".into(), input:vec![UserInput::Text{text:"pending clarification".into(),text_elements:vec![]}], source_artifact:None };
         for (index,bad) in [Some("thread"),Some("key"),Some("gate"),Some("interrupted"),None,None].into_iter().enumerate() {
             let mut live=pending.clone();
             if bad==Some("thread") {live.thread_id="foreign".into();}

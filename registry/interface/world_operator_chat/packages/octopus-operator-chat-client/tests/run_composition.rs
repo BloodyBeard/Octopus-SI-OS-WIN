@@ -930,6 +930,45 @@ fn native_result_receiving_adoption_preserves_legacy_rows_and_declared_authority
 }
 
 #[test]
+fn package_provider_contract_adoption_preserves_local_settings_and_pending_work() {
+    use octopus_operator_chat_client::native_run_authoring::plan_existing_adoption;
+    let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
+    let request = support::client_fixture(&root); enable_native_profile(&root);
+    let child = plan_run_composition(&request).unwrap();
+    for edit in composition_candidate_writes(&child) {
+        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(edit.path, edit.content).unwrap();
+    }
+    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap(); std::fs::write(root.join("ledger/movements.jsonl"), "").unwrap();
+    let provider_path = root.join("registry/interface").join(&child.provider_interface_id).join("interface.json");
+    let before = std::fs::read(&provider_path).unwrap(); let run_before = std::fs::read(&child.run_write.path).unwrap();
+    let source_path = "registry/interface/world_provider_fixture/interface.json";
+    let mut source: Value = serde_json::from_slice(&std::fs::read(root.join(source_path)).unwrap()).unwrap();
+    let messages = json!({"fixture.request":{"text_fields":["question"],"client_context_field":"observation","identity_required":false}});
+    source["interface_driver_config"]["private_config"]["input_messages"] = messages.clone();
+    write(&root, source_path, source);
+    let plan = || plan_existing_adoption(&serde_json::from_value(adoption_request(&root, &request, &child)).unwrap())
+        .map(|plan| serde_json::to_value(plan).unwrap());
+    let adopted = plan().unwrap(); assert_eq!(adopted["status"], "planned");
+    assert_eq!(adopted["writes"].as_array().unwrap().len(), 1); assert_eq!(adopted["writes"][0]["path"], json!(provider_path));
+    let mut next: Value = serde_json::from_str(adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(next["interface_driver_config"]["private_config"].as_object_mut().unwrap().remove("input_messages"), Some(messages));
+    assert_eq!(next, serde_json::from_slice::<Value>(&before).unwrap());
+    assert_eq!(std::fs::read(&provider_path).unwrap(), before);
+    let pending = pending_tool_handoff(&request, &child, &serde_json::from_slice(&run_before).unwrap());
+    std::fs::write(&child.run_write.path, serde_json::to_vec(&pending).unwrap()).unwrap();
+    let deferred = plan().unwrap(); assert_eq!(deferred["status"], "deferred"); assert_eq!(deferred["writes"], json!([]));
+    std::fs::write(&child.run_write.path, &run_before).unwrap();
+    next["interface_driver_config"]["private_config"]["input_messages"] = json!({"local.request":{"text_fields":["local"],"identity_required":false}});
+    std::fs::write(&provider_path, serde_json::to_vec(&next).unwrap()).unwrap();
+    let local = std::fs::read(&provider_path).unwrap(); let deferred = plan().unwrap();
+    assert_eq!(deferred["status"], "deferred"); assert_eq!(deferred["writes"], json!([]));
+    assert!(deferred["reason"].as_str().unwrap().contains("locally authored fields [input_messages]"));
+    assert_eq!(std::fs::read(&provider_path).unwrap(), local);
+    std::fs::write(&provider_path, adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(plan().unwrap()["status"], "unchanged"); assert_eq!(std::fs::read(&child.run_write.path).unwrap(), run_before);
+}
+
+#[test]
 fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlement() {
     use octopus_operator_chat_client::{SelectedToolSeed, native_run_authoring::plan_existing_adoption};
     let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
@@ -954,8 +993,13 @@ fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlemen
         let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
         value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!(item)); write(&root,file,value);
     }
-    let canonical: Value = serde_json::from_slice(&std::fs::read(source.join("registry/tool/client.mcp/tool.json")).unwrap()).unwrap();
-    let config: Value = serde_json::from_slice(&std::fs::read(root.join("registry/interface/world_operator_chat/client.json")).unwrap()).unwrap();
+    let mut canonical: Value = serde_json::from_slice(&std::fs::read(source.join("registry/tool/client.mcp/tool.json")).unwrap()).unwrap();
+    let mut config: Value = serde_json::from_slice(&std::fs::read(root.join("registry/interface/world_operator_chat/client.json")).unwrap()).unwrap();
+    canonical["process"]["authority"]["allow_process_signals"] = json!(true);
+    for predecessor in config["tool_contract_updates"][0]["predecessors"].as_array_mut().unwrap() {
+        predecessor["/process/authority/allow_process_signals"] = json!(false);
+    }
+    write(&root, "registry/interface/world_operator_chat/client.json", config.clone());
     let mut previous = canonical.clone();
     for (pointer, value) in config["tool_contract_updates"][0]["predecessors"][0].as_object().unwrap() {
         *previous.pointer_mut(pointer).unwrap() = value.clone();
@@ -977,6 +1021,7 @@ fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlemen
     assert_eq!(adopted["writes"].as_array().unwrap().len(),1); assert_eq!(adopted["writes"][0]["path"],json!(tool_path));
     let next: Value = serde_json::from_str(adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(next["handler_config"],canonical["handler_config"]);
+    assert_eq!(next["process"]["authority"]["allow_process_signals"], true);
     for fields in config["tool_contract_updates"][0]["predecessors"].as_array().unwrap() {
         let mut previous = next.clone();
         for (pointer, value) in fields.as_object().unwrap() { *previous.pointer_mut(pointer).unwrap() = value.clone(); }

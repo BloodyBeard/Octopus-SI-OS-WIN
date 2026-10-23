@@ -4,8 +4,6 @@ const DIGEST = /^[a-f0-9]{64}$/;
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const { constants } = require("node:fs");
-const { createHash } = require("node:crypto");
-const { isDeepStrictEqual } = require("node:util");
 const {
   registerLocalPackageMutationGuard,
   withLocalPackageInstallation,
@@ -38,6 +36,9 @@ function createOperatorChatClientLoader(options) {
       const clientPath = path.resolve(options.clientPath());
       const proof = await verifyOperatorChatClientInstallation(installation, snapshot, clientPath);
       const client = require(clientPath);
+      for (const method of ["readOperatorChatArtifacts", "submitOperatorTurn"]) {
+        if (typeof client?.[method] !== "function") throw operatorChatClientContractError(`The installed chat client does not export ${method}.`);
+      }
       loaded = { client, proof };
       return client;
     }).catch((error) => {
@@ -78,11 +79,9 @@ function requireMaterializedOperatorChatClientOwner(catalog) {
   if (
     candidate?.available !== true
     || clientOwner?.materialized !== true
-    || !DIGEST.test(sourceDigest)
-    || !DIGEST.test(installedDigest)
   ) {
     throw operatorChatClientContractError(
-      "The installed world_operator_chat interface owner is missing or stale. Repair that exact interface owner before using chat.",
+      "The installed world_operator_chat interface owner is missing. Restore that interface owner before using chat.",
     );
   }
   return {
@@ -94,81 +93,52 @@ function requireMaterializedOperatorChatClientOwner(catalog) {
 }
 
 async function requireCurrentClientFiles(member, clientPath) {
-  const sourceFiles = member?.source_files ?? [];
   const installedFiles = member?.installed_files ?? [];
-  const installed = new Map(installedFiles.map((file) => [file.relative_path, file]));
-  const source = new Map(sourceFiles.map((file) => [file.relative_path, file]));
-  if (!source.has("client.cjs") || installed.get("client.cjs")?.path !== clientPath
-    || source.size !== installed.size || source.size !== sourceFiles.length || installed.size !== installedFiles.length) {
-    throw operatorChatClientContractError("The installed chat client file set differs from its package source.");
+  const installed = new Map(installedFiles.map(file => [file.relative_path, file]));
+  if (installed.get("client.cjs")?.path !== clientPath || installed.size !== installedFiles.length) {
+    throw operatorChatClientContractError("The installed chat client has no unique declared client.cjs entry.");
   }
-  for (const [name, expected] of source) {
-    const actual = installed.get(name);
-    if (!actual || actual.mode !== expected.mode
-      || (!["client.json", "life.json"].includes(name) && (actual.sha256 !== expected.sha256 || actual.size !== expected.size))) {
-      throw operatorChatClientContractError(`The installed chat client file '${name}' differs from its package source. Repair that file before using chat.`);
-    }
+  const stat = await fs.lstat(clientPath);
+  if (!stat.isFile() || stat.isSymbolicLink() || await fs.realpath(clientPath) !== clientPath) {
+    throw operatorChatClientContractError("The installed chat client must be a regular registry file.");
   }
-  let life = null;
-  if (source.has("life.json")) {
-    const expectedFile = source.get("life.json"), actualFile = installed.get("life.json");
-    const [expected, actual] = await Promise.all([readPinnedConfiguration(expectedFile), readPinnedConfiguration(actualFile)]);
-    const executableConfiguration = (value) => {
-      if (!Array.isArray(value?.processes)) throw operatorChatClientContractError("Chat lifecycle requires declared processes.");
-      return { ...value, processes: value.processes.map((process) => {
-        const { sandbox_mode, ...authority } = process.authority ?? {};
-        if (sandbox_mode !== undefined && !["enforced", "disabled"].includes(sandbox_mode)) {
-          throw operatorChatClientContractError("Chat lifecycle has an invalid sandbox mode.");
-        }
-        return { ...process, authority };
-      }) };
-    };
-    if (!isDeepStrictEqual(executableConfiguration(actual), executableConfiguration(expected))) {
-      throw operatorChatClientContractError("The installed chat lifecycle executable configuration differs from its package source.");
-    }
-    life = { sourceDigest: expectedFile.sha256, installedDigest: actualFile.sha256 };
+  const life = await readClientConfiguration(installed.get("life.json"));
+  if (!Array.isArray(life.processes) || !life.processes.length || life.processes.some(process =>
+    !process || typeof process.bin !== "string" || !process.bin.trim()
+    || process.authority?.sandbox_mode !== undefined && !["enforced", "disabled"].includes(process.authority.sandbox_mode))) {
+    throw operatorChatClientContractError("Chat lifecycle requires valid declared processes.");
   }
-  if (!source.has("client.json")) return null;
-  const sourceFile = source.get("client.json"), installedFile = installed.get("client.json");
-  const [expected, actual] = await Promise.all([readPinnedConfiguration(sourceFile), readPinnedConfiguration(installedFile)]);
-  const defaults = (value) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)
-      || !value.run || typeof value.run !== "object" || Array.isArray(value.run)) {
-      throw operatorChatClientContractError("Chat client configuration requires an explicit run object.");
-    }
-    const { ee, worker, context_artifact_bindings, ...protocol } = value.run;
-    for (const id of [ee, worker]) {
-      if (typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
-        throw operatorChatClientContractError("Chat run defaults require exact EE and worker identities.");
-      }
-    }
-    if (!Array.isArray(context_artifact_bindings) || context_artifact_bindings.some((binding) => (
-      !binding || typeof binding !== "object" || Array.isArray(binding)
-      || Object.keys(binding).length !== 1 || typeof binding.id !== "string"
-      || !binding.id || binding.id.trim() !== binding.id || /[/\\\0]/.test(binding.id)
-    )) || new Set(context_artifact_bindings.map((binding) => binding.id)).size !== context_artifact_bindings.length) {
-      throw operatorChatClientContractError("Chat run context defaults require unique explicit artifact bindings.");
-    }
-    return { ...value, run: protocol };
-  };
-  if (!isDeepStrictEqual(defaults(actual), defaults(expected))) {
-    throw operatorChatClientContractError("The installed chat protocol or executable configuration differs from its package source.");
+  const actual = await readClientConfiguration(installed.get("client.json"));
+  if (actual.schema_version !== 2 || actual.interface !== OPERATOR_CHAT_PACKAGE_ID
+    || !actual.run || typeof actual.run !== "object" || Array.isArray(actual.run)) {
+    throw operatorChatClientContractError("Chat client configuration requires schema version 2, its interface identity and a run object.");
   }
-  return { sourceDigest: sourceFile.sha256, installedDigest: installedFile.sha256, life };
+  const { ee, worker, context_artifact_bindings: bindings } = actual.run;
+  if ([ee, worker].some(id => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id))) {
+    throw operatorChatClientContractError("Chat run defaults require exact EE and worker identities.");
+  }
+  if (!Array.isArray(bindings) || bindings.some(binding => !binding || typeof binding !== "object" || Array.isArray(binding)
+    || Object.keys(binding).length !== 1 || typeof binding.id !== "string" || !binding.id
+    || binding.id.trim() !== binding.id || /[/\\\0]/.test(binding.id))
+    || new Set(bindings.map(binding => binding.id)).size !== bindings.length) {
+    throw operatorChatClientContractError("Chat run context defaults require unique explicit artifact bindings.");
+  }
+  return { schemaVersion: actual.schema_version, interface: actual.interface };
 }
 
-async function readPinnedConfiguration(file) {
+async function readClientConfiguration(file) {
+  if (!file) throw operatorChatClientContractError("The installed chat client is missing a required configuration file.");
   const handle = await fs.open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size !== file.size || stat.size > 2 * 1024 * 1024) {
-      throw operatorChatClientContractError("Chat client configuration changed during verification.");
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) {
+      throw operatorChatClientContractError("Chat client configuration must be a bounded regular file.");
     }
-    const bytes = await handle.readFile();
-    if (createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
-      throw operatorChatClientContractError("Chat client configuration changed during verification.");
+    const value = JSON.parse(await handle.readFile("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw operatorChatClientContractError("Chat client configuration must be a JSON object.");
     }
-    return JSON.parse(bytes.toString("utf8"));
+    return value;
   } finally {
     await handle.close();
   }

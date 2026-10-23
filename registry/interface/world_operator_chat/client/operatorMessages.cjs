@@ -68,12 +68,16 @@ function assertOperatorMessageRequestMatchesEnvelope(input, payload) {
   }
 }
 
-async function operatorTurnClientContext(options, clientSurfaceRole) {
-  if (clientSurfaceRole !== "home" || options.readProjection === undefined) return [];
+async function operatorTurnClientContext(options, clientSurfaceRole, clientContext) {
+  const entries = clientContext === undefined ? [] : operatorClientContext(clientContext);
+  if (entries.some(entry => entry.name === "home_state")) {
+    throw new Error("home_state must come from the trusted client projection");
+  }
+  if (clientSurfaceRole !== "home" || options.readProjection === undefined) return entries;
   if (typeof options.readProjection !== "function") {
     throw new Error("readProjection must be a trusted client callback");
   }
-  return operatorClientContext([await homeStateClientContext(options.readProjection, Date.now())]);
+  return operatorClientContext([await homeStateClientContext(options.readProjection, Date.now()), ...entries]);
 }
 
 function operatorClientContext(value) {
@@ -96,7 +100,11 @@ function operatorClientContext(value) {
     if (typeof object.text !== "string" || !object.text.trim() || object.text.trim() !== object.text) {
       throw new Error(`${field}.text must be a nonempty trimmed string`);
     }
-    totalBytes += Buffer.byteLength(object.text, "utf8");
+    const bytes = Buffer.byteLength(object.text, "utf8");
+    const entryLimit = object.name === "client_observation" ? 4 * 1024
+      : object.name === "home_state" ? 12 * 1024 : MAX_OPERATOR_CLIENT_CONTEXT_BYTES;
+    if (bytes > entryLimit) throw new Error(`${field}.text exceeds ${entryLimit} bytes`);
+    totalBytes += bytes;
     if (totalBytes > MAX_OPERATOR_CLIENT_CONTEXT_BYTES) {
       throw new Error(`operator message client_context exceeds ${MAX_OPERATOR_CLIENT_CONTEXT_BYTES} bytes`);
     }

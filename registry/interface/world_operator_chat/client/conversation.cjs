@@ -101,6 +101,7 @@ function existingRunSubmission(
       checkpoint.interface_binding !== undefined
       && checkpoint.interface_binding !== null
       && authoredInterfaceBindingId(checkpoint.interface_binding) === identity.interfaceId
+      && artifactBindingAdmitsLabel(checkpoint.interface_binding, config.artifact_labels.message)
     ) {
       activeClientInputs.push(checkpoint);
     }

@@ -32,6 +32,7 @@ def verify(request):
     assert isinstance(experience["source_movement_seq"], int), "current experience movement absent"
     assert payload["omission"]["before_current_experience"] is True and payload["omission"]["selected_evidence_trimmed"] is False, "outcome is not bounded to current experience"
     outcome = payload["outcome"]
+    assert isinstance(outcome, dict), payload.get("outcome_parse_error") or "outcome must be one JSON object"
     assert set(outcome) == {"schema_version", "status", "source_run", "reason", "receipts"}, "outcome fields mismatch"
     assert outcome["schema_version"] == 1 and outcome["source_run"] == params["source_run"], "outcome source mismatch"
     assert isinstance(outcome["reason"], str) and outcome["reason"].strip(), "outcome reason absent"

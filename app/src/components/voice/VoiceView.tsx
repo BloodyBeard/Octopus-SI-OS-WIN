@@ -5,6 +5,8 @@ import "../icon-glyphs/worker";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { subscribeClientCommands } from "../../clientActions";
+import type { RuntimeTopologyState } from "../../runtimeTopology";
+import { OcLoadingText } from "../../design-system/LoadingSkeleton";
 import type { ChatRun } from "../../chatRuns";
 import { ClientSurfaceRenderer, resetVoiceWidgetLayout, restoreVoiceWidgetLayout } from "../../client-surfaces/ClientSurfaceRenderer";
 import { homeSurfaceIdentity, homeSurfaceLayoutIdentity } from "../../client-surfaces/homePresentation";
@@ -62,7 +64,7 @@ type Props = {
   viewMode: HomeViewMode;
   session: VoiceSession;
   surfaces: AdmittedClientSurfaceDocument[];
-  topology: TopologySnapshot;
+  topology: RuntimeTopologyState;
   workerEnvironmentSurfaces: AdmittedClientSurfaceDocument[];
   widgetsOpen: boolean;
   workspace: ChatWorkspace;
@@ -89,6 +91,7 @@ const SURFACE_TRANSITIONS_SETTLE_MS = 1_200;
 const HOME_DEFERRED_STOP_MS = 30_000;
 const LAB_TASK_PROGRESS: TaskProgressWidget = {
   completion: 62,
+  failed: 0,
   running: 7,
   scheduled: 4,
   unseenDone: 16,
@@ -142,7 +145,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const boundRunId = homeRunId;
   const homeProjectionLoading = accessProfile === "live"
     && (
-      (!homeRunId && !workspace.runsLoaded && !workspace.runsError)
+      (!workspace.runsLoaded && !workspace.runsError)
       || (Boolean(homeRunId) && (workspace.activeRunId !== homeRunId || workspace.loadingMessages))
     );
   const target = useMemo(() => findProjectionTarget(topology, boundRunId), [boundRunId, topology]);
@@ -166,15 +169,17 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       label: `${environment.label} · ${surface.label}`,
     })));
   }, [accessProfile, target.run]);
+  const voiceBinding = workspace.runs.find((run) => run.runId === homeRunId && run.clientSurfaceRole === "home")?.voiceContext;
   const homeInterfaceId = workspace.activeRun?.runId === boundRunId
     ? workspace.activeRun.chatInterfaceId
     : workspace.runs.find((run) => run.runId === boundRunId)?.chatInterfaceId || "";
   const homeInterfaceMessages = useMemo(() => workspace.renderedMessages.filter((message) => (
     Boolean(homeInterfaceId)
     && message.runId === boundRunId
-    && message.interfaceId === homeInterfaceId
-  )), [boundRunId, homeInterfaceId, workspace.renderedMessages]);
-  const voiceConversationContext = useMemo(() => projectHomeVoiceContext(homeInterfaceMessages, homeRunId, homeInterfaceId), [homeInterfaceMessages, homeRunId, homeInterfaceId]);
+    && (message.interfaceId === homeInterfaceId || message.interfaceId === voiceBinding?.delegationInterfaceId
+      && message.role === "user" && message.direction === "in" && message.label === "realtime.delegation")
+  )), [boundRunId, homeInterfaceId, workspace.renderedMessages, voiceBinding?.delegationInterfaceId]);
+  const voiceConversationContext = useMemo(() => projectHomeVoiceContext(homeInterfaceMessages, homeRunId, homeInterfaceId, voiceBinding?.delegationInterfaceId), [homeInterfaceMessages, homeRunId, homeInterfaceId, voiceBinding?.delegationInterfaceId]);
   const homeOperatorRequests = useMemo(() => homeInterfaceMessages.filter((message) =>
     ["approval", "user_input", "elicitation"].includes(message.eventKind ?? "") && message.eventData?.resolved !== true
   ), [homeInterfaceMessages]);
@@ -188,30 +193,32 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       .find((message) => message.eventKind === "turn_started" && message.createdAtMs >= latestPromptAtMs)
       ?.createdAtMs ?? latestPromptAtMs;
   }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
-  const latestHomeTerminal = useMemo(() => {
+  const latestHomeOutcome = useMemo(() => {
     const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
-    const terminalSince = (sinceMs: number) => [...homeInterfaceMessages]
+    const outcomeSince = (sinceMs: number) => [...homeInterfaceMessages]
       .reverse()
       .find((message) => (
         message.direction === "out"
         && message.role === "assistant"
         && (message.eventKind === "message" || message.eventKind === "error")
-        && message.terminal
+        && (message.terminal || message.eventKind === "message"
+          && message.eventData?.phase === "final_answer"
+          && message.eventData?.lifecycle === "completed")
         && message.createdAtMs >= sinceMs
         && Boolean(message.text.trim() || message.attachments?.length || message.error)
       )) ?? null;
-    const currentTurn = terminalSince(latestHomeTurnAtMs);
+    const currentTurn = outcomeSince(latestHomeTurnAtMs);
     if (currentTurn || latestHomeTurnAtMs === latestPromptAtMs) return currentTurn;
-    return homeTurnAwaitsFinalReply(homeTurnActivity(homeInterfaceMessages, latestPromptAtMs)) ? null : terminalSince(latestPromptAtMs);
+    return homeTurnAwaitsFinalReply(homeTurnActivity(homeInterfaceMessages, latestPromptAtMs)) ? null : outcomeSince(latestPromptAtMs);
   }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs, latestHomeTurnAtMs]);
-  const latestHomeResponse = latestHomeTerminal
-    && latestHomeTerminal.eventKind === "message"
-    && !latestHomeTerminal.error
-    ? latestHomeTerminal
+  const latestHomeResponse = latestHomeOutcome
+    && latestHomeOutcome.eventKind === "message"
+    && !latestHomeOutcome.error
+    ? latestHomeOutcome
     : null;
-  const latestHomeFailure = latestHomeTerminal
-    && (latestHomeTerminal.eventKind === "error" || latestHomeTerminal.error)
-    ? latestHomeTerminal
+  const latestHomeFailure = latestHomeOutcome
+    && (latestHomeOutcome.eventKind === "error" || latestHomeOutcome.error)
+    ? latestHomeOutcome
     : null;
   const latestHomeStreamingResponse = useMemo(() => [...homeInterfaceMessages]
     .reverse()
@@ -226,7 +233,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     homeInterfaceMessages, latestHomePrompt?.createdAtMs ?? 0,
   ), [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
   const displayTitle = session.context?.homeRunId === homeRunId ? session.context.runTitle : sessionTitle;
-  const voiceBinding = workspace.runs.find((run) => run.runId === homeRunId && run.clientSurfaceRole === "home")?.voiceContext;
   const providerId = voiceBinding?.providerId || "";
   const providerLabel = workspace.declaredProviderInterfaces.find((provider) => provider.id === providerId)?.label || "Voice";
   const callActive = isVoiceCallActive(session.phase);
@@ -536,16 +542,23 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   return (
     <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`} ref={viewRef}>
       <div aria-hidden="true" className="voice-home-scene">
-        <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} quietField={oceanScene} sceneSurface={stageMainRef} formationSurface={widgetCanvasRef} rippleSurface={oceanScene ? undefined : viewRef} sizeProbe={orbProbeRef} />
+        <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} quietField={oceanScene} sceneSurface={stageMainRef} formationSurface={viewRef} rippleSurface={oceanScene ? undefined : viewRef} sizeProbe={orbProbeRef} />
         {oceanScene ? <OctopusOceanScene activity={orbActivity} calling={callActive} orbProbe={orbProbeRef} rippleSurface={viewRef} /> : null}
       </div>
-      <header className="voice-session-heading" data-ocean-obstacle="">
+      <header className="voice-session-heading" data-ocean-obstacle="" data-voice-placement-obstacle="">
         <VoiceSessionTitle
           editable={!callActive}
           onChange={setSessionTitle}
           title={displayTitle}
         />
-        {status.label ? (
+        {topology.readError ? (
+          <button className="voice-session-status is-error" type="button" title={topology.readError}
+            disabled={topology.loading} onClick={topology.refresh}>
+            {topology.loading ? <OcLoadingText label="Loading environment" /> : "Couldn’t load environment · Retry"}
+          </button>
+        ) : !target.run && topology.loading ? (
+          <div className="voice-session-status is-pending"><OcLoadingText label="Loading environment" /></div>
+        ) : status.label ? (
           <div className={`voice-session-status is-${status.tone}`}>
             <span>{status.label}</span>
           </div>
@@ -789,11 +802,11 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   const text = response?.text.trim() ?? "";
   const finalReplyPending = (!response && homeTurnAwaitsFinalReply(activity)) || homeTurnAwaitsClientResult(activity, toolPresentations);
   const activityNotice = finalReplyPending ? null : homeTurnTerminalNotice(activity);
-  const working = (busy || finalReplyPending) && !submitting && !failure && !activityNotice;
+  const working = (busy || finalReplyPending) && !response && !submitting && !failure && !activityNotice;
   const streamingText = working ? streamingResponse?.text ?? "" : "";
   const responseStreaming = Boolean(streamingText.trim());
   const attachments = response?.attachments ?? [];
-  const finalVisible = !working && Boolean(response && (text || attachments.length));
+  const finalVisible = !submitting && !failure && Boolean(response && (text || attachments.length));
   const responseTimestamp = responseStreaming ? streamingResponse?.createdAtMs : finalVisible ? response?.createdAtMs : undefined;
   const responseDate = responseTimestamp && Number.isFinite(responseTimestamp) && responseTimestamp > 0
     ? new Date(responseTimestamp)
@@ -812,7 +825,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
     ? true
     : finalVisible
     ? isCompactHomeResponse(text, attachments)
-    : !turnFailed && !retainedActivity;
+    : !turnFailed;
 
   useLayoutEffect(() => {
     const stage = stageRef.current;
@@ -889,6 +902,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
               <article
                 className={`home-response-output${responseStreaming ? " home-response-output--streaming octopus-assistant-streaming" : ""}`}
                 data-ocean-obstacle=""
+                data-voice-placement-obstacle=""
                 key="assistant-response"
               >
                 {datedResponse ? (
@@ -909,11 +923,11 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
                 {!responseStreaming && attachments.length ? <HomeResponseAttachments attachments={attachments} /> : null}
               </article>
             ) : working || retainedActivity ? (
-              <article className={`home-response-output${working ? " home-response-output--live" : ""}`} data-ocean-obstacle="" key="activity">
+              <article className={`home-response-output home-response-output--activity${working ? " home-response-output--live" : ""}`} data-ocean-obstacle="" data-voice-placement-obstacle="" key="activity">
                 <HomeTurnActivity activities={activity} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} turnInProgress={working} terminalNotice={activityNotice} />
               </article>
             ) : quiet || loading ? null : (
-              <div className="home-response-empty" data-ocean-obstacle="" key="empty">
+              <div className="home-response-empty" data-ocean-obstacle="" data-voice-placement-obstacle="" key="empty">
                 <h2>{homeInterfaceReady ? "What would you like to do?" : "Home is not available yet"}</h2>
                 <p>{homeInterfaceReady ? "Talk to Home or send a message." : "The Home connection has not been projected."}</p>
               </div>
@@ -922,7 +936,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
         </div>
       </motion.div>
       <div className="home-response-stage__composer-footer" ref={composerFooterRef}>
-        <div className="home-response-stage__composer" data-ocean-obstacle="">{composer}</div>
+        <div className="home-response-stage__composer" data-ocean-obstacle="" data-voice-placement-obstacle="">{composer}</div>
       </div>
     </motion.section>
   );
@@ -1331,33 +1345,30 @@ function projectInsights(activity: HomeRunActivity): InsightsWidget {
   };
 }
 
-function projectTaskProgress(
+export function projectTaskProgress(
   topology: TopologySnapshot,
   target: ProjectionTarget,
   homeRunId: string,
   chatRuns: ChatRun[],
 ): TaskProgressWidget {
   const environmentIds = homeEnvironmentIds(topology, target.environment?.id || target.run?.eeId || "");
-  const scopedRuns = topology.environments
-    .filter((environment) => environmentIds.has(environment.id))
-    .flatMap((environment) => environment.runs)
-    .filter((run) => run.id !== homeRunId);
+  const scopedRuns = chatRuns.filter((run) => run.clientSurfaceRole === "task" && run.writable
+    && run.runId !== homeRunId && !run.archived && environmentIds.has(run.eeId));
   const now = Date.now();
-  const scheduledRunIds = new Set(chatRuns
-    .filter((run) => environmentIds.has(run.eeId) && run.nextScheduledAtMs > now)
-    .map((run) => run.runId));
-  const unseenDone = scopedRuns.filter((run) => run.status === "done" || run.status === "settled").length;
-  const running = scopedRuns.filter((run) => run.status === "active").length;
-  const scheduled = scheduledRunIds.size;
-  const waiting = scopedRuns.filter((run) => (
-    run.status !== "done"
-    && run.status !== "settled"
-    && run.status !== "active"
-    && !scheduledRunIds.has(run.id)
-  )).length;
-  const total = unseenDone + running + waiting;
+  let unseenDone = 0, running = 0, waiting = 0, scheduled = 0, failed = 0;
+  for (const run of scopedRuns) {
+    if (run.turnState === "failed") failed++;
+    else if (run.turnOpen) {
+      if (run.turnState === "working") running++;
+      else waiting++;
+    } else if (run.nextScheduledAtMs > now) scheduled++;
+    else if (run.lastTerminalMessage) unseenDone++;
+    else waiting++;
+  }
+  const total = unseenDone + running + waiting + failed;
   return {
     completion: total ? (unseenDone / total) * 100 : 0,
+    failed,
     running,
     scheduled,
     unseenDone,

@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { useEffect, useState } from "react";
 import { OcButton, OcCard, OcEmptyState, OcGroup, OcStatus, OcTextField } from "../../design-system/components";
 import type { OctopusAppInfo, OctopusTransportDefaults } from "../../electron";
@@ -109,7 +110,7 @@ export function ConnectionsSection() {
       >
         <div className="settings-provider-grid">
           {providerState.providers.map((provider) => <ProviderCard key={provider.id} provider={provider} />)}
-          {providerState.loading ? <OcEmptyState className="min-h-0 py-6" size="compact" title="Reading provider descriptors…" /> : null}
+          {providerState.loading && !providerState.providers.length ? <OcLoadingRows label="Reading provider descriptors…" /> : null}
           {!providerState.loading && providerState.providers.length === 0 ? (
             <OcEmptyState
               className="min-h-0 py-6"

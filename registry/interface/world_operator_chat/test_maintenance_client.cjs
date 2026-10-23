@@ -33,7 +33,7 @@ function maintenanceFixture(registryRoot, runsRoot, original = {}) {
   const d = { schema_version: 1, run: "observer_run", ee: source.ee, worker_interface: "observer_worker", provider_interface: "observer_provider",
     source_run: source.id, source_worker_interface: source.worker, source_provider_interface: provider, source_client_interface: client,
     source_relay_interface: "terminal_relay", projection_interface: "projector", experience_interface: "experience_relay",
-    terminal_label: terminal, provider_output_labels: [terminal, "turn.completed"], input_label: input, outcome_interface: "observer_outcome", capture_interface: "capture_relay", outcome_label: outcome,
+    terminal_label: terminal, provider_output_labels: [terminal, "turn.completed"], input_label: input, outcome_interface: "observer_outcome", capture_interface: "capture_relay", outcome_label: outcome, outcome_error_label: "memory.capture.error",
     collection_source: library, collection_entries_root: path.join(registryRoot, "artifact", library, "entries"),
     publication_door_interface: "publication_door", publication_tool: "memory.save.publication" };
   const sourceParams = { source_run: source.id, source_ee: source.ee, source_worker_interface: source.worker, source_provider_interface: provider, source_client_interface: client };
@@ -51,6 +51,7 @@ function maintenanceFixture(registryRoot, runsRoot, original = {}) {
     template("provider_artifact_output", d.projection_interface, d.capture_interface, requirement(outcome, {
       source_run: source.id, source_ee: source.ee, provider_interface: d.provider_interface, publication_tool: d.publication_tool, entries_root: d.collection_entries_root }), outcome),
     template("authoring_call", "projector_authoring", "projector_door", requirement("tool.call", { tools: ["file.write.projection_run"] })), template("authoring_result", "projector_door", d.projection_interface)];
+  projectionTemplates.push(template("provider_artifact_output", d.projection_interface, d.capture_interface, [], "memory.capture.error"));
   projectionTemplates[0].outbound_interface_bindings = [binding(d.projection_interface)];
   projectionTemplates[2].outbound_interface_bindings = [binding(d.projection_interface)];
   delete projectionTemplates[2].static_artifact_bindings;
@@ -91,7 +92,7 @@ function maintenanceFixture(registryRoot, runsRoot, original = {}) {
   stage("tool", d.publication_tool, { id: d.publication_tool, interface: d.publication_door_interface, process: { authority: {
     write_root_slots: ["registry_artifact_root"] } } });
   stage("interface", d.projection_interface, { id: d.projection_interface, interface_type: "system", interface_driver_ref: "bound_context_projection",
-    interface_driver_config: { private_config: { client_projection_output_labels: [input, outcome], context_projection: { schema_version: 1, ...sourceParams, projection_run: projection.id,
+    interface_driver_config: { private_config: { client_projection_output_labels: [input, outcome, "memory.capture.error"], context_projection: { schema_version: 1, ...sourceParams, projection_run: projection.id,
       observer_run: d.run, source_relay_interface: d.source_relay_interface, terminal_label: terminal, collection_source: library, publication_tool: d.publication_tool,
       outcome: { worker_interface: d.worker_interface, provider_interface: d.provider_interface, relay_interface: d.outcome_interface,
         experience_interface: d.experience_interface, input_routes: [{ interface_binding: observerTemplates[0].interface_binding }] } } } } });

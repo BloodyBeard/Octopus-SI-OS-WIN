@@ -9,7 +9,7 @@ const { projectOctopusOsRequiredVerifiedArtifacts } = require("./authoringProfil
 const { readOptionalRegularJsonDocument, readRegularJsonDocument, requireUnchangedJsonDigest } = require("./jsonFiles.cjs");
 const { parseApplicationManifest, parseOctopusOsSidecar } = require("./sidecars.cjs");
 const { readClientTaskArchive } = require("./taskArchive.cjs");
-const { assertRunPrivateStateIsOwned, assertTaskWorkerPinRemainsTaskLocal, octopusOsOwnedInterfaceIds, requirePrivatePublicationDirectory, scopedRecordPath, snapshotRemovalDirectory } = require("./taskDeletion.cjs");
+const { assertRunPrivateStateIsOwned, assertTaskWorkerPinRemainsTaskLocal, taskOwnedInterfaceIds, requirePrivatePublicationDirectory, scopedRecordPath, snapshotRemovalDirectory } = require("./taskDeletion.cjs");
 const { arrayValue, isPlainRecord, mapConcurrentOrdered, numberValue, objectOrEmpty, requiredAbsolutePath, requiredBoolean, requiredDigest, requiredSafeRegistryId, requiredString, stringValue } = require("./values.cjs");
 
 async function configureOctopusOsTaskApplication(
@@ -132,7 +132,7 @@ async function configureOctopusOsTaskApplication(
     if ([...activeIds].some((checkpointId) => !checkpointIds.has(checkpointId))) {
       throw new Error(`task '${runId}' activates a checkpoint absent from its record`);
     }
-    const exactInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, chatInterface);
+    const exactInterfaces = await taskOwnedInterfaceIds(registryRoot, next, chatInterface, runId);
     assertRunPrivateStateIsOwned(next, exactInterfaces, runId);
     const workerInterface = requiredSafeRegistryId(next.worker, "task worker interface");
     await assertTaskWorkerPinRemainsTaskLocal(

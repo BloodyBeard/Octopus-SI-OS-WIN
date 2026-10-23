@@ -6746,6 +6746,7 @@ dependencies = [
  "octopus-world-pyecho-life-runtime",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -7033,6 +7034,7 @@ dependencies = [
  "blake3",
  "dirs",
  "dunce",
+ "fs2",
  "libc",
  "octopus-applypatch",
  "octopus-descriptors",
@@ -7210,6 +7212,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-runtime",
+ "octopus-util-pty",
  "octopus-verifiers",
  "schemars 0.8.22",
  "serde",
@@ -8031,7 +8034,12 @@ name = "octopus-system-room-tool-runtime"
 version = "0.1.0"
 dependencies = [
  "octopus-descriptors",
+ "octopus-interfaces",
+ "octopus-ledger",
  "octopus-process-session-tool-runtime",
+ "octopus-tool-handlers",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -8043,6 +8051,7 @@ dependencies = [
  "octopus-git-sandbox-substrate",
  "octopus-process-session-tool-runtime",
  "octopus-system-coder-env",
+ "octopus-verifiers",
  "octopus-worker-env",
  "tempfile",
  "tokio",

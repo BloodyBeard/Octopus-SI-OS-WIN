@@ -33,6 +33,11 @@ impl Ledger {
         }
     }
 
+    pub(super) fn watermark(&mut self) -> Result<u64, String> {
+        self.refresh()?;
+        Ok(self.index.watermark())
+    }
+
     fn refresh(&mut self) -> Result<(), String> {
         let mut file = std::fs::File::open(&self.path).map_err(|error| error.to_string())?;
         let length = file.metadata().map_err(|error| error.to_string())?.len();
@@ -272,7 +277,22 @@ impl Identity {
     }
 }
 
+pub(super) fn identity_for(record: &RunRecord, provider: &InterfaceId, pending: &PendingHandoff) -> Result<String, String> {
+    let [item] = pending.items.as_slice() else { return Err("retained identity requires one output".into()); };
+    Identity { schema_version: 1, provider: provider.clone(), run: record.id.clone(), worker: record.worker.clone(),
+        source_movement_seq: pending.source_movement_seq, item: item.clone() }.id()
+}
+
 impl ProviderOutputHandoff {
+    pub(super) fn retained_output_identity(&self, pending: &PendingHandoff) -> Result<Option<(String, u64)>, String> {
+        let [item] = pending.items.as_slice() else { return Err("rejected final requires exactly one output".into()); };
+        let identity = self.pending_delivery_identity(pending, item);
+        if !identity.exists(&self.ctx)? { return Ok(None); }
+        let mut index = self.session.index()?;
+        index.retained_delivery.refresh()?;
+        Ok(Some((identity.id()?, index.retained_delivery.index.watermark())))
+    }
+
     fn pending_delivery_identity(
         &self,
         pending: &PendingHandoff,
@@ -360,33 +380,77 @@ impl ProviderOutputHandoff {
         item: &PendingHandoffItem,
         artifact: InterfaceArtifactFile,
     ) -> Result<DeliveryVerdict, String> {
+        if self.ctx.cancel.is_cancelled() {
+            return Err("provider pending output delivery was cancelled".into());
+        }
+        let limits = self.ctx.required_host_io_limits()?;
+        let artifact = artifact
+            .capture_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+            .map_err(|error| format!("provider pending output capture failed: {error}"))?;
+        let captured = artifact
+            .read_manifest_bounded(limits.max_manifest_bytes)
+            .map_err(|error| format!("provider pending output identity failed: {error}"))?;
+        let content = ContentHash::of_bytes(&captured.manifest_bytes);
+        let captured_ref = ArtifactRef {
+            id: ArtifactId::new(format!("{}:{}", captured.manifest.label, content.to_hex())),
+            content,
+        };
         let identity = self.prepare_pending_delivery(pending, item)?;
+        if captured_ref != identity.artifact()? {
+            return Err("provider pending output changed its retained artifact".into());
+        }
+        let delivery_id = identity.id()?;
         self.record_pending_dispatch(pending, item)?;
-        let delivery = self
-            .ctx
-            .hand_arrival_retained(artifact, Vec::new(), &identity.id()?)
-            .await?;
-        let scope = self
+        let mut original_scope = self
             .session
             .index()?
             .retained_delivery
             .scope(&identity)?
-            .ok_or("retained provider output reply has no durable scope")?;
-        match delivery {
-            ArtifactDelivery::Pending { scope_seq } if scope.seq == scope_seq => Err(format!(
-                "provider pending output '{}' retains unfinished original edges in scope {scope_seq}",
-                item.artifact_id.as_str(),
-            )),
-            ArtifactDelivery::Pending { .. } => {
-                Err("retained provider output changed its original scope".into())
+            .map(|scope| scope.seq);
+        let delivery = async {
+            loop {
+                let delivery = self
+                    .ctx
+                    .hand_arrival_retained(artifact.clone(), Vec::new(), &delivery_id)
+                    .await?;
+                let scope = self
+                    .session
+                    .index()?
+                    .retained_delivery
+                    .scope(&identity)?
+                    .ok_or("retained provider output reply has no durable scope")?;
+                if !scope.has_output {
+                    return Err("retained provider output scope omits its original checkpoint".into());
+                }
+                if *original_scope.get_or_insert(scope.seq) != scope.seq {
+                    return Err("retained provider output changed its original scope".into());
+                }
+                match delivery {
+                    ArtifactDelivery::Pending { scope_seq } if scope.seq == scope_seq => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    ArtifactDelivery::Pending { .. } => {
+                        return Err("retained provider output changed its original scope".into());
+                    }
+                    ArtifactDelivery::Complete { verdict }
+                        if scope.complete && !verdict.awaits_current_source() =>
+                    {
+                        return Ok(verdict);
+                    }
+                    ArtifactDelivery::Complete { .. } => {
+                        return Err("retained provider output completed without all original edge decisions".into());
+                    }
+                }
             }
-            ArtifactDelivery::Complete { verdict }
-                if scope.complete && !verdict.awaits_current_source() =>
-            {
-                Ok(verdict)
-            }
-            ArtifactDelivery::Complete { .. } => {
-                Err("retained provider output completed without all original edge decisions".into())
+        };
+        tokio::select! {
+            biased;
+            _ = self.ctx.cancel.cancelled() => Err("provider pending output delivery was cancelled".into()),
+            result = tokio::time::timeout(Duration::from_millis(self.config.result_timeout_ms), delivery) => {
+                result.map_err(|_| format!(
+                    "provider pending output '{}' delivery timed out after {}ms; retained scope {original_scope:?} remains unresolved",
+                    item.artifact_id.as_str(), self.config.result_timeout_ms,
+                ))?
             }
         }
     }

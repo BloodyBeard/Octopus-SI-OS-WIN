@@ -249,6 +249,42 @@ const writerAgent = {
   client_template_provider_model: "model-a", client_template_reasoning_effort: "medium", client_template_application_ids: [], client_template_worker_environment_kinds: [],
 };
 
+test("refreshing the task list preserves the selected model and a ready new-task draft", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.workers = [{ id: "worker.test", ...writerAgent }];
+  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
+  const view = await mount(host, "live");
+  await type(view, "Create a report");
+  await until(() => view.current.canSubmit, () => view.current.submitBlockReason);
+  const read = host.transport.projectionRead;
+  let release;
+  host.transport.projectionRead = request => request.method === "projection.operator.chats.list"
+    ? new Promise(resolve => { release = () => resolve({ chats: structuredClone(host.runs) }); }) : read(request);
+  const refreshing = view.current.refreshRuns();
+  await until(() => view.current.loadingRuns, "the refresh did not start");
+  assert.equal(view.current.runsLoaded, true);
+  assert.equal(view.current.canSubmit, true, view.current.submitBlockReason);
+  assert.equal(view.current.providerModel, "model-a");
+  release(); await refreshing;
+});
+
+test("editing a message from another pane carries only its preceding reply into the task draft", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.workers = [{ id: "worker.test", ...writerAgent }];
+  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }), runRow("source"));
+  const view = await openTask(host, "live");
+  const history = [
+    { id: "before", runId: "source", role: "assistant", eventKind: "message", terminal: true, artifactId: "source-prefix", text: "Earlier answer" },
+    { id: "foreign", runId: "run-1", role: "assistant", eventKind: "message", terminal: true, artifactId: "unrelated", text: "Other pane" },
+    { id: "edit", runId: "source", role: "user", eventKind: "message", artifactId: "original-input", text: "Original" },
+  ];
+  assert.equal(view.current.editUserMessageInNewTask(history[2], "Corrected", history), true);
+  await until(() => view.current.activeRunId === "" && view.current.text === "Corrected", "the edited task draft did not open");
+  assert.deepEqual(view.current.continuation, { sourceRunId: "source", sourceArtifactId: "source-prefix" });
+  assert.equal(view.current.providerModel, "model-a");
+  await until(() => view.current.canSubmit, () => view.current.submitBlockReason);
+});
+
 test("a new task adopts the one Agent matching the Home defaults, starts as submitting and moves to the run the host creates", { timeout: 15_000 }, async () => {
   const host = fakeHost();
   host.workers = [{ id: "worker.test", ...writerAgent }];
@@ -386,21 +422,24 @@ for (const profile of ["live", "lab"]) {
     assert.equal(host.turns.length, 1);
   });
 
-  test(`an unconfirmed delivery that never reached the task blocks sending until it is removed (${profile})`, { timeout: 15_000 }, async () => {
+  test(`an unconfirmed manual delivery returns to the composer and retries the same identity (${profile})`, { timeout: 15_000 }, async () => {
     const host = fakeHost();
     const view = await openTask(host, profile);
     await type(view, "Add totals");
     host.failNextTurn = { failure: new Error("transport closed"), admitted: false };
     await view.current.submit();
-    await until(() => view.current.queuedTurns[0]?.status === "unknown", "the unconfirmed delivery was not kept");
+    await until(() => view.current.text === "Add totals" && view.current.error === "transport closed", "the draft was not restored");
+    assert.equal(view.current.queuedTurns.length, 0);
+    assert.equal(view.current.canSubmit, true);
+    const original = host.turns[0].messageId;
     host.changed("ledger");
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    assert.equal(view.current.queuedTurns[0]?.status, "unknown", "history without the message never confirms it");
-    await type(view, "Try again");
-    assert.equal(view.current.canSubmit, false);
-    await view.current.deleteQueuedTurn(view.current.queuedTurns[0].id);
-    await until(() => view.current.queuedTurns.length === 0 && view.current.canSubmit, `still blocked: ${view.current.submitBlockReason}`);
-    assert.equal(host.turns.length, 1);
+    await settle();
+    assert.equal(host.turns.length, 1, "uncertain delivery must not retry automatically");
+    void view.current.submit();
+    await until(() => host.turns.length === 2, "explicit retry did not submit");
+    assert.equal(host.turns[1].messageId, original);
+    host.reply("run-1", "Totals added.");
+    await until(() => !view.current.busy, "retry did not settle");
   });
 
   test(`a recovered delivery refreshes the task and is never sent again (${profile})`, { timeout: 15_000 }, async () => {
@@ -453,7 +492,7 @@ for (const profile of ["live", "lab"]) {
     await until(() => view.current.turnOpen, "turn never opened");
     await view.current.interruptActiveTurn();
     assert.deepEqual(host.controls.map((request) => [request.runId, request.action, request.interfaceId]), [["run-1", "stop", "chat.run-1"]]);
-    await until(() => view.current.turnControlPending, "the stop is not pending");
+    assert.equal(view.current.turnControlPending, false, "Stop remains available after hand-in while the provider acknowledgement is pending");
     host.append("run-1", "assistant", "", control("run-1", "stop", host.controls[0].controlId));
     Object.assign(host.run("run-1"), { turn_open: false, turn_state: "idle" });
     host.changed("ledger");
@@ -504,7 +543,7 @@ for (const profile of ["live", "lab"]) {
     await until(() => view.current.queuedTurns.length === 1 && view.current.text === "", "not queued");
     await view.current.interruptActiveTurn();
     host.append("run-1", "assistant", "", control("run-1", "stop", host.controls[0].controlId));
-    host.append("run-1", "assistant", "Interrupted before totals", { event_kind: "interrupted_result" });
+    host.append("run-1", "assistant", "Interrupted before totals", { event_kind: "interrupted_result", event_data: { turn_interrupted: true } });
     Object.assign(host.run("run-1"), { turn_open: false, turn_state: "idle" });
     await until(() => !view.current.busy && view.current.queuePaused, () => `the queue did not pause: ${JSON.stringify({ busy: view.current.busy, paused: view.current.queuePaused, queued: view.current.queuedTurns })}`);
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -523,10 +562,10 @@ for (const profile of ["live", "lab"]) {
     void view.current.submit();
     await until(() => view.current.turnOpen, "turn never opened");
     await view.current.interruptActiveTurn();
-    await until(() => view.current.turnControlPending, "the stop is not pending");
+    assert.equal(view.current.turnControlPending, false, "Stop remains available after hand-in while the provider acknowledgement is pending");
     const refusal = control("run-1", "stop", host.controls[0].controlId);
     host.append("run-1", "assistant", "Provider busy", { ...refusal, event_data: { ...refusal.event_data, status: "failed", detail: { error: "provider busy" } } });
-    await until(() => !view.current.turnControlPending, "the refused stop stayed pending");
+    await until(() => !view.current.turnControlPending && view.current.error === "Stop failed. provider busy", "the refused stop was not reported");
     assert.equal(view.current.error, "Stop failed. provider busy");
     host.reply("run-1", "Totals added.");
     await until(() => !view.current.busy, "the reply never closed the turn");
@@ -659,7 +698,7 @@ for (const profile of ["live", "lab"]) {
     void view.current.submit();
     await until(() => view.current.turnOpen, "turn never opened");
     await view.current.interruptActiveTurn();
-    await until(() => view.current.turnControlPending, "the stop is not pending");
+    assert.equal(view.current.turnControlPending, false, "Stop remains available after hand-in while the provider acknowledgement is pending");
     host.reply("run-1", "Totals added.");
     await until(() => !view.current.busy && !view.current.turnOpen && !view.current.turnControlPending, () => `the reply did not release the stop: ${JSON.stringify({ busy: view.current.busy, open: view.current.turnOpen, pending: view.current.turnControlPending })}`);
   });
@@ -748,9 +787,9 @@ const researcher = { ...writerAgent, id: "worker.research", label: "Research", p
   applications: [notesApp, mailApp], drivers, selected_tools: [{ tool: "shell.exec", interface: "iface.shell", worker_environment_kind: "system_shell" }, { tool: "browser.open", interface: "iface.browser", worker_environment_kind: "system_browser" }],
   client_agent_id: "agent-research", client_agent_name: "Researcher", client_template_provider_model: "model-b", client_template_reasoning_effort: "high",
   client_template_application_ids: ["app.notes"], client_template_worker_environment_kinds: ["system_shell"] };
-const rootContext = (workers) => ({ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1", host_root_refs: { host_filesystem_root: "/" },
+const rootContext = (workers) => ({ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1", full_access_root: "/", host_root_refs: { host_filesystem_root: "/" },
   workers: workers.map((worker) => ({ label: worker.id, provider_interface_ids: [provider.id, otherProvider.id], interface_policy: policy(["model-a", "model-b"]), ...worker })) });
-const projectContext = { ee_id: "ee.proj", display_name: "Market study", agent_catalog_digest: "catalog-2", host_root_refs: { host_filesystem_root: "/" }, workers: [researcher] };
+const projectContext = { ee_id: "ee.proj", display_name: "Market study", agent_catalog_digest: "catalog-2", full_access_root: "/", host_root_refs: { host_filesystem_root: "/" }, workers: [researcher] };
 function capableHost(contexts = [rootContext([{ id: "worker.test" }]), projectContext], { home = true } = {}) {
   localStorage.clear();
   const host = fakeHost();
@@ -935,4 +974,51 @@ test("a structural change lists new tasks even when ledger changes arrive with i
   await until(() => host.reads.filter((method) => method === "projection.operator.chats.status").length > 0, "no status read");
   await settle();
   assert.equal(host.reads.filter((method) => method === "projection.operator.chats.list").length, lists, "a ledger change does not re-list tasks");
+});
+
+
+test("a manual message refused before delivery returns to the composer and the existing error surface", { timeout: 15000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "live");
+  await type(view, "Keep this draft");
+  host.failNextTurn = { failure: Object.assign(new Error("Choose a project folder"), { deliveryState: "not_sent" }), admitted: false };
+  await view.current.submit();
+  await until(() => view.current.text === "Keep this draft" && view.current.error === "Choose a project folder", () => `draft/error: ${view.current.text} / ${view.current.error}`);
+  assert.equal(view.current.error, "Choose a project folder");
+  assert.equal(view.current.queuedTurns.length, 0);
+  assert.equal(view.current.canSubmit, true);
+});
+
+
+test("a failed manual send preserves a newer composer draft and retains the refused message", async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "live");
+  await type(view, "Original message");
+  let release;
+  host.holdTurn = new Promise((resolve) => { release = resolve; });
+  host.failNextTurn = { failure: Object.assign(new Error("Choose a project folder"), { deliveryState: "not_sent" }), admitted: false };
+  const sending = view.current.submit();
+  await until(() => view.current.text === "" && view.current.busy, "sending did not consume the original draft");
+  await type(view, "New draft");
+  release();
+  await sending;
+  await until(() => view.current.error === "Choose a project folder", "the refusal was not reported");
+  assert.equal(view.current.text, "New draft");
+  assert.equal(view.current.queuedTurns[0]?.text, "Original message");
+  assert.equal(view.current.queuedTurns[0]?.status, "failed");
+  view.current.setText("");
+  await until(() => view.current.text === "Original message" && !view.current.queuedTurns.length, "the retained message did not return to the empty composer");
+});
+
+test("late admission clears a restored uncertain draft without resending it", async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "live");
+  await type(view, "Original message");
+  host.failNextTurn = { failure: new Error("transport closed"), admitted: false };
+  await view.current.submit();
+  await until(() => view.current.text === "Original message", "the draft was not restored");
+  host.append("run-1", "user", "Original message", { id: host.turns[0].messageId });
+  host.reply("run-1", "Received.");
+  await until(() => view.current.text === "" && !view.current.busy, "late admission left the original draft ready to duplicate");
+  assert.equal(host.turns.length, 1);
 });

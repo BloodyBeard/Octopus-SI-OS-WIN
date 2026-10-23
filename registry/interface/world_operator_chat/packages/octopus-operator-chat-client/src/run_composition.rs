@@ -585,6 +585,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &topology,
         &identity,
         &request.door_host_slots,
+        &capability_plan::project_source_folders(&roots.ee_instances_root, &identity.ee_id)?,
         &mut writes,
     )?;
     plan_authoring_interfaces(&interface_root, &config, &topology, &identity, &mut writes)?;

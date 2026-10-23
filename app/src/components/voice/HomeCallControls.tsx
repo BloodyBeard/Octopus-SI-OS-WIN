@@ -1,4 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useIsPresent } from "motion/react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEventHandler, type ReactNode } from "react";
+import { useShouldReduceMotion } from "../../appearance";
+import { homeSurfaceFade } from "../../client-surfaces/homeSurfaceMotion";
 import { OcButton, OcIconButton, OcSelect } from "../../design-system/components";
 import type { VoiceSession } from "./useVoiceSession";
 import { formatCallDuration, voicePresentation } from "./voicePresentation";
@@ -65,17 +68,15 @@ export function HomeCallControls({ session, onStart, speakerEnabled, onSpeakerCh
     if (devicesOpen) devicesPanel.current?.focus({ preventScroll: true });
   }, [devicesOpen]);
 
-  if (!live && !showFailure) return null;
-
   return (
-    <section aria-label="Home call" className={`home-call is-${session.phase}`} onKeyDown={(event) => {
+    <AnimatePresence>{live || showFailure ? <HomeCallTransition className={`home-call is-${session.phase}`} onKeyDown={(event) => {
       if (event.key !== "Escape" || event.defaultPrevented || (!devicesOpen && !transcriptOpen)) return;
       if (event.target instanceof Element && event.target.closest('[data-oc-dropdown], button[aria-haspopup="menu"][aria-expanded="true"]')) return;
       event.stopPropagation();
       event.preventDefault();
       (transcriptOpen ? transcriptButton : devicesButton).current?.focus({ preventScroll: true });
       setPanel(null);
-    }}>
+    }}>{(present) => <>
       {live && showCaptions && latestUtterance && !transcriptOpen ? (
         <p key={latestUtterance.id} aria-live="polite" aria-atomic="true" className={`home-call__caption is-${latestUtterance.role}`} title={latestUtterance.text}>
           <span className="home-call__caption-speaker">{latestUtterance.role === "user" ? "You: " : "Home: "}</span>
@@ -104,7 +105,7 @@ export function HomeCallControls({ session, onStart, speakerEnabled, onSpeakerCh
         </div>
       ) : null}
       {live ? (
-        <nav aria-label="Voice controls" className="home-call__bar">
+        <nav aria-label="Voice controls" className="home-call__bar is-layout-ready" data-voice-forming={present || undefined} data-voice-leaving={!present || undefined}>
           <div className="home-call__clock" title={state.detail}>
             <span aria-hidden="true" className="home-call__dot" />
             <span aria-label="Call duration" className="home-call__duration">{ticking ? formatCallDuration(nowMs - session.startedAtMs) : "–:––"}</span>
@@ -169,6 +170,19 @@ export function HomeCallControls({ session, onStart, speakerEnabled, onSpeakerCh
           </details>
         </div>
       ) : null}
-    </section>
+    </>}</HomeCallTransition> : null}</AnimatePresence>
   );
+}
+
+function HomeCallTransition({ children, className, onKeyDown }: {
+  children: (present: boolean) => ReactNode;
+  className: string;
+  onKeyDown: KeyboardEventHandler<HTMLElement>;
+}) {
+  const present = useIsPresent();
+  const reducedMotion = useShouldReduceMotion();
+  return <motion.section {...homeSurfaceFade(reducedMotion)} aria-label="Home call" className={className}
+    data-leaving={!present || undefined} inert={!present || undefined} onKeyDown={onKeyDown}>
+    {children(present)}
+  </motion.section>;
 }

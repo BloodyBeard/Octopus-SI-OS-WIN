@@ -1,3 +1,4 @@
+import { OcLoadingText } from "../../design-system/LoadingSkeleton";
 import { cloneElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type HTMLAttributes, type PointerEvent, type ReactElement, type RefAttributes } from "react";
 import { createPortal } from "react-dom";
 import { visibleClientAgents, type ClientAgentDefinition } from "../../agentPresets";
@@ -264,8 +265,8 @@ export function TaskHoverCard({ children, details, disabled = false, title, age 
           <AgentPresetLogo color={details.project?.color} icon={details.agent.icon} size={16} />
           <span>{details.agent.name}</span>
         </div> : null}
-        {!environment || environment.failed || environment.data?.folders.length === 0 ? <div className="task-hover-card-notice" role="status">
-          {environment?.failed ? "Environment details unavailable" : environment?.data ? "No workspace attached to this task" : "Loading environment…"}
+        {!environment || environment.failed || environment.data?.folders.length === 0 ? <div className="task-hover-card-notice">
+          {environment?.failed ? "Environment details unavailable" : environment?.data ? "No workspace attached to this task" : <OcLoadingText label="Loading environment…" />}
         </div> : null}
       </div>, document.body,
     ) : null}

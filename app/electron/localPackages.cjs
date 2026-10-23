@@ -48,10 +48,11 @@ async function readLocalPackageCatalog(options) {
   const roots = normalizeRoots(options);
   return withPackageStateRead(roots, async () => {
     const library = await loadLocalPackageLibrary(roots);
+    const sourceRead = { library, snapshots: new Map() };
     const packages = [];
     for (const entry of library.packages) {
       try {
-        const source = await snapshotPackageSource(roots, entry.manifest);
+        const source = await snapshotPackageSource(roots, entry.manifest, sourceRead);
         const state = await readPackageState(roots, entry.manifest, source);
         packages.push(packageCatalogRecord(entry, source, state));
       } catch (error) {
@@ -155,7 +156,7 @@ async function inspectLocalPackageCatalog(options) {
   const snapshots = new Map();
   for (const entry of library.packages) {
     try {
-      const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true, snapshots });
+      const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true, snapshots, library });
       const state = await readPackageState(roots, entry.manifest, source);
       packages.push(packageCatalogRecord(entry, source, state));
     } catch (error) {
@@ -421,7 +422,6 @@ async function adoptLocalPackageUpdates(options) {
           || sourceBaselineIssue(entry.manifest, source, state) !== null) continue;
         receiptUpgrades.push(entry.manifest.id);
       } else {
-        if (state.receiptState === "valid") continue;
         await preparePackageUpdate(roots, entry.manifest, source, state, resolutions, usedResolutions);
         if (state.localChanges.length) localChanges.push({ packageId: entry.manifest.id, files: state.localChanges });
       }
@@ -1681,7 +1681,7 @@ async function assertApplicationInterfaceImportClosure(manifest, members, roots,
     .map((member) => [member.owner, member]));
   const externalOwners = new Set(imports.filter(imported => !interfaceMembers.has(imported.owner)).map(imported => imported.owner));
   if (externalOwners.size && manifest.required_packages?.length) {
-    const library = await loadLocalPackageLibrary(roots);
+    const library = options.library ?? await loadLocalPackageLibrary(roots);
     for (const dependency of packageDependencyOrder(library, manifest.required_packages)) {
       for (const member of dependency.manifest.members) {
         if (member.registry_kind !== "interface" || !externalOwners.has(member.owner)) continue;
@@ -1807,6 +1807,7 @@ async function readPackageState(roots, manifest, source) {
     present += 1;
     const snapshot = await snapshotDirectory(target);
     validateMemberDataPaths(member, snapshot);
+    await validateInstalledDescriptor(member, snapshot);
     const baseline = receiptResult?.members.find(candidate => memberKey(candidate) === memberKey(member));
     const deferred = new Set();
     for (const [relative, entry] of configurationEvolution(member, baseline)) {
@@ -1849,21 +1850,13 @@ async function readPackageState(roots, manifest, source) {
   }) : "";
   let receiptState = receiptResult ? "valid" : "missing";
   if (receiptResult && (
-    receiptResult.source_digest !== source.sourceDigest
-    || receiptResult.manifest_digest !== source.manifestDigest
-    || receiptResult.package_version !== manifest.version
-    || receiptResult.product_kind !== manifest.product_kind
+    receiptResult.product_kind !== manifest.product_kind
     || receiptResult.product_id !== manifest.product_id
-    || stableJson(receiptResult.required_packages ?? []) !== stableJson(manifest.required_packages ?? [])
-    || receiptResult.members.length !== source.members.length
-    || !materialized
     || receiptResult.members.some((receiptMember) => {
-      const active = activeMembers.find((candidate) => (
+      const active = [...activeMembers, ...retiredMembers].find((candidate) => (
         candidate.registry_kind === receiptMember.registry_kind && candidate.owner === receiptMember.owner
       ));
-      const expected = source.members.find((candidate) => memberKey(candidate) === memberKey(receiptMember));
-      if (!active || !expected || receiptMember.target !== memberRelative(active)) return true;
-      return !receiptMemberMatchesSource(receiptMember, expected, active);
+      return !active?.present || receiptMember.target !== memberRelative(active);
     })
   )) receiptState = "stale";
   const customizations = source.members.flatMap((member) => {
@@ -1887,6 +1880,8 @@ async function readPackageState(roots, manifest, source) {
     retiredMembers,
     receipt: receiptResult,
     receiptState,
+    updateAvailable: Boolean(receiptResult && (receiptResult.source_digest !== source.sourceDigest
+      || receiptResult.manifest_digest !== source.manifestDigest)),
     customizations,
     localChanges: receiptResult?.schema_version === 2 ? receiptResult.members.filter(member => !retiredKeys.has(memberKey(member))).flatMap(member => {
       const active = activeMembers.find(candidate => memberKey(candidate) === memberKey(member));
@@ -1903,43 +1898,15 @@ async function readPackageState(roots, manifest, source) {
   };
 }
 
-function receiptMemberMatchesSource(receipt, source, active) {
-  if (receipt.source_files) {
-    if (snapshotDigest(receiptSourceFiles(receipt)) !== source.digest) return false;
-    if (active.digest === receipt.digest) return true;
-    const baselines = new Map((receipt.json_files ?? []).map(file => [file.path, file]));
-    const normalized = active.files.map(file => {
-      const relative = snapshotRelativePath(file.relative_path), projected = active.projectedFiles.get(relative), saved = baselines.get(relative);
-      return projected && saved?.configuration_digest === projected.configuration_digest && saved.owned_sha256 === projected.owned_sha256
-        ? { ...file, size: saved.size, sha256: saved.sha256 } : file;
-    });
-    const saved = source.data_directories?.length ? receiptMaterializedFiles(receipt) : null;
-    if (saved) {
-      return snapshotDigest(normalized.filter(file => !isMemberDataPath(source, snapshotRelativePath(file.relative_path))))
-        === snapshotDigest(saved.filter(file => !isMemberDataPath(source, file.path)));
-    }
-    if (!source.configuration?.length || active.contentDigest !== receipt.content_digest) return false;
-    return snapshotDigest(normalized) === receipt.digest;
+async function validateInstalledDescriptor(member, snapshot) {
+  const name = `${member.registry_kind}.json`;
+  const file = snapshot.files.find(candidate => snapshotRelativePath(candidate.relative_path) === name);
+  if (!file) throw new Error(`Installed owner '${memberKey(member)}' is missing ${name}`);
+  const descriptor = await readSnapshotJson(file, `Installed owner '${memberKey(member)}'`);
+  const identity = member.registry_kind === "worker_environment_kind" ? "worker_environment_kind_id" : "id";
+  if (!isRecord(descriptor) || descriptor[identity] !== member.owner) {
+    throw new Error(`Installed owner '${memberKey(member)}' has an invalid descriptor identity`);
   }
-  if (!source.configuration?.length) return receipt.digest === source.digest && active.digest === receipt.digest;
-  if (receipt.content_digest !== source.contentDigest || active.contentDigest !== source.contentDigest) return false;
-  const baselines = new Map((receipt.json_files ?? []).map((file) => [file.path, file]));
-  const jsonFiles = source.files.filter((file) => path.extname(file.relative_path) === ".json");
-  if (baselines.size !== jsonFiles.length) return false;
-  for (const file of jsonFiles) {
-    const relative = snapshotRelativePath(file.relative_path), baseline = baselines.get(relative);
-    if (!baseline) return false;
-    const projected = source.projectedFiles.get(relative);
-    if (projected ? baseline.owned_sha256 !== projected.owned_sha256 || baseline.configuration_digest !== projected.configuration_digest
-      : baseline.sha256 !== file.sha256 || baseline.size !== file.size || baseline.owned_sha256 !== undefined) return false;
-  }
-  const materializedFiles = source.files.map((file) => {
-    const relative = snapshotRelativePath(file.relative_path);
-    if (!source.projectedFiles.has(relative)) return file;
-    const baseline = baselines.get(relative);
-    return { ...file, size: baseline.size, sha256: baseline.sha256 };
-  });
-  return snapshotDigest(materializedFiles) === receipt.digest;
 }
 
 function packageCatalogRecord(entry, source, state) {
@@ -1949,10 +1916,11 @@ function packageCatalogRecord(entry, source, state) {
     manifest_digest: source.manifestDigest,
     source_kind: "local",
     available: true,
-    installed: state.materialized && state.receiptState === "valid",
+    installed: state.receiptState === "valid",
     materialized: state.materialized,
     partially_materialized: state.partiallyMaterialized,
     receipt_state: state.receiptState,
+    update_available: state.updateAvailable,
     receipt_operation_id: state.receipt?.operation_id ?? "",
     receipt_digest: state.receipt ? hashJson(state.receipt) : "",
     source_digest: source.sourceDigest,
@@ -1975,10 +1943,10 @@ function packageCatalogRecord(entry, source, state) {
         materialized: active?.present === true,
       };
     }),
-    error: state.partiallyMaterialized
+    error: state.partiallyMaterialized && state.receiptState !== "valid"
       ? `package '${entry.manifest.id}' is only partially materialized`
       : state.receiptState === "stale"
-        ? `package '${entry.manifest.id}' receipt does not match active owner folders`
+        ? `package '${entry.manifest.id}' is missing a receipted owner or has inconsistent ownership`
         : state.materialized && state.receiptState !== "valid"
           ? `package '${entry.manifest.id}' has materialized owner folders without a valid install receipt`
         : "",
@@ -2271,7 +2239,9 @@ async function repairResolvedPackages(roots, entries, operation) {
     const state = await readPackageState(roots, entry.manifest, source);
     const currentReceiptDigest = state.receipt ? hashJson(state.receipt) : null;
     const alreadyCurrent = state.receiptState === "valid"
-      && state.receipt?.operation_id === operation.operationId;
+      && state.receipt?.operation_id === operation.operationId
+      && state.receipt.members.every(member => state.activeMembers.some(active => memberKey(active) === memberKey(member)
+        && active.digest === member.digest));
     if (alreadyCurrent) {
       prepared.push({ entry, source, state, alreadyCurrent: true });
       continue;
@@ -3696,8 +3666,8 @@ function normalizeRepairExpectations(value, packageIds) {
     const receiptDigest = expected.receiptDigest;
     if (!DIGEST.test(sourceDigest)) throw new Error(`expectedRepairs.${packageId}.sourceDigest must be a SHA-256 digest`);
     if (!DIGEST.test(installedDigest)) throw new Error(`expectedRepairs.${packageId}.installedDigest must be a SHA-256 digest`);
-    if (!new Set(["missing", "stale"]).has(receiptState)) {
-      throw new Error(`expectedRepairs.${packageId}.receiptState must be missing or stale`);
+    if (!new Set(["missing", "stale", "valid"]).has(receiptState)) {
+      throw new Error(`expectedRepairs.${packageId}.receiptState must be missing, stale or valid`);
     }
     if (receiptState === "missing" ? receiptDigest !== null : !DIGEST.test(receiptDigest)) {
       throw new Error(`expectedRepairs.${packageId}.receiptDigest does not match receiptState`);

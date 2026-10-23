@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { useEffect, useState } from "react";
 import { OcButton, OcCard, OcDialog, OcDialogFooter, OcDialogHeader, OcGroup, OcSettingsRow } from "../../design-system/components";
 import type { OctopusSavedApplicationPermissions, OctopusSavedBrowserPermissions } from "../../electron";
@@ -37,11 +38,11 @@ export function SavedPermissionsSection() {
   return <>
     <OcGroup title="Saved browser permissions" description="Remove an Always choice to ask again on a future request. Choices for an existing task remain separate.">
       <OcCard {...settingsTargetProps("access.browser-permissions")}>
-        {browserLoading ? <OcSettingsRow label="Loading saved browser permissions…" /> : browserError ? <OcSettingsRow label="Browser permissions unavailable" description={browserError} />
+        {browserLoading && !browser ? <OcLoadingRows label="Loading saved browser permissions…" /> : browserError ? <OcSettingsRow label="Browser permissions unavailable" description={browserError} />
           : browser?.entries.length === 0 ? <OcSettingsRow label="No saved browser permissions" /> : browser?.entries.map(entry => <OcSettingsRow key={entry.id}
             label={entry.subject.type === "upload" ? entry.subject.origin : entry.subject.source.id}
             description={`${entry.subject.type === "upload" ? "File uploads" : "Browsing history"} · ${entry.decision === "accept" ? "Always allowed" : "Always declined"}`}
-            control={<OcButton disabled={browserBusy} onClick={() => void removeBrowser(entry.id)} variant="ghost">Remove</OcButton>} />)}
+            control={<OcButton disabled={browserBusy || browserLoading} onClick={() => void removeBrowser(entry.id)} variant="ghost">Remove</OcButton>} />)}
         <OcSettingsRow label="Refresh browser permissions" control={<OcButton disabled={browserBusy || browserLoading} onClick={() => setRevision(value => value + 1)}>Refresh</OcButton>} />
       </OcCard>
     </OcGroup>
@@ -84,11 +85,11 @@ export function SavedApplicationPermissionsSection() {
   return <>
     <OcGroup title="Always-allowed apps">
       <OcCard {...settingsTargetProps("access.application-permissions")}>
-        {applicationLoading ? <OcSettingsRow label="Loading apps…" />
+        {applicationLoading && !applications ? <OcLoadingRows label="Loading apps…" />
           : applicationError ? <OcSettingsRow label="Application permissions unavailable" description={<details><summary>Error details</summary>{applicationError}</details>} />
           : applications?.applications.length === 0 ? <OcSettingsRow label="None yet" />
           : applications?.applications.map(item => <OcSettingsRow key={item.bundle_id} label={item.display_name}
-            control={<OcButton disabled={applicationBusy} onClick={() => setRemoving(item)} variant="ghost">Remove</OcButton>} />)}
+            control={<OcButton disabled={applicationBusy || applicationLoading} onClick={() => setRemoving(item)} variant="ghost">Remove</OcButton>} />)}
         {applicationError ? <OcSettingsRow label="Check saved apps" control={<OcButton disabled={applicationBusy || applicationLoading} onClick={() => setRevision(value => value + 1)}>Refresh</OcButton>} /> : null}
       </OcCard>
     </OcGroup>

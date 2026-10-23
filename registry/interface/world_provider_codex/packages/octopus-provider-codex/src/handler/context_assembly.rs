@@ -245,6 +245,7 @@ pub(crate) fn recover_codex_continuity(
         run,
         context_output_labels,
         session_snapshot_labels,
+        &[],
     )
 }
 

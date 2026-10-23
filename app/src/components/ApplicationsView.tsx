@@ -211,7 +211,7 @@ type ApplicationCatalogView = "browse" | "manage";
 const CATEGORY_ORDER: ApplicationCategory[] = ["provider", "connector", "plugin", "artifact"];
 const SHA256_DIGEST = /^[a-f0-9]{64}$/;
 const CATEGORY_COPY: Record<ApplicationCategory, { title: string; description: string }> = {
-  provider: { title: "AI Providers", description: "Models Home and tasks run on. Codex uses your ChatGPT sign-in; the others connect with an API key through OpenCodex." },
+  provider: { title: "AI Providers", description: "Models for Home and tasks. Each provider connects through its own sign-in, API key, or local service." },
   connector: { title: "Connectors", description: "Services and triggers that bring messages into a task and carry its replies back out." },
   plugin: { title: "Plugins", description: "Tools and guides a task picks up when it needs them, such as MCP servers, memory and image generation." },
   artifact: { title: "Context", description: "Knowledge packages you can attach to new tasks." },

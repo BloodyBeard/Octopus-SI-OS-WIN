@@ -1,3 +1,4 @@
+import { OcSkeleton } from "../../design-system/LoadingSkeleton";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { OcExpandableList, OcIconButton, cx } from "../../design-system/components";
@@ -168,7 +169,7 @@ export function CatalogLoadingState({ label }: { label: string }) {
     <section className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3 border-b border-subtle pe-0.5 pb-2 text-default [padding-inline-start:var(--padding-row-x)]">
         <h2 className="flex min-h-7 items-center gap-1.5 text-lg leading-6 font-medium">
-          <span aria-hidden="true" className="h-3 w-20 rounded bg-text/10 motion-safe:animate-pulse" />
+          <OcSkeleton size="sm" width={80} />
         </h2>
       </div>
       <div role="status">
@@ -184,19 +185,19 @@ export function CatalogLoadingState({ label }: { label: string }) {
               { key: "sixth", titleWidth: "w-16", descriptionWidth: "w-1/2" },
             ].map((row) => (
               <div aria-hidden="true" key={row.key}>
-                <div className="pointer-events-none flex flex-col justify-center gap-2.5 rounded-2xl border-none p-2 text-base motion-safe:animate-pulse" tabIndex={-1}>
+                <div className="pointer-events-none flex flex-col justify-center gap-2.5 rounded-2xl border-none p-2 text-base" tabIndex={-1}>
                   <div className="flex items-center gap-3">
-                    <span className="shrink-0"><span className="block size-9 shrink-0 rounded-lg bg-text/10" /></span>
+                    <span className="size-9 shrink-0"><OcSkeleton size="fill" /></span>
                     <div className="flex min-w-0 flex-1 items-center gap-3">
                       <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
                         <div className="flex min-w-0 items-center gap-2">
                           <div className="flex min-w-0 items-center gap-2">
-                            <div className="truncate font-medium text-default"><div className={cx("h-3 rounded bg-text/10", row.titleWidth)} /></div>
+                            <div className="truncate font-medium text-default"><OcSkeleton className={row.titleWidth} size="sm" /></div>
                           </div>
                         </div>
-                        <div className="flex flex-col gap-0.5 text-sm leading-relaxed text-text-description"><div className={cx("h-3 rounded bg-text/10", row.descriptionWidth)} /></div>
+                        <div className="flex flex-col gap-0.5 text-sm leading-relaxed text-text-description"><OcSkeleton className={row.descriptionWidth} size="sm" /></div>
                       </div>
-                      <div className="flex shrink-0 items-center"><div className="h-token-button-composer w-14 rounded-lg bg-text/10" /></div>
+                      <div className="flex shrink-0 items-center"><span className="h-token-button-composer w-14"><OcSkeleton size="fill" /></span></div>
                     </div>
                   </div>
                 </div>

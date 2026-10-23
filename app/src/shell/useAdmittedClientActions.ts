@@ -75,7 +75,9 @@ function clientAction(row: Record<string, unknown>) {
   if (Object.hasOwn(row, "error")) {
     throw new Error(typeof row.error === "string" && row.error ? row.error : "Client action payload could not be verified.");
   }
-  return parseClientAction(row.action);
+  const action = parseClientAction(row.action);
+  if (action.action !== "open_surface" && !isRecord(row.tool_call)) throw new Error("Client controls require a correlated tool request.");
+  return action;
 }
 
 export function useAdmittedClientActions(options: ClientActionOptions): void {
@@ -88,6 +90,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
   if (active.current.key !== scopeKey) active.current = { key: scopeKey };
   const lastFailure = useRef("");
   const serial = useRef(new Map<string, Promise<void>>());
+  const wake = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!scopeKey) return;
@@ -129,7 +132,13 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
             let action;
             try { action = clientAction(row); } catch (error) { refuse(error instanceof Error ? error.message : String(error)); }
             const closure = turnClosure(row);
-            if (action && action.action !== "open_surface") {
+            const recorded = row.completed_result === undefined ? null : object(row.completed_result);
+            if (recorded && (typeof recorded.artifact_id !== "string" || !/^client\.action\.result:[0-9a-f]{64}$/.test(recorded.artifact_id)
+              || typeof recorded.seq !== "number" || !Number.isSafeInteger(recorded.seq) || recorded.seq <= identity.seq)) {
+              throw new Error("Client action completion has invalid ledger evidence.");
+            }
+            let relaunchReady = false;
+            if (action && action.action !== "open_surface" && !recorded) {
               const pendingKey = `octopus.client-widget-result.v1:${scopeKey}`;
               const retained = storage.getItem(pendingKey);
               let receipt: Record<string, unknown>;
@@ -152,15 +161,23 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                 }
               } else receipt = {};
               if (!receipt.request_artifact && closure === "stopped") {
-                receipt = { stopped: true };
+                receipt = { schema: "octopus.client_action_result", schema_version: 1,
+                  observed_at: new Date().toISOString(), phase: "completed", ok: false,
+                  request_artifact: identity.artifact_id, request_seq: identity.seq,
+                  request_id: action.request_id, action: action.action, tool_call: row.tool_call,
+                  error: "The request was stopped before this client action executed." };
               } else if (!receipt.request_artifact) {
                 const base = { schema: "octopus.client_action_result", schema_version: 1,
                   observed_at: new Date().toISOString(),
-                  request_artifact: identity.artifact_id, request_seq: identity.seq, request_id: action.request_id, action: action.action };
+                  request_artifact: identity.artifact_id, request_seq: identity.seq, request_id: action.request_id, action: action.action,
+                  tool_call: row.tool_call };
                 const prepared = JSON.stringify({ ...base, phase: "prepared" });
                 storage.setItem(pendingKey, prepared);
                 if (storage.getItem(pendingKey) !== prepared) throw new Error("Widget action preparation could not be saved.");
                 try {
+                  if (typeof row.expires_at_ms !== "number" || Date.now() >= row.expires_at_ms) {
+                    throw new Error("This client control expired before execution. No action was performed.");
+                  }
                   if (action.action === "inspect_client") {
                     if (!latest.current.inspect) throw new Error("Client inspection is unavailable.");
                     receipt = { ...base, phase: "completed", ok: true, client: await latest.current.inspect(action) };
@@ -185,20 +202,16 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                 storage.setItem(pendingKey, JSON.stringify(receipt));
               }
               if (!current()) return;
-              if (closure === null) return;
-              if (closure === "completed") {
-                await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
-                  label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
-              } else {
-                storage.removeItem(pendingKey);
-              }
+              await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
+                label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
+              relaunchReady = action.action === "relaunch_client" && receipt.ok === true && closure !== "stopped";
             }
             storage.setItem(key, JSON.stringify({
               schema_version: 1, home: scope.home, run_id: scope.runId, interface_id: scope.interfaceId,
               last_consumed: identity,
             }));
             if (readCursor(storage, key, scope) !== identity.seq) throw new Error("Client action cursor could not be saved.");
-            if (action?.action === "relaunch_client" && closure === "completed" && latest.current.relaunch) {
+            if (relaunchReady && latest.current.relaunch) {
               await latest.current.relaunch();
               return;
             }
@@ -225,9 +238,35 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
         lastFailure.current = failure;
       }
     }
-    const queued = (serial.current.get(scopeKey) ?? Promise.resolve()).then(() => current() ? consume() : undefined);
-    serial.current.set(scopeKey, queued);
-    void queued.finally(() => { if (serial.current.get(scopeKey) === queued) serial.current.delete(scopeKey); });
-    return () => { cancelled = true; };
+    let requested = false;
+    let running = false;
+    const request = () => {
+      if (!current()) return;
+      requested = true;
+      if (running) return;
+      running = true;
+      const queued = (serial.current.get(scopeKey) ?? Promise.resolve()).then(async () => {
+        while (current() && requested) {
+          requested = false;
+          await consume();
+        }
+      });
+      serial.current.set(scopeKey, queued);
+      void queued.finally(() => {
+        running = false;
+        if (serial.current.get(scopeKey) === queued) serial.current.delete(scopeKey);
+        if (requested && current()) request();
+      });
+    };
+    wake.current = request;
+    request();
+    return () => {
+      cancelled = true;
+      if (wake.current === request) wake.current = null;
+    };
+  }, [scopeKey]);
+
+  useEffect(() => {
+    wake.current?.();
   }, [generation, scopeKey]);
 }

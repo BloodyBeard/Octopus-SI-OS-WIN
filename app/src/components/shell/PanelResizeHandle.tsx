@@ -47,12 +47,19 @@ export function useAnimatedPanelSize(
   }, [open, size, sizeValue]);
 
   useLayoutEffect(() => {
+    if (reduceMotion || immediate) {
+      opacity.set(open ? 1 : 0);
+      animatedSize.set(open ? sizeValue.get() : 0);
+      mirroredSize?.set(animatedSize.get());
+      setMounted(open);
+      return;
+    }
     if (open) setMounted(true);
     let active = true;
     const controls = animate(
       opacity,
       open ? 1 : 0,
-      reduceMotion || immediate ? { duration: 0 } : PANEL_MOTION_TRANSITION,
+      PANEL_MOTION_TRANSITION,
     );
     void controls.then(() => {
       if (active && !open) setMounted(false);
@@ -61,7 +68,7 @@ export function useAnimatedPanelSize(
       active = false;
       controls.stop();
     };
-  }, [immediate, open, opacity, reduceMotion]);
+  }, [animatedSize, immediate, mirroredSize, open, opacity, reduceMotion, sizeValue]);
 
   return { animatedSize, mounted, opacity };
 }

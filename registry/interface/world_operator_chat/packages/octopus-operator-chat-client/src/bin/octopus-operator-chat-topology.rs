@@ -16,6 +16,13 @@ use octopus_operator_chat_client::native_run_authoring::{NativeRunAdoptionReques
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 1 && arguments[0] == "--plan-native-adoption-batch" {
+        if let Err(error) = octopus_operator_chat_client::native_run_authoring::serve_native_adoption_batch() {
+            eprintln!("operator native adoption batch failed closed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if arguments.len() == 1 && arguments[0] == "--publish-files" {
         match read_publication_request().and_then(file_publication::publish_files) {
             Ok(result) => match serde_json::to_string(&result) {

@@ -49,12 +49,14 @@ pub(crate) fn recover_codex_continuity_resolved(
     run: &str,
     context_output_labels: &BTreeSet<String>,
     session_snapshot_labels: &BTreeSet<String>,
+    input_sources: &[ArtifactRef],
 ) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
     let mut candidates = Vec::new();
     let mut session_evidence = Vec::new();
     let mut sources = BTreeSet::new();
     let mut current_snapshot_seen = false;
     for bound in artifact_binding_payloads {
+        if input_sources.contains(&bound.artifact) { continue; }
         let bytes = bound.read_bytes()
             .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
         let value: serde_json::Value =
@@ -127,6 +129,7 @@ pub(crate) fn recover_codex_continuity_resolved(
             ))
         })?;
         for artifact in &session_artifacts[..historical_len] {
+            if input_sources.contains(&artifact.source_artifact) { continue; }
             if is_foreign_provider_payload(&artifact.payload, provider_interface)? {
                 continue;
             }
@@ -219,7 +222,7 @@ pub(crate) fn recover_codex_continuity_resolved(
 
 pub(crate) fn recover_codex_continuity_from_current_session(
     session_artifacts: &[SessionContextArtifact],
-    source_artifact: &ArtifactRef,
+    input_sources: &[ArtifactRef],
     provider_interface: &InterfaceId,
     run: &str,
     context_output_labels: &BTreeSet<String>,
@@ -228,7 +231,7 @@ pub(crate) fn recover_codex_continuity_from_current_session(
     let mut session_evidence = Vec::new();
     let mut sources = BTreeSet::new();
     for artifact in session_artifacts {
-        if artifact.source_artifact == *source_artifact {
+        if input_sources.contains(&artifact.source_artifact) {
             continue;
         }
         if is_foreign_provider_payload(&artifact.payload, provider_interface)? {
@@ -305,7 +308,7 @@ pub(crate) fn reconcile_operator_session_continuity(
     })?;
     let labels = private_config_string_set(&config.private_config, "context_output_labels")?;
     reconcile_current_session_continuity(bound, recover_codex_continuity_from_current_session(
-        session, &input.artifact, &runtime.interface, runtime.run.as_str(), &labels,
+        session, std::slice::from_ref(&input.artifact), &runtime.interface, runtime.run.as_str(), &labels,
     )?)
 }
 
@@ -491,7 +494,7 @@ pub(crate) fn terminal_output_continuity(
         private_config_string_set(&config.private_config, "context_output_labels")?;
     let Some(mut continuity) = recover_codex_continuity_from_current_session(
         current_session_context,
-        &input.artifact,
+        std::slice::from_ref(&input.artifact),
         &runtime.interface,
         runtime.run.as_str(),
         &context_output_labels,

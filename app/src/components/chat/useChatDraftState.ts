@@ -279,6 +279,7 @@ export function useChatDraftState(input: {
 
   function writeDraft(runId: string, draft: ChatDraftValue) {
     draftsRef.current.set(chatDraftKey(runId), { ...draft, updatedAtMs: Date.now() });
+    saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope);
   }
 
   function readDraft(runId: string) {

@@ -13,3 +13,8 @@ path = "src/bin/tool_door_life.rs"
 tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time", "process"] }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

@@ -16,6 +16,19 @@ use crate::{LiveProtocol, RealtimeDoorConfig};
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+struct SocketFailure {
+    message: String,
+    awaiting_activation: bool,
+}
+
+impl From<String> for SocketFailure {
+    fn from(message: String) -> Self { Self { message, awaiting_activation: false } }
+}
+
+impl From<&str> for SocketFailure {
+    fn from(message: &str) -> Self { message.to_owned().into() }
+}
+
 #[derive(Clone)]
 pub struct LiveClient {
     config: RealtimeDoorConfig,
@@ -207,6 +220,11 @@ impl LiveClient {
                                 "input_text"
                             };
                         if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+                            if parts.len() != 1 {
+                                return Err(CallCreationFailure::not_created(
+                                    "Codex Live initial messages require exactly one text content part",
+                                ));
+                            }
                             for part in parts {
                                 part["type"] = json!(content_type);
                             }
@@ -419,7 +437,7 @@ impl LiveClient {
         }
     }
 
-    async fn socket(&self, call_id: &str) -> Result<Socket, String> {
+    async fn socket(&self, call_id: &str) -> Result<Socket, SocketFailure> {
         validate_call_id(call_id)?;
         let mut url = validate_endpoint(&self.config.private.sideband_url, true)?;
         url.path_segments_mut()
@@ -461,13 +479,12 @@ impl LiveClient {
         .await
         .map_err(|_| "Live sideband attach timed out")?
         .map_err(|error| match error {
-            tokio_tungstenite::tungstenite::Error::Http(response) => self.http_refusal(
-                "sideband attach",
-                response.status().as_u16(),
-                response.headers(),
-                response.body().as_deref().unwrap_or_default(),
-            ),
-            _ => "Live sideband attach transport failed".into(),
+            tokio_tungstenite::tungstenite::Error::Http(response) => SocketFailure {
+                awaiting_activation: response.status().as_u16() == 404,
+                message: self.http_refusal("sideband attach", response.status().as_u16(),
+                    response.headers(), response.body().as_deref().unwrap_or_default()),
+            },
+            _ => SocketFailure::from("Live sideband attach transport failed"),
         })?;
         Ok(socket)
     }
@@ -477,12 +494,49 @@ impl LiveClient {
         call_id: &str,
         events: mpsc::Sender<SidebandEvent>,
     ) -> Result<mpsc::Sender<SidebandCommand>, String> {
-        let socket = self.socket(call_id).await?;
+        let socket = self.socket(call_id).await.map_err(|error| error.message)?;
         let (tx, rx) = mpsc::channel(16);
         let client = self.clone();
         let call_id = call_id.to_string();
         tokio::spawn(async move {
             client.run_sideband(call_id, socket, rx, events).await;
+        });
+        Ok(tx)
+    }
+
+    pub fn attach_created(
+        &self,
+        call_id: &str,
+        events: mpsc::Sender<SidebandEvent>,
+    ) -> Result<mpsc::Sender<SidebandCommand>, String> {
+        validate_call_id(call_id)?;
+        let (tx, rx) = mpsc::channel(16);
+        let client = self.clone();
+        let call_id = call_id.to_string();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + client.timeout;
+            let mut attempts = 0;
+            loop {
+                if rx.is_closed() { return; }
+                let failure = match tokio::time::timeout_at(deadline, client.socket(&call_id)).await {
+                    Ok(Ok(socket)) => {
+                        client.run_sideband(call_id, socket, rx, events).await;
+                        return;
+                    }
+                    Ok(Err(error)) if error.awaiting_activation
+                        && attempts < client.config.private.reconnect_attempts => {
+                        attempts += 1;
+                        let delay = Duration::from_millis((100_u64 << attempts.min(4)).min(1_000));
+                        tokio::time::sleep_until((tokio::time::Instant::now() + delay).min(deadline)).await;
+                        continue;
+                    }
+                    Ok(Err(error)) => error.message,
+                    Err(_) => "Live call did not activate its control connection before the deadline".into(),
+                };
+                let _ = events.send(SidebandEvent { call_id,
+                    event: json!({"type":"octopus.transport.failed","reason":failure,"remote_closed":false}) }).await;
+                return;
+            }
         });
         Ok(tx)
     }
@@ -637,7 +691,7 @@ impl LiveClient {
                     let _ = events
                         .send(SidebandEvent {
                             call_id,
-                            event: json!({"type":"octopus.transport.failed","reason":error}),
+                            event: json!({"type":"octopus.transport.failed","reason":error.message}),
                         })
                         .await;
                     return;

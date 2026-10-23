@@ -778,6 +778,36 @@ test("a side pane shows its tab strip only when tabs need it, lends a lone tab's
   paneRoot.unmount(); host.remove();
 });
 
+test("closing the last side tab immediately removes the pane and its content", { timeout: 20_000 }, async () => {
+  const { WorkspacePaneManager } = await compiled;
+  const { motionValue } = require("motion/react");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const paneRoot = createRoot(host);
+  const width = motionValue(0);
+  const render = async (open, content) => {
+    paneRoot.render(React.createElement(WorkspacePaneManager, {
+      primary: "Primary", secondaryOpen: open, secondaryFocused: false, secondaryWidthPercent: 40, resolvedWidthMotion: width,
+      onOpenChange() {}, onSecondaryFocusedChange() {}, onSecondaryWidthPercentChange() {},
+      secondary: content == null ? null : React.createElement("div", { "data-last-tab": true }, content),
+    }));
+    await settle(2);
+  };
+  try {
+    await render(true, "Last tab");
+    const openWidth = width.get();
+    assert.ok(openWidth > 0);
+    await render(false, null);
+    assert.equal(host.querySelector(".workspace-pane-secondary"), null);
+    assert.equal(width.get(), 0);
+    assert.equal(host.querySelector("[data-last-tab]"), null);
+    await render(true, "New tab");
+    assert.equal(host.querySelector("[data-last-tab]")?.textContent, "New tab", "reopening must show the new tab");
+  } finally {
+    paneRoot.unmount(); host.remove();
+  }
+});
+
 test("pane tabs reorder by dragging, scroll a newly opened tab into view once it has grown, and turn inert while they close", { timeout: 20_000 }, async () => {
   const { WorkspaceSurfacePane, WorkspacePaneManager, WindowPaneControlsProvider } = await compiled;
   const { motionValue } = require("motion/react");

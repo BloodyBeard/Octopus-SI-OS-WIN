@@ -66,6 +66,23 @@ which start other agents for you. Home is what Dots would be for Codex.
 possible, but it holds only work - runs, grouped into Projects and Agents. Most
 people will rarely need it, because Home hands the tasks out.
 
+A new task initially shows a preview of its request. With the native Codex
+provider, a background request to the selected model replaces that preview with
+a concise title. Naming does not delay the work or overwrite an authored name
+or a manual sidebar rename.
+
+Opening Working or a tool's details keeps the selected header in place while
+the contents expand and new output arrives. Details the reader opened remain
+open when the answer finishes. Scrolling to the bottom or choosing the latest
+message resumes following new output.
+Resume is offered after a confirmed stop or interruption. An ordinary failed
+reply keeps the error visible and accepts a new request; it does not imply that
+a resumable native turn exists.
+
+Task progress counts visible, unarchived tasks in Home's environment tree.
+Internal service runs do not appear in its totals. Failed tasks remain distinct
+from completed work, and an empty workspace shows "No tasks yet".
+
 **Dashboard** is the least necessary destination for an ordinary user and a
 convenient one for everyone else: Topology, Registry, Worker Environments, and
 Movements.
@@ -99,14 +116,29 @@ works the same way for everything it can do.
 - **The boundary is short.** Home's role says when a turn needs only an
   answer, when to start a task, set a trigger, show a widget, save knowledge,
   change the client's own code, or change Octopus itself - and when to do none of
-  these. When the operator states a goal, Home starts the work instead of
+  these. Short actions use Home's own granted tools immediately, including
+  browser tools. Longer work starts a separate task so the conversation can
+  continue. When the operator states a goal, Home starts the work instead of
   asking for permission, and when unsure it does the cheap reversible part and
   offers the rest in one line.
 - **The summary is what you see.** Every message sent from Home carries the
   client's snapshot of the tasks with their status and last reply, the
   triggers with their schedule, the projects and the Agents. It travels inside
-  the message artifact, so the ledger records exactly what Home knew. Widgets
-  are listed on demand.
+  the message artifact, so the ledger records exactly what Home knew. Text
+  input and voice carry an explicit client observation of available surfaces
+  and the widget inventory, including exact IDs, source digests, visibility,
+  configuration and review availability. Home can use these identities directly;
+  listing is for missing or stale detail. The observation fits within 4 KiB,
+  keeps whole rows and counts omissions; Home state has 12 KiB, with a shared
+  16 KiB limit. A text retry retains its original saved observation. During a
+  call, only changed observations cross the control interface, which retains
+  them for delegated requests without sending them to the audio model. Each voice
+  delegation carries the last durably accepted snapshot. Older calls may
+  have none. Observations grant no authority: each action still checks its
+  admitted route and current source digest.
+- **Voice follows the work.** Public progress and answers reach the active call
+  as they appear. Completed text is not spoken a second time. Updates from an
+  earlier call cannot become answers to a new request.
 - **Acting is cheap.** A task is one call: a title and the assignment. The
   installation's defaults pick the environment, worker, model and tools and
   bring the result back to Home. Procedures for hand-authored runs, widget
@@ -165,6 +197,13 @@ tool call, stop. In Octopus a trigger is an interface with its own rules. An
 interface can check anything and send anything whenever its conditions hold,
 so a trigger is simply a run with such an interface attached in JSON: at this
 time, or after this event, check this and change that.
+
+Creating a trigger opens a normal task draft. The operator describes what
+should happen and when; the model chooses the interface, target run and
+bindings using the bound `artifact-trigger-authoring` guide and architecture.
+Suggestions fill the draft without sending it. The model confirms the useful
+behavior in plain language after checking the installed configuration and
+live binding. Existing triggers retain their direct editing controls.
 
 ## Self-improvement
 

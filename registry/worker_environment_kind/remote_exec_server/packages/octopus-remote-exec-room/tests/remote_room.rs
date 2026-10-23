@@ -176,6 +176,7 @@ fn formation(door_instance_dir: &Path) -> (WorkerEnvironmentFormation, WorkerEnv
     let worker = InterfaceId::new(WORKER);
     let formed = registry
         .form(&WorkerEnvironmentFormationRequest {
+            door_additional_root_bindings: &Default::default(),
             door_interface: &door,
             door_descriptor_hash: "remote-exec-test-door-hash",
             door_driver_ref: "system_remote_exec",

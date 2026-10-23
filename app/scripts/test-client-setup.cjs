@@ -144,8 +144,8 @@ async function coldPresetLoader(root) {
   const provider = "world_provider_fixture";
   for (const id of ["world_operator_chat", worker, provider]) await write(path.join(roots.sourceRegistryRoot, "interface", id, "interface.json"), { id, interface_type: id === worker ? "system" : "world", role: id === worker ? "worker" : "provider" });
   await write(path.join(roots.sourceRegistryRoot, "interface", worker, "policy.json"), { id: worker, role_artifacts: [], ceiling: { tools: [], wek: [], mark_outcomes: [], interfaces: [provider] } });
-  await fs.writeFile(path.join(roots.sourceRegistryRoot, "interface", "world_operator_chat", "client.cjs"), "exports.planOperatorChatSurface = async (_options, request) => ({providerModel: request.providerModel, authoringProfile: {ee_id: request.eeId, worker_choice_interface: request.workerInterfaceId, door_host_slots: {}}});\n");
-  const config = { schema_version: 2, run: { ee: "ee_default", worker, context_artifact_bindings: [], run_prefix: "run_" }, executables: { topology_planner: "packages/bin/topology" } };
+  await fs.writeFile(path.join(roots.sourceRegistryRoot, "interface", "world_operator_chat", "client.cjs"), "exports.readOperatorChatArtifacts = async () => ({artifacts: []}); exports.submitOperatorTurn = async () => ({}); exports.planOperatorChatSurface = async (_options, request) => ({providerModel: request.providerModel, authoringProfile: {ee_id: request.eeId, worker_choice_interface: request.workerInterfaceId, door_host_slots: {}}});\n");
+  const config = { schema_version: 2, interface: "world_operator_chat", run: { ee: "ee_default", worker, context_artifact_bindings: [], run_prefix: "run_" }, executables: { topology_planner: "packages/bin/topology" } };
   await write(path.join(roots.sourceRegistryRoot, "interface", "world_operator_chat", "client.json"), config);
   const life = { processes: [{ bin: "owner://packages/bin/client", authority: { sandbox_mode: "enforced", allow_network: false } }] };
   await write(path.join(roots.sourceRegistryRoot, "interface", "world_operator_chat", "life.json"), life);
@@ -192,10 +192,17 @@ async function coldPresetLoader(root) {
   await write(lifePath, configuredLife);
   const configuredLoader = fresh();
   await configuredLoader.load();
-  assert.notEqual(configuredLoader.loadedProof().configuration.sourceDigest, configuredLoader.loadedProof().configuration.installedDigest);
-  for (const invalid of [
+  assert.equal(configuredLoader.loadedProof().configuration.schemaVersion, 2);
+  for (const authored of [
     { ...configured, executables: { topology_planner: "other/bin" } },
     { ...configured, run: { ...configured.run, run_prefix: "other_" } },
+  ]) {
+    await write(configPath, authored);
+    await fresh().load();
+  }
+  for (const invalid of [
+    { ...configured, schema_version: 99 },
+    { ...configured, interface: "world_other" },
     { ...configured, run: { ...configured.run, context_artifact_bindings: [{ id: "same" }, { id: "same" }] } },
   ]) {
     await write(configPath, invalid);
@@ -203,11 +210,18 @@ async function coldPresetLoader(root) {
   }
   await write(configPath, configured);
   await write(lifePath, { processes: [{ ...configuredLife.processes[0], bin: "owner://other" }] });
-  await assert.rejects(fresh().load(), /lifecycle executable/);
+  await fresh().load();
+  await write(lifePath, { processes: [{ bin: "" }] });
+  await assert.rejects(fresh().load(), /valid declared processes/);
   await write(lifePath, configuredLife);
   const clientFile = path.join(roots.activeRegistryRoot, "interface", "world_operator_chat", "client.cjs");
-  await fs.appendFile(clientFile, "\nexports.unreviewed = true;\n");
-  await assert.rejects(fresh().load(), /client.cjs.*differs/);
+  await fs.appendFile(clientFile, "\nexports.locallyAuthored = true;\n");
+  delete require.cache[clientFile];
+  assert.equal((await fresh().load()).locallyAuthored, true);
+  await fs.writeFile(clientFile, "module.exports = {};\n");
+  delete require.cache[clientFile];
+  await assert.rejects(fresh().load(), /does not export readOperatorChatArtifacts/);
+
 }
 
 async function checkpointEphemeralOwnerCandidate(root) {

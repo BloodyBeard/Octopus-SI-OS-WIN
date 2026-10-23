@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod result_receiving;
+mod adoption_batch;
+pub use adoption_batch::{NativeAdoptionBatch, serve_native_adoption_batch};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -234,6 +236,61 @@ struct ToolContractUpdate {
     predecessors: Vec<BTreeMap<String, Value>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderContractUpdate {
+    field: String,
+    predecessors: Vec<ProviderContractPredecessor>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum ProviderContractPredecessor {
+    Absent,
+    Exact { value: Value },
+}
+
+enum ProviderContractAdoption {
+    Planned(serde_json::Map<String, Value>),
+    Deferred(Vec<String>),
+}
+
+fn plan_provider_contract_adoption(
+    registry: &Path, declarations: Option<&Value>, source: &str,
+    private: &serde_json::Map<String, Value>, preimages: &mut Vec<NativeRunAdoptionPreimage>,
+) -> Result<ProviderContractAdoption, String> {
+    let updates: Vec<ProviderContractUpdate> = declarations.map(|value| serde_json::from_value(value.clone()))
+        .transpose().map_err(|e|format!("client provider_contract_updates: {e}"))?.unwrap_or_default();
+    let mut changes = serde_json::Map::new();
+    if updates.is_empty() { return Ok(ProviderContractAdoption::Planned(changes)); }
+    let (source_descriptor, bytes) = adoption_document(&registry.join("interface").join(source).join("interface.json"), preimages)?;
+    let parsed: InterfaceDescriptor = parse_strict(&bytes).map_err(|e|e.to_string())?;
+    if parsed.id.as_str() != source { return Err("provider contract adoption source identity differs from its path".into()); }
+    let source_config = source_descriptor.pointer("/interface_driver_config/private_config")
+        .and_then(Value::as_object).ok_or("provider contract adoption source has no private configuration")?;
+    let mut declared = BTreeSet::new();
+    let mut locally_changed = Vec::new();
+    for update in updates {
+        safe_segment(&update.field, "provider contract field")?;
+        if !declared.insert(update.field.clone()) || update.predecessors.is_empty() {
+            return Err("provider contract updates require unique fields and explicit predecessors".into());
+        }
+        let Some(next) = source_config.get(&update.field) else { continue; };
+        let current = private.get(&update.field);
+        if current == Some(next) { continue; }
+        if update.predecessors.iter().any(|prior| match prior {
+            ProviderContractPredecessor::Absent => current.is_none(),
+            ProviderContractPredecessor::Exact { value } => current == Some(value),
+        }) {
+            changes.insert(update.field, next.clone());
+        } else {
+            locally_changed.push(update.field);
+        }
+    }
+    if locally_changed.is_empty() { Ok(ProviderContractAdoption::Planned(changes)) }
+    else { Ok(ProviderContractAdoption::Deferred(locally_changed)) }
+}
+
 enum ToolContractAdoption {
     Planned(Vec<PlannedClientWrite>),
     Deferred {
@@ -348,14 +405,14 @@ fn plan_tool_contract_adoption(
             let mut prior = next.clone();
             for (pointer, value) in &fields {
                 if !(pointer == "/description" || pointer == "/args_schema" || pointer.starts_with("/args_schema/")
-                    || pointer.starts_with("/handler_config/"))
+                    || pointer.starts_with("/handler_config/") || pointer.starts_with("/process/authority/"))
                     || fields.keys().any(|other| other != pointer && pointer.starts_with(&format!("{other}/"))) {
                     return Err(format!("tool contract predecessor field '{pointer}' is outside a disjoint tool contract"));
                 }
                 *prior.pointer_mut(pointer).ok_or_else(||format!("tool contract predecessor field '{pointer}' is absent"))? = value.clone();
             }
-            let _: ToolDescriptor = serde_json::from_value(prior.clone()).map_err(|e|e.to_string())?;
-            eligible |= current == prior;
+            let prior: ToolDescriptor = serde_json::from_value(prior).map_err(|e|e.to_string())?;
+            eligible |= current == serde_json::to_value(prior).map_err(|e|e.to_string())?;
         }
         if !eligible {
             locally_changed.push(tool);
@@ -368,6 +425,14 @@ fn plan_tool_contract_adoption(
 }
 
 pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<NativeRunAdoptionPlan, String> {
+    NativeAdoptionBatch::default().plan(request)
+}
+
+fn plan_existing_adoption_with_ledger(
+    request: &NativeRunAdoptionRequest,
+    ledger: &mut Option<result_receiving::AdoptionLedgerView>,
+    metrics: &mut adoption_batch::PlanningMetrics,
+) -> Result<NativeRunAdoptionPlan, String> {
     use octopus_run_authoring::{CheckedRunEvidence, declared_provider_run_writer, provider_context_bindings, provider_input_payloads_ready};
     let roots = &request.roots;
     for root in [&roots.registry_root, &roots.ee_instances_root, &roots.run_records_root,
@@ -435,6 +500,16 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         result.preimages = preimages;
         return Ok(result);
     }
+    let provider_updates = match plan_provider_contract_adoption(&roots.registry_root,
+        client_config.get("provider_contract_updates"), source, private, &mut preimages)? {
+        ProviderContractAdoption::Planned(updates) => updates,
+        ProviderContractAdoption::Deferred(fields) => {
+            result.status = NativeRunAdoptionStatus::Deferred;
+            result.reason = Some(format!("automatic provider contract adoption deferred for locally authored fields [{}]; current descriptor is preserved", fields.join(", ")));
+            result.preimages = preimages;
+            return Ok(result);
+        }
+    };
     let catalog = plan_catalog_adoption(roots, &config, chat_id, source, private, &mut preimages)?;
     let mut writes = match plan_tool_contract_adoption(&roots.registry_root, client_config.get("tool_contract_updates"),
         &record, client, chat_id, adoption_field(&state, "client_surface_role")?, &mut preimages)? {
@@ -454,7 +529,8 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
             return Ok(result);
         }
     };
-    if cutover.run.is_none() && writes.is_empty() && catalog.as_ref().is_none_or(|catalog| catalog.write.is_none()) {
+    if cutover.run.is_none() && writes.is_empty() && provider_updates.is_empty()
+        && catalog.as_ref().is_none_or(|catalog| catalog.write.is_none()) {
         result.preimages = preimages;
         return Ok(result);
     }
@@ -478,7 +554,7 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
     let writer = declared_provider_run_writer(&record, &provider_id, &serde_json::from_value(
         private.get("run_authoring_profile").cloned().ok_or("native adoption provider has no declared writer profile")?
     ).map_err(|error|error.to_string())?)?;
-    if !provider_input_payloads_ready(&evidence, &run_path, &bytes, &writer, client)? {
+    if !metrics.measure("provider_input", || provider_input_payloads_ready(&evidence, &run_path, &bytes, &writer, client))? {
         result.status = NativeRunAdoptionStatus::Deferred;
         result.reason = Some("retained handoff lacks complete admitted evidence or a newer provider input is already admitted".into());
         result.preimages = preimages;
@@ -490,8 +566,8 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         let descriptor: ToolDescriptor = parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
         affected_tools.insert(descriptor.id.to_string(), descriptor.interface);
     }
-    if !result_receiving::outputs_settled(request, &record, &provider_id, pending, &affected_tools,
-        process.io_limits.max_control_frame_bytes, &mut preimages)? {
+    if !metrics.measure("outputs_settled", || result_receiving::outputs_settled(request, &record, &provider_id, pending, &affected_tools,
+        process.io_limits.max_control_frame_bytes, &mut preimages, ledger))? {
         result.status = NativeRunAdoptionStatus::Deferred;
         result.reason = Some("pending outputs retain unresolved original fan-out or lack exact retained delivery proof".into());
         result.preimages = preimages;
@@ -505,11 +581,11 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
             max_manifest_bytes: process.io_limits.max_manifest_bytes,
             max_payload_bytes: process.io_limits.max_payload_bytes,
         };
-        let proof = tool_contract_update_quiescent(ToolContractUpdateRequest {
+        let proof = metrics.measure("tool_quiescence", || tool_contract_update_quiescent(ToolContractUpdateRequest {
             movements_path: &movements, ledger_index_path: &index, blobs_dir: &blobs,
             interface_private_state_root: &roots.interface_private_state_root,
             affected_tools: &affected_tools, limits: &limits,
-        })?;
+        }))?;
         if !proof.quiescent {
             result.status = NativeRunAdoptionStatus::Deferred;
             result.reason = Some("accepted tool work can still dispatch or recover under the previous contract".into());
@@ -544,6 +620,8 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         }
         writes.push(PlannedClientWrite { path: run_path, content: pretty_json(&next)?, tag: format!("run:{}", record.id), expected_before_hash: Some(request.expected_run_hash.clone()) });
     }
+    let mut provider_changed = !provider_updates.is_empty();
+    private.extend(provider_updates);
     if let Some(catalog) = catalog.filter(|catalog| catalog.write.is_some()) {
         if catalog.profile.read_root_slots.iter().any(|slot| !process.authority.read_root_slots.contains(slot)) {
             return Err("native adoption requires undeclared provider read roots; an explicit capability amendment is required".into());
@@ -565,6 +643,9 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         private.insert("run_affordances".into(), catalog.next);
         private.insert("run_affordance_profile".into(), catalog.raw_profile);
         writes.push(catalog.write.unwrap());
+        provider_changed = true;
+    }
+    if provider_changed {
         writes.push(PlannedClientWrite { path: provider_path, content: pretty_json(&descriptor)?, tag: format!("interface:{provider}"), expected_before_hash: Some(request.expected_provider_hash.clone()) });
     }
     result.status = NativeRunAdoptionStatus::Planned;

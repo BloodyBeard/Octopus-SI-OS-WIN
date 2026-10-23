@@ -163,11 +163,18 @@ impl AbsPath {
 
 #[derive(Clone, Debug)]
 pub struct EnvContext {
+    pub additional_root_slots: BTreeMap<String, Vec<AbsPath>>,
     pub root_slots: BTreeMap<String, AbsPath>,
     pub env: BTreeMap<String, String>,
 }
 
 impl EnvContext {
+    pub fn resolve_roots(&self, name: &str) -> Result<Vec<AbsPath>, WorkerEnvError> {
+        let mut roots = vec![self.resolve_root(name)?];
+        roots.extend(self.additional_root_slots.get(name).into_iter().flatten().cloned());
+        Ok(roots)
+    }
+
     pub fn resolve_root(&self, name: &str) -> Result<AbsPath, WorkerEnvError> {
         self.root_slots
             .get(name)

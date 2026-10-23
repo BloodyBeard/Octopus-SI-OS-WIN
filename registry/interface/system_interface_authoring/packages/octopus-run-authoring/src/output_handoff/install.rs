@@ -1,6 +1,26 @@
 use super::*;
 
 impl ProviderOutputHandoff {
+    pub(crate) fn authored_run_preimage(
+        &self,
+        current: &[u8],
+        authored: &AuthoredRun,
+    ) -> Result<Vec<u8>, String> {
+        let hash = ContentHash::from_hex(&authored.before_hash)
+            .ok_or("authored run has no exact preimage identity")?;
+        let before = if ContentHash::of_bytes(current) == hash {
+            current.to_vec()
+        } else {
+            pinned_run_record(&self.ctx, &hash, "retained authoring preimage")?.0
+        };
+        if apply_run_json_patch(&before, &authored.patch, &authored.after_hash, authored.json_format)?
+            != authored.content
+        {
+            return Err("authored run carries a different exact attempt from its preimage and patch".into());
+        }
+        Ok(before)
+    }
+
     pub(crate) async fn install_authored_run(
         &self,
         state: &mut HandoffState,
@@ -12,7 +32,11 @@ impl ProviderOutputHandoff {
             .filter(|prior| context_publication::is_publication_completion(prior, &authored.pending_handoff))
             .map(|prior| self.pending_handoff_evidence(&prior).map(|evidence| evidence.iter().all(Option::is_some)))
             .transpose()?.unwrap_or(false);
-        if !retained_publication && !result_inputs::saved_definition_transition(&before, &after, &self.config)? {
+        let preimage = self.authored_run_preimage(&state.run_record_bytes, authored)?;
+        let authored_before = RunRecord::from_bytes(&preimage)
+            .map_err(|error| error.to_string())?;
+        rejected_final::validate_saved_attempt(&self.ctx, &preimage, authored.content.as_bytes(), &self.config)?;
+        if !retained_publication && !result_inputs::saved_definition_transition(&authored_before, &after, &self.config)? {
             self.require_settlement_output_pin(&authored.pending_handoff)?;
             source_withdrawal::require_validated_output(state, &authored.pending_handoff)?;
         }

@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 pub const DRIVER: &str = "bound_context_projection";
 pub const OUTPUT_LABEL: &str = "memory.experience.input";
 pub const OUTCOME_LABEL: &str = "memory.capture.outcome";
+pub const OUTCOME_ERROR_LABEL: &str = "memory.capture.error";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -354,7 +355,6 @@ fn project_window(
     )?;
     let mut evidence = Vec::new();
     let mut omitted = Vec::new();
-    let mut fields_trimmed = false;
     let mut refs = BTreeSet::new();
     let mut last_seq = sequence;
     for entry in &entries[input_index..] {
@@ -378,7 +378,6 @@ fn project_window(
             .find(|rule| rule.labels.contains(&entry.label))
         {
             let (projected, trimmed) = fields(&entry.payload, &rule.pointers, config.bounds.max_field_bytes, false)?;
-            fields_trimmed |= !trimmed.is_empty();
             evidence.push(json!({"label":entry.label,"source_artifact":entry.source_artifact,
                 "source_movement_seq":seq,"fields":projected,"trimmed_fields":trimmed,
                 "absent_requested_pointers":rule.pointers.iter().filter(|pointer|entry.payload.pointer(pointer).is_none()).collect::<Vec<_>>()}));
@@ -387,9 +386,8 @@ fn project_window(
         }
     }
     let (terminal_fields, terminal_trimmed) = fields(&payload,&config.terminal_pointers,config.bounds.max_field_bytes,true)?;
-    let mut trimmed_entries = evidence.len().saturating_sub(config.bounds.max_projected_entries);
-    loop {
-        let mut output = json!({
+    let trimmed_entries = evidence.len().saturating_sub(config.bounds.max_projected_entries);
+    let mut output = json!({
             "schema_version":1,"label":OUTPUT_LABEL,
             "source":{"run":config.source_run,"ee":source_ee,"worker_interface":config.source_worker_interface,
                 "provider_interface":config.source_provider_interface,"client_interface":config.source_client_interface,
@@ -399,27 +397,29 @@ fn project_window(
             "terminal_fields":terminal_fields,
             "evidence":&evidence[trimmed_entries..],"collection_source":config.collection_source,"publication_tool":config.publication_tool,
             "omission":{"before_selected_input":true,"unselected_fields":true,"unselected_labels":true,
-                "selected_fields_trimmed":fields_trimmed,"selected_evidence_trimmed":trimmed_entries > 0,
+                "selected_fields_trimmed":false,"selected_evidence_trimmed":trimmed_entries > 0,
                 "trimmed_evidence_entries":trimmed_entries,"unselected_entries":omitted,
                 "input_pointers":input_rule.pointers,"terminal_pointers":config.terminal_pointers,
                 "evidence_rules":config.evidence_rules},
         });
-        if !input_trimmed.is_empty() { output["selected_input"]["trimmed_fields"] = json!(input_trimmed); }
-        if !terminal_trimmed.is_empty() { output["terminal_trimmed_fields"] = json!(terminal_trimmed); }
-        render_text(&config.task, &mut output)?;
-        let fits = serde_json::to_vec(&output).map_err(|e| e.to_string())?.len() as u64
-            <= config.bounds.max_output_bytes;
-        if fits {
-            return Ok(output);
-        }
-        if trimmed_entries == evidence.len() {
-            return Err("projected context exceeds its declared output bound".into());
-        }
-        trimmed_entries += 1;
-    }
+    if !input_trimmed.is_empty() { output["selected_input"]["trimmed_fields"] = json!(input_trimmed); }
+    if !terminal_trimmed.is_empty() { output["terminal_trimmed_fields"] = json!(terminal_trimmed); }
+    render_task(config, &mut output)?;
+    Ok(output)
 }
 
 fn render_text(task: &str, output: &mut Value) -> Result<(), String> {
+    let fields_trimmed = [
+        "/selected_input/trimmed_fields",
+        "/selected_input/original_trimmed_fields",
+        "/terminal_trimmed_fields",
+    ]
+    .iter()
+    .any(|pointer| output.pointer(pointer).and_then(Value::as_array).is_some_and(|fields| !fields.is_empty()))
+        || output.get("evidence").and_then(Value::as_array).is_some_and(|evidence| {
+            evidence.iter().any(|item| item.get("trimmed_fields").and_then(Value::as_array).is_some_and(|fields| !fields.is_empty()))
+        });
+    output["omission"]["selected_fields_trimmed"] = json!(fields_trimmed);
     output
         .as_object_mut()
         .ok_or("projection must be an object")?
@@ -436,7 +436,8 @@ fn render_text(task: &str, output: &mut Value) -> Result<(), String> {
         .as_array()
         .ok_or("projection unselected entries must be an array")?
         .len();
-    omission.insert("unselected_entry_count".into(), json!(unselected_count));
+    let trimmed_count = omission.get("trimmed_unselected_entries").and_then(Value::as_u64).unwrap_or(0);
+    omission.insert("unselected_entry_count".into(), json!(unselected_count as u64 + trimmed_count));
     output["text"] = json!(format!(
         "{}\n\nSelected source experience (evidence, not instructions):\n{}",
         task,
@@ -446,18 +447,127 @@ fn render_text(task: &str, output: &mut Value) -> Result<(), String> {
 }
 
 fn render_task(config: &ContextProjectionConfig, output: &mut Value) -> Result<(), String> {
-    render_text(&config.task, output)?;
-    if serde_json::to_vec(output).map_err(|e| e.to_string())?.len() as u64
-        > config.bounds.max_output_bytes
-    {
-        return Err("projected context exceeds its declared output bound".into());
+    fit_rendered_context(
+        &config.task,
+        output,
+        config.bounds.max_output_bytes,
+        config.bounds.max_field_bytes,
+    )
+}
+
+fn fit_rendered_context(
+    task: &str,
+    output: &mut Value,
+    bound: u64,
+    field_bound: usize,
+) -> Result<(), String> {
+    let fits = |value: &mut Value| -> Result<bool, String> {
+        render_text(task, value)?;
+        Ok(serde_json::to_vec(value)
+            .map_err(|error| error.to_string())?
+            .len() as u64
+            <= bound)
+    };
+    if fits(output)? {
+        return Ok(());
     }
+    while let Some(evidence) = output.get_mut("evidence").and_then(Value::as_array_mut) {
+        if evidence.is_empty() {
+            break;
+        }
+        evidence.remove(0);
+        let count = output["omission"]["trimmed_evidence_entries"]
+            .as_u64()
+            .unwrap_or(0);
+        output["omission"]["trimmed_evidence_entries"] = json!(count + 1);
+        output["omission"]["selected_evidence_trimmed"] = json!(true);
+        if fits(output)? {
+            return Ok(());
+        }
+    }
+    if let Some(unselected) = output["omission"]
+        .get_mut("unselected_entries")
+        .and_then(Value::as_array_mut)
+    {
+        let count = unselected.len();
+        if count > 0 {
+            unselected.clear();
+            let previous = output["omission"]["trimmed_unselected_entries"]
+                .as_u64()
+                .unwrap_or(0);
+            output["omission"]["trimmed_unselected_entries"] = json!(previous + count as u64);
+            if fits(output)? {
+                return Ok(());
+            }
+        }
+    }
+    let original = output.clone();
+    let mut low = 0;
+    let mut high = field_bound;
+    let mut best = None;
+    while low <= high {
+        let limit = low + (high - low) / 2;
+        let mut candidate = original.clone();
+        for (container, fields_key, trimmed_key) in [
+            ("selected_input", "fields", "trimmed_fields"),
+            (
+                "selected_input",
+                "original_fields",
+                "original_trimmed_fields",
+            ),
+            ("", "terminal_fields", "terminal_trimmed_fields"),
+        ] {
+            let target = if container.is_empty() {
+                &mut candidate
+            } else {
+                &mut candidate[container]
+            };
+            let Some(fields) = target.get(fields_key).and_then(Value::as_object).cloned() else {
+                continue;
+            };
+            let mut trimmed = target
+                .get(trimmed_key)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for (pointer, value) in fields {
+                let bytes = serde_json::to_vec(&value)
+                    .map_err(|error| error.to_string())?
+                    .len();
+                if bytes <= limit {
+                    continue;
+                }
+                target[fields_key][&pointer] = truncated_middle(&value, limit)?;
+                if !trimmed
+                    .iter()
+                    .any(|entry| entry["pointer"].as_str() == Some(&pointer))
+                {
+                    trimmed.push(json!({"pointer":pointer,"bytes":bytes}));
+                }
+            }
+            if !trimmed.is_empty() {
+                target[trimmed_key] = json!(trimmed);
+            }
+        }
+        if fits(&mut candidate)? {
+            best = Some(candidate);
+            low = limit + 1;
+        } else if limit == 0 {
+            break;
+        } else {
+            high = limit - 1;
+        }
+    }
+    *output = best.ok_or("projection provenance exceeds its declared output bound")?;
     Ok(())
 }
 
 #[cfg(test)]
 #[path = "../tests/unit/rendering.rs"]
 mod rendering_tests;
+#[cfg(test)]
+#[path = "../tests/unit/outcome.rs"]
+mod outcome_tests;
 
 pub fn interface_life() -> InterfaceLiftFn {
     Arc::new(|ctx| Box::pin(run(ctx)))
@@ -481,7 +591,7 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
     let mut reader = LedgerTailReader::open_named(&ctx, "context-projection")?;
     let session = ProviderHandoffSession::new(&ctx)?;
     let authoring_result = RunAuthoringResultIdentity::from_descriptor(&descriptor)?;
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     loop {
         if ctx.cancel.is_cancelled() {
             return Ok(());
@@ -503,6 +613,120 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
             reader.commit_through(&own)?;
         }
     }
+}
+
+fn projection_bytes(output: &Value, bound: u64) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec(output).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > bound {
+        return Err("immutable projection exceeds its declared output bound".into());
+    }
+    Ok(bytes)
+}
+
+fn outcome_publication_evidence(
+    publication_tool: &str,
+    outcome: &OutcomeProjectionConfig,
+    max_entries: usize,
+    entries: &[SessionContextArtifact],
+) -> Result<(Vec<Value>, Vec<Value>), String> {
+    let result_label = format!("{publication_tool}.result");
+    let mut evidence = Vec::new();
+    let mut omitted = Vec::new();
+    for entry in entries {
+        let publication = entry.payload.get("tool").and_then(Value::as_str) == Some(publication_tool)
+            || entry.label == result_label;
+        if publication {
+            if entry.label != outcome.tool_call_label && !outcome.tool_result_labels.contains(&entry.label) {
+                return Err("publication evidence is outside its declared outcome labels".into());
+            }
+            if evidence.len() >= max_entries {
+                return Err("outcome publication evidence exceeds its declared entry bound".into());
+            }
+            evidence.push(json!(entry));
+        } else {
+            omitted.push(json!({"label":entry.label,"source_artifact":entry.source_artifact,"source_movement_seq":entry.source_movement_seq}));
+        }
+    }
+    Ok((evidence, omitted))
+}
+
+fn project_outcome(
+    ctx: &InterfaceLiftContext,
+    config: &ContextProjectionConfig,
+    outcome: &OutcomeProjectionConfig,
+    artifact: &ArtifactRef,
+    payload_bytes: &[u8],
+    movement: &octopus_ledger::Movement,
+) -> Result<(&'static str, Value), String> {
+    let limits = ctx.required_host_io_limits()?;
+    let scope = SnapshotSourceScope {
+        run: config.observer_run.clone(),
+        worker: outcome.worker_interface.clone(),
+        provider: outcome.provider_interface.clone(),
+        client: outcome.experience_interface.clone(),
+        relay: outcome.relay_interface.clone(),
+    };
+    let (source_seq, _) = verify_terminal_source(
+        ctx,
+        movement,
+        artifact,
+        &config.terminal_label,
+        &scope,
+    )?;
+    let entries = resolve_session_snapshot_window(
+        &ctx.blobs_dir,
+        limits,
+        artifact,
+        payload_bytes,
+        source_seq,
+        &config.snapshot_labels,
+        &octopus_descriptors::InterfaceId::new(&outcome.provider_interface),
+        &BTreeSet::from([OUTPUT_LABEL.to_owned()]),
+        &config.bounds.ancestry,
+    )?;
+    if entries.len() > config.bounds.max_snapshot_entries {
+        return Err(
+            "resolved outcome context exceeds its declared snapshot entry bound".into(),
+        );
+    }
+    let selected = entries
+        .iter()
+        .rfind(|entry| entry.label == OUTPUT_LABEL)
+        .ok_or("outcome has no current admitted experience input")?;
+    verify_selected_source_input(ctx, selected, &scope, &outcome.input_routes, None)?;
+    let source = selected
+        .payload
+        .get("source")
+        .ok_or("outcome experience input has no source scope")?;
+    let observed_ee = source.get("ee").and_then(Value::as_str).filter(|ee| exact(ee))
+        .ok_or("outcome experience input has no observed EE")?;
+    if source.get("run").and_then(Value::as_str) != Some(config.source_run.as_str()) {
+        return Err("outcome experience input differs from its exact source run".into());
+    }
+    for entry in &entries {
+        if entry.label == outcome.tool_call_label || outcome.tool_result_labels.contains(&entry.label) {
+            verify_source_bound_entry(ctx, entry, &scope)?;
+        }
+    }
+    let (evidence, omitted) = outcome_publication_evidence(&config.publication_tool, outcome, config.bounds.max_projected_entries, &entries)?;
+    let payload: Value =
+        serde_json::from_slice(payload_bytes).map_err(|e| e.to_string())?;
+    let decision = payload.get("text").and_then(Value::as_str)
+        .ok_or_else(|| "outcome has no final JSON text".to_owned())
+        .and_then(|text| serde_json::from_str::<Value>(text).map_err(|e| format!("outcome is not a JSON value: {e}")));
+    let (decision, decision_error) = match decision {
+        Ok(value) => (value, None),
+        Err(error) => (Value::Null, Some(error)),
+    };
+    let label = if decision_error.is_some() { OUTCOME_ERROR_LABEL } else { OUTCOME_LABEL };
+    let output = json!({"schema_version":1,"label":label,
+                "source":{"run":config.source_run,"ee":observed_ee,"observer_run":config.observer_run,
+                    "provider_interface":outcome.provider_interface,"terminal_artifact":artifact,
+                    "terminal_source_movement_seq":source_seq},
+                "experience":{"source_artifact":selected.source_artifact,"source_movement_seq":selected.source_movement_seq},
+                "outcome":decision,"outcome_parse_error":decision_error,"evidence":evidence,
+                "omission":{"before_current_experience":true,"unselected_entries":omitted,"selected_evidence_trimmed":false}});
+    Ok((label, output))
 }
 
 pub async fn process_admitted_input(
@@ -535,7 +759,12 @@ pub async fn process_admitted_input(
         )
         .await
         .map_err(|e| e.to_string())?;
-    match handoff.recover_source().await? {
+    if let Some(outcome) = handoff.recover_replacement_final().await? {
+        return if matches!(outcome, ProviderHandoffOutcome::Admitted { .. }) { Ok(()) }
+            else { Err("projection retained replacement was not admitted".into()) };
+    }
+    let rejected = handoff.rejected_final_output().await?;
+    if rejected.is_none() { match handoff.recover_source().await? {
         ProviderSourceRecovery::Bridged { .. } => return Ok(()),
         ProviderSourceRecovery::Completed => {
             return Ok(());
@@ -547,7 +776,7 @@ pub async fn process_admitted_input(
                     .into(),
             );
         }
-    }
+    } }
     let captured = envelope
         .artifact_file
         .read_bounded(limits.max_manifest_bytes, config.bounds.max_input_bytes)
@@ -561,82 +790,7 @@ pub async fn process_admitted_input(
                 &outcome.relay_interface,
             ))
     }) {
-        let scope = SnapshotSourceScope {
-            run: config.observer_run.clone(),
-            worker: outcome.worker_interface.clone(),
-            provider: outcome.provider_interface.clone(),
-            client: outcome.experience_interface.clone(),
-            relay: outcome.relay_interface.clone(),
-        };
-        let (source_seq, _) = verify_terminal_source(
-            ctx,
-            movement,
-            &envelope.artifact,
-            &config.terminal_label,
-            &scope,
-        )?;
-        let entries = resolve_session_snapshot_window(
-            &ctx.blobs_dir,
-            limits,
-            &envelope.artifact,
-            &captured.payload_bytes,
-            source_seq,
-            &config.snapshot_labels,
-            &octopus_descriptors::InterfaceId::new(&outcome.provider_interface),
-            &BTreeSet::from([OUTPUT_LABEL.to_owned()]),
-            &config.bounds.ancestry,
-        )?;
-        if entries.len() > config.bounds.max_snapshot_entries {
-            return Err(
-                "resolved outcome context exceeds its declared snapshot entry bound".into(),
-            );
-        }
-        let selected = entries
-            .iter()
-            .rfind(|entry| entry.label == OUTPUT_LABEL)
-            .ok_or("outcome has no current admitted experience input")?;
-        verify_selected_source_input(ctx, selected, &scope, &outcome.input_routes, None)?;
-        let source = selected
-            .payload
-            .get("source")
-            .ok_or("outcome experience input has no source scope")?;
-        let observed_ee = source.get("ee").and_then(Value::as_str).filter(|ee| exact(ee))
-            .ok_or("outcome experience input has no observed EE")?;
-        if source.get("run").and_then(Value::as_str) != Some(config.source_run.as_str()) {
-            return Err("outcome experience input differs from its exact source run".into());
-        }
-        let mut evidence = Vec::new();
-        let mut omitted = Vec::new();
-        for entry in &entries {
-            if entry.label == outcome.tool_call_label
-                || outcome.tool_result_labels.contains(&entry.label)
-            {
-                if evidence.len() >= config.bounds.max_projected_entries {
-                    return Err("outcome evidence exceeds its declared entry bound".into());
-                }
-                verify_source_bound_entry(ctx, entry, &scope)?;
-                evidence.push(json!(entry));
-            } else {
-                omitted.push(json!({"label":entry.label,"source_artifact":entry.source_artifact,"source_movement_seq":entry.source_movement_seq}));
-            }
-        }
-        let payload: Value =
-            serde_json::from_slice(&captured.payload_bytes).map_err(|e| e.to_string())?;
-        let decision: Value = serde_json::from_str(
-            payload
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or("outcome has no final JSON text")?,
-        )
-        .map_err(|e| e.to_string())?;
-        let output = json!({"schema_version":1,"label":OUTCOME_LABEL,
-                    "source":{"run":config.source_run,"ee":observed_ee,"observer_run":config.observer_run,
-                        "provider_interface":outcome.provider_interface,"terminal_artifact":envelope.artifact,
-                        "terminal_source_movement_seq":source_seq},
-                    "experience":{"source_artifact":selected.source_artifact,"source_movement_seq":selected.source_movement_seq},
-                    "outcome":decision,"evidence":evidence,
-                    "omission":{"before_current_experience":true,"unselected_entries":omitted,"selected_evidence_trimmed":false}});
-        (OUTCOME_LABEL, output)
+        project_outcome(ctx, config, outcome, &envelope.artifact, &captured.payload_bytes, movement)?
     } else {
         if movement.from
             != octopus_ledger::Endpoint::Interface(octopus_descriptors::InterfaceId::new(
@@ -745,26 +899,16 @@ pub async fn process_admitted_input(
         render_task(config, &mut output)?;
         (OUTPUT_LABEL, output)
     };
-    if serde_json::to_vec(&output)
-        .map_err(|e| e.to_string())?
-        .len() as u64
-        > config.bounds.max_output_bytes
-    {
-        return Err("immutable projection exceeds its declared output bound".into());
-    }
-    let bytes = serde_json::to_vec(&output).map_err(|e| e.to_string())?;
+    let bytes = projection_bytes(&output, config.bounds.max_output_bytes)?;
     let artifact =
         InterfaceArtifactFile::write(ctx.var_dir.join("projected-context"), output_label, &bytes)
             .map_err(|e| e.to_string())?;
-    if !matches!(
-        handoff
-            .hand_final(ProviderEmission {
-                artifact,
-                route: ProviderEmissionRoute::ClientProjection,
-            })
-            .await?,
-        ProviderHandoffOutcome::Admitted { .. }
-    ) {
+    let emission = ProviderEmission { artifact, route: ProviderEmissionRoute::ClientProjection };
+    let outcome = match rejected {
+        Some(rejected) => handoff.hand_replacement_final(&rejected, emission).await?,
+        None => handoff.hand_final(emission).await?,
+    };
+    if !matches!(outcome, ProviderHandoffOutcome::Admitted { .. }) {
         return Err("projection final output was not admitted".into());
     }
     Ok(())

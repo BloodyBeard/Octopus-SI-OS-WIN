@@ -7,7 +7,7 @@ export function materializeRegistry(
   readError: string,
   loading: boolean,
   accessProfile: "live" | "lab",
-): ClientSurfaceDocumentRegistryState {
+): Omit<ClientSurfaceDocumentRegistryState, "hydrated"> {
   const errors = [...snapshot.errors, ...(readError ? [readError] : [])];
   const candidates = snapshot.documents.map((source, index) => ({ source, index, result: admitClientSurfaceSource(source) }));
   const verdicts = candidates.map(({ result }) => result.verdict);

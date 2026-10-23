@@ -15,7 +15,7 @@ export function ScheduledLanding({ disabledReason, onCreate, templates, timeDisa
     title: template.displayName,
     description: describeSchedule(template),
     instructions: template.instructions,
-    cron: "",
+    schedule: describeSchedule(template),
     templateInterfaceId: template.interfaceId,
   }));
   const suggestions = [...installed.map((suggestion) => ({ suggestion, reason: disabledReason })), ...scheduledSuggestions.map((suggestion) => ({ suggestion, reason: timeDisabledReason }))];

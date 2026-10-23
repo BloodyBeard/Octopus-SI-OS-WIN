@@ -3,7 +3,7 @@ module.exports = { configurationProjection };
 const path = require("node:path");
 const { readClientAgentCatalog } = require("../clientAgentCatalog.cjs");
 const { readLocalPackageCatalog } = require("../localPackages.cjs");
-const { readWorkspaceSetupState } = require("../workspaceSetup.cjs");
+const { inspectWorkspaceSetupState } = require("../workspaceSetup.cjs");
 const { readApplicationPackageCatalog } = require("./applicationCatalog.cjs");
 const { DESCRIPTOR_REGISTRIES } = require("./constants.cjs");
 const { readOperatorChatProtocol, readProviderInterfaceDescriptors } = require("./providerDescriptors.cjs");
@@ -16,6 +16,57 @@ function configurationProjection(store) {
   let configurationProjectionBuild = null;
   let policyProjectionBuild = null;
   let policyProjectionGeneration = 1;
+  let packageCatalogBuild = null;
+  let packageCatalogGeneration = 1;
+  let packageOwnerScope = null;
+  let packageOwners = null;
+  const packageProjectionStates = new WeakMap();
+
+  async function cachedPackageCatalog(repoRoot) {
+    const scope = store.fileProjectionScope(repoRoot);
+    for (;;) {
+      if (scope !== store.fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during package read");
+      let build = packageCatalogBuild;
+      if (!build || build.scope !== scope) {
+        if (packageOwnerScope !== scope) packageOwners = null;
+        build = { scope, generation: packageCatalogGeneration, promise: readLocalPackageCatalog({
+          sourceRegistryRoot: store.resolveLocalPackageRegistry(),
+          activeRegistryRoot: path.join(store.octopusHome(), "registry"),
+          libraryRoot: store.resolveLocalPackageLibrary(),
+          stateRoot: path.join(store.octopusHome(), "client", "package-state"),
+        }) };
+        packageCatalogBuild = build;
+      }
+      try {
+        const catalog = await build.promise;
+        if (scope !== store.fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during package read");
+        packageOwners = new Set(arrayValue(catalog.packages).flatMap((entry) => (
+          [...arrayValue(entry.members), ...arrayValue(entry.retired_members)]
+            .map((member) => `${member.registry_kind}/${member.owner}`)
+        )));
+        packageOwnerScope = scope;
+        if (build.generation === packageCatalogGeneration) return structuredClone(catalog);
+      } catch (error) {
+        if (build.generation === packageCatalogGeneration) {
+          if (packageCatalogBuild === build) packageCatalogBuild = null;
+          throw error;
+        }
+      }
+      if (packageCatalogBuild === build) packageCatalogBuild = null;
+    }
+  }
+
+  function packageInputsChanged(filename) {
+    if (filename === null || filename === undefined) return true;
+    const segments = String(filename).split(/[\\/]/).filter(Boolean);
+    if (!segments.length) return true;
+    if (segments[0] === "client" && segments[1] === "package-state") return true;
+    if (segments[0] !== "registry") return false;
+    if (segments.length < 3 || !packageOwners
+      || packageOwnerScope !== store.fileProjectionScope(store.resolveRepoRoot())
+      || path.resolve(store.resolveLocalPackageRegistry()) === path.join(store.octopusHome(), "registry")) return true;
+    return packageOwners.has(`${segments[1]}/${segments[2]}`);
+  }
 
   async function cachedConfigurationProjection(repoRoot) {
     const scope = store.fileProjectionScope(repoRoot);
@@ -41,6 +92,8 @@ function configurationProjection(store) {
   }
 
   async function buildConfigurationProjection(repoRoot) {
+    const generation = configurationProjectionGeneration;
+    const scope = store.fileProjectionScope(repoRoot);
     const warnings = store.projectionWatchWarnings();
     const homeRoot = store.octopusHome();
     const durableRoot = store.resolveDurableRoot();
@@ -61,29 +114,21 @@ function configurationProjection(store) {
     } catch (error) {
       warnings.push(`Managed runtime launch environment could not be verified: ${String(error?.message ?? error)}`);
     }
-    const descriptorEntries = await Promise.all(DESCRIPTOR_REGISTRIES.map(async (registry) => {
-      return [registry.kind, await store.readDescriptorRows(registryRoot, registry, warnings, launchEnvironment)];
-    }));
-    const descriptors = Object.fromEntries(descriptorEntries);
     const sourceRegistryRoot = store.resolveSourceRegistry();
     const localPackageRegistryRoot = store.resolveLocalPackageRegistry();
     const localPackageLibraryRoot = store.resolveLocalPackageLibrary();
-    const localPackages = await readLocalPackageCatalog({
-      sourceRegistryRoot: localPackageRegistryRoot,
-      activeRegistryRoot: registryRoot,
-      libraryRoot: localPackageLibraryRoot,
-      stateRoot: path.join(homeRoot, "client", "package-state"),
-    });
-    warnings.push(...arrayValue(localPackages.errors));
-    const setupSourceProviders = await readProviderInterfaceDescriptors(localPackageRegistryRoot);
-    const setupInstalledProviders = await readProviderInterfaceDescriptors(registryRoot);
-    for (const pack of localPackages.packs) {
-      const id = pack.workspace_setup?.home?.provider_interface_id;
-      if (!id) continue;
-      const owner = pack.components.find((component) => component.product_id === id);
-      const providers = owner?.materialized === true || owner?.partially_materialized === true ? setupInstalledProviders : setupSourceProviders;
-      pack.setup_provider = providers.find((provider) => provider.id === id) ?? null;
-    }
+    const descriptorWarnings = [];
+    const [descriptorRead, policyRead] = await Promise.allSettled([
+      Promise.all(DESCRIPTOR_REGISTRIES.map(async (registry) => [
+        registry.kind,
+        await store.readDescriptorRows(registryRoot, registry, descriptorWarnings, launchEnvironment),
+      ])),
+      cachedEePolicyProjection(),
+    ]);
+    if (descriptorRead.status === "rejected") throw descriptorRead.reason;
+    const descriptors = Object.fromEntries(descriptorRead.value);
+    warnings.push(...descriptorWarnings);
+    const packageWarningOffset = warnings.length;
     let clientAgentCatalog = null;
     let clientAgentCatalogError = "";
     try {
@@ -96,11 +141,7 @@ function configurationProjection(store) {
       clientAgentCatalogError = String(error?.message ?? error);
       warnings.push(clientAgentCatalogError);
     }
-    const applicationPackages = await readApplicationPackageCatalog(
-      registryRoot,
-      localPackageRegistryRoot,
-      warnings,
-    );
+    const applicationWarningOffset = warnings.length;
     const descriptorIndexes = Object.fromEntries(Object.entries(descriptors).map(([kind, rows]) => [
       kind,
       new Map(rows.flatMap((row) => {
@@ -117,14 +158,15 @@ function configurationProjection(store) {
     let eePolicyProjection = { environments: [], issues: [] };
     let eePolicyProjectionError = "";
     try {
-      eePolicyProjection = await cachedEePolicyProjection();
+      if (policyRead.status === "rejected") throw policyRead.reason;
+      eePolicyProjection = policyRead.value;
       warnings.push(...eePolicyProjection.issues);
     } catch (error) {
       eePolicyProjectionError = String(error?.message ?? error);
       warnings.push(eePolicyProjectionError);
     }
     const operatorChatProtocol = await readOperatorChatProtocol(registryRoot);
-    return {
+    const configuration = {
       repoRoot,
       octopusHome: homeRoot,
       registryRoot,
@@ -135,19 +177,82 @@ function configurationProjection(store) {
       runRecordsRoot,
       durableRoot,
       descriptors,
-      localPackages,
       clientAgentCatalog,
       clientAgentCatalogError,
-      applicationPackages,
       descriptorIndexes,
       operatorChatProtocol,
       eeInstances,
       eePolicyProjection,
       eePolicyProjectionError,
       hostRootRefs,
+      fullAccessRoot: path.parse(homeRoot).root,
       hostManifestError,
       warnings,
     };
+    packageProjectionStates.set(configuration, {
+      repoRoot,
+      scope,
+      generation,
+      packageWarningOffset,
+      applicationWarningOffset,
+      promise: null,
+    });
+    return configuration;
+  }
+
+  async function readPackageInventory(configuration) {
+    const applicationWarnings = [];
+    const [packageRead, applicationRead] = await Promise.allSettled([
+      cachedPackageCatalog(configuration.repoRoot),
+      readApplicationPackageCatalog(configuration.registryRoot, configuration.localPackageRegistryRoot, applicationWarnings),
+    ]);
+    if (packageRead.status === "rejected") throw packageRead.reason;
+    const localPackages = packageRead.value;
+    const setupSourceProviders = await readProviderInterfaceDescriptors(configuration.localPackageRegistryRoot);
+    const setupInstalledProviders = await readProviderInterfaceDescriptors(configuration.registryRoot);
+    for (const pack of localPackages.packs) {
+      const id = pack.workspace_setup?.home?.provider_interface_id;
+      if (!id) continue;
+      const owner = pack.components.find((component) => component.product_id === id);
+      const providers = owner?.materialized === true || owner?.partially_materialized === true ? setupInstalledProviders : setupSourceProviders;
+      pack.setup_provider = providers.find((provider) => provider.id === id) ?? null;
+    }
+    if (applicationRead.status === "rejected") throw applicationRead.reason;
+    return { localPackages, applicationPackages: applicationRead.value, applicationWarnings };
+  }
+
+  async function withFileProjectionPackages(projection, includeLedger = false) {
+    for (;;) {
+      const state = packageProjectionStates.get(projection);
+      if (!state) throw new Error("File projection has no configuration package source");
+      if (state.scope !== store.fileProjectionScope(state.repoRoot)) throw new Error("Projection Home changed during package read");
+      if (state.generation !== configurationProjectionGeneration) {
+        projection = await store.cachedFileProjection(state.repoRoot, includeLedger);
+        continue;
+      }
+      if (projection.localPackages && projection.applicationPackages) return projection;
+      const promise = state.promise ??= readPackageInventory(projection);
+      let inventory;
+      try {
+        inventory = await promise;
+      } catch (error) {
+        if (state.promise === promise) state.promise = null;
+        if (state.generation === configurationProjectionGeneration) throw error;
+      }
+      if (state.scope !== store.fileProjectionScope(state.repoRoot)) throw new Error("Projection Home changed during package read");
+      if (state.generation !== configurationProjectionGeneration) {
+        projection = await store.cachedFileProjection(state.repoRoot, includeLedger);
+        continue;
+      }
+      if (!projection.localPackages) {
+        projection.localPackages = inventory.localPackages;
+        projection.applicationPackages = inventory.applicationPackages;
+        projection.warnings.splice(state.applicationWarningOffset, 0, ...inventory.applicationWarnings);
+        projection.warnings.splice(state.packageWarningOffset, 0, ...arrayValue(inventory.localPackages.errors));
+        projection.structureMemo.clear();
+      }
+      return projection;
+    }
   }
 
   async function buildFileProjection(repoRoot) {
@@ -156,7 +261,7 @@ function configurationProjection(store) {
     const runRecordProjection = await readRunRecords(configuration.runRecordsRoot, warnings);
     let workspaceSetup;
     try {
-      workspaceSetup = await (store.options.readWorkspaceSetupState ?? readWorkspaceSetupState)({ octopusHomeRoot: configuration.octopusHome, registryRoot: configuration.registryRoot });
+      workspaceSetup = await (store.options.inspectWorkspaceSetupState ?? inspectWorkspaceSetupState)({ octopusHomeRoot: configuration.octopusHome, registryRoot: configuration.registryRoot });
       warnings.push(...arrayValue(workspaceSetup.errors));
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -167,7 +272,7 @@ function configurationProjection(store) {
     const cachedLedger = store.ledgerProjectionSnapshot?.durableRoot === configuration.durableRoot
       ? store.ledgerProjectionSnapshot
       : null;
-    return {
+    const projection = {
       ...configuration,
       workspaceSetup,
       workerEnvironments,
@@ -192,6 +297,8 @@ function configurationProjection(store) {
       invalidRunRecords: runRecordProjection.invalidRecords,
       warnings,
     };
+    packageProjectionStates.set(projection, packageProjectionStates.get(configuration));
+    return projection;
   }
 
   async function cachedEePolicyProjection() {
@@ -219,14 +326,18 @@ function configurationProjection(store) {
     }
   }
 
-  function invalidateConfigurationProjection(configurationChanged, policyChanged) {
+  function invalidateConfigurationProjection(configurationChanged, policyChanged, filename) {
     if (configurationChanged) configurationProjectionGeneration += 1;
+    if (configurationChanged && packageInputsChanged(filename)) packageCatalogGeneration += 1;
     if (policyChanged) policyProjectionGeneration += 1;
   }
 
   function closeConfigurationProjection() {
     configurationProjectionBuild = null;
+    packageCatalogBuild = null;
+    packageOwners = null;
+    packageOwnerScope = null;
   }
 
-  return { buildConfigurationProjection, buildFileProjection, cachedConfigurationProjection, cachedEePolicyProjection, closeConfigurationProjection, invalidateConfigurationProjection };
+  return { buildConfigurationProjection, buildFileProjection, cachedConfigurationProjection, cachedEePolicyProjection, closeConfigurationProjection, invalidateConfigurationProjection, withFileProjectionPackages };
 }

@@ -26,6 +26,8 @@ struct FormationPin<'a> {
     ee: &'a str,
     run: &'a str,
     granted_tools: &'a [String],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    door_additional_root_bindings: &'a BTreeMap<String, Vec<PathBuf>>,
     door_root_bindings: &'a BTreeMap<String, PathBuf>,
     readable_root_slots: &'a [String],
     writable_root_slots: &'a [String],
@@ -47,6 +49,7 @@ pub struct WorkerEnvironmentFormationRequest<'a> {
     pub run: &'a str,
     pub granted_worker_environment_kinds: &'a [WorkerEnvironmentKindId],
     pub granted_tools: &'a [String],
+    pub door_additional_root_bindings: &'a BTreeMap<String, Vec<PathBuf>>,
     pub door_root_bindings: &'a BTreeMap<String, PathBuf>,
     pub door_instance_dir: &'a Path,
     pub ee_root_slot_allowance: Option<&'a BTreeSet<String>>,
@@ -67,6 +70,8 @@ pub struct WorkerEnvironmentFormation {
     pub instance_config_hashes: BTreeMap<String, String>,
     pub formation_pin: String,
     pub granted_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub door_additional_root_bindings: BTreeMap<String, Vec<PathBuf>>,
     pub door_root_bindings: BTreeMap<String, PathBuf>,
     pub readable_root_slots: Vec<String>,
     pub writable_root_slots: Vec<String>,
@@ -143,6 +148,15 @@ impl WorkerEnvironmentFormation {
                 )));
             }
         }
+        for (slot, paths) in &self.door_additional_root_bindings {
+            let primary = self.door_root_bindings.get(slot).ok_or_else(|| WorkerEnvError::MalformedFormation(format!("additional roots have no primary slot '{slot}'")))?;
+            let mut seen = BTreeSet::from([primary.clone()]);
+            for path in paths {
+                if AbsPath::new(path)?.as_path() != path || !seen.insert(path.clone()) {
+                    return Err(WorkerEnvError::MalformedFormation(format!("additional roots for '{slot}' are not canonical and unique")));
+                }
+            }
+        }
         for slot in self
             .readable_root_slots
             .iter()
@@ -166,6 +180,7 @@ impl WorkerEnvironmentFormation {
             ee: &self.ee,
             run: &self.run,
             granted_tools: &self.granted_tools,
+            door_additional_root_bindings: &self.door_additional_root_bindings,
             door_root_bindings: &self.door_root_bindings,
             readable_root_slots: &self.readable_root_slots,
             writable_root_slots: &self.writable_root_slots,
@@ -718,6 +733,7 @@ pub(crate) fn formation_pin(
     tool_descriptor_hashes: &BTreeMap<String, String>,
     instance_config_hashes: &BTreeMap<String, String>,
     door_root_bindings: &BTreeMap<String, PathBuf>,
+    door_additional_root_bindings: &BTreeMap<String, Vec<PathBuf>>,
     caps: &WorkerEnvCaps,
     requires_release: bool,
 ) -> Result<(String, WorkerEnvironmentId), WorkerEnvError> {
@@ -737,6 +753,7 @@ pub(crate) fn formation_pin(
         run: request.run,
         granted_tools,
         door_root_bindings,
+        door_additional_root_bindings,
         readable_root_slots: &readable_root_slots,
         writable_root_slots: &writable_root_slots,
         network_ceiling: caps.network(),

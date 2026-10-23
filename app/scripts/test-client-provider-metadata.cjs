@@ -36,9 +36,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   try {
     const folder = path.join(root, "registry", "interface", "provider");
     await fs.mkdir(folder, { recursive: true });
+    await installNativeMetadata(path.join(root, "registry"));
     await fs.writeFile(path.join(folder, "interface.json"), JSON.stringify({ id: "provider", interface_type: "world",
       role: "provider", interface_driver_ref: "codex_app_server", interface_driver_config: nativeConfig(), interface_policy: { variables: { models: { default: ["second"] } } } }));
-    const service = createClientProviderMetadata({ registryRoot: () => path.join(root, "registry"), accountClient: () => client,
+    const service = createClientProviderMetadata({ registryRoot: () => path.join(root, "registry"), sourceRegistryRoot: () => path.join(root, "registry"), accountClient: () => client,
       reference: (kind, id, evidence) => ({ kind, id, evidence }) });
     const source = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8");
     const ownerFactory = source.slice(source.indexOf("function createClientSetupOwners("), source.indexOf("function clientSetupPackageRoots("));
@@ -73,13 +74,14 @@ test("account failures remain explicit and unsupported providers never reach Cod
     const descriptor = { id: "provider", interface_type: "world", role: "provider", interface_driver_ref: "other" };
     const write = () => fs.writeFile(path.join(folder, "interface.json"), JSON.stringify(descriptor));
     await write();
-    const service = createClientProviderMetadata({ registryRoot: () => root, accountClient: () => ({
+    const service = createClientProviderMetadata({ registryRoot: () => root, sourceRegistryRoot: () => root, accountClient: () => ({
       account: async () => { throw new Error("account transport failed"); },
     }), reference: () => assert.fail("must not manufacture signed-in evidence") });
     const plan = { provider: { interface_id: "provider" } };
     await assert.rejects(service.setupOwner.probe(plan), /does not support/);
     descriptor.interface_driver_ref = "codex_app_server";
     descriptor.interface_driver_config = nativeConfig();
+    await installNativeMetadata(root);
     await write();
     await assert.rejects(service.setupOwner.probe(plan), /account transport failed/);
     await assert.rejects(service.setupOwner.apply(plan), /account transport failed/);
@@ -89,31 +91,52 @@ test("account failures remain explicit and unsupported providers never reach Cod
 });
 
 function nativeConfig() {
-  return { residual_ambient: { private_auth_store: { auth_file_env: "OCTOPUS_MACHINE_CODEX_AUTH_FILE" } } };
+  return { residual_ambient: { private_auth_store: { auth_file_env: "OCTOPUS_MACHINE_CODEX_AUTH_FILE" } }, private_config: {
+    client_metadata: { schema_version: 1, module: "interface://native-metadata/packages/client.cjs" },
+  } };
 }
 
-test("catalogue shares native account only, preserves exact OpenCodex models, and rejects stale selections", async () => {
+async function installNativeMetadata(registry) {
+  const folder = path.join(registry, "interface/native-metadata/packages");
+  await fs.mkdir(folder, { recursive: true });
+  await fs.writeFile(path.join(folder, "../interface.json"), JSON.stringify({ id: "native-metadata", interface_type: "world", role: "provider", interface_driver_config: nativeConfig() }));
+  await fs.copyFile(path.resolve(__dirname, "../../registry/interface/world_provider_codex/packages/octopus-provider-codex/client-metadata.cjs"), path.join(folder, "client.cjs"));
+}
+
+test("Claude Code exposes its declared model catalogue without consulting the Codex account", async () => {
+  const registry = path.resolve(__dirname, "../../registry");
+  const descriptor = JSON.parse(await fs.readFile(path.join(registry, "interface/world_provider_claude_cli/interface.json")));
+  const service = createClientProviderMetadata({ registryRoot: () => registry,
+    accountClient: () => assert.fail("CLI model discovery must not ask the Codex account") });
+  const [provider] = await service.catalog([{ id: descriptor.id, runtimeHandlerRef: descriptor.interface_driver_ref, model: descriptor.interface_driver_config.private_config.model }]);
+  assert.equal(provider.modelCatalogError, "");
+  assert.deepEqual(provider.models.map(model => model.model), descriptor.interface_driver_config.private_config.model_catalog.map(model => model.model));
+  assert.ok(provider.models.some(model => model.showInPicker));
+});
+
+test("catalogue uses declared data or owner modules independently of provider and adapter names", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-catalogue-"));
   let selectedRoot = root, calls = 0;
   const row = model => ({ model, displayName: model, supportedReasoningEfforts: ["high"], defaultReasoningEffort: "high", showInPicker: true });
+  const declared = model => ({ model, display_name: model, supported_reasoning_efforts: ["high"], default_reasoning_effort: "high", show_in_picker: true });
   const nativeModels = [row("live-model"), row("outside-policy")];
   nativeModels[0].serviceTiers = [{ id: "priority", name: "Fast", description: "Fast" }, { id: "ultrafast", name: "Ultra Fast", description: "Ultra Fast" }];
   const native = { id: "native", runtimeHandlerRef: "codex_app_server", models: [row("stale-model")] };
   const custom = { id: "custom", runtimeHandlerRef: "codex_app_server", models: [row("stale-custom-model")] };
   const other = { id: "other", runtimeHandlerRef: "other", models: [row("other-model")] };
-  const write = async (id, config, allowed, registry = root) => {
+  const write = async (id, config, allowed, registry = root, driver = "codex_app_server") => {
     const folder = path.join(registry, "interface", id);
     await fs.mkdir(folder, { recursive: true });
     await fs.writeFile(path.join(folder, "interface.json"), JSON.stringify({ id, interface_type: "world", role: "provider",
-      interface_driver_ref: "codex_app_server", interface_driver_config: config, interface_policy: { variables: { models: { default: allowed } } } }));
+      interface_driver_ref: driver, interface_driver_config: config, interface_policy: { variables: { models: { default: allowed } } } }));
   };
-  const customConfig = { private_config: { opencodex: { schema_version: 1, adapter: "openai-chat", credential_owner_interface: "custom", model_catalog: { models: [{
-    slug: "custom-model", display_name: "Custom", description: "Custom transport", default_reasoning_level: "high", supported_reasoning_levels: [{ effort: "high" }], visibility: "list", supported_in_api: true,
-  }] } } }, transport: { wire: "openai_chat" } };
+  const customConfig = { private_config: { model_catalog: [declared("custom-model")], opencodex: { adapter: "an-unfamiliar-adapter" } } };
   try {
+    await installNativeMetadata(root);
     await write("native", nativeConfig(), ["live-model"]);
     await write("custom", customConfig, ["custom-model"]);
-    const service = createClientProviderMetadata({ registryRoot: () => selectedRoot,
+    await write("other", { private_config: { model_catalog: [declared("other-model")] } }, ["other-model"], root, "another-driver");
+    const service = createClientProviderMetadata({ registryRoot: () => selectedRoot, sourceRegistryRoot: () => root,
       accountClient: () => ({ models: async () => { calls++; return nativeModels; } }) });
     const providers = await service.catalog([native, custom, other]);
     assert.equal(calls, 1);
@@ -133,10 +156,17 @@ test("catalogue shares native account only, preserves exact OpenCodex models, an
     assert.deepEqual(unavailableSetup.models, []);
     assert.match(unavailableSetup.modelCatalogError, /ENOENT/, "an installed owner must not silently reuse source catalogue evidence");
     await write("native", nativeConfig(), ["outside-policy"], installedRoot);
+    await installNativeMetadata(installedRoot);
     assert.deepEqual((await setupMetadata.setupCatalog(setup)).packs[0].setup_provider.models.map((model) => model.model), ["outside-policy"]);
+    const installedModule = path.join(installedRoot, "interface/native-metadata/packages/client.cjs");
+    await fs.appendFile(installedModule, '\n// Locally authored provider implementation.\n');
+    assert.deepEqual((await setupMetadata.setupCatalog(setup)).packs[0].setup_provider.models.map(model => model.model), ["outside-policy"]);
+    await fs.appendFile(installedModule, '\nmodule.exports.schemaVersion = 99;\n');
+    assert.match((await setupMetadata.setupCatalog(setup)).packs[0].setup_provider.modelCatalogError, /unsupported client metadata contract/);
+    await installNativeMetadata(installedRoot);
     setup.packs[0].setup_provider = { ...native, id: "unbound" };
     await assert.rejects(setupMetadata.setupCatalog(setup), /no exact provider catalogue owner/);
-    await assert.rejects(service.setupOwner.probe({ provider: { interface_id: "custom" } }), /does not use the desktop/);
+    await assert.rejects(service.setupOwner.probe({ provider: { interface_id: "custom" } }), /does not support desktop account/);
     validateProviderModelSelection(providers, { providerInterfaceId: "custom", providerModel: "custom-model", reasoningEffort: "high" });
     for (const selection of [{ providerInterfaceId: "native", providerModel: "custom-model", reasoningEffort: "high" },
       { providerInterfaceId: "native", providerModel: "stale-model", reasoningEffort: "high" },
@@ -145,15 +175,22 @@ test("catalogue shares native account only, preserves exact OpenCodex models, an
     }
     nativeModels.splice(0, 1);
     assert.match((await service.catalog([native]))[0].modelCatalogError, /no available declared models/);
-    const scoped = createClientProviderMetadata({ registryRoot: () => selectedRoot, accountClient: () => ({ models: async () => { selectedRoot = "another-home"; return [row("live-model")]; } }) });
+    const scoped = createClientProviderMetadata({ registryRoot: () => selectedRoot, sourceRegistryRoot: () => root, accountClient: () => ({ models: async () => { selectedRoot = "another-home"; return [row("live-model")]; } }) });
     await assert.rejects(scoped.catalog([native]), /scope changed/); selectedRoot = root;
-    delete customConfig.private_config.opencodex.model_catalog;
+    delete customConfig.private_config.model_catalog;
     await write("custom", customConfig, ["custom-model"]);
     const unavailableCustom = await service.catalog([custom, other]);
-    assert.match(unavailableCustom[0].modelCatalogError, /no valid OpenCodex/);
+    assert.match(unavailableCustom[0].modelCatalogError, /no declared model catalogue/);
     assert.equal(unavailableCustom[0].models.length, 0);
-    assert.equal(unavailableCustom[1], other);
-    const failing = createClientProviderMetadata({ registryRoot: () => root, accountClient: () => ({ models: async () => { throw new Error("offline"); } }) });
+    assert.deepEqual(unavailableCustom[1].models.map(model => model.model), ["other-model"]);
+    customConfig.private_config.model_catalog = [declared("custom-model")];
+    customConfig.private_config.client_metadata = { schema_version: 1, module: "interface://custom/packages/../outside.cjs" };
+    await write("custom", customConfig, ["custom-model"]);
+    assert.match((await service.catalog([custom]))[0].modelCatalogError, /invalid client metadata/);
+    customConfig.private_config.client_metadata.module = "interface://custom/packages/missing.cjs";
+    await write("custom", customConfig, ["custom-model"]);
+    assert.match((await service.catalog([custom]))[0].modelCatalogError, /ENOENT/, "failed discovery must not fall back to a static catalogue");
+    const failing = createClientProviderMetadata({ registryRoot: () => root, sourceRegistryRoot: () => root, accountClient: () => ({ models: async () => { throw new Error("offline"); } }) });
     assert.match((await failing.catalog([native]))[0].modelCatalogError, /offline/);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

@@ -3,7 +3,7 @@ use crate::run_composition::{
     CompositionAuthoring, CompositionCommunication, CompositionOutputSelection, CompositionRoots,
 };
 use octopus_context_projection::{
-    ContextProjectionConfig, OUTCOME_LABEL, OUTPUT_LABEL, OutcomeProjectionConfig,
+    ContextProjectionConfig, OUTCOME_LABEL, OUTCOME_ERROR_LABEL, OUTPUT_LABEL, OutcomeProjectionConfig,
     ProjectionBounds, ProjectionRule,
 };
 use octopus_run_authoring::snapshot_projection::SnapshotInputRoute;
@@ -397,6 +397,7 @@ pub fn plan_maintenance_observer(
         &topology,
         &identity,
         &slots,
+        &[],
         &mut writes,
     )?;
     plan_authoring_interfaces(&interface_root, &config, &topology, &identity, &mut writes)?;
@@ -614,7 +615,7 @@ pub fn plan_maintenance_observer(
         "provider_interface":identity.model_interface_id,"source_run":source_run.id,"source_worker_interface":source_run.worker,
         "source_provider_interface":request.source_provider_interface_id,"source_client_interface":request.source_client_interface_id,
         "source_relay_interface":relay_id,"projection_interface":projection_id,"experience_interface":experience_id,
-        "terminal_label":cfg.terminal_label,"provider_output_labels":output_labels,"input_label":OUTPUT_LABEL,"outcome_interface":outcome_id,"capture_interface":capture_id,"outcome_label":OUTCOME_LABEL,
+        "terminal_label":cfg.terminal_label,"provider_output_labels":output_labels,"input_label":OUTPUT_LABEL,"outcome_interface":outcome_id,"capture_interface":capture_id,"outcome_label":OUTCOME_LABEL,"outcome_error_label":OUTCOME_ERROR_LABEL,
         "projection_run":{"run":projection_run_id,"worker_interface":projection_worker_id,
             "provider_interface":projection_id,"initial_record":projection_initial,"initial_record_content":projection_content},
         "collection_source":cfg.collection_source,
@@ -1234,11 +1235,11 @@ fn plan_projection_run(
     descriptor["interface_driver_config"]["private_config"]["run_authoring_profile"] = profile;
     descriptor["interface_driver_config"]["private_config"]["model_hidden_tools"] = json!([tool]);
     descriptor["interface_driver_config"]["private_config"]["context_output_labels"] =
-        json!([OUTCOME_LABEL]);
+        json!([OUTCOME_LABEL, OUTCOME_ERROR_LABEL]);
     descriptor["interface_driver_config"]["private_config"]["session_snapshot_labels"] =
-        json!([OUTCOME_LABEL]);
+        json!([OUTCOME_LABEL, OUTCOME_ERROR_LABEL]);
     descriptor["interface_driver_config"]["private_config"]["client_projection_output_labels"] =
-        json!([OUTPUT_LABEL, OUTCOME_LABEL]);
+        json!([OUTPUT_LABEL, OUTCOME_LABEL, OUTCOME_ERROR_LABEL]);
     descriptor["interface_driver_config"]["host_slots"]["run_records_root"] =
         json!({"path":request.roots.run_records_root});
     replace(writes, &projection_path, &descriptor)?;
@@ -1345,6 +1346,12 @@ fn plan_projection_run(
             names_binding(id, &[OUTCOME_LABEL.into()])?,
             vec![names_binding(capture, &[OUTCOME_LABEL.into()])?],
             vec![outcome_verified],
+        )?,
+        bound_checkpoint_template(
+            BoundCheckpointRole::ProviderArtifactOutput,
+            names_binding(id, &[OUTCOME_ERROR_LABEL.into()])?,
+            vec![names_binding(capture, &[OUTCOME_ERROR_LABEL.into()])?],
+            Vec::new(),
         )?,
         bound_checkpoint_template(
             BoundCheckpointRole::ProviderArtifactOutput,

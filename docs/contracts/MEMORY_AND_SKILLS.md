@@ -37,6 +37,30 @@ Memory is written in two ways:
 The resulting entries become visible only to runs whose bindings and formed
 policy admit them.
 
+The projection's byte limit covers the complete artifact, including its model
+text and any original input attached after source verification. When it is too
+large, the package removes older optional evidence, counts omitted references,
+and shortens selected fields with explicit truncation metadata. The exact input,
+terminal and provenance references remain intact; an envelope whose provenance
+alone exceeds the limit is refused. The field-trimming flag describes only fields
+still present in the selected input, its original input, terminal text and retained
+evidence. Removing an evidence entry updates the separate entry-omission count;
+its field flags do not survive the entry. The verifier checks every retained
+trimming record against its own field container.
+
+An observer outcome carries complete calls and results for its declared
+publication tool, including publications absent from the model's receipt list.
+Other context entries remain exact references in the omission record. The
+projection verifies their source evidence before selection and never trims
+publication proof to meet its output bound.
+
+An observer's final text is one JSON object. Malformed JSON produces an explicit
+`memory.capture.error` diagnostic with the original terminal artifact reference.
+That diagnostic has no capture-success mark. It settles its source so the
+projection can process the next observation; it never extracts fenced JSON or
+rewrites the model's decision. Well-formed outcomes still cross the declared
+capture verifier before any success mark is admitted.
+
 ## Remembering is one call
 
 The model never works out which JSON file to write where. The **Memory** plugin
@@ -56,11 +80,16 @@ door uses the installation's shared `artifact-system-library` collection. A
 save becomes one ordinary collection entry:
 
 - **Scope** is the calling run's EE, or, on a door whose configuration names
-  the run it serves (`observed_run`), that run's current EE. A run sees notes of
-  its own EE and of the EEs above it, never a sibling's.
+  the run it serves (`observed_run`), the EE in the latest bound
+  `memory.experience.input`. The tool checks its exact admitted reference,
+  read grant, source run and collection before reading or writing memory.
+  Missing experience refuses the call; current placement is not substitute
+  evidence. A run sees notes of that EE and the EEs above it, never a sibling's.
 - **Memory follows place**: a note keeps the scope it was saved under. When a
   run moves, its earlier notes stay with the old EE and later notes take the
-  new one; nothing migrates notes behind the user's back.
+  new one. An observation already in flight keeps its evidenced EE through
+  the save, even if the run moves meanwhile. Nothing migrates notes behind the
+  user's back.
 - **Provenance** is the invoking tool call, kept as the entry's evidence, so the
   ledger names the run, trace and checkpoint that saved it.
 - **Deduplication**: saving a note identical to one already visible returns the
@@ -71,7 +100,8 @@ save becomes one ordinary collection entry:
 - **Durability**: a new note is installed exclusively, whole or not at all; a
   superseded note is replaced by an atomic exchange that is undone if the note
   changed meanwhile. The plan is kept per call, so a retried call ends in the
-  same notes.
+  same notes. A retained plan with a different EE scope is refused before it
+  can publish another write.
 - **Usage**: each read leaves one dated receipt per note per day beside the
   entries; tools report `days_used` and `last_used`, and consolidation uses them
   to decide what to keep.

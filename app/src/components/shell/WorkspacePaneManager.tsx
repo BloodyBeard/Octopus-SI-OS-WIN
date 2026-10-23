@@ -88,7 +88,7 @@ export function WorkspacePaneManager({
       : Math.max(0, Math.min(limits.maximum, liveWidth));
   if (!secondaryOpen) instantOpenRef.current = false;
   else if (secondaryFocused && !previousOpenRef.current) instantOpenRef.current = true;
-  const panelMotion = useAnimatedPanelSize(secondaryOpen, resolvedWidth, resolvedWidthMotion, resizing || instantOpenRef.current);
+  const panelMotion = useAnimatedPanelSize(secondaryOpen, resolvedWidth, resolvedWidthMotion, !secondaryOpen || resizing || instantOpenRef.current);
 
   useLayoutEffect(() => {
     onPrimaryBlockedChange?.(primaryBlocked);
@@ -145,7 +145,7 @@ export function WorkspacePaneManager({
       <section aria-hidden={primaryBlocked || undefined} className="workspace-pane workspace-pane-primary" aria-label="Primary workspace" data-pane-role={primaryPaneRole} inert={primaryBlocked || undefined} ref={primaryRef} tabIndex={-1}>
         {primary}
       </section>
-      {secondaryOpen || resizing || panelMotion.mounted ? (
+      {secondaryOpen || resizing ? (
           <motion.aside
             aria-label="Secondary workspace"
             className="workspace-pane workspace-pane-secondary"

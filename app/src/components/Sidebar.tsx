@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../design-system/LoadingSkeleton";
 import type { DragEndEvent } from "@dnd-kit/core";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -44,6 +45,7 @@ import {
 } from "./navigation/SidebarDnd";
 import type { RuntimeHostView } from "../runtimeHost";
 import type { OctopusOsProjectWorkspace } from "../shell/useOctopusOsProjects";
+import { ProjectSourceFolders } from "./project/ProjectSourceFolders";
 import { ProjectAppearancePicker } from "./navigation/ProjectAppearancePicker";
 import type { OctopusProviderInterface } from "../electron";
 import { AgentPresetDialog } from "./agent/AgentPresetDialog";
@@ -105,6 +107,7 @@ type ProjectDialogState = {
 };
 
 type ProjectDialogValue = {
+  sourceFolders: string[];
   name: string;
   icon: string;
   color: string;
@@ -414,6 +417,7 @@ function TaskNavigation({
     if (projectDialog.mode === "create") {
       await projectWorkspace.createProject({
         name: value.name,
+        sourceFolders: value.sourceFolders,
         icon: value.icon,
         color: value.color,
         parentId: projectDialog.parentId,
@@ -423,6 +427,7 @@ function TaskNavigation({
       await projectWorkspace.editProject({
         projectId: projectDialog.projectId,
         name: value.name,
+        sourceFolders: value.sourceFolders,
         icon: value.icon,
         color: value.color,
       });
@@ -595,7 +600,7 @@ function TaskNavigation({
             onContextMenu={(event) => openTaskMenu(chat.runId, event)}
             title={clientTaskTitle(chat.runId, chat.title, organization)}
           />)}
-          {archivedChats.length === 0 ? <div className="p-2 text-base text-token-description-foreground opacity-50">{chatRunsLoading ? "Loading tasks…" : "No archived tasks"}</div> : null}
+          {archivedChats.length === 0 ? chatRunsLoading ? <OcLoadingRows label="Loading archived tasks…" /> : <div className="p-2 text-base text-token-description-foreground opacity-50">No archived tasks</div> : null}
         </OctopusNavSection>
       ) : <>
       <div className="shrink-0 px-row-x">
@@ -800,11 +805,9 @@ function TaskNavigation({
               </SidebarSortableItem>
             ))}
           </SidebarSortableList>
-          {visibleChats.length === 0 ? (
+          {visibleChats.length === 0 ? chatRunsLoading ? <OcLoadingRows label="Loading tasks…" /> : (
             <div className="p-2 text-base text-token-description-foreground opacity-50">
-              {chatRunsLoading
-                ? "Loading tasks…"
-                : selectedProject
+              {selectedProject
                   ? "No tasks in this project"
                   : taskChats.length === 0 ? "No tasks yet" : "All visible tasks are pinned"}
             </div>
@@ -832,6 +835,7 @@ function TaskNavigation({
         initialColor={dialogProject?.color ?? ""}
         initialIcon={dialogProject?.icon ?? ""}
         initialName={dialogProject?.name ?? ""}
+        initialFolders={dialogProject?.sourceFolders ?? []}
         open={Boolean(projectDialog)}
         parent={dialogParentContext}
         runtimeBacked={accessProfile === "live"}
@@ -1050,6 +1054,7 @@ function ProjectDialog({
   initialColor,
   initialIcon,
   initialName,
+  initialFolders,
   open,
   parent,
   runtimeBacked,
@@ -1064,6 +1069,7 @@ function ProjectDialog({
   initialColor: string;
   initialIcon: string;
   initialName: string;
+  initialFolders: string[];
   open: boolean;
   parent: ProjectDialogParent | null;
   runtimeBacked: boolean;
@@ -1075,6 +1081,7 @@ function ProjectDialog({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState("");
+  const [sourceFolders, setSourceFolders] = useState<string[]>([]);
   const [icon, setIcon] = useState<string>(PROJECT_ICON_OPTIONS[0]);
   const [color, setColor] = useState<string>(PROJECT_COLOR_OPTIONS[0]);
   const [templateName, setTemplateName] = useState("");
@@ -1084,6 +1091,7 @@ function ProjectDialog({
   useEffect(() => {
     if (!open) return;
     setName(initialName);
+    setSourceFolders(initialFolders);
     setIcon((PROJECT_ICON_OPTIONS as readonly string[]).includes(initialIcon) ? initialIcon : PROJECT_ICON_OPTIONS[0]);
     setColor(initialColor || DEFAULT_PROJECT_COLOR);
     setTemplateName(creating ? templateOptions.find((option) => option.inheritsParentPolicy)?.id
@@ -1106,7 +1114,7 @@ function ProjectDialog({
     if (runtimeBacked && creating && (!selectedPolicy || !parent?.eeId)) return;
     setSubmissionError("");
     try {
-      await onSubmit({ name: value, icon, color, templateName });
+      await onSubmit({ name: value, icon, color, templateName, sourceFolders });
     } catch (failure) {
       setSubmissionError(failure instanceof Error ? failure.message : String(failure));
     }
@@ -1162,6 +1170,7 @@ function ProjectDialog({
                 />
               </div>
             </div>
+            {runtimeBacked ? <ProjectSourceFolders folders={sourceFolders} onChange={setSourceFolders} disabled={busy} onError={setSubmissionError} /> : null}
             {runtimeBacked && creating ? (
               <div className="flex w-full flex-col gap-2 pt-3 first:pt-0">
                 <OcSelect

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   emptyProjection,
   emptySnapshot,
@@ -53,15 +53,23 @@ const ACCENTS: Accent[] = ["green", "blue", "purple", "amber"];
 const TIME_FORMATTER = new Intl.DateTimeFormat([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const DATE_FORMATTER = new Intl.DateTimeFormat([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
+export type RuntimeTopologyState = TopologySnapshot & {
+  loading: boolean;
+  readError: string;
+  refresh: () => void;
+};
+
 export function useRuntimeTopology(
   enabled = true,
   focusedRunIds: readonly string[] = [],
   includeLedger = true,
-): TopologySnapshot {
+): RuntimeTopologyState {
   const [snapshot, setSnapshot] = useState<TopologySnapshot>(() => emptySnapshot());
   // Every projection change on disk re-projects the world in place: no flash back to a
   // loading state, no stale "live" claim. The first read is the only "connecting" moment.
   const generation = useProjectionGeneration(includeLedger, enabled);
+  const [readState, setReadState] = useState({ loading: enabled, error: "" });
+  const failedRef = useRef(false);
   const loadedRef = useRef(false);
   const payloadRef = useRef<RuntimePayload | null>(null);
   const runtimeObservationRef = useRef<ClientRuntimeObservation | null>(null);
@@ -72,21 +80,34 @@ export function useRuntimeTopology(
   const requestedGenerationRef = useRef<number | null>(null);
   const focusedRunKey = focusedRunIds.filter(Boolean).join("\u0000");
 
+  const refresh = useCallback(() => readerRef.current?.request(true), []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const onFocus = () => { if (failedRef.current) refresh(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [enabled, refresh]);
+
   useEffect(() => {
     if (!enabled) return;
     return window.octopusTransport?.onRuntimeHostState?.((state) => {
       const observation = clientRuntimeHostObservation(state);
+      const wasReady = runtimeObservationRef.current?.socket_connected === true;
       runtimeObservationRef.current = observation;
+      if (observation.socket_connected && !wasReady && (!loadedRef.current || failedRef.current)) refresh();
+      if (failedRef.current) return;
       const current = payloadRef.current;
       if (!current) return;
       const next = { ...current, runtimeObservation: observation };
       payloadRef.current = next;
       setSnapshot((previous) => ({ ...previous, projection: liveProjectionStatus(next) }));
     });
-  }, [enabled]);
+  }, [enabled, refresh]);
 
   useEffect(() => {
     if (!enabled) {
+      setReadState((previous) => ({ ...previous, loading: false }));
       // Keep the last projected world so returning to the surface is instant; only the
       // status tells the truth that reads are paused while the surface is closed.
       setSnapshot((prev) => (loadedRef.current
@@ -104,6 +125,8 @@ export function useRuntimeTopology(
       return;
     }
     if (!hasProjectionBridge()) {
+      failedRef.current = true;
+      setReadState({ loading: false, error: "Projection bridge unavailable" });
       setSnapshot(emptySnapshot({
         ...emptyProjection,
         endpoint: projectionTargetLabel(),
@@ -129,6 +152,7 @@ export function useRuntimeTopology(
     const focusedRuns = new Set(focusedRunKey.split("\u0000").filter(Boolean));
     let appliedGeneration: number | null = null;
     const reader = createTopologyReader(async (isCurrent) => {
+      setReadState((previous) => ({ ...previous, loading: true }));
       try {
         const payload = await refreshProjection(focusedRuns, includeLedger, runtimeObservationRef.current);
         if (!isCurrent()) return;
@@ -138,6 +162,8 @@ export function useRuntimeTopology(
         const unchanged = payload.generation !== null && payload.generation === appliedGeneration && loadedRef.current;
         appliedGeneration = payload.generation;
         loadedRef.current = true;
+        failedRef.current = false;
+        setReadState({ loading: false, error: "" });
         payloadRef.current = next;
         if (!unchanged) setSnapshot(projectRuntime(next));
       } catch (error) {
@@ -151,6 +177,11 @@ export function useRuntimeTopology(
         // A failed re-read keeps the last projected world visible and says so; only a
         // failure with nothing loaded yet leaves the world empty.
         appliedGeneration = null;
+        failedRef.current = true;
+        void window.octopusTransport?.logClientEvent?.({
+          level: "error", event: "renderer.topology.read_failed", message: failure.detail,
+        }).catch(() => undefined);
+        setReadState({ loading: false, error: failure.detail });
         setSnapshot((prev) => (loadedRef.current ? { ...prev, projection: failure } : emptySnapshot(failure)));
       }
     });
@@ -174,7 +205,8 @@ export function useRuntimeTopology(
     reader.request(structural);
   }, [generation]);
 
-  return snapshot;
+  return useMemo(() => ({ ...snapshot, loading: readState.loading, readError: readState.error, refresh }),
+    [snapshot, readState, refresh]);
 }
 
 type TopologyReader = {

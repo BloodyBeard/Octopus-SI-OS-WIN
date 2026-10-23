@@ -2,6 +2,7 @@ export type WidgetAction = { schema: "octopus.client_action"; schema_version: 1;
   { action: "list_widgets" }
   | { action: "set_widget"; changes: Array<{ widget_id: string; source_digest: string; state: "visible" | "hidden" | "removed" }> }
 );
+export function parseClientActionRequest(value: unknown): { action: ReturnType<typeof parseClientAction>; toolCall: { id: string; content: number[] } | null };
 export type InspectClientAction = {
   schema: "octopus.client_action"; schema_version: 1; request_id: string; action: "inspect_client"; extension_id?: string;
   source?: { method: string; params?: Record<string, unknown>; path?: string };

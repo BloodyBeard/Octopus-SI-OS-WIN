@@ -212,6 +212,7 @@ impl CodexAppServerInterfaceDriver {
         let admitted_record = octopus_runtime::run_record::RunRecord::from_bytes(admitted_run_record)
             .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
         let (context_payloads, payload_selection) = admitted_payload_context(&admitted_record, &input)?;
+        let continuity_sources = continuity_input_sources(&admitted_record, &input)?;
         let complete_context_payloads = context_payloads;
         let instructions = resolve_instruction_context(input.metadata()?, &complete_context_payloads)
             .map_err(InterfaceDriverError::FailedClosed)?;
@@ -241,29 +242,34 @@ impl CodexAppServerInterfaceDriver {
                 manifest.label
             )));
         }
+        let continuity_payloads = continuity_context_payloads(&admitted_record, &input, context_payloads)?;
         let recovered = recover_codex_continuity_resolved(
-            &context_payloads,
+            &continuity_payloads,
             &bound_session_contexts,
             &runtime.interface,
             runtime.run.as_str(),
             &context_output_labels,
             &session_snapshot_labels,
+            &continuity_sources,
         )?;
         let bound_continuity = recovered.clone();
-        let recovered = reconcile_current_session_continuity(
+        let recovered = reconcile_input_session_continuity(
+            &admitted_record,
+            &input,
             recovered,
             recover_codex_continuity_from_current_session(
                 &current_session_context,
-                &input.artifact,
+                &continuity_sources,
                 &runtime.interface,
                 runtime.run.as_str(),
                 &context_output_labels,
             )?,
+            &current_session_context,
         )?;
         let recovered = reconcile_delivered_interrupted_continuity(
             bound_continuity.as_ref(), recovered, reconciled_result_continuity,
         )?;
-        let (recovered, durable_interrupt_override) =
+        let (mut recovered, durable_interrupt_override) =
             reconcile_durable_interrupted_continuity(recovered, durable_interrupted_continuity)?;
         if manifest.label == PROVIDER_MODELS_LIST_LABEL {
             if self.has_pending_request(&scope).await
@@ -365,8 +371,18 @@ impl CodexAppServerInterfaceDriver {
                 source_interface.as_ref(),
                 &native_catalog.interface_operations,
                 Some(&selected_files),
+                &self.interface_private_config,
             )?,
         };
+        if matches!(provider_input, ProviderInput::Resume { .. }) && recovered.is_none() {
+            let ctx = self.life_context.get().ok_or_else(|| InterfaceDriverError::FailedClosed(
+                "Resume has no declared provider life for its stopping receipt".into()))?;
+            let stopped = crate::life::resume_control_continuity(ctx, &runtime.run, source_movement_seq,
+                read_codex_context_generation(&run_record, &runtime.interface)?)
+                .map_err(InterfaceDriverError::FailedClosed)?;
+            recovered = reconcile_current_session_continuity(Some(stopped), recovered)?;
+            if let Some(state) = recovered.clone() { sink.set_continuity(state); }
+        }
         let mut assembled_context = assemble_current_context(
             &context_payloads,
             &bound_session_contexts,
@@ -659,6 +675,13 @@ impl CodexAppServerInterfaceDriver {
             thread_shape_fingerprint,
             context_generation,
             static_context_fingerprint,
+            turn_input: if recovered_tool_continuation.is_some() || cut_turn_continuation.is_some()
+                || resume_control_id.is_some() || thread_compact_requested
+            {
+                recovered.as_ref().and_then(|state| state.turn_input.clone())
+            } else {
+                Some(effective_source_artifact.clone())
+            },
             pending: recovered_tool_continuation
                 .as_ref()
                 .and_then(|_| recovered.as_ref().and_then(|state| state.pending.clone())),

@@ -392,6 +392,9 @@ impl WorkerEnvKindRegistry {
                     })
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        let door_additional_root_bindings = request.door_additional_root_bindings.iter()
+            .filter(|(slot, paths)| door_root_bindings.contains_key(*slot) && !paths.is_empty())
+            .map(|(slot, paths)| (slot.clone(), paths.clone())).collect();
         let (formation_pin, worker_environment_id) = formation_pin(
             request,
             &spec.worker_environment_kind_id,
@@ -400,11 +403,14 @@ impl WorkerEnvKindRegistry {
             &tool_descriptor_hashes,
             &instance_config_hashes,
             &door_root_bindings,
+            &door_additional_root_bindings,
             &caps,
             spec.lifecycle.requires_release,
         )?;
 
         let formation = WorkerEnvironmentFormation {
+
+            door_additional_root_bindings,
             worker_environment_id,
             run: request.run.to_string(),
             ee: request.ee.to_string(),

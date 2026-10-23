@@ -48,6 +48,9 @@ pub enum Direction {
 #[serde(transparent)]
 pub struct Role(pub String);
 
+mod host_root_paths;
+pub use host_root_paths::{additional_host_root_paths, expand_host_root_authority};
+
 pub const RETIRED_INTERFACE_REQUEST_WORKER_METADATA_FIELD: &str = "worker_metadata";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +80,8 @@ pub struct InterfaceDriverConfig {
 #[serde(deny_unknown_fields)]
 pub struct HostSlotOverride {
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

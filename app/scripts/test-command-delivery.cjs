@@ -102,7 +102,8 @@ test("actual Stop and Resume retain unknown identity, release known rejection, f
       assert.equal(Boolean(hook.state().pendingTurnControl), !known);
       if (!known) {
         assert.equal(hook.state().pendingTurnControl.controlId, "control_fixed");
-        await hook[action](); assert.equal(calls, 1);
+        await hook[action](); assert.equal(calls, action === "stop" ? 2 : 1);
+        assert.equal(hook.state().pendingTurnControl.controlId, "control_fixed", "retry preserves the admitted operation identity");
       }
       assert.equal(hook.state().reads, 0);
     }
@@ -117,7 +118,7 @@ test("actual Stop and Resume retain unknown identity, release known rejection, f
   let calls=0;
   const multiple=create(async()=>{calls++;return{deliveryError:{stage:"outcome-unknown",message:"lost"}}});
   await multiple.stop(); multiple.select("b"); await multiple.stop(); multiple.select("r"); await multiple.stop();
-  assert.equal(calls,2); assert.deepEqual(Object.keys(multiple.all()),["r","b"]);
+  assert.equal(calls,3); assert.deepEqual(Object.keys(multiple.all()),["r","b"]);
   let pauseDone;
   const preparing=create(async()=>{assert.fail("old Home must not submit")},{queued:[{runKey:"r"}],pause:()=>new Promise(resolve=>pauseDone=resolve)});
   const resumed=preparing.resume(); await preparing.resume(); preparing.switchHome(); pauseDone(); await resumed;

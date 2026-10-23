@@ -43,8 +43,19 @@ def verify(request):
     omission = value["omission"]
     fields_trimmed, evidence_trimmed = omission["selected_fields_trimmed"], omission["selected_evidence_trimmed"]
     assert type(fields_trimmed) is bool and type(evidence_trimmed) is bool, "trimming flags malformed"
-    trimmed_fields = [entry for item in value["evidence"] for entry in item.get("trimmed_fields", [])]
-    assert all(isinstance(entry, dict) and exact(entry.get("pointer")) and type(entry.get("bytes")) is int and entry["bytes"] > 0 for entry in trimmed_fields), "trimmed field record malformed"
+    assert all(isinstance(item, dict) for item in value["evidence"]), "evidence entry malformed"
+    field_groups = [(item.get("fields"), item.get("trimmed_fields", [])) for item in value["evidence"]]
+    field_groups.extend([
+        (selected["fields"], selected.get("trimmed_fields", [])),
+        (selected.get("original_fields", {}), selected.get("original_trimmed_fields", [])),
+        (value.get("terminal_fields", {}), value.get("terminal_trimmed_fields", [])),
+    ])
+    trimmed_fields = []
+    for fields, entries in field_groups:
+        assert isinstance(fields, dict) and isinstance(entries, list), "trimmed field container malformed"
+        assert all(isinstance(entry, dict) and exact(entry.get("pointer")) and entry["pointer"] in fields and type(entry.get("bytes")) is int and entry["bytes"] > 0 for entry in entries), "trimmed field record malformed"
+        assert len({entry["pointer"] for entry in entries}) == len(entries), "duplicate trimmed field record"
+        trimmed_fields.extend(entries)
     assert fields_trimmed == bool(trimmed_fields), "field trimming is not recorded"
     trimmed_entries = omission.get("trimmed_evidence_entries", 0)
     assert type(trimmed_entries) is int and trimmed_entries >= 0 and evidence_trimmed == (trimmed_entries > 0), "evidence trimming is not recorded"

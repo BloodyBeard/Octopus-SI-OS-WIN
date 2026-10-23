@@ -405,7 +405,7 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                     ProviderStreamEmission::TransportDispatch { admitted, .. } => {
                         admitted.send(Ok(())).unwrap();
                     }
-                    ProviderStreamEmission::Turn(emission) => {
+                    ProviderStreamEmission::Turn(emission) | ProviderStreamEmission::Progress(emission) => {
                         let value: serde_json::Value = serde_json::from_slice(
                             &emission.artifact.read_payload_bytes().unwrap(),
                         )

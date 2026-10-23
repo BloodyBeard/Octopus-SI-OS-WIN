@@ -743,6 +743,9 @@ pub(super) fn rebase_authored_run(
     if ContentHash::of_bytes(before).to_hex() != authored.before_hash {
         return Err("authoring retry lost the original exact preimage".into());
     }
+    if authored.pending_handoff.replacement.is_some() && before != current {
+        return Err("rejected final replacement requires fresh proof after an independent record advance; refusing rebase before write".into());
+    }
     let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let observed = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
     let extension = if original.interface_state.get(&config.provider_interface)
@@ -761,6 +764,7 @@ pub(super) fn rebase_authored_run(
     {
         return Err("authoring retry changed run identity or provider-owned state".into());
     }
+    let result_invocation = result_inputs::rebased_invocation_value(before, protected, authored.content.as_bytes(), config)?;
     let mut before: serde_json::Value =
         serde_json::from_slice(before).map_err(|error| error.to_string())?;
     let mut planned: serde_json::Value =
@@ -835,6 +839,9 @@ pub(super) fn rebase_authored_run(
         planned.as_object().unwrap(),
         merged.as_object_mut().unwrap(),
     )?;
+    if let Some(invocation) = result_invocation {
+        merged = invocation;
+    }
     let mut declared_config = if extension.is_some() {
         attempt_config(&observed, config)?
     } else {
@@ -857,7 +864,9 @@ pub(super) fn rebase_authored_run(
     }
     let effective_config = result_inputs::saved_attempt_config(&candidate, &declared_config)?;
     validate_bound_run_authoring_topology(&candidate, &effective_config, None)?;
-    result_inputs::validate_transition(&actual, &candidate, &effective_config)?;
+    if !result_inputs::saved_definition_transition(&actual, &candidate, &effective_config)? {
+        result_inputs::validate_transition(&actual, &candidate, &effective_config)?;
+    }
     let mut rebased = authored.clone();
     if let Some(generation) = revised_generation { rebased.correlation_id = format!("provider-run-authoring:{}:{generation}", config.run); }
     rebased.before_hash = ContentHash::of_bytes(current).to_hex();

@@ -92,6 +92,18 @@ turning its contents into JSON. The kernel does not decode audio.
 
 ### Tasks: Project → Agent → task
 
+Project settings include **Source folders**. Add several folders, remove a folder,
+or use **Make primary** to choose the working directory. Tasks created afterward
+use that Primary folder and can work in the other selected folders within their
+configured access. **Full access** keeps those folders as working context and
+uses its separately selected filesystem permissions.
+
+If a manual message cannot be sent, its text returns to the composer and the
+usual error notification explains the failure. Delivery with a lost confirmation
+is checked against task history; retrying explicitly uses the same message
+identity. A newer draft is preserved while the failed message remains available.
+
+
 A **Project** supplies the goal and permission boundary. An **Agent** is a
 reusable worker template in that project: its pin, capability ceiling, and
 defaults for authoring a task. Creating an Agent does not start work. A **task**
@@ -99,7 +111,7 @@ is a run created from that template; subsequent messages continue that run.
 
 For example, to work on a repository:
 
-1. Choose the Project and configure its folder and Drivers.
+1. Choose the Project and configure its source folders and Drivers.
 2. Use **Create agent**, select an offered model, and review capabilities.
 3. Select that Agent in the task composer and describe the change.
 4. Inspect the resulting files, tool trace, and changes before accepting them.

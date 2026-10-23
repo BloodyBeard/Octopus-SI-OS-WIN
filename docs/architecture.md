@@ -202,12 +202,15 @@ its ceiling.
 
 An EE is a scope classified by a goal and bounded by a policy. Runs live inside
 EEs. EEs nest, and an inner EE can only be narrower than the one around it. The
-root goal is `existence`; under it sit goals like an operator space, a project,
+initial root goal is `existence`; under it sit goals like an operator space, a project,
 memory maintenance, self-improvement. None of these names is a constant in
 code - each is a template in `registry/ee_template/`.
 
 Long-running and one-shot environments are the same primitive. An EE exists
-while its JSON record exists.
+while its JSON record exists. Parentless instances form independent roots. The
+single `bootstrap_root` template selects the initial seed, not the only permitted
+root. Each root forms policy from its own template, instance narrowing, worker
+ceiling and bindings, without inheriting another root's policy.
 
 ### Worker environment
 
@@ -459,9 +462,11 @@ loss to be repaired with leases and retries.
 A restart does not end the work in flight either. A command a room started
 keeps running in its own keeper process, outside the tool process and the
 runtime; the call that was waiting on it is re-delivered after the restart and
-receives the command's own output and exit code, exactly once per call. Only an
-effect that truly cannot be established is reported as unknown, never run
-twice. The provider continues the turn the restart cut off by itself: it starts
+receives the command's own output and exit code, exactly once per call. Start
+identity and per-call responses stay in the room's durable formation state
+after the keeper expires or the process is released. If an outcome cannot be
+established, recovery reports it as unknown. Cleanup never makes the same
+invocation a new command. The provider continues the turn the restart cut off by itself: it starts
 the next native turn on the same thread with the late result in context, the
 way the Resume control does, without any client attached. A turn the operator
 stopped stays stopped. The runtime also outlives the terminal that launched it,

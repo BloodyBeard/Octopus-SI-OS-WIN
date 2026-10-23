@@ -679,6 +679,7 @@ pub(crate) fn validate_authoring_attempt_source(
     if !result_inputs::saved_definition_transition(record, &candidate, config)? {
         source_settlement::validate_transition(record, &candidate, config)?;
         source_withdrawal::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
+        rejected_final::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
     }
     if candidate.id != record.id || candidate.worker != record.worker {
         return Err(

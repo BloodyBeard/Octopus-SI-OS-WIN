@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "../../tests/support/result_invocation.rs"]
+mod tests;
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResultInvocation {
@@ -303,6 +307,41 @@ pub(crate) fn definition_source(
         &writer,
     )?
     .map(|bridge| bridge.invocation.source.source_movement_seq))
+}
+
+pub(crate) fn rebased_value(
+    before: &[u8],
+    current: &[u8],
+    after: &[u8],
+    config: &RunAuthoringConfig,
+) -> Result<Option<serde_json::Value>, String> {
+    if !config.checkpoints.iter().any(|template| template.role == RunAuthoringCheckpointRole::ResultInput) {
+        return Ok(None);
+    }
+    let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let writer = declared_provider_run_writer(&original, &config.provider_interface, &RunAuthoringProfile {
+        file_write_tool: config.file_write_tool.clone(),
+        file_write_label: config.file_write_label.clone(),
+        file_write_result_label: config.file_write_result_label.clone(),
+        result_timeout_ms: config.result_timeout_ms,
+    })?;
+    let Some(retained) = definition(before, after, &writer)? else { return Ok(None); };
+    let selected = original.checkpoints.iter().filter(|checkpoint| {
+        original.active_checkpoints.contains(&checkpoint.id)
+            && checkpoint_record_matches_template(checkpoint, &retained.original, &original.id)
+    }).collect::<Vec<_>>();
+    let [selected] = selected.as_slice() else {
+        return Err("result invocation retry lost its exact original receiving row".into());
+    };
+    let next = value(current, &writer, &selected.id, &retained.invocation)?;
+    let rebuilt = definition(current, &serde_json::to_vec(&next).map_err(|error| error.to_string())?, &writer)?
+        .ok_or("result invocation retry lost its checked definition")?;
+    if rebuilt.invocation != retained.invocation || rebuilt.original != retained.original
+        || rebuilt.template != retained.template || rebuilt.checkpoint != retained.checkpoint
+    {
+        return Err("result invocation retry changed its admitted identity, context or provenance".into());
+    }
+    Ok(Some(next))
 }
 
 fn validate_source(
@@ -774,8 +813,9 @@ impl ProviderOutputHandoff {
         };
         let authored = match attempt {
             AuthoringAttemptRecovery::InFlight(attempt) => {
+                let before = active.authored_run_preimage(&state.run_record_bytes, &attempt.authored)?;
                 let source = definition_source(
-                    &current,
+                    &RunRecord::from_bytes(&before).map_err(|error| error.to_string())?,
                     &RunRecord::from_bytes(attempt.authored.content.as_bytes())
                         .map_err(|error| error.to_string())?,
                     &active.config,
@@ -839,7 +879,7 @@ impl ProviderOutputHandoff {
             },
         )?;
         let bridge = definition(
-            &state.run_record_bytes,
+            &active.authored_run_preimage(&state.run_record_bytes, &authored)?,
             authored.content.as_bytes(),
             &writer,
         )?

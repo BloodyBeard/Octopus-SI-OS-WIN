@@ -1,4 +1,4 @@
-module.exports = { changeJournalPlan, currentFileDigest, undoChangeJournal };
+module.exports = { changeJournalPlan, currentFileDigest, readChangeJournalDocument, undoChangeJournal };
 
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
@@ -15,7 +15,7 @@ async function currentFileDigest(file) {
   return crypto.createHash("sha256").update(await fs.readFile(file)).digest("hex");
 }
 
-async function changeJournalPlan(octopusHome, registryRoot, runId) {
+async function readChangeJournalDocument(octopusHome, runId) {
   requiredSafeRegistryId(runId, "change journal run");
   const directory = path.join(octopusHome, "state", "change-journals", runId);
   const file = path.join(directory, "journal.json");
@@ -27,6 +27,13 @@ async function changeJournalPlan(octopusHome, registryRoot, runId) {
   if (document.schema_version !== 1 || document.run !== runId) throw new Error("change journal belongs to another run or schema");
   if (!["changed", "unchanged"].includes(document.outcome)) throw new Error("change journal outcome must be changed or unchanged");
   if (!Array.isArray(document.changes) || (document.checks !== undefined && !Array.isArray(document.checks))) throw new Error("change journal changes and checks must be arrays");
+  return { document, digest, directory };
+}
+
+async function changeJournalPlan(octopusHome, registryRoot, runId) {
+  const journal = await readChangeJournalDocument(octopusHome, runId);
+  if (!journal) return null;
+  const { document, digest, directory } = journal;
   const restorableRoots = [
     ...["interface", "tool", "artifact", "ee_template"].map((kind) => path.join(registryRoot, kind)),
     path.join(octopusHome, "state", "runs"),

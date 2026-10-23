@@ -85,7 +85,7 @@ pub async fn run_descriptor_activation_life(
             activation_ref
         ));
     }
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
     ctx.cancel.cancelled().await;
     for task in tasks {
         task.abort();
@@ -732,13 +732,14 @@ pub async fn run_spawned_interface_life(life: InterfaceLiftFn) -> Result<(), Str
     let (emissions, emission_rx) = tokio::sync::mpsc::channel(64);
     let ctx = spawned_context_from_env(arrivals, emissions)?;
     let host_io_limits = ctx.required_host_io_limits()?;
-    let (ctx, readiness) = ctx.with_readiness_channel();
+    let (ctx, readiness, publication) = ctx.with_readiness_publication_channel();
 
     let pending = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
     let output = pump_spawned_life_outputs(
         arrival_rx,
         emission_rx,
         readiness,
+        publication,
         Arc::clone(&pending),
         host_io_limits.max_control_frame_bytes,
     );
@@ -820,16 +821,28 @@ type PendingVerdicts = Arc<tokio::sync::Mutex<BTreeMap<u64, SpawnedReply>>>;
 mod spawned_tests;
 
 async fn pump_spawned_life_outputs(
-    mut arrivals: tokio::sync::mpsc::Receiver<InterfaceActivationArrival>,
-    mut emissions: tokio::sync::mpsc::Receiver<SystemInterfaceEmission>,
+    arrivals: tokio::sync::mpsc::Receiver<InterfaceActivationArrival>,
+    emissions: tokio::sync::mpsc::Receiver<SystemInterfaceEmission>,
     readiness: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    publication: octopus_interface_transport::InterfaceLifeReadyPublication,
     pending: PendingVerdicts,
     maximum_frame_bytes: u64,
 ) -> Result<(), String> {
-    use std::io::Write;
-    let mut stdout = std::io::stdout();
+    pump_spawned_life_outputs_to(arrivals, emissions, readiness, publication, pending, maximum_frame_bytes, &mut std::io::stdout()).await
+}
+
+async fn pump_spawned_life_outputs_to(
+    mut arrivals: tokio::sync::mpsc::Receiver<InterfaceActivationArrival>,
+    mut emissions: tokio::sync::mpsc::Receiver<SystemInterfaceEmission>,
+    readiness: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    publication: octopus_interface_transport::InterfaceLifeReadyPublication,
+    pending: PendingVerdicts,
+    maximum_frame_bytes: u64,
+    stdout: &mut impl std::io::Write,
+) -> Result<(), String> {
     let mut next_request_id = 1_u64;
     let mut readiness = Some(readiness);
+    let mut publication = Some(publication);
     loop {
         let output = tokio::select! {
             ready = async {
@@ -878,10 +891,12 @@ async fn pump_spawned_life_outputs(
         };
         let bytes =
             serialize_bounded_json_line(&output, maximum_frame_bytes, "spawned-life output frame")?;
-        stdout
-            .write_all(&bytes)
-            .and_then(|()| stdout.flush())
-            .map_err(|error| format!("spawned life output write failed: {error}"))?;
+        let written = stdout.write_all(&bytes).and_then(|()| stdout.flush())
+            .map_err(|error| format!("spawned life output write failed: {error}"));
+        if matches!(output, SpawnedLifeOutput::Ready) {
+            publication.take().ok_or("spawned life repeated readiness publication")?.complete(written.clone())?;
+        }
+        written?;
     }
 }
 

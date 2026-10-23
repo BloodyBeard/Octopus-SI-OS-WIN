@@ -57,7 +57,10 @@
       "operator.elicitation.request",
       "operator.user_input.request"
     ],
-    "excluded_root_fields": ["session_context", "codex_continuity"],
+    "excluded_root_fields": [
+      "session_context",
+      "codex_continuity"
+    ],
     "max_source_bytes": 268435456,
     "max_projected_bytes": 41943040
   },
@@ -72,6 +75,7 @@
     "error_output": "turn.error",
     "stream_outputs": [
       "agent.message.delta",
+      "turn.agent_message",
       "turn.reasoning",
       "turn.reasoning.delta",
       "turn.plan.update",
@@ -174,6 +178,9 @@
       },
       {
         "id": "artifact-context-collection-guide"
+      },
+      {
+        "id": "artifact-trigger-authoring"
       }
     ]
   },
@@ -184,23 +191,58 @@
   "result_receiving_updates": [
     {
       "worker_template_interface": "system_worker_operator_home",
-      "mark_outcomes": ["operator.approval", "operator.input.provided", "tool.call.allowed", "task.summary.received"]
+      "mark_outcomes": [
+        "operator.approval",
+        "operator.input.provided",
+        "tool.call.allowed",
+        "task.summary.received"
+      ]
     },
     {
       "worker_template_interface": "system_worker_operator_task",
-      "mark_outcomes": ["operator.approval", "operator.input.provided", "tool.call.allowed", "task.summary.received"]
+      "mark_outcomes": [
+        "operator.approval",
+        "operator.input.provided",
+        "tool.call.allowed",
+        "task.summary.received"
+      ]
     },
     {
       "worker_template_interface": "system_worker_computer_use",
-      "mark_outcomes": ["ocr.text.contains", "tool.call.allowed", "task.summary.received", "operator.approval", "operator.input.provided"]
+      "mark_outcomes": [
+        "ocr.text.contains",
+        "tool.call.allowed",
+        "task.summary.received",
+        "operator.approval",
+        "operator.input.provided"
+      ]
     },
     {
       "worker_template_interface": "system_worker_coder_max",
-      "mark_outcomes": ["coder.build.ok", "ocr.text.contains", "operator.approval", "operator.input.provided", "emit.tool_call.present", "tool.call.allowed", "task.summary.received"]
+      "mark_outcomes": [
+        "coder.build.ok",
+        "ocr.text.contains",
+        "operator.approval",
+        "operator.input.provided",
+        "emit.tool_call.present",
+        "tool.call.allowed",
+        "task.summary.received"
+      ]
     },
     {
       "worker_template_interface": "system_worker_web",
-      "mark_outcomes": ["tool.call.allowed", "task.summary.received", "operator.approval", "operator.input.provided"]
+      "mark_outcomes": [
+        "tool.call.allowed",
+        "task.summary.received",
+        "operator.approval",
+        "operator.input.provided"
+      ]
+    }
+  ],
+  "provider_contract_updates": [
+    {
+      "field": "input_messages",
+      "predecessors": [{"state": "absent"}]
     }
   ],
   "tool_contract_updates": [
@@ -5362,6 +5404,16 @@
           ]
         }
       ]
+    },
+    {
+      "source_tool": "workspace.exec",
+      "source_interface": "system_workspace_env",
+      "predecessors": [{"/process/authority/allow_process_signals": false}]
+    },
+    {
+      "source_tool": "workspace.build",
+      "source_interface": "system_workspace_env",
+      "predecessors": [{"/process/authority/allow_process_signals": false}]
     }
   ]
 }

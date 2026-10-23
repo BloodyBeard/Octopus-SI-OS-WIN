@@ -106,6 +106,21 @@ arguments, a missing interface binding, or a duplicate registration all fail
 closed. Nothing falls back to a product-specific path or a hidden default, and
 the runtime never installs a placeholder success.
 
+## Private process transport
+
+Inside the process-session code-world, the tool control frame carries a checked
+reference to its invocation context. The complete grant metadata and bound
+artifact catalogue are written into a private file for that exact process
+generation and request. This is transport storage, not an artifact published to
+the runtime or model context. No authority or provenance is omitted to fit the
+control frame.
+
+The receiver checks the owned path, declared byte limit, exact length and content
+hash before decoding. Symlinks, cross-request references and changed bytes fail
+closed. Input retirement pins this file with the primary request and removes it
+only after the outcome is retained. Package updates replace both protocol peers;
+accepted output recovery retains its existing invocation and result evidence.
+
 ## What ships
 
 The registry carries about 190 tool descriptors over kind-owned executables:

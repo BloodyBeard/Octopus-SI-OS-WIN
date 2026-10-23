@@ -1,12 +1,45 @@
-module.exports = { applicationDirectoryDigest, applicationHasAnyAuthoredBinding, applicationIsConnectedToAuthoredRun, applicationTaskCapabilityReferences, assertApplicationPackageUnreferenced, installOctopusOsApplicationPackage, optionalApplicationPackageSource, projectCapabilityChanges, removeOctopusOsApplicationPackage, reportApplicationProgress, stageApplicationPackage, taskBaseAuthoringProfile, taskCheckpointCarriesProviderContext, taskProviderContextArtifactIds };
+module.exports = { applicationDirectoryDigest, applicationHasAnyAuthoredBinding, applicationIsConnectedToAuthoredRun, applicationTaskCapabilityReferences, assertApplicationPackageUnreferenced, installOctopusOsApplicationPackage, optionalApplicationPackageSource, projectCapabilityChanges, readConnectedApplicationIdsByRun, removeOctopusOsApplicationPackage, reportApplicationProgress, stageApplicationPackage, taskBaseAuthoringProfile, taskCheckpointCarriesProviderContext, taskProviderContextArtifactIds };
 
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const path = require("node:path");
-const { readApplicationPackageSource, snapshotApplicationPackageDirectory } = require("./applicationCatalog.cjs");
+const { readApplicationPackageSource, scanApplicationPackageRoot, snapshotApplicationPackageDirectory } = require("./applicationCatalog.cjs");
 const { readOptionalRegularJsonDocument, readRegularJsonDocument, stableJson } = require("./jsonFiles.cjs");
+const { projectedRunInterfaceIds } = require("./registryRows.cjs");
 const { exactStringReferencePaths, registryControlJsonFiles } = require("./taskDeletion.cjs");
-const { arrayValue, createJsonFile, interfaceBindingId, isPlainRecord, requiredAbsolutePath, requiredApplicationOperationId, requiredArtifactBindingId, requiredBoolean, requiredDigest, requiredSafeRegistryId, stringValue, syncDirectory } = require("./values.cjs");
+const { arrayValue, createJsonFile, interfaceBindingId, isPlainRecord, objectOrEmpty, requiredAbsolutePath, requiredApplicationOperationId, requiredArtifactBindingId, requiredBoolean, requiredDigest, requiredSafeRegistryId, stringValue, syncDirectory } = require("./values.cjs");
+
+async function readConnectedApplicationIdsByRun(projection, scope) {
+  const scopeEeIds = new Set(arrayValue(scope.environments).map(row => stringValue(row.ee_id)).filter(Boolean));
+  const profiles = new Map(arrayValue(scope.client_runs).map(row => [stringValue(row.run_id), objectOrEmpty(row.authoring_profile)]));
+  const runs = arrayValue(projection.runRecords).filter(row => scopeEeIds.has(stringValue(row.ee_id))).map(record => ({
+    id: stringValue(record.run_id),
+    interfaces: projectedRunInterfaceIds(record),
+    artifacts: new Set(arrayValue(record.checkpoints).filter(checkpoint => checkpoint.status === "projected")
+      .flatMap(checkpoint => arrayValue(checkpoint.artifact_binding_ids).map(stringValue).filter(Boolean))),
+    profile: profiles.get(stringValue(record.run_id)) ?? {},
+  }));
+  const manifests = new Map(arrayValue(projection.descriptors?.interface)
+    .filter(row => isPlainRecord(row.application_manifest))
+    .map(row => [stringValue(row.application_manifest.id), row.application_manifest]));
+  const sourceOwners = new Set(runs.flatMap(run => [...run.interfaces]).filter(id => !manifests.has(id)));
+  const sources = await scanApplicationPackageRoot(projection.localPackageRegistryRoot, "local", [], false, sourceOwners);
+  for (const source of sources) manifests.set(stringValue(source.manifest.id), source.manifest);
+  const connected = new Map();
+  for (const [applicationId, manifest] of manifests) {
+    const interfaces = arrayValue(manifest.interfaces).map(stringValue).filter(Boolean);
+    const artifacts = arrayValue(manifest.artifact_bindings).map(binding => stringValue(binding.artifact_id)).filter(Boolean);
+    for (const run of runs) {
+      if (!run.id || !interfaces.every(id => run.interfaces.has(id)) || !artifacts.every(id => run.artifacts.has(id))
+        || !applicationTaskCapabilityReferences(run.profile, manifest).complete) continue;
+      const ids = connected.get(run.id) ?? [];
+      ids.push(applicationId);
+      connected.set(run.id, ids);
+    }
+  }
+  for (const ids of connected.values()) ids.sort();
+  return connected;
+}
 
 async function installOctopusOsApplicationPackage(
   registryRoot,

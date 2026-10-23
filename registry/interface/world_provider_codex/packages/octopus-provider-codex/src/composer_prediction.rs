@@ -769,7 +769,7 @@ fn rpc_failure(error: TypedRequestError) -> PredictionFailure {
     }
 }
 
-async fn effect_rpc(
+pub(super) async fn effect_rpc(
     driver: &CodexAppServerInterfaceDriver,
     client: &AppServerClient,
     method: &str,

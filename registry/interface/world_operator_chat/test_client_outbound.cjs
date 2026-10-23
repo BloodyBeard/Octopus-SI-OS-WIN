@@ -122,6 +122,7 @@ test("native compaction projects as non-terminal activity", () => {
   assert.equal(activity.eventKind, "compaction");
   assert.equal(activity.text, "");
   assert.equal(operatorChatLiveActivityPayload("interface.artifact.output", config, { text: "Done." }).eventKind, "message");
+  assert.equal(operatorChatLiveActivityPayload("interface.artifact.output", config, { text: "" }).text, "");
   assert.equal(operatorChatLiveEventEndsTurn({
     config,
     eventKind: activity.eventKind,
@@ -131,13 +132,15 @@ test("native compaction projects as non-terminal activity", () => {
   }), false);
 });
 
-test("partial answers retain their message meaning in the live transcript", () => {
+test("answer items retain their message meaning in the live transcript", () => {
   const config = { artifact_labels: { terminal_output: "interface.artifact.output", error_output: "interface.artifact.error", tool_call: "tool.call" } };
-  const payload = { phase: "partial_answer", text: "The first result." };
-  const activity = operatorChatLiveActivityPayload("turn.agent_message", config, payload);
-  assert.equal(activity.eventKind, "message");
-  assert.equal(activity.text, payload.text);
-  assert.equal(operatorChatLiveEventEndsTurn({ config, eventKind: activity.eventKind, label: "turn.agent_message", payload, willRetry: false }), false);
+  for (const phase of ["partial_answer", "final_answer"]) {
+    const payload = { phase, text: "The first result." };
+    const activity = operatorChatLiveActivityPayload("turn.agent_message", config, payload);
+    assert.equal(activity.eventKind, "message");
+    assert.equal(activity.text, payload.text);
+    assert.equal(operatorChatLiveEventEndsTurn({ config, eventKind: activity.eventKind, label: "turn.agent_message", payload, willRetry: false }), false);
+  }
 });
 
 test("provider authentication recovery stays visible and non-terminal", () => {
@@ -682,6 +685,11 @@ process.stdin.on("end", () => {
   return executable;
 }
 
+async function writeAuthoringFixtureJson(file, value) {
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  await fs.promises.writeFile(file, JSON.stringify(value));
+}
+
 async function createAuthoringFixture(root, eeId = "ee_operator_space") {
   const installationRoot = path.join(root, "installation");
   const registryRoot = path.join(root, "registry");
@@ -698,8 +706,15 @@ async function createAuthoringFixture(root, eeId = "ee_operator_space") {
   ]);
   await fs.promises.writeFile(path.join(root, "host.json"), JSON.stringify({
     host_manifest_version: 1,
-    root_refs: { run_records_root: runsRoot },
+    root_refs: { run_records_root: runsRoot, workspace_root: root },
   }));
+  const room = JSON.parse(await fs.promises.readFile(path.join(__dirname, "../system_workspace_env/interface.json"), "utf8"));
+  room.id = "fixture_room";
+  await writeAuthoringFixtureJson(path.join(registryRoot, "interface/fixture_room/interface.json"), room);
+  await writeAuthoringFixtureJson(path.join(registryRoot, "interface/fixture_room/life.json"), JSON.parse(await fs.promises.readFile(path.join(__dirname, "../system_workspace_env/life.json"), "utf8")));
+  await writeAuthoringFixtureJson(path.join(registryRoot, "worker_environment_kind/filesystem_workspace/worker_environment_kind.json"), JSON.parse(await fs.promises.readFile(path.join(__dirname, "../../worker_environment_kind/filesystem_workspace/worker_environment_kind.json"), "utf8")));
+  const fixtureTool = JSON.parse(await fs.promises.readFile(path.join(__dirname, "../../tool/workspace.read_file/tool.json"), "utf8"));
+  fixtureTool.interface = "fixture_room";
   await fs.promises.writeFile(path.join(eeInstancesRoot, `${eeId}.json`), `${JSON.stringify({
     ee_id: eeId,
     template_name: "project",
@@ -761,7 +776,7 @@ async function createAuthoringFixture(root, eeId = "ee_operator_space") {
     },
     {
       path: path.join(request.registry_root, "tool", authoringToolId, "tool.json"),
-      content: "{}\\n",
+      content: JSON.stringify({ ...${JSON.stringify(fixtureTool)}, id: authoringToolId }) + "\\n",
       tag: \`tool:\${authoringToolId}\`,
       expected_before_hash: null,
     },
@@ -1150,7 +1165,7 @@ test("ordinary existing run reuses its provider-authored exact client input", ()
   delete providerState.run_authoring_binding;
   providerState.authoring_generation = 0;
   const submission = existingRunSubmission(
-    { run: { interface_prefix: "world_operator_chat_" } },
+    { run: { interface_prefix: "world_operator_chat_" }, artifact_labels: { message: "operator.message" } },
     ACTIVE_RUN,
     ordinary,
     ACTIVE_CLIENT,
@@ -2912,3 +2927,89 @@ test("operator ledger pages stop reading at their page while retaining exact rep
   } finally { fs.promises.open = open; }
 });
 
+
+test("empty Project planning stays available while executable Task publication requires host bindings", async t => {
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-project-host-preflight-"));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const fixture = await createAuthoringFixture(root), handed = [];
+  await writeAuthoringFixtureJson(path.join(root, "host.json"), { host_manifest_version: 1, root_refs: { run_records_root: fixture.runsRoot, host_filesystem_root: "/" } });
+  await planOperatorChatSurface(fixture.options, { chatId: "emptyproject", cycle: "emptyproject", eeId: fixture.eeId,
+    providerInterfaceId: "world_provider_codex", providerModel: "gpt-5.6-sol", workerInterfaceId: "system_worker_coder_max",
+    clientSurfaceRole: "task", selectedWorkerEnvironmentKinds: ["filesystem_workspace"], doorHostSlots: {} });
+  const request = { ...newTaskRequest(fixture.eeId), messageId: "hostpreflight001", selectedWorkerEnvironmentKinds: ["filesystem_workspace"] };
+  await assert.rejects(submitOperatorTurn(newTaskOptions(fixture, handed), request), /unbound host root slot 'workspace_root'/);
+  assert.deepEqual(await fs.promises.readdir(fixture.runsRoot), []);
+  assert.deepEqual(await fs.promises.readdir(path.join(fixture.registryRoot, "tool")), []);
+  assert.deepEqual(await fs.promises.readdir(path.join(fixture.registryRoot, "interface")), ["fixture_room"]);
+  assert.equal(handed.length, 0);
+  const doorPath = path.join(fixture.registryRoot, "interface/fixture_room/interface.json");
+  const door = JSON.parse(await fs.promises.readFile(doorPath, "utf8"));
+  door.interface_driver_config = { host_slots: { workspace_root: { path: root } } };
+  await writeAuthoringFixtureJson(doorPath, door);
+  const submitted = submitOperatorTurn(newTaskOptions(fixture, handed), request);
+  const run = JSON.parse(await fs.promises.readFile(await waitForRunRecord(fixture.runsRoot), "utf8"));
+  const server = await listenForInterface(root, Object.keys(run.interface_state)[0]);
+  try { assert.equal((await submitted).runId, run.id); assert.equal(handed.length, 1); }
+  finally { await closeServer(server); }
+});
+
+test("task host preflight refuses missing required slots before publication and preserves valid rooms", async t => {
+  const fs = require("node:fs/promises"), os = require("node:os");
+  const { validatePlannedHostBindings } = require("./client/hostBindings.cjs");
+  const registryRoot = path.resolve(__dirname, "../..");
+  const transport = await fs.readFile(path.join(registryRoot, "../crates/octopus-interface-transport/src/lib.rs"), "utf8");
+  const formation = transport.slice(transport.indexOf("fn life_root_slots("), transport.indexOf("fn prepare_interface_local_ipc_root("));
+  const formedSlots = [...formation.matchAll(/slots\.insert\(\s*(?:"([^"]+)"|([A-Z_]+))\.to_string\(\)/g)].map(([, literal, constant]) =>
+    literal ?? transport.match(new RegExp(`const ${constant}: &str = "([^"]+)"`))[1]);
+  const preflightSource = await fs.readFile(path.join(__dirname, "client/hostBindings.cjs"), "utf8");
+  const clientSlots = JSON.parse(`[${preflightSource.match(/const hostFormedSlots = new Set\(\[([\s\S]*?)\]\)/)[1].replace(/,\s*$/, "")}]`);
+  assert.deepEqual(clientSlots.sort(), [...new Set(formedSlots)].sort());
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-host-preflight-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const host = roots => fs.writeFile(path.join(home, "host.json"), JSON.stringify({ host_manifest_version: 1, root_refs: roots }));
+  const read = async (kind, id, file) => JSON.parse(await fs.readFile(path.join(registryRoot, kind, id, file), "utf8"));
+  const original = await read("interface", "system_workspace_env", "interface.json");
+  const life = await read("interface", "system_workspace_env", "life.json");
+  const tool = await read("tool", "workspace.read_file", "tool.json");
+  const door = "preflight_private_door", toolId = "preflight.read_file";
+  const plan = { requiredToolIds: [toolId], writes: [] };
+  const write = (kind, id, file, document) => ({ filePath: path.join(registryRoot, kind, id, file), content: JSON.stringify(document) });
+  function stage(overrides, selectedLife = life, selectedTool = tool) {
+    plan.writes = [write("interface", door, "interface.json", { ...original, id: door, interface_driver_config: { host_slots: overrides } }),
+      write("interface", door, "life.json", selectedLife), write("tool", toolId, "tool.json", { ...selectedTool, id: toolId, interface: door })];
+  }
+  const check = () => validatePlannedHostBindings({ octopusHome: home, registryRoot, plan });
+  await host({});
+  stage({ host_filesystem_root: { path: "/" } });
+  await assert.rejects(check(), /requires unbound host root slot 'workspace_root'/);
+  stage({ workspace_root: { path: home } });
+  await check();
+  await host({ workspace_root: home }); stage({}); await check();
+  await host({}); stage({ workspace_root: { path: "relative" } }); await assert.rejects(check(), /must be absolute/);
+  const optionalLife = structuredClone(life);
+  for (const process of optionalLife.processes) {
+    for (const field of ["read_root_slots", "write_root_slots", "executable_root_slots"]) {
+      process.authority[field] = process.authority[field].filter(slot => slot !== "workspace_root");
+      process.authority[`optional_${field}`].push("workspace_root");
+    }
+    process.coordinate_root_slots = process.coordinate_root_slots.filter(slot => slot !== "workspace_root");
+  }
+  stage({}, optionalLife); await assert.rejects(check(), /workspace_root.*tool preflight.read_file/);
+  stage({}, JSON.parse(JSON.stringify(optionalLife).replaceAll("workspace_root", "analysis.root")),
+    JSON.parse(JSON.stringify(tool).replaceAll("workspace_root", "analysis.root")));
+  await assert.rejects(check(), /analysis\.root.*tool preflight.read_file/);
+  const optionalTool = structuredClone(tool); optionalTool.process.authority.read_root_slots = ["registry_worker_environment_kind_root"];
+  stage({}, optionalLife, optionalTool); await check();
+  const renamedLife = JSON.parse(JSON.stringify(life).replaceAll("workspace_root", "analysis_root"));
+  stage({}, renamedLife); await assert.rejects(check(), /unbound host root slot 'analysis_root'/);
+  stage({ analysis_root: { path: home } }, renamedLife, optionalTool); await check();
+  for (const [id, toolName, roots] of [
+    ["system_coder_env", "coder.read_file", { repo_root: home, worktree_root: home }],
+    ["system_room", "file.read", { repo_root: home, run_records_root: home, ee_instances_root: home }],
+    ["system_web_search", "web.search", { repo_root: home }],
+  ]) {
+    await host(roots);
+    const neighbour = { ...plan, requiredToolIds: [toolName], writes: [] };
+    await validatePlannedHostBindings({ octopusHome: home, registryRoot, plan: neighbour });
+  }
+});

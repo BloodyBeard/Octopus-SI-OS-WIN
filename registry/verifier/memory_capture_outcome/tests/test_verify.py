@@ -60,6 +60,13 @@ class CaptureOutcomeVerifierTests(unittest.TestCase):
                 verdict = json.loads(completed.stdout)
                 self.assertEqual(verdict["passed"], passed, verdict)
 
+            invalid = copy.deepcopy(payload)
+            invalid.update(outcome=None, outcome_parse_error="outcome is not a JSON value")
+            pathlib.Path(request["payload_path"]).write_text(json.dumps(invalid))
+            refused = subprocess.run([sys.executable, str(SCRIPT)], input=json.dumps(request), text=True, capture_output=True, check=True)
+            verdict = json.loads(refused.stdout)
+            self.assertFalse(verdict["passed"])
+            self.assertEqual(verdict["details"]["error"], invalid["outcome_parse_error"])
             check([], "noop", True)
             check([repeat, deduped], "noop", True)
             check([call, result], "published", True)

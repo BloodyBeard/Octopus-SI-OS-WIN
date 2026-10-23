@@ -58,13 +58,17 @@ impl Fixture {
     }
 
     fn run(&self, input: &InterfaceInvocationEnvelope, tool: &str, arguments: Value) -> Result<Value, String> {
+        self.run_for(input, tool, arguments, None)
+    }
+
+    fn run_for(&self, input: &InterfaceInvocationEnvelope, tool: &str, arguments: Value, observed_run: Option<&str>) -> Result<Value, String> {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
         let descriptor = octopus_tool_registry::load_tool_descriptor_from_dir(&repository.join("registry/tool"), tool).unwrap().unwrap();
         octopus_tool_registry::ToolArgumentValidator::compile(&descriptor.args_schema).unwrap()
             .validate(&arguments).map_err(|error| error.to_string())?;
         let effects = self.root.join("effects");
         let host = MemoryHost { collection: "artifact-memory-test", artifact_root: &self.artifacts, ee_instances_root: &self.ees,
-            effect_root: Some(&effects), maximum_bytes: 1024 * 1024, observed_run: None, run_records_root: None };
+            effect_root: Some(&effects), maximum_bytes: 1024 * 1024, observed_run };
         let call = ToolCall { tool_id: tool.into(), arguments, handler_config: descriptor.handler_config.clone() };
         execute(input, &call, &host).map(|result| result.body).map_err(|error| error.to_string())
     }
@@ -113,4 +117,52 @@ fn one_save_is_found_by_later_runs_within_its_scope_lineage() {
     let names = std::fs::read_dir(fixture.artifacts.join("artifact-memory-test/entries")).unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect::<Vec<_>>();
     assert!(names.len() == 2 && names.iter().all(|name| name.ends_with(".json") && !name.starts_with('.')), "{names:?}");
+}
+
+#[test]
+fn observation_keeps_its_admitted_scope_across_moves_and_retries() {
+    let temporary = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(&temporary.path().canonicalize().unwrap());
+    let writer = ["read", "create", "change"];
+    let persist = |label: &str, value: &Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        let file = InterfaceArtifactFile::write(fixture.root.join("carriers"), label, &bytes).unwrap();
+        let manifest = std::fs::read(file.manifest_path()).unwrap();
+        let content = ContentHash::of_bytes(&manifest);
+        ArtifactBindingPayload::new(ArtifactRef { id: ArtifactId::new(format!("{label}:{}", content.to_hex())), content }, bytes)
+    };
+    let bind = |input: &mut InterfaceInvocationEnvelope, source: &ArtifactBindingPayload| {
+        let metadata = input.metadata.as_mut().unwrap();
+        metadata.grant.artifact_access.insert(source.artifact.id.to_string(), serde_json::from_value(json!({"read":true})).unwrap());
+        metadata.artifact_binding_refs.push(source.artifact.clone());
+        input.artifact_binding_payloads.push(source.clone());
+    };
+    let mut experience = json!({"schema_version":1,"label":"memory.experience.input","collection_source":"artifact-memory-test",
+        "source":{"run":"observed","ee":"ee_project","terminal_source_movement_seq":10,"projection_source_movement_seq":12,"terminal_artifact":fixture.source.artifact}});
+    let source = persist("memory.experience.input", &experience);
+    let note = json!({"note":"Private project deployment procedure."});
+    let mut input = fixture.envelope("memory.save", &note, "ee_home", &writer);
+    assert!(fixture.run_for(&input, "memory.save", note.clone(), Some("observed")).unwrap_err().contains("no bound experience"));
+    bind(&mut input, &source);
+    let saved = fixture.run_for(&input, "memory.save", note.clone(), Some("observed")).unwrap();
+    assert_eq!(saved["memory"]["scope_ee_ids"], json!(["ee_project"]));
+    assert_eq!(fixture.call("memory.search", json!({"query":"private project"}), "ee_home", &["read"]).unwrap()["matches"], json!([]));
+    assert!(fixture.run_for(&input, "memory.save", note.clone(), Some("another_run")).is_err());
+    assert_eq!(fixture.run_for(&input, "memory.save", note.clone(), Some("observed")).unwrap(), saved);
+    experience["source"]["ee"] = json!("ee_home");
+    experience["source"]["projection_source_movement_seq"] = json!(30);
+    let later = persist("memory.experience.input", &experience);
+    let future_note = json!({"note":"New Home experience after the move."});
+    let mut future = fixture.envelope("memory.save", &future_note, "ee_other", &writer);
+    bind(&mut future, &source);
+    bind(&mut future, &later);
+    assert_eq!(fixture.run_for(&future, "memory.save", future_note, Some("observed")).unwrap()["memory"]["scope_ee_ids"], json!(["ee_home"]));
+    let mut denied = input.clone();
+    denied.metadata.as_mut().unwrap().grant.artifact_access.remove(source.artifact.id.as_str());
+    assert!(fixture.run_for(&denied, "memory.save", note.clone(), Some("observed")).is_err());
+    let plan = fixture.root.join("effects/memory-save").join(input.artifact.content.to_hex()).join("plan.json");
+    let mut poisoned: Value = serde_json::from_slice(&std::fs::read(&plan).unwrap()).unwrap();
+    poisoned["memory"]["scope_ee_ids"] = json!(["ee_home"]);
+    std::fs::write(plan, serde_json::to_vec(&poisoned).unwrap()).unwrap();
+    assert!(fixture.run_for(&input, "memory.save", note, Some("observed")).unwrap_err().contains("differs from its admitted experience scope"));
 }

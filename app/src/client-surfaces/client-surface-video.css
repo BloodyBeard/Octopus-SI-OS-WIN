@@ -1,0 +1,5 @@
+.client-surface-video { display: flex; flex-direction: column; gap: 8px; margin: 0; min-width: 0; }
+.client-surface-video video { display: block; width: 100%; max-height: 540px; aspect-ratio: 16 / 9; object-fit: contain; border-radius: 8px; background: #000; }
+.client-surface-video figcaption { display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; font-size: 12px; }
+.client-surface-video figcaption span { opacity: .65; }
+.client-surface-video [role="alert"] { font-size: 12px; }

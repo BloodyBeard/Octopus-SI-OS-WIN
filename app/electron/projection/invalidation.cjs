@@ -9,6 +9,7 @@ const { projectionTruthChange } = require("./registryRows.cjs");
 function invalidationProjection(store) {
   let projectionGeneration = 1;
   let projectionStructureGeneration = 1;
+  let projectionConfigurationGeneration = 1;
   let projectionBuild = null;
   let projectionBuildPending = null;
   let projectionBroadcastTimer = null;
@@ -36,10 +37,10 @@ function invalidationProjection(store) {
       try {
         const watcher = require("node:fs").watch(root, { recursive: true, persistent: false }, (_event, filename) => {
           const change = projectionTruthChange(filename);
-          if (change === "policy") invalidateProjection(true);
-          else if (change === "structure") invalidateProjection(false);
-          else if (change === "runs") invalidateProjection(false, "runs");
-          else if (change === "files") invalidateProjection(false, "files");
+          if (change === "policy") invalidateProjection(true, "structure", filename);
+          else if (change === "structure") invalidateProjection(false, "structure", filename);
+          else if (change === "runs") invalidateProjection(false, "runs", filename);
+          else if (change === "files") invalidateProjection(false, "files", filename);
           else if (change === "ledger") signalLedgerProjectionChange();
         });
         watcher.on("error", (error) => {
@@ -136,6 +137,7 @@ function invalidationProjection(store) {
     const pending = [
       path.join(root, "registry"),
       path.join(root, "state", "runs"),
+      path.join(root, "state", "change-journals"),
       path.join(root, "state", "ee_instances"),
       path.join(root, "interfaces"),
       path.join(root, "app-server-control"),
@@ -206,10 +208,11 @@ function invalidationProjection(store) {
     scheduleProjectionBroadcast("ledger", false);
   }
 
-  function invalidateProjection(policyChanged = true, kind = "structure") {
+  function invalidateProjection(policyChanged = true, kind = "structure", filename) {
     projectionGeneration += 1;
     projectionStructureGeneration += 1;
-    store.invalidateConfigurationProjection(kind !== "runs", policyChanged);
+    if (kind !== "runs") projectionConfigurationGeneration += 1;
+    store.invalidateConfigurationProjection(kind !== "runs", policyChanged, filename);
     projectionBuild = null;
     scheduleProjectionBroadcast(kind, true);
   }
@@ -229,7 +232,7 @@ function invalidationProjection(store) {
         build = projectionBuildPending;
       } else {
         const promise = store.buildFileProjection(repoRoot);
-        build = { structureGeneration: projectionStructureGeneration, scope, promise };
+        build = { structureGeneration: projectionStructureGeneration, configurationGeneration: projectionConfigurationGeneration, scope, promise };
         projectionBuild = build;
         projectionBuildPending = build;
         const settled = () => {
@@ -242,7 +245,7 @@ function invalidationProjection(store) {
       }
       const projection = await build.promise;
       if (scope !== fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during read");
-      if (build.structureGeneration !== projectionStructureGeneration) continue;
+      if (build.configurationGeneration !== projectionConfigurationGeneration) continue;
       if (!includeLedger) return projection;
       return refreshLedgerProjection(projection);
     }

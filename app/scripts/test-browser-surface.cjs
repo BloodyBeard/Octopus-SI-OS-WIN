@@ -212,10 +212,12 @@ async function startupChecks() {
   });
   vm.runInContext(`let nativeBrowserHost = null, nativeBrowserStartup = null, nativeBrowserStartupError = null, nativeBrowserHome = '', nativeBrowserModuleLoaded = false, nativeBrowserMutationGuard = null;\n${functions}`, context);
   installation.installed = false;
+  installation.member_states[0].materialized = false;
   installation.receipt_state = "stale";
   installation.member_states[0].installed_digest = "c".repeat(64);
-  await assert.rejects(vm.runInContext("startNativeBrowserEngine()", context), /installed browser code/);
+  await assert.rejects(vm.runInContext("startNativeBrowserEngine()", context), /installed browser owner is missing/);
   installation.member_states[0].installed_digest = "b".repeat(64);
+  installation.member_states[0].materialized = true;
   await assert.rejects(vm.runInContext("startNativeBrowserEngine()", context), /explicit canonical absolute/);
   assert.equal(calls.includes("start"), false);
   assert.equal(vm.runInContext("nativeBrowserStartup", context), null, "explicit setup must be able to retry failed startup");
@@ -236,7 +238,8 @@ async function startupChecks() {
   assert.throws(() => vm.runInContext("nativeBrowserTargetsForProjection({octopusHome:'/another/home'})", context), /another Octopus Home/);
   assert.throws(() => guard(["driver.browser_session"]), /Restart/);
   installation.member_states[0].installed_digest = "c".repeat(64);
-  await assert.rejects(vm.runInContext("planBrowserNativeHost({})", context), /installed browser code/);
+  installation.member_states[0].materialized = false;
+  await assert.rejects(vm.runInContext("planBrowserNativeHost({})", context), /installed browser owner is missing/);
   assert.equal(calls.some((call) => call.endsWith?.("setup-host.cjs")), false);
 }
 

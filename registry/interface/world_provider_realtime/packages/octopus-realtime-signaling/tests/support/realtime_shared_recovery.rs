@@ -456,6 +456,8 @@ impl Fixture {
                 delegations: BTreeSet::new(),
                 updates: BTreeMap::new(),
                 stops: BTreeMap::new(),
+                client_context: None,
+                session_configuration: None,
             },
         );
         store

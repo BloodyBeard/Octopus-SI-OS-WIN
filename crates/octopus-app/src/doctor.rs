@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,7 +10,6 @@ use octopus_interface_transport::{
     resolve_spawn_life_executable, validate_spawn_life_config,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -76,27 +74,6 @@ pub async fn run(octopus_home: &Path, installation_root: &Path) -> Result<(), St
             installation_root.display()
         )
     })?;
-    let active_interface_root = std::fs::canonicalize(&interface_root).map_err(|error| {
-        format!(
-            "active interface registry '{}' cannot be canonicalized: {error}",
-            interface_root.display()
-        )
-    })?;
-    let packaged_interface_root = installation_root
-        .join("local-packages")
-        .join("registry")
-        .join("interface");
-    let packaged_interface_root = packaged_interface_root
-        .is_dir()
-        .then(|| std::fs::canonicalize(&packaged_interface_root))
-        .transpose()
-        .map_err(|error| {
-            format!(
-                "packaged interface registry '{}' cannot be canonicalized: {error}",
-                packaged_interface_root.display()
-            )
-        })?;
-
     let (interfaces, mut errors) = discover_interfaces(&interface_root)?;
     match diagnose_run_worker_policies(octopus_home, &registry_root) {
         Ok(issues) => errors.extend(issues),
@@ -105,7 +82,6 @@ pub async fn run(octopus_home: &Path, installation_root: &Path) -> Result<(), St
     let mut life_processes = 0usize;
     let mut unprobed_processes = 0usize;
     let mut probe_jobs = Vec::new();
-    let mut executable_uses = BTreeMap::<(PathBuf, PathBuf), BTreeSet<String>>::new();
     let mut imported_executable_cache =
         BTreeMap::<String, Result<ResolvedSpawnLifeExecutable, String>>::new();
 
@@ -160,20 +136,6 @@ pub async fn run(octopus_home: &Path, installation_root: &Path) -> Result<(), St
                     continue;
                 }
             };
-            if let Some(packaged_root) = &packaged_interface_root {
-                if let Some(relative) = active_registry_relative_executable(
-                    &active_interface_root,
-                    &executable.executable,
-                ) {
-                    let packaged = packaged_root.join(relative);
-                    if packaged.is_file() {
-                        executable_uses
-                            .entry((executable.executable.clone(), packaged))
-                            .or_default()
-                            .insert(format!("{}#{process_index}", interface.as_str()));
-                    }
-                }
-            }
             let Some(doctor) = process.doctor.clone() else {
                 unprobed_processes += 1;
                 continue;
@@ -186,15 +148,6 @@ pub async fn run(octopus_home: &Path, installation_root: &Path) -> Result<(), St
                 executable,
                 doctor,
             });
-        }
-    }
-
-    let mut executable_pairs = 0usize;
-    for ((active, packaged), users) in executable_uses {
-        executable_pairs += 1;
-        if let Err(error) = compare_executables(&active, &packaged) {
-            let users = users.into_iter().collect::<Vec<_>>().join(", ");
-            errors.push(format!("packaged executable drift for {users}: {error}"));
         }
     }
 
@@ -240,11 +193,6 @@ pub async fn run(octopus_home: &Path, installation_root: &Path) -> Result<(), St
         interfaces.len(),
         life_processes
     );
-    if packaged_interface_root.is_some() {
-        println!("packages   {executable_pairs} active executable pairs checked");
-    } else {
-        println!("packages   no packaged local registry in this installation");
-    }
     match (&client_doctor, client_doctor_execution_failed) {
         (Some(report), _) => println!(
             "client     {}/{} read-only structured checks passed",
@@ -538,64 +486,6 @@ fn discover_interfaces(interface_root: &Path) -> Result<(Vec<InterfaceId>, Vec<S
     Ok((interfaces, errors))
 }
 
-fn active_registry_relative_executable<'a>(
-    active_interface_root: &'a Path,
-    executable: &'a Path,
-) -> Option<&'a Path> {
-    executable.strip_prefix(active_interface_root).ok()
-}
-
-fn compare_executables(active: &Path, packaged: &Path) -> Result<(), String> {
-    let active_metadata = std::fs::metadata(active).map_err(|error| {
-        format!(
-            "active executable '{}' cannot be inspected: {error}",
-            active.display()
-        )
-    })?;
-    let packaged_metadata = std::fs::metadata(packaged).map_err(|error| {
-        format!(
-            "packaged executable '{}' cannot be inspected: {error}",
-            packaged.display()
-        )
-    })?;
-    if active_metadata.len() != packaged_metadata.len() {
-        return Err(format!(
-            "active '{}' has {} bytes, packaged '{}' has {} bytes",
-            active.display(),
-            active_metadata.len(),
-            packaged.display(),
-            packaged_metadata.len()
-        ));
-    }
-    let active_hash = sha256_file(active)?;
-    let packaged_hash = sha256_file(packaged)?;
-    if active_hash != packaged_hash {
-        return Err(format!(
-            "active '{}' SHA-256 {active_hash} differs from packaged '{}' SHA-256 {packaged_hash}",
-            active.display(),
-            packaged.display()
-        ));
-    }
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| format!("executable '{}' cannot be opened: {error}", path.display()))?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("executable '{}' cannot be read: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-
 async fn run_probes(jobs: Vec<ProbeJob>) -> Vec<ProbeOutcome> {
     let semaphore = Arc::new(Semaphore::new(PROBE_CONCURRENCY));
     let mut tasks = JoinSet::new();
@@ -846,12 +736,37 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let installation_root = root.path().join("installation");
-        std::fs::create_dir(&installation_root).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let contents = root.path().join("Octopus.app/Contents");
+        let installation_root = contents.join("Resources/app");
+        std::fs::create_dir_all(installation_root.join("electron")).unwrap();
+        std::fs::write(installation_root.join("electron/clientDoctor.cjs"), "// client doctor transport fixture").unwrap();
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        let runner = contents.join("MacOS/Octopus");
+        std::fs::write(&runner, "#!/bin/sh\necho '{\"schema_version\":2,\"checks\":1,\"passed\":1,\"findings\":[],\"errors\":[]}'\n").unwrap();
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A locally rebuilt executable is healthy when its declared probe succeeds,
+        // independently of the executable distributed with the application.
+        let active_bin = interface.join("local-probe");
+        let packaged_bin = installation_root.join("local-packages/registry/interface/world_test/local-probe");
+        std::fs::create_dir_all(packaged_bin.parent().unwrap()).unwrap();
+        std::fs::write(&active_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&active_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&packaged_bin, "different release executable").unwrap();
+        let life_path = interface.join("life.json");
+        let mut life: serde_json::Value = serde_json::from_slice(&std::fs::read(&life_path).unwrap()).unwrap();
+        life["processes"][0]["bin"] = serde_json::json!(active_bin);
+        life["processes"][0]["authority"]["executable_paths"] = serde_json::json!([active_bin]);
+        std::fs::write(&life_path, life.to_string()).unwrap();
         let metadata = home.join("registry/interface").join(octopus_file_storage::publication::COORDINATION_DIRECTORY);
         std::fs::create_dir(&metadata).unwrap();
 
         run(&home, &installation_root).await.unwrap();
+
+        std::fs::write(&active_bin, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(run(&home, &installation_root).await.is_err(), "a failing declared probe must be reported");
+        std::fs::remove_file(&active_bin).unwrap();
+        assert!(run(&home, &installation_root).await.is_err(), "a missing executable must be reported");
 
         std::fs::remove_dir(&metadata).unwrap();
         std::os::unix::fs::symlink(&interface, &metadata).unwrap();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
 import { PowerBurst, PowerDecoration } from "./providerModelPickerEffects";
@@ -6,6 +6,7 @@ import type { OctopusProviderInterface, OctopusProviderModel } from "../../elect
 import { useShouldReduceMotion } from "../../appearance";
 import { subscribeClientCommands } from "../../clientActions";
 import { OcMenuItem } from "../../design-system/components";
+import { OcLoadingRows, OcLoadingText } from "../../design-system/LoadingSkeleton";
 import { Glyph } from "../IconGlyphs";
 import { ShellTooltip } from "../shell/ShellTooltip";
 import { providerModels, providerReasoningEfforts, providerSelectedModel, providerServiceTiers, providerSelectedServiceTier } from "./chatWorkspaceCapabilities";
@@ -61,6 +62,7 @@ export function ProviderModelPicker({
   const tooltipSuppressed = useRef(false);
   const typeahead = useRef({ text: "", time: 0 });
   const [open, setOpen] = useState(false);
+  const [menuMounted, setMenuMounted] = useState(false);
   const [tooltip, setTooltip] = useState(false);
   const [menuView, setMenuView] = useState<"simple" | "advanced">("simple");
   const options = useMemo(() => (interfaceLocked ? activeProvider ? [activeProvider] : [] : providers)
@@ -73,8 +75,8 @@ export function ProviderModelPicker({
   const selectedTier = activeProvider ? providerSelectedServiceTier(activeProvider, providerModel, serviceTier) : "default";
   const tierLabel = tiers.find((tier) => tier.id === selectedTier)?.name ?? (selectedTier === "default" ? "Standard" : selectedTier + " · unavailable");
   const disabled = options.length === 0 && !onRefreshModels;
-  const catalogPending = Boolean(activeProvider && !activeProvider.modelCatalogError && providerModels(activeProvider).length === 0);
-  const unavailableLabel = loading || catalogPending ? "Loading…" : providerModel ? providerModel + " · unavailable" : "Select model";
+  const catalogPending = Boolean(loading && !activeProvider?.modelCatalogError && !activeModel);
+  const unavailableLabel = catalogPending ? "Loading…" : providerModel ? providerModel + " · unavailable" : "Select model";
   const modelLabel = activeProvider && activeModel ? displayName({ provider: activeProvider, model: activeModel }, options) : unavailableLabel;
   const triggerModelLabel = activeModel ? (activeModel.displayName || activeModel.model).replace(/^gpt[-\s]+/i, "") : unavailableLabel;
   const effortAvailable = efforts.includes(selectedEffort);
@@ -101,12 +103,13 @@ export function ProviderModelPicker({
   const closeMenu = useCallback((restoreFocus = true) => {
     openRef.current = false;
     setOpen(false);
+    if (reducedMotion) setMenuMounted(false);
     setSpeedOpen(false);
     setTriggerSizing(null);
     setWarning(false);
     hideTooltip();
     if (restoreFocus && triggerRef.current?.isConnected) triggerRef.current.focus({ preventScroll: true });
-  }, [hideTooltip]);
+  }, [hideTooltip, reducedMotion]);
   const openMenu = useCallback(() => {
     if (disabled || openRef.current) return;
     const contentWidth = anchorRef.current?.getBoundingClientRect().width ?? 0;
@@ -116,6 +119,7 @@ export function ProviderModelPicker({
     setTransitionsReady(false);
     hideTooltip();
     openRef.current = true;
+    setMenuMounted(true);
     setOpen(true);
     onRefreshModels?.();
   }, [disabled, hideTooltip, onRefreshModels]);
@@ -260,6 +264,12 @@ export function ProviderModelPicker({
   };
   const menuKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.key === "ArrowLeft" && view === "advanced" && efforts.length > 1 && effortAvailable) {
+      event.preventDefault();
+      keyboardOpen.current = true;
+      setMenuView("simple");
+      return;
+    }
     const panel = view === "advanced" ? advancedPanel.current : simplePanel.current;
     const items = [...(panel?.querySelectorAll<HTMLElement>(view === "advanced" ? "[role=menuitemradio]:not(:disabled), [role=menuitem]:not(:disabled)" : "[role=menuitem]:not(:disabled), [role=slider]") ?? [])];
     const current = items.indexOf(document.activeElement as HTMLElement);
@@ -303,7 +313,7 @@ export function ProviderModelPicker({
     <button ref={triggerRef} type="button" className="provider-model-trigger" data-provider-picker-trigger
       data-selected-reasoning-effort={selectedEffort} data-selected-service-tier={selectedTier} aria-haspopup="menu" aria-expanded={open}
       aria-controls={open ? id + "-menu" : undefined} aria-describedby={tooltip ? id + "-tooltip" : undefined}
-      aria-label={"Select model: " + modelLabel + (effortText ? ", " + effortText : "") + (onServiceTierChange && tiers.length ? ", " + tierLabel : "")} disabled={disabled}
+      aria-label={"Select model: " + modelLabel + (effortText ? ", " + effortText : "") + (onServiceTierChange && tiers.length ? ", " + tierLabel : "")} aria-busy={catalogPending || undefined} disabled={disabled}
       onPointerEnter={(event) => { if (event.pointerType !== "touch") showTooltip(); }} onPointerLeave={() => { tooltipSuppressed.current = false; hideTooltip(); }} onFocus={showTooltip} onBlur={() => { tooltipSuppressed.current = false; hideTooltip(); }}
       onPointerDown={(event) => { if (event.button === 0 && !event.ctrlKey) { keyboardOpen.current = false; if (!openRef.current) event.preventDefault(); openRef.current ? closeMenu() : openMenu(); } }}
       onClick={(event) => { if (event.detail === 0) { keyboardOpen.current = false; openRef.current ? closeMenu() : openMenu(); } }}
@@ -312,12 +322,16 @@ export function ProviderModelPicker({
       }}>
       <span ref={placeholderRef} className="provider-model-placeholder" aria-hidden="true" data-provider-picker-placeholder>Select model</span>
       <span ref={anchorRef} className="provider-model-trigger-label" data-provider-picker-anchor style={{ minWidth: triggerSizing?.minimum }}>
-        <span>{open && view === "simple" ? "Select model" : triggerModelLabel}</span>{!(open && view === "simple") && effortAvailable ? <span className="provider-model-trigger-effort" data-maximum={selectedEffort === "ultra" || undefined}>{effortLabel(selectedEffort)}</span> : null}
+        {catalogPending ? <OcLoadingText label="Loading models…">{providerModel || "Select a model"}</OcLoadingText> : <span>{open && view === "simple" ? "Select model" : triggerModelLabel}</span>}{!(open && view === "simple") && effortAvailable ? <span className="provider-model-trigger-effort" data-maximum={selectedEffort === "ultra" || undefined}>{effortLabel(selectedEffort)}</span> : null}
       </span>
       <span className="provider-model-trigger-chevron" aria-hidden="true" />
     </button>
     {tooltip && !open ? createPortal(<div ref={tooltipRef} id={id + "-tooltip"} role="tooltip" className="provider-model-tooltip">Select model</div>, document.body) : null}
-    {open ? createPortal(<div ref={menuRef} id={id + "-menu"} role="menu" tabIndex={-1} aria-label="Model and Power"
+    {menuMounted ? createPortal(<motion.div ref={menuRef} id={id + "-menu"} role="menu" tabIndex={-1} aria-label="Model and Power"
+      aria-hidden={!open} inert={!open} initial={reducedMotion ? false : { opacity: 0, scale: 0.98 }}
+      animate={{ opacity: open ? 1 : 0, scale: open ? 1 : 0.98 }}
+      transition={{ duration: reducedMotion ? 0 : open ? 0.32 : 0.12, delay: open && !reducedMotion ? 0.03 : 0, ease: [0.23, 1, 0.32, 1] }}
+      onAnimationComplete={() => { if (!openRef.current) setMenuMounted(false); }}
       className="provider-model-menu" data-provider-picker-menu data-view={view} data-reduced-motion={reducedMotion || undefined}
       onKeyDown={menuKey} onFocusCapture={(event) => {
         for (const item of event.currentTarget.querySelectorAll<HTMLElement>("[role=menuitem], [role=menuitemradio], [role=slider]")) {
@@ -360,14 +374,23 @@ export function ProviderModelPicker({
           : null}
       </div></div><div ref={advancedPanel} className="provider-model-view-panel" data-active={view === "advanced"} aria-hidden={view !== "advanced"} inert={view !== "advanced"} data-provider-picker-panel="advanced">
       <div className="provider-model-list">
-        <div className="provider-model-section-label">{options.length ? "Select model" : loading ? "Loading models…" : "No models available"}</div>
+        {efforts.length > 1 && effortAvailable ? <button type="button" role="menuitem" tabIndex={-1}
+          className="provider-model-option provider-model-back" aria-label="Back to Power" data-picker-search-label="Back to Power"
+          onPointerMove={focusHoveredItem} onPointerLeave={leaveItem} onClick={() => setMenuView("simple")}>
+          <Glyph name="chevronDown" size={14} className="rotate-90 shrink-0" /><span>Power</span>
+        </button> : null}
+        {!options.length && loading ? <OcLoadingRows label="Loading models…" /> : <div className="provider-model-section-label">{options.length ? "Select model" : "No models available"}</div>}
+        {interfaceLocked ? <div className="provider-model-empty">Start a new task to choose another provider.</div> : null}
         {!options.length && onRefreshModels ? <OcMenuItem role="menuitem" tabIndex={-1}
           label="Retry loading models" disabled={loading} onClick={onRefreshModels}
           onKeyDown={(event) => {
             if (!loading && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onRefreshModels(); }
           }}
           onPointerMove={focusHoveredItem} onPointerLeave={leaveItem} /> : null}
-        {options.map((option) => <ShellTooltip key={JSON.stringify([option.provider.id, option.model.model])}
+        {options.map((option, index) => <Fragment key={JSON.stringify([option.provider.id, option.model.model])}>
+          {!interfaceLocked && providers.length > 1 && options[index - 1]?.provider.id !== option.provider.id
+            ? <div className="provider-model-section-label">{option.provider.label || option.provider.id}</div> : null}
+        <ShellTooltip
           label={option.provider.id + " · " + option.model.model} disabled={view !== "advanced"}>
         <button type="button" role="menuitemradio" className="provider-model-option"
           tabIndex={-1} data-provider-id={option.provider.id} data-model-id={option.model.model}
@@ -378,7 +401,7 @@ export function ProviderModelPicker({
             if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectModel(option); }
           }}>
           <span>{displayName(option, options)}</span>{option.provider.id === providerInterfaceId && option.model.model === providerModel ? <Glyph name="check" size={16} className="provider-model-check" /> : null}
-        </button></ShellTooltip>)}
+        </button></ShellTooltip></Fragment>)}
       </div>
       {onServiceTierChange && activeModel && tiers.length > 1 ? <div className="provider-model-speed-row">
         <OcMenuItem buttonRef={speedRowRef} role="menuitem" tabIndex={-1} data-speed-row label="Speed"
@@ -401,7 +424,7 @@ export function ProviderModelPicker({
           trailing={<span className="provider-model-speed-check" aria-hidden="true">{selectedTier === tier.id ? <Glyph name="check" size={16} /> : null}</span>}
           onPointerMove={focusHoveredItem} onClick={() => { onServiceTierChange(tier.id); closeSpeed(); }} />)}
       </div>, document.body) : null}
-    </div>, document.body) : null}
+    </motion.div>, document.body) : null}
   </div>;
 }
 

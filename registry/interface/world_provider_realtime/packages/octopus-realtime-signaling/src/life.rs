@@ -147,7 +147,8 @@ pub(crate) async fn door_life(ctx: InterfaceLiftContext) -> Result<(), String> {
                 call.status.as_str(),
                 "created" | "attached" | "reconnecting"
             ) {
-                let pending_answer = (call.status == "created")
+                let awaiting_activation = call.status == "created";
+                let pending_answer = awaiting_activation
                     .then(|| call.answer.clone())
                     .flatten();
                 let call_id = call
@@ -157,21 +158,22 @@ pub(crate) async fn door_life(ctx: InterfaceLiftContext) -> Result<(), String> {
                 let client = LiveClient::connect(&config).await;
                 let recovered = match client {
                     Ok(client) if call.auth_owner.as_deref() == Some(client.owner()) => {
-                        client.attach(&call_id, events_tx.clone()).await
+                        if awaiting_activation { client.attach_created(&call_id, events_tx.clone()) }
+                        else { client.attach(&call_id, events_tx.clone()).await }
                     }
                     _ => Err("call authentication changed or is unavailable".into()),
                 };
                 match recovered {
                     Ok(control) => {
-                        call.status = "attached".into();
+                        call.status = if awaiting_activation { "created" } else { "attached" }.into();
                         controls.insert(call_id, control);
                         let recovered_answer = pending_answer.map(|mut answer| {
-                            answer["sideband_connected"] = json!(true);
+                            answer["sideband_connected"] = json!(!awaiting_activation);
                             call.answer = Some(answer.clone());
                             answer
                         });
                         let body = call.event_body(
-                            json!({"state":"attached","recovered":true,"media_connected":false}),
+                            json!({"state":call.status,"recovered":true,"media_connected":false}),
                         );
                         if let Some(answer) = recovered_answer {
                             queue(
@@ -212,7 +214,7 @@ pub(crate) async fn door_life(ctx: InterfaceLiftContext) -> Result<(), String> {
         }
         flush(&ctx.var_dir, &ctx.interface, &mut store, &handoffs).await?;
     }
-    ctx.signal_ready()?;
+    ctx.signal_ready().await?;
 
     loop {
         if ctx.cancel.is_cancelled() {
@@ -657,6 +659,11 @@ async fn offer_call(
         &offer.session,
         &config.private.model,
     )?;
+    let mut session_configuration = session.clone();
+    let configuration = session_configuration.as_object_mut().ok_or("voice session must be an object")?;
+    configuration.remove("model");
+    configuration.remove("initial_items");
+    crate::client_context::validate(offer.client_context.as_deref())?;
     if let Some(call) = store.state.calls.get(&offer.correlation_id) {
         if call.offer_digest != digest {
             return Err("offer identity was reused with different content".into());
@@ -710,6 +717,8 @@ async fn offer_call(
             delegations: BTreeSet::new(),
             updates: BTreeMap::new(),
             stops: BTreeMap::new(),
+            client_context: offer.client_context,
+            session_configuration: Some(session_configuration),
         },
     );
     store.save()?;
@@ -726,12 +735,10 @@ async fn offer_call(
             let response = json!({"ok":true,"creation_disposition":"created","correlation_id":correlation,"call_id":opened.call_id,"answer_sdp":opened.answer_sdp,"response_bytes":opened.response_bytes,"response_blake3":opened.response_blake3,"model":config.private.model,"protocol":config.private.protocol,"sideband_connected":false,"media_connected":false});
             call.answer = Some(response.clone());
             store.save()?;
-            match client.attach(&opened.call_id, events.clone()).await {
+            match client.attach_created(&opened.call_id, events.clone()) {
                 Ok(control) => {
                     controls.insert(opened.call_id, control);
-                    let mut body = response;
-                    body["sideband_connected"] = json!(true);
-                    Ok(body)
+                    Ok(response)
                 }
                 Err(error) => Err(CallCreationFailure::created(error, opened.call_id)),
             }
@@ -756,7 +763,7 @@ async fn offer_call(
         .ok_or("call disappeared")?;
     let body = match result {
         Ok(body) => {
-            call.status = "attached".into();
+            call.status = "created".into();
             body
         }
         Err(error) => {
@@ -792,10 +799,10 @@ async fn update_call(
     if update.text.len() > 65_536 {
         return Err("Live update exceeds bounded semantic payload".into());
     }
+    crate::client_context::validate(update.client_context.as_deref())?;
     if correlation_for_call(store, &update.call_id)? != update.correlation_id {
         return Err("voice update call identity mismatch".into());
     }
-    let frames = update_frames(config.private.protocol, &update)?;
     let call = store
         .state
         .calls
@@ -830,13 +837,27 @@ async fn update_call(
     if !matches!(call.status.as_str(), "attached" | "reconnecting") {
         return Err("voice call is not active for a new context update".into());
     }
-    let control = controls
-        .get(&update.call_id)
-        .ok_or("voice sideband is unavailable")?;
     let credential = config.private.auth.resolve().await?;
     if call.auth_owner.as_deref() != Some(&credential.owner) {
         return Err("voice authentication changed; close this call and start explicitly".into());
     }
+    if let Some(context) = update.client_context {
+        if update.channel != crate::UpdateChannel::Context
+            || update.delegation_id.is_some()
+            || !update.text.is_empty()
+        {
+            return Err("client_context updates require channel=context, no delegation and no text".into());
+        }
+        let body = call.event_body(json!({"update_id":update.update_id,"delegation_id":null,"status":"context_retained","heard_audio":false,"ok":true}));
+        call.client_context = Some(context);
+        call.updates.insert(update.update_id, Operation { digest, result: Some(body.clone()) });
+        queue(store, &update.correlation_id, "realtime.session.updated", body, false, false)?;
+        return store.save();
+    }
+    let frames = update_frames(config.private.protocol, &update)?;
+    let control = controls
+        .get(&update.call_id)
+        .ok_or("voice sideband is unavailable")?;
     call.updates.insert(
         update.update_id.clone(),
         Operation {

@@ -28,6 +28,7 @@ pub struct ProcessAuthority {
     allow_local_ipc: bool,
     allow_application_launch: bool,
     allow_sandbox_delegation: bool,
+    allow_process_signals: bool,
 }
 
 const MAX_SEARCH_PATH_LINKS: usize = 40;
@@ -77,6 +78,7 @@ impl ProcessAuthority {
         allow_local_ipc: bool,
         allow_application_launch: bool,
         allow_sandbox_delegation: bool,
+        allow_process_signals: bool,
         sandbox_mode: octopus_descriptors::ProcessSandboxMode,
     ) -> Result<Self, String> {
         let mut readable = readable
@@ -120,6 +122,7 @@ impl ProcessAuthority {
             allow_local_ipc,
             allow_application_launch,
             allow_sandbox_delegation,
+            allow_process_signals,
         })
     }
 
@@ -534,6 +537,7 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
             self.allow_local_ipc,
             self.allow_application_launch,
             self.allow_sandbox_delegation,
+            self.allow_process_signals,
             self.sandbox_mode,
         )?
         .with_executable_links(executable_links);
@@ -1127,8 +1131,11 @@ fn prepare_macos(
         }
     }
     let mut policy = String::from(
-        "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow process-info* (target same-sandbox))\n(allow sysctl-read)\n(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))\n(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n(allow ipc-posix-sem)\n(allow ipc-posix-shm-read-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink)\n(allow pseudo-tty)\n(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\") (global-name \"com.apple.system.opendirectoryd.membership\") (global-name \"com.apple.PowerManagement.control\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.cfprefsd.agent\") (local-name \"com.apple.cfprefsd.agent\"))\n(allow file-read* file-test-existence (subpath \"/private/etc\") (subpath \"/etc\") (subpath \"/private/var/db/timezone\") (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-test-existence (subpath \"/dev/fd\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+\"))\n(allow file-read* file-test-existence (literal \"/\"))\n",
+        "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow process-info* (target same-sandbox))\n(allow sysctl-read)\n(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))\n(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n(allow ipc-posix-sem)\n(allow ipc-posix-shm-read-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink)\n(allow pseudo-tty)\n(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\") (global-name \"com.apple.system.opendirectoryd.membership\") (global-name \"com.apple.PowerManagement.control\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.cfprefsd.agent\") (local-name \"com.apple.cfprefsd.agent\"))\n(allow file-read* file-test-existence (subpath \"/private/etc\") (subpath \"/etc\") (subpath \"/private/var/db/timezone\") (subpath \"/usr/share/icu\") (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-test-existence (subpath \"/dev/fd\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+\"))\n(allow file-read* file-test-existence (literal \"/\"))\n",
     );
+    if authority.allow_process_signals {
+        policy.push_str("(allow signal)\n");
+    }
     append_macos_access(
         &mut policy,
         "file-read* file-test-existence",
@@ -2123,6 +2130,7 @@ mod future_write_authority_tests {
             false,
             false,
             false,
+            false,
             octopus_descriptors::ProcessSandboxMode::Enforced,
         )
         .expect("future writable subtree");
@@ -2146,6 +2154,7 @@ mod future_write_authority_tests {
             std::iter::empty(),
             std::iter::empty(),
             std::iter::empty(),
+            false,
             false,
             false,
             false,
@@ -2198,6 +2207,7 @@ mod future_write_authority_tests {
             std::iter::empty(),
             std::iter::empty(),
             std::iter::empty(),
+            false,
             false,
             false,
             false,
@@ -2391,6 +2401,27 @@ mod macos_network_process_tests {
     use super::*;
 
     #[test]
+    fn system_locale_data_is_readable_while_undeclared_files_stay_private() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let private = root.path().join("private.txt");
+        std::fs::write(&private, "private").unwrap();
+        let locale = std::fs::read_dir("/usr/share/icu").unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "dat")).expect("system ICU data");
+        let authority = ProcessAuthority::resolve(
+            [], [], [], [], [], [], false, false, false, false,
+            false,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        ).unwrap();
+        for (file, allowed) in [(locale, true), (private, false)] {
+            let prepared = authority.prepare("/usr/bin/head", &["-c".into(), "1".into(), file.into_os_string()], root.path(), None, root.path()).unwrap();
+            let output = std::process::Command::new(prepared.program).args(prepared.args)
+                .env_clear().envs(prepared.environment).current_dir(root.path()).output().unwrap();
+            assert_eq!(output.status.success(), allowed, "{}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    #[test]
     fn future_write_root_can_materialize_its_own_subtree() {
         let root = tempfile::tempdir().expect("temporary root");
         let future = root.path().join("state").join("future-root");
@@ -2402,6 +2433,7 @@ mod macos_network_process_tests {
             std::iter::empty(),
             std::iter::empty(),
             [executable.clone()],
+            false,
             false,
             false,
             false,
@@ -2467,6 +2499,7 @@ mod macos_network_process_tests {
         let authority = ProcessAuthority::resolve(
             std::iter::empty(), std::iter::empty(), std::iter::empty(), std::iter::empty(),
             writable, [executable.clone()], false, false, false, false,
+            false,
             octopus_descriptors::ProcessSandboxMode::Enforced,
         ).expect("large exact authority");
         let run = |target: &Path| {
@@ -2486,6 +2519,7 @@ mod macos_network_process_tests {
         let broad = ProcessAuthority::resolve(
             std::iter::empty(), [unusual.clone()], std::iter::empty(), std::iter::empty(),
             std::iter::empty(), [executable.clone()], false, false, false, false,
+            false,
             octopus_descriptors::ProcessSandboxMode::Enforced,
         ).expect("broad authority");
         let touch = |target: &Path| {
@@ -2517,6 +2551,7 @@ mod macos_network_process_tests {
             false,
             false,
             false,
+            false,
             octopus_descriptors::ProcessSandboxMode::Enforced,
         )
         .expect("network authority");
@@ -2543,6 +2578,7 @@ mod macos_network_process_tests {
             std::iter::empty(),
             std::iter::empty(),
             [executable.clone()],
+            false,
             false,
             false,
             false,
@@ -2588,6 +2624,7 @@ mod native_path_tests {
     fn macos_projects_declared_process_capabilities() {
         let authority = ProcessAuthority::resolve(
             [], [], [], [], [], [], false, false, true, true,
+            false,
             octopus_descriptors::ProcessSandboxMode::Enforced,
         ).expect("process authority");
         let profiles = tempfile::tempdir().expect("profile root");

@@ -5,6 +5,9 @@ import {
   useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { motion, useIsPresent } from "motion/react";
+import { useShouldReduceMotion } from "../../appearance";
+import { homeSurfaceFade } from "../../client-surfaces/homeSurfaceMotion";
 import "../icon-glyphs/voice";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { Glyph } from "../IconGlyphs";
@@ -39,6 +42,8 @@ export function VoiceCallPuck({
   onOpenHome: () => void;
   session: VoiceSession;
 }) {
+  const present = useIsPresent();
+  const reducedMotion = useShouldReduceMotion();
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const suppressClickRef = useRef(false);
@@ -123,7 +128,8 @@ export function VoiceCallPuck({
   const elapsedMs = session.startedAtMs > 0 ? Math.max(0, nowMs - session.startedAtMs) : 0;
 
   return (
-    <div
+    <motion.div
+      {...homeSurfaceFade(reducedMotion)}
       aria-label={`Home call: ${state.title}`}
       className={`voice-call-puck${dragging ? " is-dragging" : ""}${muted ? " is-muted" : ""}`}
       onClick={openFromPanel}
@@ -133,6 +139,8 @@ export function VoiceCallPuck({
       onPointerUp={endDrag}
       ref={rootRef}
       role="group"
+      data-positioned={Boolean(position) || undefined}
+      inert={!present || undefined}
       style={position ? { left: position.left, top: position.top } : undefined}
     >
       <VoiceCallWaveform
@@ -169,7 +177,7 @@ export function VoiceCallPuck({
           <Glyph name="phoneEnd" size={18} />
         </button>
       </ShellTooltip>
-    </div>
+    </motion.div>
   );
 }
 

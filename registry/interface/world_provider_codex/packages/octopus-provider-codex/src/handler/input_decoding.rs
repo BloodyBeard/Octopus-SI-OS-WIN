@@ -34,6 +34,96 @@ pub(crate) fn admitted_payload_context(
     Ok((context, selected))
 }
 
+pub(crate) fn continuity_input_sources(
+    record: &octopus_runtime::run_record::RunRecord,
+    input: &InterfaceInvocationEnvelope,
+) -> Result<Vec<ArtifactRef>, InterfaceDriverError> {
+    let metadata = input.metadata()?;
+    let runtime = invocation_runtime_metadata(input)?;
+    let mut sources = vec![input.artifact.clone()];
+    if let Some(source) = octopus_run_authoring::input_artifacts::result_source(record, &runtime.interface, &runtime.checkpoint)
+        .map_err(InterfaceDriverError::FailedClosed)? {
+        let bound = input.artifact_binding_payloads.iter().find(|bound| bound.artifact == source)
+            .ok_or_else(|| InterfaceDriverError::FailedClosed("result invocation lost its admitted source payload".into()))?;
+        if !metadata.artifact_binding_refs.contains(&source)
+            || metadata.grant.artifact_access.get(source.id.as_str()) != Some(&octopus_runtime::ArtifactAccess::read_only()) {
+            return Err(InterfaceDriverError::FailedClosed("result invocation lost its exact source read grant".into()));
+        }
+        let original: serde_json::Value = serde_json::from_slice(&bound.read_bytes().map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        let incoming: serde_json::Value = serde_json::from_slice(&input.read_artifact_payload()?)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        if original != incoming {
+            return Err(InterfaceDriverError::FailedClosed("result invocation changed its admitted source payload".into()));
+        }
+        sources.push(source);
+    }
+    Ok(sources)
+}
+
+pub(crate) fn continuity_context_payloads(
+    record: &octopus_runtime::run_record::RunRecord,
+    input: &InterfaceInvocationEnvelope,
+    context: &[octopus_interfaces::ArtifactBindingPayload],
+) -> Result<Vec<octopus_interfaces::ArtifactBindingPayload>, InterfaceDriverError> {
+    let runtime = invocation_runtime_metadata(input)?;
+    let mut payloads = context.to_vec();
+    if let Some(call) = octopus_run_authoring::input_artifacts::result_call(record, &runtime.interface, &runtime.checkpoint)
+        .map_err(InterfaceDriverError::FailedClosed)? {
+        let metadata = input.metadata()?;
+        if !metadata.artifact_binding_refs.contains(&call)
+            || metadata.grant.artifact_access.get(call.id.as_str()) != Some(&octopus_runtime::ArtifactAccess::read_only()) {
+            return Err(InterfaceDriverError::FailedClosed("result continuity lost its exact call evidence read grant".into()));
+        }
+        let bound = input.artifact_binding_payloads.iter().find(|bound| bound.artifact == call)
+            .ok_or_else(|| InterfaceDriverError::FailedClosed("result continuity lost its exact call evidence payload".into()))?;
+        if !payloads.iter().any(|payload| payload.artifact == call) { payloads.push(bound.clone()); }
+    }
+    Ok(payloads)
+}
+
+pub(crate) fn reconcile_input_session_continuity(
+    record: &octopus_runtime::run_record::RunRecord,
+    input: &InterfaceInvocationEnvelope,
+    bound: Option<CodexContinuityState>,
+    current: Option<CodexContinuityState>,
+    current_session: &[SessionContextArtifact],
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let runtime = invocation_runtime_metadata(input)?;
+    if let (Some(bound), Some(current)) = (&bound, &current)
+        && bound.context_generation >= current.context_generation
+        && let Some(call) = octopus_run_authoring::input_artifacts::result_call(record, &runtime.interface, &runtime.checkpoint)
+            .map_err(InterfaceDriverError::FailedClosed)? {
+        let evidence = continuity_context_payloads(record, input, &[])?;
+        let payload = evidence.iter().find(|payload| payload.artifact == call)
+            .ok_or_else(|| InterfaceDriverError::FailedClosed("result continuity has no admitted call evidence".into()))?;
+        let value: serde_json::Value = serde_json::from_slice(&payload.read_bytes()
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        if value.get(CODEX_CONTINUITY_FIELD).map(|raw| parse_codex_continuity(raw, &runtime.interface, runtime.run.as_str())).transpose()?.as_ref() == Some(bound)
+            && bound.pending.is_some() {
+            if bound.context_generation > current.context_generation {
+                return reconcile_current_session_continuity(Some(current.clone()), Some(bound.clone()));
+            }
+            let mut recorded_generation = false;
+            for entry in current_session {
+                if is_foreign_provider_payload(&entry.payload, &runtime.interface)? { continue; }
+                if let Some(raw) = entry.payload.get(CODEX_CONTINUITY_FIELD) {
+                    let state = parse_codex_continuity(raw, &runtime.interface, runtime.run.as_str())?;
+                    recorded_generation |= state.context_generation >= bound.context_generation;
+                }
+            }
+            let mut settled = bound.clone();
+            settled.pending = None;
+            settled.tool_operator_request = None;
+            if !recorded_generation && &settled == current {
+                return Ok(Some(bound.clone()));
+            }
+        }
+    }
+    reconcile_current_session_continuity(bound, current)
+}
+
 pub(crate) fn selected_file_projection(
     record: &octopus_runtime::run_record::RunRecord,
     input: &InterfaceInvocationEnvelope,
@@ -277,6 +367,7 @@ pub(crate) fn decode_provider_input(
     source_interface: Option<&InterfaceId>,
     interface_operations: &BTreeMap<String, InterfaceOperationAffordance>,
     selected_files: Option<&SelectedFileProjection>,
+    private_config: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<ProviderInput, InterfaceDriverError> {
     if selected_files.is_some_and(|files| {
         files.source_label != manifest_label || files.source_payload_sha256 != sha256_hex(bytes)
@@ -284,6 +375,11 @@ pub(crate) fn decode_provider_input(
         return Err(InterfaceDriverError::FailedClosed(
             "selected file projection belongs to a different immutable input".into(),
         ));
+    }
+    if let Some(message) = decode_input_message(private_config, manifest_label, bytes, selected_files)? {
+        return Ok(ProviderInput::Turn(prepend_context_block_to_turn_input(
+            selected_files.map(|files| files.text.clone()), message.input,
+        )));
     }
     if manifest_label == OPERATOR_TURN_CONTROL_LABEL {
         let control =
@@ -407,8 +503,9 @@ pub(crate) fn is_explicit_turn_control_label(label: &str) -> bool {
     label == OPERATOR_TURN_CONTROL_LABEL
 }
 
-pub(crate) fn is_inflight_turn_control_candidate_label(label: &str) -> bool {
-    label == OPERATOR_MESSAGE_LABEL || is_explicit_turn_control_label(label) || peer_notification_label(label)
+pub(crate) fn is_inflight_turn_control_candidate_label(label: &str, descriptor: &InterfaceDescriptor) -> bool {
+    label == OPERATOR_MESSAGE_LABEL || is_declared_input_message(descriptor, label)
+        || is_explicit_turn_control_label(label) || peer_notification_label(label)
 }
 
 pub(crate) fn peer_notification_label(label: &str) -> bool {
@@ -483,18 +580,20 @@ pub(crate) fn decode_inflight_turn_control(
         ))
     })?;
     let bytes = input.read_artifact_payload()?;
-    if let Some(peer) = admitted_peer_message(input, descriptor.interface_driver_config.as_ref().and_then(|c| c.private_config.get("input_intake")))? {
+    let input_message = manifest.label == OPERATOR_MESSAGE_LABEL || is_declared_input_message(descriptor, &manifest.label);
+    if !input_message && let Some(peer) = admitted_peer_message(input, descriptor.interface_driver_config.as_ref().and_then(|c| c.private_config.get("input_intake")))? {
         return Ok(Some(match peer.action {
             PeerAction::Queue => CodexTurnControl::Inject {
                 control_id: peer.control_id.clone(), items: vec![queued_peer_item(peer_input_text(&peer, &input.artifact)?)],
             },
             PeerAction::Followup => CodexTurnControl::Steer {
                 control_id: peer.control_id.clone(), input: vec![UserInput::Text { text: peer_input_text(&peer, &input.artifact)?, text_elements: Vec::new() }],
+                source_artifact: None,
             },
             PeerAction::Interrupt => CodexTurnControl::Interrupt { control_id: peer.control_id, action: "interrupt".into() },
         }));
     }
-    if manifest.label == OPERATOR_MESSAGE_LABEL {
+    if input_message {
         let pinned_run_record = pinned_run_record.ok_or_else(|| InterfaceDriverError::FailedClosed(
             "operator steering has no source-pinned run record".into(),
         ))?;
@@ -531,16 +630,24 @@ pub(crate) fn decode_inflight_turn_control(
             &record, input, &input.artifact, &manifest.label, &bytes, &BTreeMap::new(), &[],
             ModelResultProjection::from_private_config(&config.private_config)?,
         )?;
-        let provider_input = decode_provider_input(
-            &bytes, &manifest.label, None, &BTreeMap::new(), Some(&selected_files),
-        )?;
+        let declared = decode_input_message(&config.private_config, &manifest.label, &bytes, Some(&selected_files))?;
+        let control_id = match &declared {
+            Some(message) => message.control_id.clone(),
+            None => operator_message_control_id(&bytes),
+        };
+        let provider_input = match declared {
+            Some(message) => ProviderInput::Turn(prepend_context_block_to_turn_input(Some(selected_files.text.clone()), message.input)),
+            None => decode_provider_input(
+                &bytes, &manifest.label, None, &BTreeMap::new(), Some(&selected_files), &config.private_config,
+            )?,
+        };
         let ProviderInput::Turn(turn_input) = provider_input else {
             return Ok(None);
         };
         return Ok(Some(CodexTurnControl::Steer {
-            control_id: operator_message_control_id(&bytes)
-                .unwrap_or_else(|| input.artifact.id.as_str().to_string()),
+            control_id: control_id.unwrap_or_else(|| input.artifact.id.as_str().to_string()),
             input: turn_input,
+            source_artifact: Some(input.artifact.clone()),
         }));
     }
     if manifest.label != OPERATOR_TURN_CONTROL_LABEL {

@@ -2,10 +2,60 @@ use super::*;
 use octopus_ledger::ContentHash;
 
 #[test]
+fn declared_input_messages_preserve_context_and_reject_malformed_requests() {
+    for source in [include_str!("../../../../interface.json"), include_str!("../../../../../world_provider_chatgpt/interface.json")] {
+        let descriptor: InterfaceDescriptor = serde_json::from_str(source).unwrap();
+        let config = &descriptor.interface_driver_config.unwrap().private_config;
+        let payload = serde_json::json!({"input_text":"Show the work", "delegation_id":"request-2",
+            "call_id":"call-1", "correlation_id":"offer-1", "transcript":[{"role":"user","text":"Show the work"}],
+            "client_context":[{"name":"client_state","text":"Widget: hidden; revision: current."}]});
+        let decoded = decode_input_message(config, "realtime.delegation", &serde_json::to_vec(&payload).unwrap(), None).unwrap().unwrap();
+        assert_eq!(decoded.control_id.as_deref(), Some("request-2"));
+        let texts = decoded.input.iter().map(|item| match item { UserInput::Text { text, .. } => text.as_str(), _ => panic!("text expected") }).collect::<Vec<_>>();
+        let context: serde_json::Value = serde_json::from_str(texts[0]).unwrap();
+        for field in ["delegation_id", "call_id", "correlation_id", "transcript"] {
+            assert_eq!(context["input_message_context"]["fields"][field], payload[field]);
+        }
+        assert!(texts[1].contains("Widget: hidden; revision: current."));
+        assert_eq!(texts[2], "Show the work");
+        let mut transcript_request = payload.clone();
+        transcript_request["input_text"] = serde_json::Value::Null;
+        transcript_request["provider_event_id"] = serde_json::json!("event-1");
+        let decoded = decode_provider_input(&serde_json::to_vec(&transcript_request).unwrap(), "realtime.delegation", None,
+            &BTreeMap::new(), None, config).unwrap().into_turn_input().unwrap();
+        let [UserInput::Text { text: snapshot, .. }, UserInput::Text { text: request, .. }] = decoded.as_slice() else { panic!("snapshot and complete JSON request expected") };
+        assert!(snapshot.contains("Widget: hidden; revision: current."));
+        let request: serde_json::Value = serde_json::from_str(request).unwrap();
+        assert_eq!(request["input_message_context"]["fields"], transcript_request);
+        transcript_request["transcript"] = serde_json::json!([]);
+        assert!(decode_provider_input(&serde_json::to_vec(&transcript_request).unwrap(), "realtime.delegation", None,
+            &BTreeMap::new(), None, config).is_err());
+        for (field, value) in [("input_text", serde_json::json!(false)),
+            ("delegation_id", serde_json::Value::Null), ("delegation_id", serde_json::json!(" untrimmed")),
+            ("client_context", serde_json::json!({})), ("client_context", serde_json::json!([])),
+            ("transcript", serde_json::Value::Null), ("transcript", serde_json::json!({})),
+            ("transcript", serde_json::json!(false))] {
+            let mut malformed = payload.clone(); malformed[field] = value;
+            assert!(decode_provider_input(&serde_json::to_vec(&malformed).unwrap(), "realtime.delegation", None,
+                &BTreeMap::new(), None, config).is_err(), "{field}");
+        }
+        assert!(decode_provider_input(b"plain text", "realtime.delegation", None, &BTreeMap::new(), None, config).is_err());
+        for payload in [serde_json::json!({"prompt":"Persisted request"}), serde_json::json!({"text":null,"prompt":"Persisted request"}),
+            serde_json::json!({"text":"Persisted request","prompt":"Persisted request"})] {
+            let input = decode_provider_input(&serde_json::to_vec(&payload).unwrap(), "operator.message", None,
+                &BTreeMap::new(), None, config).unwrap().into_turn_input().unwrap();
+            assert!(matches!(input.as_slice(), [UserInput::Text { text, .. }] if text == "Persisted request"));
+        }
+        assert!(decode_provider_input(br#"{"text":"One request","prompt":"Another request"}"#, "operator.message", None,
+            &BTreeMap::new(), None, config).is_err());
+    }
+}
+
+#[test]
 fn arbitrary_json_is_artifact_data_but_operator_envelopes_remain_strict() {
     let source = InterfaceId::new("system_context");
     for payload in [serde_json::json!({"authority":"operator","constraints":[]}), serde_json::json!([1, 2])] {
-        let input = decode_provider_input(&serde_json::to_vec(&payload).unwrap(), "document", Some(&source), &BTreeMap::new(), None).unwrap();
+        let input = decode_provider_input(&serde_json::to_vec(&payload).unwrap(), "document", Some(&source), &BTreeMap::new(), None, &serde_json::Map::new()).unwrap();
         let input = input.into_turn_input().unwrap();
         let [UserInput::Text { text, .. }] = input.as_slice() else { panic!("artifact text expected") };
         let rendered: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -13,7 +63,7 @@ fn arbitrary_json_is_artifact_data_but_operator_envelopes_remain_strict() {
         assert_eq!(rendered["artifact"]["source_interface"], "system_context");
     }
     for (label, payload) in [(OPERATOR_MESSAGE_LABEL, b"{}".as_slice()), ("request", b"{\"prompt\":\"\"}".as_slice()), (OPERATOR_TURN_CONTROL_LABEL, b"{}".as_slice())] {
-        assert!(decode_provider_input(payload, label, Some(&source), &BTreeMap::new(), None).is_err());
+        assert!(decode_provider_input(payload, label, Some(&source), &BTreeMap::new(), None, &serde_json::Map::new()).is_err());
     }
 }
 

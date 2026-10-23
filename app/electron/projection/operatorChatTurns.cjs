@@ -1,4 +1,6 @@
 module.exports = { operatorChatTurnsProjection };
+const { isHomeVoiceInput } = require("./operatorChatVoiceInput.cjs");
+const { cachedOperatorChatTurnState } = require("./operatorChatCache.cjs");
 
 const { movementBoundaryInterface, movementRunId } = require("./movementRows.cjs");
 const { nativeTurnRecordedInputs, operatorChatEventIdentity, operatorChatExecutionScope, operatorChatExpandedStreamRows, operatorChatProviderFailureActivity, operatorChatRuntimeProviderId, operatorTurnControlEndsTurn, operatorTurnControlOutcome } = require("./operatorChatEvents.cjs");
@@ -6,9 +8,10 @@ const { isOperatorChatProviderFailureRow, isOperatorChatProviderMovement } = req
 const { arrayValue, ledgerArtifactLabel, numberValue, objectOrEmpty, requiredString, rowTimeMs, stringValue } = require("./values.cjs");
 
 function operatorChatTurnsProjection(store) {
-  async function operatorChatTurnOpening(entry, row, protocol) {
+  async function operatorChatTurnOpening(entry, row, protocol, readPayload = (row) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection })) {
     if (movementRunId(row) !== entry.runId) return null;
     const label = ledgerArtifactLabel(row);
+    if (isHomeVoiceInput(entry, row)) return "waiting";
     if (row.kind === "InterfaceArrival"
       && label === protocol.inputLabel
       && movementBoundaryInterface(row, "from") === entry.chatInterfaceId) {
@@ -24,20 +27,20 @@ function operatorChatTurnsProjection(store) {
     if (row.kind === "InterfaceOutbound"
       && movementBoundaryInterface(row, "to") === provider
       && label === "provider.peer.input") {
-      const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+      const payload = await readPayload(row);
       return payload?.message?.action === "followup" ? "waiting" : null;
     }
     if (!isOperatorChatProviderMovement(entry, row)) return null;
     if (label === "turn.started") return "working";
     if (label === "provider.transport.dispatch") {
-      const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+      const payload = await readPayload(row);
       return payload?.provider_interface === provider && payload?.method === "turn/start"
         ? "working" : null;
     }
     return null;
   }
 
-  async function reduceOperatorChatTurnState(initial, rows, entry, protocol) {
+  async function reduceOperatorChatTurnState(initial, rows, entry, protocol, readPayload = (row) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection })) {
     const ordered = [...rows].sort((left, right) => numberValue(left.seq, -1) - numberValue(right.seq, -1));
     const executionScope = operatorChatExecutionScope(entry);
     let executionObserved = initial.executionObserved ?? !executionScope;
@@ -88,7 +91,7 @@ function operatorChatTurnsProjection(store) {
       const providerMovement = isOperatorChatProviderMovement(entry, row);
       let providerPayload;
       if (providerMovement && label === "turn.stream") {
-        const payloads = new Map([[row, await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection })]]);
+        const payloads = new Map([[row, await readPayload(row)]]);
         const expanded = operatorChatExpandedStreamRows([row], payloads, entry.runId,
           (header) => observeNative(header, header.opened_source_movement_seq));
         for (const event of expanded) {
@@ -100,7 +103,7 @@ function operatorChatTurnsProjection(store) {
         }
       }
       if (providerMovement && label !== "turn.stream") {
-        providerPayload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        providerPayload = await readPayload(row);
         observeNative(providerPayload, providerPayload?.source_movement_seq ?? providerPayload?.additional_details?.source_movement_seq ?? row.seq);
         if (label === "turn.completed") {
           for (const input of nativeTurnRecordedInputs(providerPayload)) {
@@ -110,12 +113,12 @@ function operatorChatTurnsProjection(store) {
           }
         }
       }
-      const opening = await operatorChatTurnOpening(entry, row, protocol);
+      const opening = await operatorChatTurnOpening(entry, row, protocol, readPayload);
       if (opening) {
         if (opening === "working") activeNativeTurn = nativeKey(providerPayload) ?? true;
-        if (row.kind === "InterfaceArrival" && label === protocol.inputLabel
-          && movementBoundaryInterface(row, "from") === entry.chatInterfaceId) {
-          const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        if (isHomeVoiceInput(entry, row) || (row.kind === "InterfaceArrival" && label === protocol.inputLabel
+          && movementBoundaryInterface(row, "from") === entry.chatInterfaceId)) {
+          const payload = await readPayload(row);
           pendingInputs.push({ seq: row.seq, clientId: stringValue(payload?.message_id) });
         }
         if (!open) {
@@ -130,7 +133,7 @@ function operatorChatTurnsProjection(store) {
       if (["turn.control.acknowledged", "turn.control.failed"].includes(label)) {
         if (!providerMovement) continue;
         const outcome = operatorTurnControlOutcome(
-          await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }),
+          await readPayload(row),
           row,
         );
         if (outcome?.status === "acknowledged" && outcome.action === "resume") {
@@ -161,20 +164,20 @@ function operatorChatTurnsProjection(store) {
       }
       if (!open) continue;
       if (providerMovement && label === "turn.completed") {
-        const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        const payload = await readPayload(row);
         settle(payload, row, stringValue(payload?.status ?? payload?.turn?.status) === "failed" ? "failed" : "idle");
         continue;
       }
       if (providerMovement && label === protocol.terminalOutputLabel) {
-        settle(await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }), row, "idle");
+        settle(await readPayload(row), row, "idle");
         continue;
       }
       if (providerMovement && label === "turn.interrupted.result") {
-        settle(await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }), row, "idle");
+        settle(await readPayload(row), row, "idle");
         continue;
       }
       if (providerMovement && label === protocol.errorOutputLabel) {
-        const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        const payload = await readPayload(row);
         if (payload?.will_retry === true) {
           state = "working";
           continue;
@@ -183,7 +186,7 @@ function operatorChatTurnsProjection(store) {
         continue;
       }
       if (isOperatorChatProviderFailureRow(entry, row)) {
-        const payload = await store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        const payload = await readPayload(row);
         operatorChatProviderFailureActivity(entry, row, payload);
         settle(payload, row, "failed");
         continue;
@@ -194,12 +197,10 @@ function operatorChatTurnsProjection(store) {
   }
 
   async function operatorChatTurnState(projection, entry, protocol) {
-    const state = await reduceOperatorChatTurnState(
-      { open: false, state: "idle", lastMovementSeq: -1, updatedAtMs: 0 },
-      entry.activity,
-      entry,
-      protocol,
-    );
+    const state = await cachedOperatorChatTurnState({ projection, entry, protocol,
+      reduce: (initial, rows, readPayload) => reduceOperatorChatTurnState(initial, rows, entry, protocol, readPayload),
+      resolve: (row, onVerifiedFiles) => store.resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection, onVerifiedFiles }),
+    });
     projection.operatorChatTurnStateCache.set(entry.runId, state);
     return state;
   }

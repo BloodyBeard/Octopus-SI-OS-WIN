@@ -25,6 +25,7 @@ octopus-applypatch = { path = "../octopus-applypatch" }
 octopus-file-system = { path = "../../../process_session/packages/octopus-file-system" }
 base64 = "0.22.1"
 blake3.workspace = true
+fs2 = "0.4"
 serde.workspace = true
 
 serde_json.workspace = true

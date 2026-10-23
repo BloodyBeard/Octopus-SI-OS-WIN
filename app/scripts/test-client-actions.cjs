@@ -21,6 +21,22 @@ const identity = (seq, overrides = {}) => ({ artifact_id: `client.action:${seq.t
 const response = (params, actions) => ({ home: params.home, run_id: params.run_id, interface_id: params.interface_id, actions });
 const scope = { home: '/selected-home', runId: 'home-run', interfaceId: 'home-client' };
 
+test('text submission validates its message route independently of client control results', () => {
+  const { existingRunSubmission, activeOperatorMessageCheckpoint } = require('../../registry/interface/world_operator_chat/client/conversation.cjs');
+  const config = require('../../registry/interface/world_operator_chat/client.json');
+  const client = `${config.run.interface_prefix}home`, provider = 'provider';
+  const binding = (interfaceId, label) => ({ interface: interfaceId, config: { artifact_policy: { mode: 'allow', names: [label], namespaces: [] } } });
+  const checkpoint = (id, label, target) => ({ id, run: 'run', epoch: 0, interface_binding: binding(client, label), outbound_interface_bindings: [binding(target, label)] });
+  const record = { id: 'run', ee: 'ee', worker: 'worker', active_checkpoints: ['message', 'result'],
+    interface_state: { [client]: { client_surface_role: 'home', provider_runtime_interface: provider, provider_choice_interface: provider, worker_choice_interface: 'worker' }, [provider]: {} },
+    checkpoints: [checkpoint('message', config.artifact_labels.message, provider), checkpoint('result', 'client.action.result', 'room')] };
+  const requested = { providerChoiceInterfaceId: provider, clientSurfaceRole: 'home' };
+  assert.equal(existingRunSubmission(config, 'run', record, client, requested).modelInterfaceId, provider);
+  assert.equal(activeOperatorMessageCheckpoint(record, 'run', client, provider, config.artifact_labels.message).id, 'message');
+  record.checkpoints[0].outbound_interface_bindings[0].interface = 'room';
+  assert.throws(() => existingRunSubmission(config, 'run', record, client, requested), /differs from its provider route/);
+});
+
 test('client action contract and fixture stay read-only and typed', async () => {
   assert.ok(contract.PROJECTION_READ_METHODS.includes('projection.client_actions.list'));
   assert.ok(!contract.CLIENT_SURFACE_PROJECTION_READ_METHODS.includes('projection.client_actions.list'));
@@ -58,6 +74,19 @@ test('actions require exact admitted outbound evidence and immutable manifest/pa
   assert.deepEqual(projected.actions[0].from, { Interface: 'room' }); assert.equal(projected.actions[0].run_id, scope.runId);
   assert.match(projected.actions[1].error, /exact/); assert.match(projected.actions[2].error, /identity/);
   assert.deepEqual((await read({ after_seq: 6, limit: 1 })).actions.map(row => row.seq), [7]);
+  const tool = { id: 'tool.call:' + 'a'.repeat(64), content: Array(32).fill(10) };
+  const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'recorded' };
+  const requestSeq = rows.length;
+  const admitted = await admit({ schema: 'octopus.client_action_request', schema_version: 1, action: request, tool_call: tool });
+  const resultPayload = { schema: 'octopus.client_action_result', schema_version: 1, phase: 'completed', ok: true, widgets: [],
+    tool_call: tool, request_artifact: `client.action:${admitted.hash}`, request_seq: requestSeq, request_id: 'recorded', action: 'list_widgets' };
+  const resultHash = await blob({ label: 'client.action.result', payload_path: original, payload_content_hash: await blob(resultPayload) });
+  const resultSeq = rows.length;
+  rows.push({ ...rows[requestSeq], seq: resultSeq, lamport: resultSeq, kind: 'InterfaceArrival',
+    from: { Interface: scope.interfaceId }, to: { Interface: 'worker' },
+    artifact: { id: `client.action.result:${resultHash}`, content: [...Buffer.from(resultHash, 'hex')] } });
+  await fs.writeFile(path.join(home, 'ledger/movements.jsonl'), rows.map(JSON.stringify).join('\n') + '\n');
+  assert.deepEqual((await read({ after_seq: 7 })).actions[0].completed_result, { artifact_id: `client.action.result:${resultHash}`, seq: resultSeq });
   await assert.rejects(read({ home: '/other-home' }), /selected Home/);
   await fs.writeFile(path.join(blobs, first.payloadHash), '{}'); assert.match((await read({ limit: 1 })).actions[0].error, /digest/);
   await fs.unlink(path.join(blobs, first.payloadHash)); assert.match((await read({ limit: 1 })).actions[0].error, /ENOENT/);
@@ -86,7 +115,7 @@ async function harness(read, props = {}) {
 test('widget results resume after lost admission without repeating the saved action', async () => {
   window.localStorage.clear(); let calls = 0, fail = true;
   const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'inventory' };
-  const view = await harness(params => response(params, params.after_seq < 3 ? [identity(3, { action: request, turn_closure: 'completed' })] : []), {
+  const view = await harness(params => response(params, params.after_seq < 3 ? [identity(3, { action: request, tool_call: { id: 'tool.call:' + 'a'.repeat(64), content: Array(32).fill(10) }, expires_at_ms: Date.now() + 10000, turn_closure: 'completed' })] : []), {
     widgets: async () => { calls++; return [{ widget_id: 'clock', state: 'hidden' }]; },
     deliver: async () => { if (fail) throw new Error('receipt admission unavailable'); },
   });
@@ -106,18 +135,57 @@ test('widget results resume after lost admission without repeating the saved act
   } finally { await view.close(); }
 });
 
-test('a client result waits for its turn to complete and a stopped turn cancels it', async () => {
-  window.localStorage.clear(); let calls = 0, closure = null;
-  const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'held' };
-  const view = await harness(params => response(params, params.after_seq < 4 ? [identity(4, { action: request, turn_closure: closure })] : []), {
-    widgets: async () => { calls++; return []; },
-  });
+test('a tool-correlated client control returns during the open turn, once, and expired or stopped requests have no effect', async () => {
+  for (const state of ['open', 'expired', 'stopped']) {
+    window.localStorage.clear(); let calls = 0;
+    const tool = { id: 'tool.call:' + 'a'.repeat(64), content: Array(32).fill(10) };
+    const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: state };
+    const view = await harness(params => response(params, params.after_seq < 8 ? [identity(8, {
+      action: request, tool_call: tool, expires_at_ms: Date.now() + (state === 'expired' ? -1000 : 10000),
+      turn_closure: state === 'stopped' ? 'stopped' : null,
+    })] : []), { widgets: async () => { calls++; return [{ widget_id: 'clock', state: 'visible' }]; } });
+    try {
+      assert.equal(view.results.length, 1); assert.equal(calls, state === 'open' ? 1 : 0);
+      assert.equal(view.results[0].payload.ok, state === 'open');
+      assert.deepEqual(view.results[0].payload.tool_call, tool);
+      await view.render({}, true); assert.equal(view.results.length, 1);
+      await view.close(); await view.render(); assert.equal(view.results.length, 1);
+    } finally { await view.close(); }
+  }
+});
+
+test('projection activity cannot cancel an admitted client control or its result', async () => {
+  window.localStorage.clear(); let resolveRead, resolveEffect, calls = 0;
+  const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'during-activity' };
+  const view = await harness(params => params.after_seq < 8 ? new Promise(done => { resolveRead = () => done(response(params, [identity(8, {
+    action: request, tool_call: { id: 'tool.call:' + 'a'.repeat(64), content: Array(32).fill(10) },
+    expires_at_ms: Date.now() + 10000, turn_closure: null,
+  })])); }) : response(params, []), { widgets: () => { calls++; return new Promise(done => { resolveEffect = () => done([]); }); } });
   try {
-    assert.equal(calls, 1); assert.equal(view.results.length, 0);
-    closure = 'completed'; await view.render({}, true);
-    assert.equal(calls, 1); assert.equal(view.results.length, 1); assert.equal(view.results[0].payload.request_seq, 4);
-    await view.close(); window.localStorage.clear(); closure = 'stopped';
-    await view.render(); assert.equal(calls, 1); assert.equal(view.results.length, 1);
+    const firstRead = resolveRead;
+    for (let index = 0; index < 3; index++) await view.render({}, true);
+    await React.act(async () => firstRead());
+    assert.equal(calls, 1);
+    for (let index = 0; index < 3; index++) await view.render({}, true);
+    await React.act(async () => resolveEffect());
+    assert.equal(view.results.length, 1); assert.equal(view.results[0].payload.ok, true);
+    assert.equal(calls, 1); assert.deepEqual(view.refusals, []);
+    assert.equal(view.reads.at(-1).after_seq, 8);
+  } finally { await view.close(); }
+});
+
+test('an admitted client result prevents effects after local cursor loss', async () => {
+  window.localStorage.clear(); let calls = 0;
+  const view = await harness(params => response(params, params.after_seq < 8 ? [identity(8, {
+    action: { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'recorded' },
+    tool_call: { id: 'tool.call:' + 'a'.repeat(64), content: Array(32).fill(10) },
+    completed_result: { artifact_id: 'client.action.result:' + 'b'.repeat(64), seq: 10 },
+    expires_at_ms: Date.now() + 10000,
+  })] : []), { widgets: async () => { calls++; return []; } });
+  try {
+    assert.equal(calls, 0); assert.equal(view.results.length, 0);
+    await view.close(); window.localStorage.clear(); await view.render();
+    assert.equal(calls, 0); assert.equal(view.results.length, 0);
   } finally { await view.close(); }
 });
 

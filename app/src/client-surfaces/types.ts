@@ -40,6 +40,7 @@ export type ClientSurfaceAction = {
 };
 
 export type ClientSurfaceNode =
+  | { type: "video"; source: string; title?: string }
   | {
       type: "stack";
       gap?: ClientSurfaceGap;

@@ -84,7 +84,7 @@ function turnControlMessage({
 
 const successfulTurn = turnControlMessage({ eventKind: "message", movementSeq: 1 });
 const failedTurn = turnControlMessage({ error: true, eventKind: "error", movementSeq: 2 });
-const interruptedTurn = turnControlMessage({ eventKind: "interrupted_result", movementSeq: 3 });
+const interruptedTurn = turnControlMessage({ eventKind: "interrupted_result", movementSeq: 3, eventData: { turn_interrupted: true, native_terminal_status: "interrupted" } });
 const failedResume = turnControlMessage({
   error: true,
   eventData: { action: "resume", control_id: "control-failed", status: "failed" },
@@ -99,7 +99,8 @@ const acknowledgedResume = turnControlMessage({
   terminal: false,
 });
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([successfulTurn], false), false);
-assert.equal(chatTurnControl.operatorTurnResumeAvailable([failedTurn], false), true);
+assert.equal(chatTurnControl.operatorTurnResumeAvailable([failedTurn], false), false);
+assert.equal(chatTurnControl.operatorTurnResumeAvailable([{ ...interruptedTurn, eventData: { native_terminal_status: "failed", turn_interrupted: false } }], false), false);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([interruptedTurn], false), true);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([{ ...interruptedTurn, eventData: { native_terminal_status: "completed", turn_interrupted: false } }], false), false);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([interruptedTurn, failedResume], false), true);
@@ -338,7 +339,7 @@ assert.throws(
   () => requireMaterializedOperatorChatClientOwner({ packages: [] }),
   (error) => error?.code === "operator_chat_client_contract_mismatch",
 );
-assert.throws(
+assert.doesNotThrow(
   () => requireMaterializedOperatorChatClientOwner({
     packages: [{
       id: "world_operator_chat",
@@ -348,11 +349,11 @@ assert.throws(
         owner: "world_operator_chat",
         materialized: true,
         source_digest: exactPackageDigest,
-        installed_digest: "invalid",
+        installed_digest: "b".repeat(64),
       }],
     }],
   }),
-  (error) => error?.code === "operator_chat_client_contract_mismatch",
+  "source equality is not a client contract",
 );
 assert.throws(
   () => assertOperatorChatArtifactBatch({
@@ -586,6 +587,12 @@ const deduplicatedProjection = chatActivityProjectionModule.mergeRenderedMessage
 );
 assert.equal(deduplicatedProjection.length, duplicateProjection.length);
 assert.deepEqual(deduplicatedProjection.map((message) => message.id), duplicateProjection.map((message) => message.id));
+const repeatedInput = { id: "repeat-before", runId: "home", interfaceId: "home-client", role: "user", text: "hi!", createdAtMs: 1, eventKind: "message" };
+const repeatedPending = { ...repeatedInput, id: "repeat-now", createdAtMs: 3, pending: true };
+assert.deepEqual(chatActivityProjectionModule.mergeRenderedMessages([repeatedInput], [repeatedPending], [], true)
+  .map(message => message.id), ["repeat-before", "repeat-now"]);
+assert.deepEqual(chatActivityProjectionModule.mergeRenderedMessages([repeatedPending], [repeatedPending], [], true)
+  .map(message => message.id), ["repeat-now"]);
 const pendingSteer = Object.freeze({ id: "steer-message", runId: "run-a", role: "user", text: "exact steering text",
   createdAtMs: 1, eventKind: "steering", pending: true,
   eventData: Object.freeze({ steering_status: "submitted", steering_provider_interface: "provider-exact" }) });
@@ -749,10 +756,12 @@ async function verifyTranscriptLayout() {
   window.requestAnimationFrame = (callback) => (frames.set(++frameId, callback), frameId);
   window.cancelAnimationFrame = (id) => frames.delete(id);
   const scope = {
+    Element: dom.window.Element,
     ...React, ...toolPresentation, ...reasoningSummary, ...conversationTraceModule,
     ...typescriptModule("src/components/chat/subagentActivity.ts"), ...typescriptModule("src/components/chat/commandActivityModel.ts"),
     useShouldReduceMotion: () => reducedMotion,
     Glyph: ({ name }) => React.createElement("span", { "data-glyph": name }),
+    ShimmerActivityScope: ({ children }) => children,
     CadencedShimmerText: ({ children, className, active }) => React.createElement("span", { className, "data-active": Boolean(active) }, children),
     MessageContent: ({ text, streaming, streamKey, variant }) => React.createElement("p", { "data-variant": variant, "data-streaming": streaming ? "true" : undefined, "data-stream-key": streamKey }, text),
     MessageTooltip: ({ children, label, onActivate }) => React.createElement("span", { "data-tooltip-target": label?.props?.children, "data-activates-file": Boolean(onActivate), onClick: onActivate }, children),
@@ -794,6 +803,7 @@ async function verifyTranscriptLayout() {
     McpResourceSurface: ({ message }) => React.createElement("section", { "data-mcp-tool": message.eventData.tool }) });
   const fileActivity = renderModule(messageList, ["FileChangeActivity", "activityPathLabel"], {
     ...scope,
+    ...renderModule(source("src/design-system/LoadingSkeleton.tsx"), null, scope),
     InlineUnifiedDiff: ({ diff }) => React.createElement("pre", null, diff),
   });
   const container = document.getElementById("root"), root = createRoot(container);
@@ -804,8 +814,11 @@ async function verifyTranscriptLayout() {
       const batch = [...frames.values(), ...completions.splice(0)]; frames.clear(); batch.forEach((callback) => callback());
     });
   };
+  let turnKey = 0;
   const render = async (activities, turnInProgress = true, response, statusBoundaryVisible = false, activityWindow = "all") => {
+    if (!activities.length && !turnInProgress && !response) turnKey += 1;
     await React.act(async () => root.render(React.createElement(turn.TurnActivity, {
+      key: turnKey,
       activities, activityWindow, turnInProgress, response, startedAtMs: 1, presentation: "conversation", statusBoundaryVisible, toolPresentations: {},
       renderActivity: (message) => React.createElement(events.AssistantEventContent, { message, toolPresentations: {} }),
     })));
@@ -1030,7 +1043,7 @@ async function verifyTranscriptLayout() {
       })));
       const disclosure = query('[aria-label="Toggle diff for expense-report.md"]');
       if (disclosure.getAttribute("aria-expanded") === "false") await click(disclosure);
-      assert.equal(query(".activity-file-body").textContent, expected);
+      assert.equal(receipt.detailsLoading ? query('.activity-file-body [role="status"]').getAttribute("aria-label") : query(".activity-file-body").textContent, expected);
     }
   } finally {
     await React.act(async () => root.unmount()); dom.window.close();

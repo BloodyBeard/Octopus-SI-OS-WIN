@@ -18,7 +18,55 @@ leaked.
 If a genuinely new execution family is missing, add that family once as code
 inside its owner folder. Every later instance of it is data.
 
+Installed owners may contain authorized local edits to descriptors, role
+artifacts and executable code. Health checks validate their identities,
+structure, declared imports, client APIs and diagnostic probes; byte equality
+with a distribution or an installation receipt is not a health requirement.
+Receipts retain installation and update provenance. A newer distribution is
+reported as an available update, without invalidating the installed owners.
+Content digests remain appropriate for immutable artifact references, release
+integrity and concurrent-edit protection during publication, update or removal.
+Updates preserve local changes and report conflicting edits before replacement.
+
+## Interface process lifecycle
+
+The generic Rust life bridge acknowledges readiness publication. Awaiting its
+ready signal succeeds only after the bounded Ready frame has been written and
+flushed; synchronous recovery work after that boundary cannot postpone the
+publication. Cancellation, a closed publisher, or a write/flush failure remains
+an error. This acknowledgement covers readiness publication, not completion of
+pending artifact deliveries or recovery work. An in-process life signals its
+readiness observer directly.
+
+The life host observes root exit separately from group closure. On macOS it
+keeps the root waitable until the owned group closes, so cleanup never signals
+a recycled PID or PGID. Protocol EOF allows a bounded exit observation; process
+cleanup and private stderr draining also have finite deadlines. Wait, signal and
+cleanup failures remain explicit, with the original exit status and private
+diagnostics preserved.
+
 ## In the client
+
+Project source folders are ordered client configuration in the EE's
+`config.octopus_os.source_folders`. The first folder is Primary. New task
+composition binds that folder and the remaining explicit roots to the selected
+workspace door, and carries their names in the operator input's client context.
+Full access keeps the same working context while its separate host-root grant
+controls filesystem reach. Editing project folders affects future tasks;
+existing private doors retain their accepted roots. Folder edits and presentation
+are one guarded client transaction whose receipt proves the exact EE writes
+and Home-sidecar publication.
+
+An operator message rejected during preparation is explicitly `not_sent`.
+The client restores a manual message to the composer and reports the error
+through its existing error surface. An uncertain delivery is reconciled against
+admitted message identity; an explicit retry retains that identity. It never
+retries automatically. A newer draft is preserved, with the failed message kept
+in durable client storage until it can be restored or explicitly handled.
+Provider turn boundaries also split the visible history when another run starts
+a new turn, so an earlier answer cannot hide later activity.
+
+
 
 The optional desktop client's **Applications** catalog presents these packages
 as providers, connectors, plugins, and context artifacts. A connector such as
@@ -28,6 +76,99 @@ A plugin is a service the model calls through its interface, such as an MCP
 server, together with the context artifact that teaches the model its contract.
 Installation does not make the model call it automatically. An application pack groups packages for setup without
 introducing a new runtime identity.
+
+A configured local Home opens after local client unlock and verification by the
+existing setup owner of its complete aggregate receipt, followed by matching
+that receipt's operation and workspace request to the workspace receipt and
+visible Home scope. A directory, running process, or worker is not setup proof.
+The completed branch does not request the setup model catalogue or require a
+fresh provider account observation; a browser setup draft does not supersede
+the completed receipt. New and incomplete Homes still require the real provider
+account and all setup proofs. An unavailable account observation is distinct
+from a confirmed signed-out account and never becomes authenticated state.
+Changing the selected Home discards pending client proof and account observations
+from the previous target and validates the new target. This local shell admission
+does not authorize provider requests: sending and provider-dependent operations
+retain their runtime authentication, bindings, and formed grants.
+
+The desktop reads model descriptors independently of the task list and workspace
+transaction lock. Task projections inspect workspace receipts without recovering
+transactions; startup and the owning mutations perform recovery. A run changing
+while its snapshot is read invalidates the next read, without indefinitely
+restarting the current one. Registry and policy changes still require a fresh
+configuration snapshot.
+
+Task lists read the installed descriptors and run evidence without auditing the
+package inventory. Package, application-catalogue, composer-capability and full-snapshot reads
+load that inventory when they need it, retaining its current integrity checks.
+
+The desktop client may persist derived task status and text previews under
+`client/projection-cache/`. A status checkpoint includes the exact movement
+prefix, ledger identity, reducer version, provider and execution scope, input
+protocol, and the identities of every verified artifact file it consumed. A
+matching checkpoint folds only appended movements. Previews are keyed by the
+exact artifact and read contract. Changed source files or contracts invalidate
+the result; malformed caches are discarded with a diagnostic. Cache write
+failure never blocks an authoritative read. These files are disposable client
+data: runtime admission and policy never read them, and removing them changes
+only the cost of reconstructing the same result. Changes to the fold or preview
+semantics require a new cache version.
+
+One package-adoption operation uses one bounded native planner process. It reads
+and validates the ledger prefix once, then plans and commits each run in order.
+Each request keeps its own ownership, formation and pending-work checks. Reuse
+requires the same complete ledger bytes and checked grant contents; changes stop
+the operation. Commit preconditions include those exact grant files. Cancellation
+is checked before publication, and child-process cleanup has a finite deadline.
+The projection exists only for that operation and is discarded with its process.
+
+Client suggestions and task naming use a client-maintenance EE that is a
+separate root beside the workspace's initial EE. Its template and worker ceiling
+grant no tools or worker environments. The client projects projects and tasks
+from its workspace subtree, so this service is outside that projection. The
+owning package authors the root when preparing maintenance work; an existing
+maintenance child moves to that root placement in the same guarded transaction,
+retaining its identity, configuration and instance narrowing.
+
+Task naming uses a separate client-maintenance run with private input, result,
+worker and provider interfaces. The provider copy retains the task's selected
+model, reasoning effort and service tier. Its request binds the exact admitted
+user artifact and declares a text field, instructions and output schema; the
+native provider generates from that input in an ephemeral context with no tools
+or worker environment. The result crosses the private return interface as an
+artifact. The client writes a valid title into the task's presentation only
+while no authored name exists; a local manual alias also takes precedence.
+Generation does not hold the task's execution lock. Completion or a bounded
+failure removes the maintenance run's active bindings, and an uncertain native
+request is never silently repeated. This operation currently requires a native
+Codex binding; other provider bindings do not claim title-generation support.
+
+Deleting a task includes its exact client-owned suggestion and title runs and
+private ports under the same retirement proof as its other owned records. The client
+checks each companion's source, topology and descriptors. Shared dependencies
+still refuse deletion; ledger evidence and published shared memory remain.
+The task's declared input intake and writer belong to this inventory even
+without client presentation sidecars. Idle clients' declared output routes to
+the task and exact policy allowances for its private resources are removed in
+the same guarded transaction. A required wait, ambiguous owner or busy connected
+client refuses deletion. Run-coordinate context artifacts remain readable
+provenance; their recorded coordinates are not live bindings. Publication metadata
+directories are checked as private storage and never treated as descriptors.
+While native ownership is held, repeated retirement checks reuse only the
+verified ledger prefix. Its bytes and every referenced grant remain checked;
+new rows are decoded and cold recovery validates the complete prefix again.
+Runtime-private directory contents are pinned after held quiescence, including
+the runtime's own process-finalization writes. Their root identity stays fixed;
+public descriptor trees must still match the original staging snapshot.
+
+Context-free outgoing connections are future routing configuration. The provider
+may recognize their exact addition or withdrawal between checked writer records;
+withdrawing a connection requires a terminal handoff that does not use it.
+Its checkpoint, frontier references and template are removed together, while
+context, history, ownership and pending effects remain identical. Recovery still
+proves every other edit through the declared writer chain, including consumption
+of a completed tool result before the routing change. A routing edit never
+substitutes for a writer receipt or grants a future emission.
 
 ![Applications catalog with a provider pack, installed connectors, and setup states](../images/client/applications.png)
 
@@ -74,6 +215,11 @@ What is never shared is the live executable: each kind runs its own door and
 executor processes. Byte-for-byte clones of code per owner are not the model
 either. Import is.
 
+On macOS, the process sandbox permits read-only operating-system runtime
+resources, including ICU locale data, alongside system libraries and timezone
+data. Application files and credentials come from the process authority
+declared by their owner.
+
 ## Add a provider
 
 1. Copy the nearest provider folder that speaks your wire, for example
@@ -89,6 +235,125 @@ either. Import is.
 6. Bind it on a run's checkpoints.
 
 Nothing in the runtime changes, and nothing matches on the provider's name.
+
+An admitted request that steers a native turn retains its exact input artifact
+and emits `turn.control.acknowledged` with the new continuity. That receipt is a
+declared context output, so the authored run advances with it before a later
+tool result is consumed. A queue-only input receipt with no continuity remains
+`turn.input.acknowledged` and does not claim a context change.
+
+The provider declares conversational input formats in `private_config.input_messages`.
+Each label names the payload fields that carry its text, client observations,
+attachments and request identity. An admitted message uses the same decoder when
+the model is idle and when it is working; a follow-up reaches the current native
+turn without waiting for its final answer. The original artifact remains the
+reply reference through tool results and interruption. Labels and field mappings
+belong to the provider package; the kernel continues to route by interface.
+
+`text_fields` declares alternate text carriers; populated carriers must agree.
+`client_context_field`, `attachments_field` and `identity_field` name their
+payload fields, and `identity_required` declares whether the identity must be
+present. `context_fields` names required accompanying data.
+`request_context_fields` maps structured request fields to `array` or `object`;
+when text is absent, nonempty declared request context carries the request. The
+provider preserves the complete structured payload instead of selecting or
+rewriting a transcript line.
+
+The operator client's package declares `provider_contract_updates` for private
+provider copies it owns. Each entry names a configuration field and its accepted
+predecessors: an absent field or an exact value. The update takes that field from
+the installed source provider, preserving model choices and unrelated settings.
+It applies only after accepted input, output and tool work has settled, through
+the client's existing transaction with pinned dependencies. Locally authored
+values defer the update explicitly. Installing a new input contract therefore
+updates existing chats without rebuilding their runs or losing their history.
+
+Intermediate provider observations are handed to their client route as soon as
+they are complete. Their delivery does not close the source. The provider keeps
+source completion on its final output or suspended external call, so reporting
+progress neither waits for another model item nor releases a pending effect.
+The client projects admitted message items immediately, including final-answer
+items received before turn completion. A later sealed stream or terminal output
+folds into the same provider, turn and item identity without repeating its text.
+
+For the desktop picker, declare `private_config.model_catalog` in
+`interface_driver_config`. Each entry names its `model`, `display_name`,
+`default_reasoning_effort`, `supported_reasoning_efforts` and `show_in_picker`;
+descriptions and service tiers are optional. The client validates these rows
+and intersects them with the interface's model allowance. It does not inspect
+the provider's transport adapter.
+
+For account-backed discovery, declare `private_config.client_metadata` with
+`schema_version: 1` and `module`, an exact `interface://` import of a CommonJS
+file under the owning interface's `packages/`. That file exports
+`schemaVersion: 1` and `modelCatalog`, and optionally `probeAccount` and `signIn`
+for desktop setup. Discovery receives the descriptor, desktop account transport
+and request-local cache and returns the client's model rows. Keep account
+validation in the owner module. Missing or failing modules produce an error;
+the client never replaces their result with another account or a static list.
+Ship the module and its declaration in the same package update.
+The installed package owner must declare that exact module. Execution loads
+that regular file and its imports from the active registry, and validates the
+exported API and returned catalogue. Authorized local code edits do not need
+to match a bundled copy. Before installation, setup discovery uses the selected
+source registry; it never substitutes source code for a missing installed module.
+
+A signed-in CLI provider owns its authentication and declares the executable
+and account paths its life may use. The bridge supplies its interface-private
+temporary directory to the CLI explicitly; the client does not copy tokens or
+choose a replacement provider.
+
+A retained output whose original edges are still pending remains the same
+hand-in. The provider captures its artifact once and waits within its declared
+result timeout, retrying only that retained delivery identity and scope. Pending
+admission does not end the native turn. Cancellation, an expired timeout, a
+changed scope or a definitive refusal remains an explicit failure; completed
+edges are never executed again.
+
+A deterministic projection package may explicitly replace a final artifact that
+its verifier rejected. The checked writer proves the exact predecessor record,
+pinned source, retained delivery scope and definitive refusals for every original
+edge. Any admitted, pending or ambiguous edge prevents replacement. The successor
+keeps the output contract and neighboring run state, changes the artifact and
+checkpoint generation, and retains the rejection proof. Replaying its write uses
+the same saved successor; unchanged output bytes do not create another delivery.
+Old artifacts, movements and grants remain unchanged. Model providers do not
+select this projection-repair operation.
+
+A retained result-invocation write is validated against its exact authored
+preimage, patch and postimage. If another interface has advanced the record,
+retry uses the invocation owner's assembler over that current record and proves
+the same admitted source, receiving checkpoint and original contract. The
+concurrent-edit checks still protect unrelated context, pending work and peer
+state; a later record never substitutes for an earlier attempt's preimage.
+
+When checked run authoring forwards a tool result through a new carrier, its
+exact admitted source remains the same incoming result. The provider excludes
+both carriers from evidence that would close that result's own pending native
+request; their appearance in context does not prove native consumption. The
+result wait also binds its exact original call as read-only evidence. Provider
+continuity reads that call independently of model-context filtering. An older
+conversation context may be superseded only by the newer pending state in
+that admitted call, with matching provider, run and transport coordinates.
+Completing an older result can project the same generation as a newly admitted
+call. That projection cannot clear the new call's wait: its exact call evidence
+prevails until an equally new recorded continuity carrier proves a successor.
+
+The provider's explicit `reseed_from_session_context` cold-start policy rebuilds
+its private transport from the admitted session snapshot. It requires that
+snapshot and a non-regressing context generation. A pending or interrupted
+result forces exact thread resumption instead; changing this configuration does
+not settle a tool call. The new thread receives the ordered admitted context and
+current formed policy, while the original native history remains untouched.
+This mode makes no claim that old native wrappers completed or that code after
+an await ran. When recovering damaged native history, that uncertainty belongs
+in the admitted continuation input and remains part of the session context.
+
+An explicit Resume on a context-free control route recovers its native thread
+from the provider's delivered stopping receipt. Its run, provider and context
+generation must match the current record, and its exact acknowledgement must
+have entered the ledger before Resume. The control route does not need to
+carry the conversation or create a replacement thread.
 
 ## Add a channel or sensor
 
@@ -172,14 +437,84 @@ task it creates admits only that name, so later firings never reach earlier
 tasks. Selection, timing and cursor state belong
 to the interface package; the client projects these activations as Triggers.
 A disabled activation that no run binds is a template, shipped by a package:
-Triggers clones it, with private copies of its controller interfaces and
-authoring tool, into a trigger bound to its own controller run. An Application
+The package's clone operation supplies private copies of its controller interfaces
+and authoring tool, bound to its own controller run. An Application
 Pack's `workspace_setup.triggers` names templates that setup arms through the
 same clone, each with its own interface id and quiet period, only when its
 package was selected; a retried setup finds the armed trigger and creates
 nothing.
 
+Home binds a compact client-delivery artifact separately from its full authoring
+coordinates. The compact delivery contract is included in the provider's
+declared instruction selection. Client controls use it directly; configuration
+and source edits read the separate coordinates. The client tool declares the common widget call shape directly so
+these operations need no full document-authoring catalogue.
+
+Text and voice inputs can carry a compact `client_observation` snapshot of the
+available surfaces and widgets, including exact identities, revisions and current
+presentation, configuration and review states. The snapshot travels inside the
+input artifact as read-only client context. It grants no authority; actions still
+validate the current revision and route. Missing or stale details are read through
+the client tool. The client bounds the snapshot to 4 KiB by omitting whole rows and
+reporting the omission counts. During a voice call, a changed snapshot crosses the
+declared control interface as delegation metadata; subsequent delegations carry
+the latest snapshot accepted by the voice provider. Replaying an input keeps its
+original snapshot.
+
+An in-progress projection refresh retains its last admitted observation; it does
+not report an unavailable inventory. A failed read does. Client observations stay
+in the voice interface's private state and enter the execution model only inside
+its delegation artifact. They never enter the audio model's conversation or
+change its session configuration, including at call creation. A metadata update
+has `client_context`, `channel=context`, no delegation identity and no text.
+The interface persists the snapshot and its `context_retained` receipt together;
+that receipt makes no claim about a transport write or spoken response. Replaying
+an older accepted update returns its receipt without replacing newer context.
+
+Client controls are ordinary system-room tool calls. An operation declared with
+`await_client_result` emits an exact `octopus.client_action_request` artifact
+through the presentation interface. The client retains preparation and its
+actual result by request identity, then sends `client.action.result` through
+its declared input. A standing route delivers it to the system room, where
+it completes the original native tool call. It never starts another model turn.
+The result must match the source run, tool-call artifact, request artifact and
+request id. Restart reuses retained emission and result evidence; an admitted completion
+also prevents replay after the client loses its local cursor. An uncertain
+effect is never repeated automatically. A missing client produces an explicit
+bounded timeout. A stopped or expired request performs no new client action.
+Presentation requests themselves do not echo back into the provider.
+Projection updates wake the client control consumer without cancelling an
+admitted read, effect or result delivery. Refreshing an already loaded surface
+registry keeps controls available; changing Home or disabling the client cancels
+the old consumer. Repeated wakeups coalesce while one consumption is in flight.
+
+The voice provider delegates request text to Home; it does not implement native
+widget function calls. Home uses the same client control tools and streams its public output. Provider continuity retains the exact original input artifact
+across tool results and interrupted-turn recovery; projected outputs carry that
+reference as `in_reply_to`. The client joins it only to an admitted input from
+Home's declared voice interface and returns the result to that exact native
+delegation in the same call. Results from earlier calls are not appended to the current call;
+arrival order never assigns a result to a different request. Prior Home messages enter a call as an explicit historical
+snapshot, not synthetic native voice turns without their tool evidence.
+That snapshot includes requests from Home's exact voice delegation interface;
+live microphone input is not echoed back into the call as a text update.
+Public progress reaches the voice commentary channel; answer text and failures
+reach the speakable channel as they become available. The client preserves each
+item's identity and sends only its unseen suffix. Completing an item never
+replays its prefix, and changing an already delivered prefix fails explicitly.
+Transport chunks carry the model's text, channel and exact delegation identity,
+without client JSON wrappers, extra instructions or synthetic completion messages.
+Call creation returns its SDP before the control connection is established,
+allowing WebRTC to activate the remote session. The provider joins that exact
+call with bounded activation retries. The microphone remains disabled until
+both WebRTC and an admitted provider-ready event are confirmed.
+
 ## Media across interfaces
+
+The voice provider declares conversation, interruption and delegation policy in
+its session instructions. GPT-Live instructions name the native
+`<|SpawnThinking|>` signal explicitly; only an admitted delegation, followed by
+backend result artifacts, proves execution. A spoken acknowledgment does not.
 
 Carry files as artifact references, not filesystem path strings. A transport
 adapter may materialize bytes however it needs; the framework surface stays
@@ -203,3 +538,7 @@ Ask:
 - Does every new side effect leave an artifact and a movement?
 - Is failing closed with a clear error better than a fallback that almost
   works? It usually is.
+
+### Native video documents
+
+A native `video` node accepts an explicit HTTPS media `source` without URL credentials and an optional `title`. It uses the platform video controls, anonymous cross-origin loading and metadata-only preload; it never autoplays. The media server must permit CORS. Publishing a new document revision replaces the source. Load failures remain visible. This media capability does not grant sandbox HTML network, iframe or media access.

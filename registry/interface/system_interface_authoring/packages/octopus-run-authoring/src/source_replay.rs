@@ -89,14 +89,14 @@ impl ProviderOutputHandoff {
                 let publication = previous.as_ref().is_some_and(|prior|
                     context_publication::is_publication_completion(prior, &next)
                         && prior.source_without_context == next.source_without_context);
-                if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next)) {
+                if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next) && !rejected_final::follows(prior, &next)) {
                     if prior.publication_unfinished() && !publication {
                         return Err("completed input handoff was superseded before context publication".into());
                     }
                     self.admitted_replay_handoff_before(prior, transition.call.seq.0)?;
                 }
                 if let Some(prior) = sources.get(&next.source_movement_seq) {
-                    if prior.terminal && !publication && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next) {
+                    if prior.terminal && !publication && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next) && !rejected_final::follows(prior, &next) {
                         return Err("completed input chain repeats a terminal source".into());
                     }
                     if prior.items == next.items && !publication {
@@ -221,7 +221,7 @@ impl ProviderOutputHandoff {
             let next = persisted_pending_handoff(&record, &self.config.provider_interface)?
                 .ok_or("checked source replay lost its pending handoff")?;
             if let Some(previous) = previous.as_ref() {
-                if previous.items != next.items && !source_withdrawal::follows(previous, &next) {
+                if previous.items != next.items && !source_withdrawal::follows(previous, &next) && !rejected_final::follows(previous, &next) {
                     if previous.publication_unfinished() {
                         return Err("provider handoff was superseded before its context was published".into());
                     }

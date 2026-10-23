@@ -16,7 +16,9 @@ globalThis.requestAnimationFrame = w.requestAnimationFrame.bind(w);
 globalThis.cancelAnimationFrame = w.cancelAnimationFrame.bind(w);
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
 globalThis.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };
-w.matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+let motionPreferenceChanged;
+const motionPreference = { matches: true, addEventListener(_, listener) { motionPreferenceChanged = listener; }, removeEventListener() {} };
+w.matchMedia = () => motionPreference;
 w.HTMLElement.prototype.scrollIntoView = function () { this.dataset.scrolled = "true"; };
 w.HTMLElement.prototype.getBoundingClientRect = function () {
   if (this.classList.contains("chat-tooltip")) {
@@ -32,7 +34,7 @@ w.HTMLElement.prototype.releasePointerCapture = function () { capture.delete(thi
 const { createRoot } = require("react-dom/client");
 const { useMotionValue } = require("motion/react");
 const compiled = build({
-  stdin: { contents: "import './src/components/icon-glyphs/shell'; export * from './src/components/shell/WorkspaceSurfacePane'; export * from './src/components/shell/WorkspacePaneHeaderActions'; export * from './src/components/shell/paneTabs'; export * from './src/components/shell/WorkspacePaneManager'; export * from './src/components/shell/WindowPaneControls'; export * from './src/components/shell/PanelResizeHandle'; export * from './src/components/shell/useClientPaneWindowDrag';", resolveDir: path.resolve(__dirname, ".."), loader: "tsx" },
+  stdin: { contents: "import './src/components/icon-glyphs/shell'; export * from './src/components/shell/WorkspaceSurfacePane'; export * from './src/components/worker-environment/workerEnvironmentPane'; export * from './src/components/shell/WorkspacePaneHeaderActions'; export * from './src/components/shell/paneTabs'; export * from './src/components/shell/WorkspacePaneManager'; export * from './src/components/shell/WindowPaneControls'; export * from './src/components/shell/PanelResizeHandle'; export * from './src/components/shell/useClientPaneWindowDrag';", resolveDir: path.resolve(__dirname, ".."), loader: "tsx" },
   bundle: true, platform: "node", format: "cjs", write: false, loader: { ".css": "empty" }, external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime", "motion/react"], logLevel: "silent",
 }).then(result => { const module = { exports: {} }; Function("require", "module", "exports", result.outputFiles[0].text)(require, module, module.exports); return module.exports; });
 const errors = [];
@@ -41,9 +43,53 @@ const click = async element => React.act(() => element.click());
 const flush = async () => React.act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
 after(() => { assert.deepEqual(errors, []); dom.window.close(); });
 
+test("Tools groups task roots and connections while retaining exact targets and back navigation", async () => {
+  const { WorkspacePaneLauncher, workerEnvironmentPaneActions } = await compiled;
+  const rooms = ["room-a", "room-b"].map(id => ({ id, runId: "run-a", label: "Files", surfaces: [
+    { id: "root", kind: "files", protocol: "filesystem", label: "Registry root", root: "/workspace/registry", data: {} },
+    { id: "connection", kind: "connection", protocol: "local", label: "Connection", root: "", data: {} },
+  ] }));
+  const projected = workerEnvironmentPaneActions({ environments: [{ workerEnvironments: rooms, runs: [{ id: "run-a", workerEnvironments: rooms }] }] }, ["run-a"]);
+  assert.equal(projected.length, 4);
+  assert.equal(new Set(projected.map(action => action.title)).size, 4);
+  const source = ts.createSourceFile("OperatorShell.tsx", fs.readFileSync(path.join(__dirname, "../src/components/shell/OperatorShell.tsx"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let expression;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "secondaryPaneAddActions") expression = node.initializer.arguments[0];
+    ts.forEachChild(node, visit);
+  };
+  visit(source); assert(expression);
+  const code = ts.transpileModule(`return (${expression.getText(source)})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const actions = Function("workerEnvironmentActions", "workerEnvironmentActionRunIds", "paneShortcut", "visibleSurfaces", code)(projected, ["run-a"], () => undefined, []);
+  const selected = [], root = createRoot(document.getElementById("root"));
+  await React.act(() => root.render(React.createElement(WorkspacePaneLauncher, { actions, onAction: id => selected.push(id) })));
+  const menu = () => document.querySelector('[role="menu"][aria-label="More tools"]');
+  const item = text => Array.from(menu().querySelectorAll('[role="menuitem"]')).find(button => button.dataset.textValue === text);
+  const more = () => Array.from(document.querySelectorAll(".workspace-pane-launcher-item")).find(button => button.textContent.includes("More tools"));
+  assert(!document.querySelector(".workspace-pane-launcher-list").textContent.includes("Registry root"));
+  await click(more());
+  assert(item("Task files")); assert(item("Environment details"));
+  assert(!menu().textContent.includes("Registry root"));
+  await click(item("Task files"));
+  assert(menu()); assert(menu().textContent.includes("/workspace/registry"));
+  assert.equal(menu().querySelectorAll('[role="menuitem"]').length, 3);
+  await React.act(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+  assert(document.activeElement === item("Task files"));
+  await click(item("Environment details"));
+  assert.equal(menu().querySelectorAll('[role="menuitem"]').length, 3);
+  await click(menu().querySelector('[aria-label="Back to tools"]'));
+  assert(document.activeElement === item("Environment details"));
+  await click(item("Task files"));
+  const chosen = projected.find(action => action.panelKind === "files" && action.target.workerEnvironmentId === "room-b");
+  await click(item(chosen.title));
+  assert.deepEqual(selected, [`we:${chosen.id}`]); assert.equal(menu(), null);
+  await React.act(() => root.unmount());
+});
+
 test("the window header owns pane tabs and the Tools surface retains content, selection and focus", async () => {
   const { WorkspaceSurfacePane, WorkspacePaneManager, WindowPaneControlsProvider, WorkspacePaneHeaderActions, useClientPaneWindowDrag, usePaneTabs } = await compiled;
   const actions = [], closed = [], reorders = [], transfers = [], focusChanges = [];
+  let paneWidth;
   window.octopusTransport = { onClientPaneDragState: () => () => {}, beginClientPaneDrag: async () => {}, finishClientPaneDrag: async () => {}, cancelClientPaneDrag: async () => {} };
   const browserSource = ts.createSourceFile("browser.tsx", fs.readFileSync(path.join(__dirname, "../src/components/worker-environment/RunEnvironmentBrowserSurfaces.tsx"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const geometrySource = browserSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "nativeBrowserGeometry");
@@ -57,11 +103,12 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   }
   function Harness() {
     const width = useMotionValue(0);
+    paneWidth = width;
     const model = usePaneTabs({ tabs: [{ id: "a", title: "Files", glyph: "folder", showWhenSingle: true }, { id: "b", title: "Terminal", glyph: "terminal", showWhenSingle: true }], activeTabId: "a" });
     const { tabs, activeTabId, selectTab: select } = model;
     const drag = useClientPaneWindowDrag({ begin: id => { transfers.push(id); return { transferId: id }; }, onError: error => errors.push(error), onReorder: (...ids) => reorders.push(ids) });
     return React.createElement(WindowPaneControlsProvider, { host: document.getElementById("header") }, React.createElement(WorkspacePaneManager, {
-      primary: "Primary", secondaryOpen: true, secondaryFocused: false, secondaryWidthPercent: 40, resolvedWidthMotion: width,
+      primary: "Primary", secondaryOpen: tabs.length > 0, secondaryFocused: false, secondaryWidthPercent: 40, resolvedWidthMotion: width,
       onOpenChange() {}, onSecondaryFocusedChange() {}, onSecondaryWidthPercentChange() {},
       secondary: React.createElement(WorkspaceSurfacePane, {
         controlsInWindowHeader: true, activeTabId, tabs, focused: false, onFocusedChange: (next) => focusChanges.push(next),
@@ -139,7 +186,9 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   assert.equal(closed.at(-1), "a");
   assert.equal(document.activeElement.getAttribute("aria-label"), "Terminal");
   const closedBefore = closed.length;
-  await React.act(() => header.querySelector('[role="tab"][aria-label="Terminal"]').dispatchEvent(new w.MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }))); await flush();
+  await React.act(() => header.querySelector('[role="tab"][aria-label="Terminal"]').dispatchEvent(new w.MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true })));
+  assert.equal(document.querySelector(".workspace-pane-secondary"), null, "closing the last tab removes the right pane before another frame");
+  assert.equal(paneWidth.get(), 0, "the composer receives the released width immediately");
   assert.deepEqual(closed.slice(closedBefore), ["b"], "a middle click closes the tab");
   await React.act(() => root.unmount());
   delete window.octopusTransport;
@@ -189,5 +238,28 @@ test("the Tools launcher exposes overflow actions and an explicit empty projecti
   await React.act(() => root.render(React.createElement(WorkspacePaneLauncher, { actions: [], onAction: id => selected.push(id) })));
   assert.equal(document.querySelectorAll(".workspace-pane-launcher-item").length, 0);
   assert.match(document.querySelector(".workspace-pane-launcher-empty").textContent, /No tabs are available/);
+  await React.act(() => root.unmount());
+});
+
+test("closing the right pane is immediate while opening retains motion", async () => {
+  motionPreference.matches = false;
+  motionPreferenceChanged();
+  const { WorkspacePaneManager } = await compiled;
+  const { MotionConfig, motionValue } = require("motion/react");
+  const width = motionValue(0), root = createRoot(document.getElementById("root"));
+  const render = open => root.render(React.createElement(MotionConfig, { reducedMotion: "never" }, React.createElement(WorkspacePaneManager, {
+    primary: "Primary", secondary: "Last tab", secondaryOpen: open, secondaryFocused: false,
+    secondaryWidthPercent: 40, resolvedWidthMotion: width,
+    onOpenChange() {}, onSecondaryFocusedChange() {}, onSecondaryWidthPercentChange() {},
+  })));
+  await React.act(() => render(false));
+  await React.act(() => render(true));
+  assert(document.querySelector(".workspace-pane-secondary"));
+  assert(width.get() < 409.6, "opening still animates toward the preferred width");
+  await flush();
+  assert(width.get() > 0);
+  await React.act(() => render(false));
+  assert.equal(document.querySelector(".workspace-pane-secondary"), null);
+  assert.equal(width.get(), 0);
   await React.act(() => root.unmount());
 });

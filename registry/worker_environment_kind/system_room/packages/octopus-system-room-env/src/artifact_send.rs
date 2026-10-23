@@ -1,9 +1,9 @@
-use octopus_descriptors::InterfaceId;
+use octopus_descriptors::{ArtifactId, InterfaceId};
 use octopus_interfaces::{
     InterfaceArtifactFile, InterfaceBoundaryError as InterfaceDriverError,
     InterfaceInvocationEnvelope,
 };
-use octopus_ledger::ArtifactRef;
+use octopus_ledger::{ArtifactRef, ContentHash};
 use octopus_tool_door_runtime::{SystemInterfaceEmissionArtifact, ToolProcessIo};
 
 #[derive(Clone, Debug)]
@@ -67,6 +67,14 @@ pub async fn execute_artifact_send(
     io: &ToolProcessIo,
     call: ArtifactSendCall,
 ) -> Result<serde_json::Value, ArtifactSendError> {
+    execute_artifact_send_with_reference(input, io, call).await.map(|(verdict, _)| verdict)
+}
+
+pub async fn execute_artifact_send_with_reference(
+    input: &InterfaceInvocationEnvelope,
+    io: &ToolProcessIo,
+    call: ArtifactSendCall,
+) -> Result<(serde_json::Value, ArtifactRef), ArtifactSendError> {
     ensure_interface_in_formed_grant(input, &call.to_interface)
         .map_err(|error| ArtifactSendError::Capability(error.to_string()))?;
     let emitted = match call.body {
@@ -95,11 +103,20 @@ pub async fn execute_artifact_send(
             SystemInterfaceEmissionArtifact::Reference(artifact)
         }
     };
+    let reference = match &emitted {
+        SystemInterfaceEmissionArtifact::Reference(reference) => reference.clone(),
+        SystemInterfaceEmissionArtifact::Materialized(file) => {
+            let manifest = file.read_manifest_bounded(1024 * 1024)
+                .map_err(|e| ArtifactSendError::Capability(e.to_string()))?;
+            let content = ContentHash::of_bytes(&manifest.manifest_bytes);
+            ArtifactRef { id: ArtifactId::new(format!("{}:{}", manifest.manifest.label, content.to_hex())), content }
+        }
+    };
     let verdict = io
         .hand_system_emission(&emitted, &call.to_interface)
         .await
         .map_err(ArtifactSendError::Unavailable)?;
-    serde_json::to_value(&verdict).map_err(|error| {
+    serde_json::to_value(&verdict).map(|verdict| (verdict, reference)).map_err(|error| {
         ArtifactSendError::Capability(format!(
             "artifact.send delivery verdict did not serialize: {error}"
         ))

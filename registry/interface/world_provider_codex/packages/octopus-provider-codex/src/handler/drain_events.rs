@@ -49,7 +49,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::TurnStarted(turn) if turn.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(TURN_STARTED_LABEL, &turn)?)?;
+                sink.send_progress(serialized_client_output(TURN_STARTED_LABEL, &turn)?)?;
             }
             ServerNotification::AgentMessageDelta(delta) if delta.thread_id == thread_id => {
                 let phase = message_phases.get(&delta.item_id).cloned().flatten();
@@ -94,7 +94,7 @@ impl CodexAppServerInterfaceDriver {
                     &started.turn_id,
                     started.started_at_ms,
                 ) {
-                    sink.send(output)?;
+                    sink.send_progress(output)?;
                 }
             }
             ServerNotification::PlanDelta(delta) if delta.thread_id == thread_id => {
@@ -135,7 +135,7 @@ impl CodexAppServerInterfaceDriver {
                     "section_break",
                     serde_json::Value::Bool(true),
                 );
-                sink.send(output)?;
+                sink.send_progress(output)?;
             }
             ServerNotification::ReasoningTextDelta(delta) if delta.thread_id == thread_id => {
                 if queue_client_delta(
@@ -164,7 +164,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::TerminalInteraction(delta) if delta.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_TERMINAL_INTERACTION_LABEL,
                     &delta,
                 )?)?;
@@ -183,7 +183,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::FileChangePatchUpdated(delta) if delta.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_FILE_CHANGE_DELTA_LABEL,
                     &delta,
                 )?)?;
@@ -193,7 +193,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_MCP_PROGRESS_LABEL,
                     &progress,
                 )?)?;
@@ -201,7 +201,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::TurnDiffUpdated(diff) if diff.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(TURN_DIFF_UPDATED_LABEL, &diff)?)?;
+                sink.send_progress(serialized_client_output(TURN_DIFF_UPDATED_LABEL, &diff)?)?;
             }
             ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item,
@@ -253,13 +253,13 @@ impl CodexAppServerInterfaceDriver {
                     ),
                 };
                 if let Some(output) = completed_output {
-                    sink.send(output)?;
+                    sink.send_progress(output)?;
                 }
             }
             ServerNotification::TurnPlanUpdated(plan) if plan.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(plan_update_output(&plan))?;
+                sink.send_progress(plan_update_output(&plan))?;
             }
             ServerNotification::ThreadTokenUsageUpdated(usage) if usage.thread_id == thread_id => {
                 let (context_window_usage, provider_token_usage) =
@@ -270,7 +270,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::HookStarted(hook) if hook.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(hook_result_output(
+                sink.send_progress(hook_result_output(
                     &hook.run,
                     "started",
                     hook.turn_id.as_deref(),
@@ -279,7 +279,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::HookCompleted(hook) if hook.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(hook_result_output(
+                sink.send_progress(hook_result_output(
                     &hook.run,
                     "completed",
                     hook.turn_id.as_deref(),
@@ -290,7 +290,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_AUTO_REVIEW_STARTED_LABEL,
                     &review,
                 )?)?;
@@ -300,7 +300,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_AUTO_REVIEW_COMPLETED_LABEL,
                     &review,
                 )?)?;
@@ -310,7 +310,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_OPERATOR_REQUEST_RESOLVED_LABEL,
                     &request,
                 )?)?;
@@ -320,12 +320,12 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(TURN_MCP_STATUS_LABEL, &status)?)?;
+                sink.send_progress(serialized_client_output(TURN_MCP_STATUS_LABEL, &status)?)?;
             }
             ServerNotification::ThreadGoalUpdated(goal) if goal.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(goal_status_output(&goal.goal))?;
+                sink.send_progress(goal_status_output(&goal.goal))?;
             }
             ServerNotification::ContextCompacted(compaction)
                 if compaction.thread_id == thread_id =>
@@ -345,12 +345,12 @@ impl CodexAppServerInterfaceDriver {
                 validate_model_reroute(&selected_model, &model.from_model, &model.to_model)?;
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(TURN_MODEL_REROUTED_LABEL, &model)?)?;
+                sink.send_progress(serialized_client_output(TURN_MODEL_REROUTED_LABEL, &model)?)?;
             }
             ServerNotification::ModelVerification(model) if model.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_MODEL_VERIFICATION_LABEL,
                     &model,
                 )?)?;
@@ -360,7 +360,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_AUTH_RECOVERY_STARTED_LABEL,
                     &recovery,
                 )?)?;
@@ -370,7 +370,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     TURN_AUTH_RECOVERY_COMPLETED_LABEL,
                     &recovery,
                 )?)?;
@@ -380,7 +380,7 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(model_safety_buffering_output(&status)?)?;
+                sink.send_progress(model_safety_buffering_output(&status)?)?;
             }
             ServerNotification::Warning(warning)
                 if warning
@@ -390,17 +390,17 @@ impl CodexAppServerInterfaceDriver {
             {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
+                sink.send_progress(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
             }
             ServerNotification::GuardianWarning(warning) if warning.thread_id == thread_id => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
+                sink.send_progress(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
             }
             ServerNotification::DeprecationNotice(notice) => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(CodexTurnOutput::client(
+                sink.send_progress(CodexTurnOutput::client(
                     TURN_WARNING_LABEL,
                     serde_json::json!({
                         "message": notice.summary,
@@ -412,7 +412,7 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::ConfigWarning(warning) => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(CodexTurnOutput::client(
+                sink.send_progress(CodexTurnOutput::client(
                     TURN_WARNING_LABEL,
                     serde_json::json!({
                         "message": warning.summary,
@@ -429,17 +429,17 @@ impl CodexAppServerInterfaceDriver {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
                 self.record_login_completion(&notification).await;
-                sink.send(account_login_completed_output(&notification))?;
+                sink.send_progress(account_login_completed_output(&notification))?;
             }
             ServerNotification::AccountUpdated(notification) if provider_account_events_enabled => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(account_updated_output(&notification)?)?;
+                sink.send_progress(account_updated_output(&notification)?)?;
             }
             ServerNotification::AccountRateLimitsUpdated(limits) => {
                 flush_pending_delta(sink, pending_delta, delta_seq)?;
                 *flush_deadline = None;
-                sink.send(serialized_client_output(
+                sink.send_progress(serialized_client_output(
                     if provider_account_events_enabled {
                         PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL
                     } else {
@@ -460,7 +460,7 @@ impl CodexAppServerInterfaceDriver {
                         ));
                     }
                 } else {
-                    sink.send(output)?;
+                    sink.send_progress(output)?;
                 }
             }
             ServerNotification::TurnCompleted(turn)
@@ -474,7 +474,7 @@ impl CodexAppServerInterfaceDriver {
                     control.finish();
                     return Ok(DrainStep::Done(TurnDrainOutcome::Complete));
                 }
-                sink.send(completion)?;
+                sink.send_progress(completion)?;
                 control.finish();
                 if !terminal_turn_may_emit_reply(&turn.turn.status, turn.turn.error.as_ref())? {
                     let terminal_error = terminal_error.take().ok_or_else(|| {

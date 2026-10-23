@@ -1,4 +1,5 @@
 module.exports = { operatorChatMessagesProjection };
+const { isHomeVoiceInput } = require("./operatorChatVoiceInput.cjs");
 
 const { compareMovementOrder, movementBoundaryInterface } = require("./movementRows.cjs");
 const { appendOperatorChatAssistantMessage, nativeTurnRecordedInputs, operatorChatActivityPayload, operatorChatAttachments, operatorChatEventData, operatorChatEventKind, operatorChatEventText, operatorChatExpandedStreamRows, operatorChatProjectedRowId, operatorChatProviderFailureActivity, operatorChatRequestKey, operatorChatResponseKey, operatorChatRunProvider, operatorChatRuntimeProviderId, operatorChatStreamPositionCovered, operatorChatTurnText, operatorTurnControlEndsTurn, operatorTurnControlOutcome } = require("./operatorChatEvents.cjs");
@@ -40,6 +41,11 @@ function operatorChatMessagesProjection(store) {
       stringValue(descriptor.role),
     ]).filter(([interfaceId]) => interfaceId));
     const toolCallOrigins = new Map();
+    const voiceInputs = new Map();
+    const sourceKey = artifact => {
+      const id = stringValue(artifact?.id), hash = contentHashHex(artifact?.content);
+      return id && hash ? `${id}:${hash}` : null;
+    };
     const activityOriginFor = (row, payload, eventKind) => {
       const sourceInterfaceId = movementBoundaryInterface(row, "from");
       const callId = stringValue(payload?.call_id ?? payload?.correlation_id);
@@ -56,15 +62,29 @@ function operatorChatMessagesProjection(store) {
       }
       return activityOrigin;
     };
-    const projectedEventDataFor = (payload, eventKind, row) => ({
-      ...operatorChatEventData(payload, eventKind, row),
-      _activity_origin: activityOriginFor(row, payload, eventKind),
-    });
+    const projectedEventDataFor = (payload, eventKind, row) => {
+      const data = operatorChatEventData(payload, eventKind, row);
+      delete data.voice;
+      return {
+        ...data,
+        _activity_origin: activityOriginFor(row, payload, eventKind),
+        ...(movementBoundaryInterface(row, "from") === operatorChatRuntimeProviderId(entry)
+          && voiceInputs.has(sourceKey(payload?.in_reply_to))
+          ? { voice: voiceInputs.get(sourceKey(payload.in_reply_to)) } : {}),
+      };
+    };
     const payloads = await store.resolveLedgerArtifactPayloads([
       ...entry.inbound,
       ...entry.outbound,
     ], false, { projection: protocol.artifactReadProjection });
     const expandedOutbound = operatorChatExpandedStreamRows(entry.outbound, payloads, entry.runId);
+    for (const row of entry.inbound) {
+      if (!isHomeVoiceInput(entry, row)) continue;
+      const payload = payloads.get(row), key = sourceKey(row.artifact);
+      if (key && stringValue(payload?.correlation_id) && stringValue(payload?.delegation_id)) {
+        voiceInputs.set(key, { correlation_id: payload.correlation_id, delegation_id: payload.delegation_id });
+      }
+    }
     const recordedInputs = new Map();
     const nativeRecordedInputs = new Map();
     const runtimeProvider = operatorChatRuntimeProviderId(entry);
@@ -115,8 +135,9 @@ function operatorChatMessagesProjection(store) {
       const payload = payloads.get(row);
       const createdAtMs = rowTimeMs(row);
       if (movement.direction === "in") {
-        if (ledgerArtifactLabel(row) !== protocol.inputLabel) continue;
-        const text = operatorChatTurnText(payload, "in");
+        const voice = isHomeVoiceInput(entry, row);
+        if (!voice && ledgerArtifactLabel(row) !== protocol.inputLabel) continue;
+        const text = voice ? stringValue(payload?.input_text) : operatorChatTurnText(payload, "in");
         if (!text) continue;
         const steering = turnOpen;
         if (!turnOpen) {
@@ -140,6 +161,7 @@ function operatorChatMessagesProjection(store) {
           event_kind: inboundEventKind,
           event_data: {
             ...projectedEventDataFor(payload, inboundEventKind, row),
+            ...(voice ? { voice: { correlation_id: payload.correlation_id, delegation_id: payload.delegation_id } } : {}),
             ...(steering ? {
               steering_status: recordedInput || nativeRecordedInput ? "input_recorded" : controlOutcome?.status ?? "submitted",
               steering_provider_interface: runtimeProvider,

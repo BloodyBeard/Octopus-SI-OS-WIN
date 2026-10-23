@@ -9,6 +9,7 @@ const RECEIPT = "codex-cli-receipt.json";
 const COMPANION = "codex-code-mode-host";
 const PENDING = ".codex-cli-pending.json";
 const LOCK = ".codex-cli-install.lock";
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SCHEMA_NAME = /^(v2\/)?[A-Za-z][A-Za-z0-9]*\.json$/;
@@ -195,7 +196,7 @@ function acquireLock(file, version) {
 }
 
 async function downloadArchive(url, destination, expectedBytes) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(120000), redirect: "follow" });
+  const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS), redirect: "follow" });
   const final = new URL(response.url);
   if (!response.ok || final.protocol !== "https:"
       || !["github.com", "release-assets.githubusercontent.com"].includes(final.hostname)) {

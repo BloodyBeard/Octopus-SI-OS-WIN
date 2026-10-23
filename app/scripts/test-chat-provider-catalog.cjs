@@ -6,7 +6,7 @@ const { JSDOM } = require("jsdom");
 
 const dom = new JSDOM('<div id="root"></div>', { url: "http://fixture.invalid", pretendToBeVisual: true });
 const w = dom.window;
-for (const key of ["window", "document", "HTMLElement", "Element", "SVGElement", "Node", "Event", "KeyboardEvent", "MouseEvent", "localStorage", "navigator"]) {
+for (const key of ["window", "document", "HTMLElement", "Element", "SVGElement", "Node", "Event", "CustomEvent", "KeyboardEvent", "MouseEvent", "localStorage", "navigator"]) {
   Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? w : w[key] });
 }
 globalThis.requestAnimationFrame = w.requestAnimationFrame.bind(w);
@@ -23,6 +23,7 @@ const compiled = build({
     contents: [
       'export { readRuntimeProviderInterfaces, refreshProviderModels } from "./src/projectionClient";',
       'export { useChatCapabilityCatalog } from "./src/components/chat/useChatCapabilityCatalog";',
+      'export { useOctopusOsProjects } from "./src/shell/useOctopusOsProjects";',
       'export { chatProductError } from "./src/components/chat/chatProductError";',
       'export { ProviderModelPicker } from "./src/components/chat/ProviderModelPicker";',
     ].join("\n"),
@@ -89,6 +90,83 @@ test("a disabled surface holds no provider catalog and reads none", async () => 
   assert.deepEqual([view.current.providerInterfaces, view.current.providerInterfacesLoaded, view.current.providerInterfaceError, catalogReads], [[], false, "", reads]);
   root.render(null);
   await settle();
+});
+
+test("ongoing run changes do not starve Home discovery and another Home rejects the old read", async () => {
+  const { useOctopusOsProjects } = await compiled;
+  const reads = [];
+  let changed, current;
+  w.octopusTransport = {
+    onProjectionChanged: listener => { changed = listener; return () => { changed = null; }; },
+    projectionRead: () => new Promise(resolve => reads.push(resolve)),
+  };
+  function Harness({ home }) { current = useOctopusOsProjects("lab", home); return null; }
+  root.render(React.createElement(Harness, { home: "/first" }));
+  await until(() => reads.length === 1 && changed, "the first scope read did not start");
+  for (let generation = 101; generation < 104; generation++) {
+    changed({ generation, kind: "runs" }); await settle(1);
+  }
+  assert.equal(reads.length, 1, "movement refreshes coalesce behind the current read");
+  reads[0]({ home_run_id: "first", home_interface_id: "first-port" });
+  await until(() => current.homeRunId === "first" && reads.length === 2, "run changes discarded every usable scope snapshot");
+  root.render(React.createElement(Harness, { home: "/second" }));
+  await until(() => reads.length === 3, "the new Home never read its own scope");
+  assert.equal(current.homeRunId, "");
+  reads[1]({ home_run_id: "stale" }); await settle(1);
+  assert.equal(current.homeRunId, "");
+  reads[2]({ home_run_id: "second", home_interface_id: "second-port" });
+  await until(() => current.homeRunId === "second", "the current Home did not adopt its snapshot");
+  root.render(null); await settle(1);
+});
+
+test("unchanged project discovery preserves an in-flight capability read during run activity", async () => {
+  const { useOctopusOsProjects, useChatCapabilityCatalog } = await compiled;
+  const contextReads = [];
+  let changed, projects, catalog, scopeReads = 0, projectName = "Project";
+  w.octopusTransport = {
+    onProjectionChanged: listener => { changed = listener; return () => { changed = null; }; },
+    providerInterfaces: async () => ({ providers: [providerFixture("provider.a", [model("model-a")])] }),
+    projectionRead: async ({ method }) => {
+      if (method === "projection.operator.os.scope") {
+        scopeReads++;
+        return { status: "ready", root_ee_id: "root", root_environment: { ee_id: "root" }, home_run_id: "home",
+          home_interface_id: "home-port", projects: [{ ee_id: "project", parent_ee_id: "root", client_run_ids: [`run-${scopeReads}`] }],
+          project_presentations: [{ ee_id: "project", name: projectName, icon: "folder", color: "#123456" }] };
+      }
+      if (method === "projection.operator.chat.contexts") return new Promise(resolve => contextReads.push(resolve));
+      return {};
+    },
+  };
+  function Harness() {
+    projects = useOctopusOsProjects("live", "/catalog-discovery");
+    catalog = useChatCapabilityCatalog("live", true, true, "/catalog-discovery");
+    return null;
+  }
+  root.render(React.createElement(Harness));
+  await until(() => projects?.status === "ready" && contextReads.length > 0 && changed,
+    () => `project discovery never completed: ${projects?.error}; ${scopeReads} scope reads, ${contextReads.length} context reads`);
+  await settle();
+  const pendingCount = contextReads.length;
+  for (let generation = 201; generation < 205; generation++) {
+    const before = scopeReads;
+    changed({ generation, kind: "runs" });
+    await until(() => scopeReads > before, "run activity did not refresh project discovery");
+    await settle(1);
+  }
+  assert.equal(contextReads.length, pendingCount, "unchanged project presentations repeatedly cancelled capability loading");
+  assert.deepEqual(projects.projects[0].chatRunIds, [`run-${scopeReads}`], "new tasks must still reach the project list");
+  contextReads.at(-1)({ contexts: [{ ee_id: "project", workers: [{ id: "worker" }] }] });
+  await until(() => catalog.executionContextsLoaded, "run activity discarded the completed capability snapshot");
+  assert.equal(catalog.executionContexts[0].displayName, "Project");
+  projectName = "Renamed project";
+  const beforeRename = contextReads.length;
+  changed({ generation: 205, kind: "runs" });
+  await until(() => projects.projects[0]?.name === projectName && contextReads.length > beforeRename,
+    "a changed project presentation did not invalidate capabilities");
+  await settle(1);
+  contextReads.at(-1)({ contexts: [{ ee_id: "project", workers: [{ id: "worker" }] }] });
+  await until(() => catalog.executionContexts[0]?.displayName === projectName, "the real project rename was not shown");
+  root.render(null); await settle(1);
 });
 
 test("the product error names an undeclared provider only for an Agent or an existing task once the catalog has loaded", async () => {

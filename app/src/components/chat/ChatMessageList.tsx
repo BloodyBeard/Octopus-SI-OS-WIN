@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { motion } from "motion/react";
@@ -229,6 +230,7 @@ export function ChatMessageList({
   const footerRef = useRef<HTMLDivElement>(null);
   const footerHeightRef = useRef<number | null>(null);
   const pinnedRef = useRef(true);
+  const readingAnchorRef = useRef<{ element: HTMLElement; top: number } | null>(null);
   const programmaticLatestScrollRef = useRef(false);
   const userScrollIntentUntilRef = useRef(0);
   const lastScrollDistanceRef = useRef(0);
@@ -271,6 +273,20 @@ export function ChatMessageList({
     const list = listRef.current;
     if (list) setReverseScrollDistance(list, distance);
   }, []);
+  const preserveReadingAnchor = useCallback(() => {
+    const anchor = readingAnchorRef.current;
+    const list = listRef.current;
+    if (!anchor || !list) return false;
+    if (!list.contains(anchor.element)) {
+      readingAnchorRef.current = null;
+      return false;
+    }
+    const displacement = anchor.element.getBoundingClientRect().top - list.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(displacement) > 0.5) {
+      scrollToDistanceFromBottomPx(reverseScrollDistance(list) - displacement);
+    }
+    return true;
+  }, [scrollToDistanceFromBottomPx]);
   const updateHeaderEdgeScroll = useCallback(() => {
     const list = listRef.current;
     const distanceFromTop = list ? Math.max(0, list.scrollHeight - list.clientHeight + list.scrollTop) : 0;
@@ -303,6 +319,7 @@ export function ChatMessageList({
       : 0;
     const hasInitialSnapshot = emptyState !== "loading-task";
     pinnedRef.current = restoreDistance === 0;
+    readingAnchorRef.current = null;
     programmaticLatestScrollRef.current = false;
     userScrollIntentUntilRef.current = 0;
     lastScrollDistanceRef.current = restoreDistance;
@@ -391,7 +408,9 @@ export function ChatMessageList({
       return;
     }
     if (distanceFromLatest <= 1) programmaticLatestScrollRef.current = false;
-    if (distanceFromLatest <= THREAD_SCROLL_BOTTOM_THRESHOLD_PX) {
+    if (readingAnchorRef.current) {
+      pinnedRef.current = false;
+    } else if (distanceFromLatest <= THREAD_SCROLL_BOTTOM_THRESHOLD_PX) {
       pinnedRef.current = true;
     } else if (intentIsCurrent || !pinnedRef.current) {
       pinnedRef.current = false;
@@ -482,6 +501,7 @@ export function ChatMessageList({
       list.style.setProperty("--thread-scroll-padding-bottom", `${nextHeight + 16}px`);
 
       if (previousHeight == null || previousHeight === nextHeight) return;
+      if (preserveReadingAnchor()) return;
       if (programmaticLatestScrollRef.current || pinnedRef.current) {
         scrollToDistanceFromBottomPx(0);
         return;
@@ -501,7 +521,7 @@ export function ChatMessageList({
       observer.disconnect();
       footerHeightRef.current = null;
     };
-  }, [footerVisible, scrollToDistanceFromBottomPx, threadLayoutActive]);
+  }, [footerVisible, preserveReadingAnchor, scrollToDistanceFromBottomPx, threadLayoutActive]);
 
   const navigationItems = turns.flatMap((turn) => {
     const prompt = turn.find((message) => message.role === "user" && message.eventKind !== "steering");
@@ -636,6 +656,7 @@ export function ChatMessageList({
     const list = listRef.current;
     if (!list) return;
     pinnedRef.current = true;
+    readingAnchorRef.current = null;
     programmaticLatestScrollRef.current = true;
     userScrollIntentUntilRef.current = 0;
     setScrolledFromLatest(false);
@@ -669,6 +690,7 @@ export function ChatMessageList({
   }
 
   function stopProgrammaticLatestScroll(detachFromLatest = false, scrolling = true) {
+    if (scrolling || detachFromLatest) readingAnchorRef.current = null;
     if (scrolling) revealScrollbar();
     userScrollIntentUntilRef.current = performance.now() + THREAD_USER_SCROLL_INTENT_WINDOW_MS;
     if (detachFromLatest) {
@@ -691,6 +713,17 @@ export function ChatMessageList({
       <div
         className={`octopus-chat-scroll thread-scroll-container h-full overflow-x-hidden overflow-y-auto [overflow-anchor:none] [scroll-padding-bottom:var(--thread-scroll-padding-bottom,0px)] electron:[scrollbar-gutter:stable_both-edges] pt-(--thread-content-top-inset) [container-name:thread-content] [container-type:inline-size] [&:has([data-thread-scroll-footer='true']:focus-within)]:[scroll-padding-bottom:0px] flex flex-col-reverse focus:outline-none${scrolledFromLatest ? " is-scrolled" : ""}${dragOver ? " is-drag-over" : ""}`}
         data-scrollbar-visible={scrollbarAwayFromLatest || scrollbarActive || undefined}
+        onClickCapture={(event) => {
+          const target = event.target;
+          const disclosure = target instanceof Element ? target.closest<HTMLElement>("button[aria-expanded], summary") : null;
+          if (!disclosure || !disclosure.closest("[data-thread-turn-key]")) return;
+          stopProgrammaticLatestScroll(true, false);
+          lastScrollDistanceRef.current = reverseScrollDistance(event.currentTarget);
+          readingAnchorRef.current = {
+            element: disclosure,
+            top: disclosure.getBoundingClientRect().top - event.currentTarget.getBoundingClientRect().top,
+          };
+        }}
         onDragLeave={dropEnabled ? onDragLeave : undefined}
         onDragOver={dropEnabled ? onDragOver : undefined}
         onDrop={dropEnabled ? onDrop : undefined}
@@ -773,6 +806,7 @@ export function ChatMessageList({
                 scrollElementRef={listRef}
                 scrollToDistanceFromBottomPx={scrollToDistanceFromBottomPx}
                 shouldFollowLatest={shouldFollowLatest}
+                preserveReadingAnchor={preserveReadingAnchor}
                 turns={turns}
                 renderTurn={(turn, turnIndex) => (
                   <ChatRenderBoundary
@@ -927,6 +961,7 @@ function VirtualizedTurns({
   initialRestoreState,
   onRevealReady,
   onRestoreStateChange,
+  preserveReadingAnchor,
   revealRequest,
   renderTurn,
   scrollElementRef,
@@ -939,6 +974,7 @@ function VirtualizedTurns({
   initialRestoreState: ThreadVirtualizerRestoreState | null;
   onRevealReady: (request: { id: string; instant: boolean; turnKey: string }) => void;
   onRestoreStateChange: (state: ThreadVirtualizerRestoreState) => void;
+  preserveReadingAnchor?: () => boolean;
   revealRequest: { id: string; instant: boolean; turnKey: string } | null;
   renderTurn: (turn: ChatRenderMessage[], turnIndex: number) => ReactNode;
   scrollElementRef: React.RefObject<HTMLDivElement | null>;
@@ -995,7 +1031,7 @@ function VirtualizedTurns({
     const previousLayout = layoutRef.current;
     const anchorKey = previousLayout.turnKeys[range.startIndex];
     layoutRef.current = layout;
-    if (previousLayout !== layout) {
+    if (previousLayout !== layout && !preserveReadingAnchor?.()) {
       if (shouldFollowLatest()) {
         scrollToDistanceFromBottomPx(0);
       } else {
@@ -1036,6 +1072,7 @@ function VirtualizedTurns({
   }, [
     getLastScrollDistanceFromBottomPx,
     layout,
+    preserveReadingAnchor,
     range,
     scrollElementRef,
     scrollToDistanceFromBottomPx,
@@ -1346,9 +1383,17 @@ function groupIntoTurns(messages: ChatRenderMessage[], linkToolResults = true): 
   const toolTurns = new Map<string, ChatRenderMessage[]>();
   const interruptedTurns = new Map<string, ChatRenderMessage[]>();
   for (const message of messages) {
-    const startsTurn = message.role === "user" && message.eventKind !== "steering";
-    if (startsTurn || turns.length === 0) turns.push([]);
     const data = eventRecord(message.eventData);
+    const turnId = eventString(data.turn_id ?? eventRecord(data._event).turn_id ?? eventRecord(data.turn).id);
+    const currentTurn = turns[turns.length - 1];
+    const startsProviderTurn = message.eventKind === "turn_started" && Boolean(turnId)
+      && currentTurn?.some((previous) => {
+        const previousData = eventRecord(previous.eventData);
+        const previousId = eventString(previousData.turn_id ?? eventRecord(previousData._event).turn_id ?? eventRecord(previousData.turn).id);
+        return previous.eventKind === "turn_completed" && previousId && previousId !== turnId;
+      });
+    const startsTurn = message.role === "user" && message.eventKind !== "steering";
+    if (startsTurn || startsProviderTurn || turns.length === 0) turns.push([]);
     const scope = [message.runId, message.interfaceId,
       eventString(eventRecord(data._activity_origin).interface_id)];
     const callId = eventString(data.call_id ?? data.callId ?? data.correlation_id);
@@ -2434,7 +2479,8 @@ function CommandActivity({ command, isCode = false, message }: {
   const reducedMotion = useShouldReduceMotion();
   const data = message.eventData ?? {};
   const model = commandActivityModel(message);
-  const lifecycle = model.phase === "running" ? "active" : model.phase === "interrupted" ? "stopped"
+  const observedRunning = model.yielded && Boolean(model.processId);
+  const lifecycle = model.phase === "running" ? observedRunning ? "background" : "active" : model.phase === "interrupted" ? "stopped"
     : model.phase === "failed" || model.phase === "timed_out" || (model.exitCode !== null && model.exitCode !== 0) ? "error"
       : model.phase === "exited" ? "complete" : "unknown";
   const terminalInputs = eventArray(data._terminal_inputs).map(eventString).filter(Boolean);
@@ -2463,7 +2509,7 @@ function CommandActivity({ command, isCode = false, message }: {
   const elapsed = elapsedMs >= 1_000 ? formatActivityElapsed(elapsedMs) : "";
   const summaryCommand = expanded ? "" : command;
   const operation = isCode ? "code" : "command";
-  const summary = model.phase === "running"
+  const summary = observedRunning ? `${isCode ? "Code" : "Command"} running at last check` : model.phase === "running"
     ? `${model.yielded ? `${isCode ? "Code" : "Command"} still running` : `Running ${operation}`}${elapsed ? ` for ${elapsed}` : ""}`
     : `${model.phase === "interrupted" ? "Stopped" : model.phase === "timed_out" ? "Timed out" : model.phase === "failed" ? "Failed" : model.phase === "unknown" ? "Outcome unknown for" : "Ran"}${summaryCommand ? ` ${summaryCommand}` : ` ${operation}`}${elapsed ? ` for ${elapsed}` : ""}`;
   const success = model.phase === "exited" && model.exitCode === 0;
@@ -3015,7 +3061,7 @@ function FileChangeActivity({ added, changeKind, deleted, detailsLoading = false
         transition={{ duration: reducedMotion ? 0 : 0.3, ease: [0.19, 1, 0.22, 1] }}
       >
         {detailsLoading ? (
-          <div className="activity-file-empty-detail">Loading full diff…</div>
+          <OcLoadingRows className="activity-file-empty-detail" label="Loading full diff…" />
         ) : diff.trim() ? (
           <InlineUnifiedDiff added={added} changeKind={changeKind} deleted={deleted} diff={diff} path={path} />
         ) : (
@@ -3152,7 +3198,7 @@ function InlineUnifiedDiff({ added, changeKind, deleted, diff, path }: {
   path: string;
 }) {
   return (
-    <Suspense fallback={<div className="activity-file-diff-loading">Loading diff…</div>}>
+    <Suspense fallback={<OcLoadingRows className="activity-file-diff-loading" label="Loading diff…" />}>
       <WorkingPatchDiff added={added} changeKind={changeKind} deleted={deleted} patch={diff} path={path} />
     </Suspense>
   );

@@ -23,3 +23,5 @@ export function clientSurfaceDocumentSemanticInspection(
   document: unknown,
   options?: { compiled?: boolean; readMethods?: readonly string[]; sourceBytes?: number },
 ): ClientSurfaceDocumentSemanticInspection;
+
+export function isSafeClientSurfaceVideoSource(value: unknown): boolean;

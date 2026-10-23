@@ -67,7 +67,7 @@ pub fn project_sandbox(
     for r in &bd.write_root_refs {
         let writable_decl = r.access.is_empty() || r.access.contains(&RootAccess::Write);
         if writable_decl && caps.admits_writable(&r.path) {
-            writable_roots.push(ctx.resolve_root(&r.path)?);
+            writable_roots.extend(ctx.resolve_roots(&r.path)?);
         }
     }
 
@@ -75,23 +75,23 @@ pub fn project_sandbox(
     for r in &bd.read_root_refs {
         let readable_decl = r.access.is_empty() || r.access.contains(&RootAccess::Read);
         if readable_decl && caps.admits_readable(&r.path) {
-            readable_roots.push(ctx.resolve_root(&r.path)?);
+            readable_roots.extend(ctx.resolve_roots(&r.path)?);
         }
     }
 
     let mut read_only_subpaths = Vec::new();
     for r in &bd.protected_read_only_subpaths {
-        let root = ctx.resolve_root(&r.path)?;
-        match r.relative.as_deref() {
-            None => read_only_subpaths.push(root),
-            Some(relative) => {
-                for leaf in expand_protected_relative(&root, relative)? {
-                    read_only_subpaths.push(leaf);
+        for root in ctx.resolve_roots(&r.path)? {
+            match r.relative.as_deref() {
+                None => read_only_subpaths.push(root),
+                Some(relative) => {
+                    for leaf in expand_protected_relative(&root, relative)? {
+                        read_only_subpaths.push(leaf);
+                    }
                 }
             }
         }
     }
-
     let network = bd.network_ceiling.min(caps.network());
 
     Ok(ProjectedSandbox::from_parts(

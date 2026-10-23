@@ -315,6 +315,8 @@ function createFixtureProjectionStore(options = {}) {
           status: "ready",
           root_ee_id: FIXTURE_ROOT_EE_ID,
           host_root_refs: data.hostRootRefs,
+          full_access_root: "/",
+          source_folders: [FIXTURE_WORKSPACE_ROOT],
           host_manifest_ready: true,
           drivers: data.drivers,
           projects: data.eeInstances.map(fixtureApplicationProject),
@@ -2417,6 +2419,8 @@ function fixtureChatExecutionContexts(data) {
       agent_catalog_digest: "lab-agent-catalog",
       default_task_access_mode: "project_access",
       host_root_refs: data.hostRootRefs,
+          full_access_root: "/",
+          source_folders: [FIXTURE_WORKSPACE_ROOT],
       is_os_root: environment.ee_id === FIXTURE_ROOT_EE_ID,
       display_name: data.projectPresentations.find((presentation) => presentation.ee_id === environment.ee_id)?.name
         || (environment.ee_id === FIXTURE_ROOT_EE_ID ? "Home" : environment.goal),

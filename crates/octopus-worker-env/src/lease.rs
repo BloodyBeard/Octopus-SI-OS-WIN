@@ -24,6 +24,11 @@ pub async fn lease(
     let hash = formation.descriptor_hash()?;
     let door_root_bindings = ctx.provided_root_bindings();
     formation.attest_door_root_bindings(&door_root_bindings)?;
+    let additional = ctx.additional_root_slots.iter().map(|(slot, paths)|
+        (slot.clone(), paths.iter().map(|path| path.as_path().to_path_buf()).collect::<Vec<_>>())).collect::<std::collections::BTreeMap<_, _>>();
+    if additional != formation.door_additional_root_bindings {
+        return Err(WorkerEnvError::MalformedFormation("additional door roots differ from the formed record".into()));
+    }
     let caps = WorkerEnvCaps::form(&spec, &door_root_bindings, ee_root_allowance);
     if caps != formation.caps() {
         return Err(WorkerEnvError::OpenFailed {

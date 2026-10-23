@@ -231,6 +231,7 @@ function octopusClientServer(): Plugin {
                 ...input,
                 blobsRoot: path.join(octopusHome, "ledger", "blobs"),
               }),
+              readProjection: (method: string) => getStore("live").read(projectionReadRequest(method)),
             }, {
               ...request,
               attachments: (Array.isArray(request?.attachments) ? request.attachments : []).map((input: { name?: string; label?: string; type?: string; base64?: string }) => ({
@@ -277,6 +278,7 @@ function octopusClientServer(): Plugin {
               ...input,
               blobsRoot: path.join(octopusHome, "ledger", "blobs"),
             }),
+            readProjection: (method: string) => getStore("live").read(projectionReadRequest(method)),
           }, { ...request, attachments: [] });
           sendJson(res, 200, {
             interfaceId: outcome.chatInterfaceId,

@@ -163,3 +163,11 @@ pub fn bound_sources(record: &RunRecord, provider: &InterfaceId, checkpoint: &Ch
         || admitted.iter().any(|reference| reference.id == source.id));
     Ok(sources)
 }
+
+pub fn result_source(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId) -> Result<Option<ArtifactRef>, String> {
+    result_inputs::bound_source(record, provider, checkpoint)
+}
+
+pub fn result_call(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId) -> Result<Option<ArtifactRef>, String> {
+    result_inputs::bound_call_evidence(record, provider, checkpoint)
+}

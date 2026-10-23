@@ -12,6 +12,7 @@ export type VoiceWidgetItem = {
 
 export type TaskProgressWidget = {
   completion: number;
+  failed: number;
   running: number;
   scheduled: number;
   unseenDone: number;
@@ -140,7 +141,7 @@ export function buildVoiceWidgetDocuments(input: {
       schema_version: 1,
       release_channel: "lab",
       id: "builtin.voice.task-progress",
-      revision: 2,
+      revision: 3,
       title: "Task progress",
       glyph: "progress",
       header: { show_glyph: true, tone: "accent" },
@@ -164,7 +165,10 @@ export function buildVoiceWidgetDocuments(input: {
         root: {
           type: "stack",
           gap: "none",
-          children: [{
+          children: input.taskProgress.unseenDone + input.taskProgress.running + input.taskProgress.waiting
+            + input.taskProgress.scheduled + input.taskProgress.failed === 0
+            ? [{ type: "text", value: "No tasks yet", role: "caption", tone: "muted" }]
+            : [{
             type: "donut",
             value: input.taskProgress.completion,
             label: "Complete",
@@ -172,6 +176,7 @@ export function buildVoiceWidgetDocuments(input: {
               { label: "Done", value: input.taskProgress.unseenDone, tone: "positive" },
               { label: "Running", value: input.taskProgress.running, tone: "accent" },
               { label: "Waiting", value: input.taskProgress.waiting, tone: "warning" },
+              { label: "Failed", value: input.taskProgress.failed, tone: "danger" },
               { label: "Scheduled", value: input.taskProgress.scheduled, tone: "muted" },
             ],
           }],

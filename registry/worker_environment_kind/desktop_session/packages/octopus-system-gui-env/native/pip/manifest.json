@@ -50,7 +50,7 @@
     },
     {
       "path": "stack.mm",
-      "sha256": "01c5f25e00c6032259012b95fd603fcc989a0c3ef7978fb76dcec91d1f3fb033"
+      "sha256": "d4868de16c10b2ba1ac5e0fff627426f715e997845831f0fff01d69c193742a2"
     },
     {
       "path": "permissions.h",

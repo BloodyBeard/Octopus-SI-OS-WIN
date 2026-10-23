@@ -103,7 +103,7 @@ async fn failed_source_projection_reaches_only_a_proven_standing_route() {
         let source=QueuedTurn { seq:9, envelope:InterfaceInvocationEnvelope {
             artifact:materialized_artifact_ref(&file).unwrap(),artifact_file:file,artifact_binding_payloads:Vec::new(),metadata:None,
         }};
-        let result=materialize_consumed_source_outcome(&ctx,&source,"missing outcome",independent).unwrap();
+        let result=materialize_consumed_source_outcome(&ctx,&descriptor,&source,"missing outcome",independent).unwrap();
         assert_eq!(result.read_manifest().unwrap().label,expected);
         let body:serde_json::Value=serde_json::from_slice(&result.read_payload_bytes().unwrap()).unwrap();
         if expected=="turn.input.acknowledged" {

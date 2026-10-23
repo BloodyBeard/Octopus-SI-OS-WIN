@@ -1,6 +1,8 @@
 pub mod pipe;
 mod process;
 pub mod process_group;
+#[cfg(target_os = "macos")]
+pub mod owned_process_group;
 pub mod pty;
 #[cfg(test)]
 mod tests;

@@ -734,7 +734,7 @@ async fn pipe_terminate_aborts_detached_readers() -> anyhow::Result<()> {
         .await
         .map_err(|_| anyhow::anyhow!("expected detached output before terminate"))??;
 
-    session.terminate();
+    session.terminate()?;
     let mut post_rx = output_rx.resubscribe();
 
     let post_terminate =
@@ -773,7 +773,7 @@ async fn pipe_terminate_reaps_child() -> anyhow::Result<()> {
     .await?;
     let (session, _output_rx, exit_rx) = combine_spawned_output(spawned);
 
-    session.terminate();
+    session.terminate()?;
 
     let exit_code = tokio::time::timeout(tokio::time::Duration::from_secs(5), exit_rx)
         .await
@@ -872,7 +872,7 @@ time.sleep(10)
         drop(writer);
         let session = match shutdown {
             PtyShutdown::Terminate => {
-                session.terminate();
+                session.terminate()?;
                 Some(session)
             }
             PtyShutdown::Drop => {
@@ -1003,7 +1003,7 @@ fn pty_terminate_allows_runtime_shutdown_with_full_output_channel() -> anyhow::R
             })
             .await?;
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            session.terminate();
+            session.terminate()?;
             tokio::time::timeout(std::time::Duration::from_secs(2), exit_rx).await??;
             Ok::<_, anyhow::Error>((session, stdout_rx))
         })?;
@@ -1133,7 +1133,7 @@ async fn pty_terminate_kills_background_children_in_same_process_group() -> anyh
     let bg_pid = match wait_for_marker_pid(&mut output_rx, marker, 2_000).await {
         Ok(pid) => pid,
         Err(err) => {
-            session.terminate();
+            session.terminate()?;
             return Err(err);
         }
     };
@@ -1266,7 +1266,7 @@ async fn pty_preserving_inherited_fds_keeps_python_repl_running() -> anyhow::Res
     let python_pid = match wait_for_marker_pid(&mut output_rx, marker, 2_000).await {
         Ok(pid) => pid,
         Err(err) => {
-            session.terminate();
+            session.terminate()?;
             return Err(err);
         }
     };
@@ -1316,7 +1316,7 @@ async fn pty_spawn_with_inherited_fds_reports_exec_failures() -> anyhow::Result<
 
     let err = match spawn_result {
         Ok(spawned) => {
-            spawned.session.terminate();
+            spawned.session.terminate()?;
             anyhow::bail!("missing executable unexpectedly spawned");
         }
         Err(err) => err,

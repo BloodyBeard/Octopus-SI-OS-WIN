@@ -1,5 +1,6 @@
 mod interface_life;
 mod life_ownership;
+mod life_process;
 pub mod runtime_instance;
 
 pub use life_ownership::InterfaceLifeOwnership;
@@ -8,7 +9,7 @@ pub use octopus_verifiers::process_authority;
 
 pub use interface_life::{
     INTERFACE_HOST_IO_LIMITS_ENV, InterfaceHostIoLimits, InterfaceLifeFuture, InterfaceLiftContext,
-    InterfaceLiftFn, RESOLVED_INTERFACE_DESCRIPTOR_ENV, ResolvedSpawnLifeConfig,
+    InterfaceLiftFn, InterfaceLifeReadyPublication, RESOLVED_INTERFACE_DESCRIPTOR_ENV, ResolvedSpawnLifeConfig,
     ResolvedSpawnLifeExecutable, SpawnLifeArgument, SpawnLifeCommand, SpawnLifeConfig,
     SpawnLifeDoctorCommand, SpawnLifeRepositoryFileArgument, ValidatedSpawnLifeConfig,
     capture_spawned_artifact, interfaces_mentioned_in_live_runs, resolve_interface_descriptor, resolve_spawn_life_config,

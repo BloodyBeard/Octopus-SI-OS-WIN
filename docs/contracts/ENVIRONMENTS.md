@@ -34,8 +34,11 @@ EEs it can act in.
 }
 ```
 
-**Environments form a hierarchy.** An instance has a parent, and policy narrows inward
-along that chain. See [Policy](POLICY.md).
+**Environments form a hierarchy.** An instance may have a parent, and policy narrows
+inward along that chain. A parentless instance starts an independent chain. The
+single `bootstrap_root` template selects the initial seed; other authored roots
+inherit nothing from it. Creating or reparenting an EE requires a granted path
+to its record. See [Policy](POLICY.md).
 
 **Reorganizing is JSON.** Allowances name originals, and a task's private
 copies are admitted by them, so a narrowed environment can host real runs: a
@@ -125,6 +128,38 @@ from the owning folder, the same way interfaces reuse driver code.
 A kind's folder name is the name of an execution-code type, not a routing id.
 Artifacts are delivered by interface id; nothing routes by a kind name.
 
+## Persistent command control
+
+The workspace keeper retains invocation and exact per-call results outside the
+command's filesystem scope. Its process descriptor may explicitly grant
+`allow_process_signals` to the trusted executor. On macOS this permits signals
+across sandbox labels; the default is false, and a copied descriptor cannot add
+that authority. Command arguments still cross their own formed sandbox before
+execution and do not inherit the executor's signal authority. Command control
+accepts an opaque process identity belonging to the formed WorkerEnvironment,
+never an arbitrary host PID supplied by the model.
+
+Existing private tool copies receive a changed authority only through their
+owning package's explicit predecessor declaration and after accepted tool work
+has settled. Adoption compares the complete prior descriptor and forms the next
+grant against the updated original; locally authored differences defer the
+transition. No already accepted invocation gains new rights.
+
+A failed stop retains the process handle and reports the actual error. Closure
+requires observed exit, stream closure and termination of the owned process group
+within the declared cleanup timeout;
+a deadline or permission failure never synthesizes an exit. A successful retry
+clears the current termination failure only after closure, while earlier call
+receipts remain unchanged. Replacing a package does not change the sandbox of
+an already running keeper.
+
+On macOS, the executor observes root exit without reaping its PID until the owned
+group has finished. Signals and reaping share that ownership; after it is
+released, later control cannot target a reused numeric process identity. Root
+exit remains distinct from closure, including a PTY whose streams close while
+another group member is still running. Observation and cleanup failures remain
+visible and never become successful closure.
+
 ## Choosing a room
 
 Selecting a room is the intersection of four explicit links:
@@ -165,6 +200,15 @@ whose path covers that file. The edit is an ordinary file tool call - gated,
 recorded, and executed like any other.
 
 
+
+A door's host-slot override carries `path` and may declare `additional_paths`.
+The primary path remains the working directory. Additional paths extend that
+same symbolic slot to an explicit set of roots; they never grant their common
+parent. Process authority, filesystem boundaries and protected subpaths apply
+to every root under the slot's existing grant. The formed record retains the
+additional bindings and includes them in its formation pin; a lease refuses a
+different set. Empty additional bindings are omitted, preserving existing
+single-root records and their pins.
 
 ## Fail closed
 

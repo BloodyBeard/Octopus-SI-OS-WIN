@@ -394,6 +394,7 @@ pub(crate) fn checked_run_file_chain_with_reader(
                 validate_verified_input_transition(reader,&transition)?;
                 input_revision::validate_rearm_evidence(reader, &transition, path)?;
                 source_withdrawal::validate_evidence(reader, &transition)?;
+                rejected_final::validate_evidence(reader, &transition)?;
                 if transitions.len() >= 1024 { return Err("checked authoring transitions exceed their evidence bound".into()); }
                 transitions.push(transition);
                 continue;
@@ -426,7 +427,8 @@ pub(crate) fn checked_run_file_chain_with_reader(
             input_artifacts::validate_input_transition(reader, &transition)?;
             validate_verified_input_transition(reader, &transition)?;
             input_revision::validate_rearm_evidence(reader, &transition, path)?;
-                source_withdrawal::validate_evidence(reader, &transition)?;
+            source_withdrawal::validate_evidence(reader, &transition)?;
+            rejected_final::validate_evidence(reader, &transition)?;
             transitions.push(transition);
         }
     }
@@ -525,6 +527,7 @@ pub(crate) fn checked_run_file_chain_with_reader(
             validate_verified_input_transition(reader, &transition)?;
             input_revision::validate_rearm_evidence(reader, &transition, path)?;
             source_withdrawal::validate_evidence(reader, &transition)?;
+            rejected_final::validate_evidence(reader, &transition)?;
         }
         hash = ContentHash::of_bytes(&transition.after).to_hex();
         current = transition.after.clone();
@@ -1068,6 +1071,11 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     if result_inputs::definition_transition(transition)? { return Ok(()); }
     source_settlement::validate_checked_transition(&before, &after, &transition.writer)?;
     source_withdrawal::validate_checked_transition(&before, &after, &transition.writer)?;
+    let replacement_config = config_from_persisted_profile(&before, provider, &RunAuthoringProfile {
+        file_write_tool: transition.writer.tool.clone(), file_write_label: transition.writer.call_label.clone(),
+        file_write_result_label: transition.writer.result_label.clone(), result_timeout_ms: 1,
+    })?;
+    rejected_final::validate_transition(&before, &after, &replacement_config)?;
     if capability_amendment::validate_transition(transition)? { return Ok(()); }
     let read = |record: &RunRecord| -> Result<BoundRunAuthoringTopology, String> {
         let state = record.interface_state.get(provider).ok_or("checked provider lost its state")?;

@@ -16,6 +16,9 @@ pub use completed_output::{PreparedToolOutputRecovery, prepare_tool_output_recov
 #[cfg(test)]
 #[path = "../tests/support/execution_loading.rs"]
 mod execution_loading_tests;
+#[cfg(test)]
+#[path = "../tests/support/invocation_context.rs"]
+mod invocation_context_tests;
 mod process_authority;
 
 #[cfg(unix)]
@@ -606,11 +609,60 @@ struct ToolProcessWireEnvelope {
     artifact: ArtifactRef,
     label: String,
     manifest_path: PathBuf,
-    artifact_bindings: Vec<ToolProcessBoundArtifactCarrier>,
-    metadata: Option<InvocationMetadata>,
+    context: ToolProcessContextCarrier,
     source_movement_seq: u64,
     worker_environment: Option<WorkerEnvironmentFormation>,
     worker_environment_kind: Option<WorkerEnvKindSpec>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolProcessInvocationContext {
+    // Private request transport inside this code-world, never a runtime artifact.
+    artifact_bindings: Vec<ToolProcessBoundArtifactCarrier>,
+    metadata: Option<InvocationMetadata>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolProcessContextCarrier {
+    path: PathBuf,
+    content_hash: ContentHash,
+    byte_len: u64,
+}
+
+impl ToolProcessContextCarrier {
+    fn read_bytes(
+        &self,
+        root: &Path,
+        request_id: u64,
+        limits: &InterfaceHostIoLimits,
+    ) -> Result<Vec<u8>, String> {
+        let expected = root.canonicalize().map_err(|error| error.to_string())?
+            .join(request_id.to_string()).join("artifact")
+            .join(format!("invocation-context-{}.json", self.content_hash.to_hex()));
+        if self.path != expected {
+            return Err("tool-process context carrier left its exact generation and request".into());
+        }
+        if self.byte_len > limits.max_payload_bytes {
+            return Err("tool-process context carrier exceeds its declared payload byte ceiling".into());
+        }
+        let bytes = read_tool_process_binding_bytes(root, &self.path, self.byte_len)?;
+        if bytes.len() as u64 != self.byte_len || ContentHash::of_bytes(&bytes) != self.content_hash {
+            return Err("tool-process context carrier changed its pinned length or hash".into());
+        }
+        Ok(bytes)
+    }
+
+    fn read(
+        &self,
+        root: &Path,
+        request_id: u64,
+        limits: &InterfaceHostIoLimits,
+    ) -> Result<ToolProcessInvocationContext, String> {
+        serde_json::from_slice(&self.read_bytes(root, request_id, limits)?)
+            .map_err(|error| format!("tool-process context carrier is malformed: {error}"))
+    }
 }
 
 impl ToolProcessEnvelope {
@@ -651,10 +703,12 @@ impl ToolProcessEnvelope {
         self,
         root: &Path,
         request_id: u64,
+        host_io_limits: &InterfaceHostIoLimits,
     ) -> Result<ToolProcessWireEnvelope, String> {
-        let request_root = root.join(request_id.to_string());
+        std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+        let directory = materialize_owner_private_descendant(root, &[request_id.to_string(), "artifact".into()])?;
         let artifact_file =
-            InterfaceArtifactFile::write(request_root.join("artifact"), &self.label, &self.payload)
+            InterfaceArtifactFile::write(&directory, &self.label, &self.payload)
                 .map_err(|error| {
                     format!("tool-process invocation artifact failed to materialize: {error}")
                 })?;
@@ -662,12 +716,38 @@ impl ToolProcessEnvelope {
         for binding in self.artifact_bindings {
             artifact_bindings.push(materialize_tool_process_binding(root, binding)?);
         }
+        let bytes = serde_json::to_vec(&ToolProcessInvocationContext {
+            artifact_bindings, metadata: self.metadata,
+        }).map_err(|error| format!("tool-process context carrier cannot encode: {error}"))?;
+        if bytes.len() as u64 > host_io_limits.max_payload_bytes {
+            return Err("tool-process context carrier exceeds its declared payload byte ceiling".into());
+        }
+        let content_hash = ContentHash::of_bytes(&bytes);
+        let context = ToolProcessContextCarrier {
+            path: directory.join(format!("invocation-context-{}.json", content_hash.to_hex())),
+            content_hash,
+            byte_len: bytes.len() as u64,
+        };
+        match octopus_file_storage::write_new(&context.path, &bytes) {
+            Ok(file) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
+                }
+                file.sync_all().map_err(|error| error.to_string())?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                context.read_bytes(root, request_id, host_io_limits)?;
+            }
+            Err(error) => return Err(format!("tool-process context carrier cannot be published: {error}")),
+        }
+        sync_tool_process_owner_directory(&directory)?;
         Ok(ToolProcessWireEnvelope {
             artifact: self.artifact,
             label: self.label,
             manifest_path: artifact_file.manifest_path().to_path_buf(),
-            artifact_bindings,
-            metadata: self.metadata,
+            context,
             source_movement_seq: self.source_movement_seq,
             worker_environment: self.worker_environment,
             worker_environment_kind: self.worker_environment_kind,
@@ -682,6 +762,7 @@ impl ToolProcessWireEnvelope {
         request_id: u64,
         host_io_limits: &InterfaceHostIoLimits,
     ) -> Result<InterfaceInvocationEnvelope, String> {
+        let context = self.context.read(root, request_id, host_io_limits)?;
         let request_root = root.join(request_id.to_string());
         let artifact_file =
             read_tool_process_input_artifact(&self.manifest_path, &request_root, host_io_limits)?;
@@ -696,15 +777,15 @@ impl ToolProcessWireEnvelope {
         }
         artifact_file.read_payload_bytes_bounded(host_io_limits.max_payload_bytes)
             .map_err(|error| error.to_string())?;
-        let mut artifact_binding_payloads = Vec::with_capacity(self.artifact_bindings.len());
-        for binding in self.artifact_bindings {
+        let mut artifact_binding_payloads = Vec::with_capacity(context.artifact_bindings.len());
+        for binding in context.artifact_bindings {
             artifact_binding_payloads.push(read_tool_process_bound_artifact(&binding, root, host_io_limits)?);
         }
         Ok(InterfaceInvocationEnvelope {
             artifact: self.artifact,
             artifact_file,
             artifact_binding_payloads,
-            metadata: self.metadata,
+            metadata: context.metadata,
         })
     }
 }
@@ -2008,6 +2089,16 @@ async fn hand_completed_tool_outputs(
 
 #[cfg(unix)]
 impl ToolProcessPrimaryInput {
+    fn capture_invocation(root: &Path, request_id: u64, envelope: &ToolProcessWireEnvelope, limits: &InterfaceHostIoLimits) -> Result<Self, String> {
+        let mut owned = Self::capture(root, request_id, &envelope.manifest_path, limits)?;
+        let expected = envelope.context.read_bytes(root, request_id, limits)?;
+        let name = envelope.context.path.file_name().ok_or("tool-process context carrier has no filename")?;
+        let (bytes, metadata) = owned.read_file(name, envelope.context.byte_len)?;
+        if bytes != expected { return Err("tool-process context carrier changed before dispatch".into()); }
+        owned.files.push((name.to_os_string(), envelope.context.content_hash, metadata));
+        Ok(owned)
+    }
+
     fn capture(root: &Path, request_id: u64, manifest_path: &Path, limits: &InterfaceHostIoLimits) -> Result<Self, String> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::fs::OpenOptionsExt;
@@ -2097,6 +2188,9 @@ impl ToolProcessPrimaryInput {
 
 #[cfg(not(unix))]
 impl ToolProcessPrimaryInput {
+    fn capture_invocation(_root: &Path, _request_id: u64, _envelope: &ToolProcessWireEnvelope, _limits: &InterfaceHostIoLimits) -> Result<Self, String> {
+        Err("tool-process primary input retirement requires descriptor-relative file operations".into())
+    }
     fn capture(_root: &Path, _request_id: u64, _manifest_path: &Path, _limits: &InterfaceHostIoLimits) -> Result<Self, String> {
         Err("tool-process primary input retirement requires descriptor-relative file operations".into())
     }
@@ -2284,10 +2378,15 @@ impl ToolProcessClient {
         }
         let mut process_readable = package_files.clone();
         process_readable.extend(private_read_write.iter().cloned());
+        let additional = octopus_interfaces::additional_host_root_paths(
+            &ctx.resolved_interface_descriptor().map_err(ToolProcessInvokeError::Unavailable)?, &ctx.root_slots,
+        ).map_err(ToolProcessInvokeError::Unavailable)?;
+        let (authority, authority_roots) = octopus_interfaces::expand_host_root_authority(&authority, &ctx.root_slots, &additional)
+            .map_err(ToolProcessInvokeError::Unavailable)?;
         let resolved = match arguments {
             Some(arguments) => {
                 authority
-                    .preflight_invocation_paths(&ctx.root_slots, arguments)
+                    .preflight_invocation_paths(&authority_roots, arguments)
                     .map_err(|error| match error {
                         ProcessInvocationAuthorityError::Unavailable(error) => {
                             ToolProcessInvokeError::Unavailable(error)
@@ -2298,7 +2397,7 @@ impl ToolProcessClient {
                     })?;
                 authority.resolve_for_invocation(
                     &executable_base,
-                    &ctx.root_slots,
+                    &authority_roots,
                     &environment,
                     arguments,
                     process_readable.clone(),
@@ -2315,7 +2414,7 @@ impl ToolProcessClient {
             }
             None => authority.resolve(
                 &executable_base,
-                &ctx.root_slots,
+                &authority_roots,
                 &environment,
                 process_readable,
                 private_read_write,
@@ -2325,6 +2424,7 @@ impl ToolProcessClient {
         }
         .map_err(ToolProcessInvokeError::Unavailable)?;
         let mut exposed_root_slots = resolved.root_slots;
+        exposed_root_slots.retain(|slot, _| ctx.root_slots.contains_key(slot));
         exposed_root_slots.insert(
             "interface_life_install_root".to_string(),
             ctx.installation_root()
@@ -2549,10 +2649,10 @@ impl ToolProcessClient {
             ToolProcessInvokeError::Capability(error)
         };
         let envelope = envelope
-            .materialize_for_process(&self.input_root, request_id)
+            .materialize_for_process(&self.input_root, request_id, &self.host_io_limits)
             .map_err(preparation_error)?;
-        let primary_input = ToolProcessPrimaryInput::capture(
-            &self.input_root, request_id, &envelope.manifest_path, &self.host_io_limits,
+        let primary_input = ToolProcessPrimaryInput::capture_invocation(
+            &self.input_root, request_id, &envelope, &self.host_io_limits,
         ).map_err(preparation_error)?;
         let invocation_manifest = envelope.manifest_path.clone();
         let input = ToolProcessInput::Invoke {
@@ -4948,9 +5048,11 @@ fn form_worker_environment(
     }
     let owned_kind = [owner_kind.clone()];
     let door_root_bindings = ctx.root_slots.clone();
+    let door_additional_root_bindings = octopus_interfaces::additional_host_root_paths(&door, &door_root_bindings).map_err(ToolProcessInvokeError::Unavailable)?;
     let ee_root_slot_allowance = metadata.grant().ee_root_slot_allowance_set();
     let door_instance_dir = interface_root.join(ctx.interface.as_str());
     let request = WorkerEnvironmentFormationRequest {
+        door_additional_root_bindings: &door_additional_root_bindings,
         door_interface: &ctx.interface,
         door_descriptor_hash: &door_descriptor_hash,
         door_driver_ref: &door.interface_driver_ref,
@@ -9338,6 +9440,7 @@ mod tool_process_private_boundary_tests {
         let roots = BTreeMap::new();
         let formation = registry
             .form(&WorkerEnvironmentFormationRequest {
+                door_additional_root_bindings: &Default::default(),
                 door_interface: &door,
                 door_descriptor_hash: "hash-door",
                 door_driver_ref: "test_door",
@@ -9427,14 +9530,14 @@ mod tool_process_private_boundary_tests {
                 artifact_bindings: vec![super::ToolProcessBoundArtifact::new(artifact.clone(), b"bound bytes".to_vec())],
                 metadata: None, source_movement_seq: 0, worker_environment: None,
                 worker_environment_kind: None, output_source: None,
-            }.materialize_for_process(&input_root, 1).unwrap();
+            }.materialize_for_process(&input_root, 1, &limits).unwrap();
             std::os::unix::fs::symlink(input_root.join("1"), input_root.join("2")).unwrap();
-            assert!(super::ToolProcessPrimaryInput::capture(&input_root, 2, &wire.manifest_path, &limits).is_err());
-            let input = super::ToolProcessPrimaryInput::capture(&input_root, 1, &wire.manifest_path, &limits).unwrap();
+            assert!(super::ToolProcessPrimaryInput::capture_invocation(&input_root, 2, &wire, &limits).is_err());
+            let input = super::ToolProcessPrimaryInput::capture_invocation(&input_root, 1, &wire, &limits).unwrap();
             let captured = wire.clone().materialize(&input_root, 1, &limits).unwrap();
             let input_payload = captured.artifact_file.read_manifest().unwrap().payload_path;
             let output = InterfaceArtifactFile::write(wire.manifest_path.parent().unwrap().join("emitted"), "result", b"retained output").unwrap();
-            let bound = wire.artifact_bindings[0].manifest_path.clone();
+            let bound = wire.context.read(&input_root, 1, &limits).unwrap().artifact_bindings[0].manifest_path.clone();
             let source = Movement { seq: Seq(0), lamport: Lamport(1), recorded_at_unix_ms: 1,
                 trace: TraceId("retirement".into()), kind: MovementKind::InterfaceOutbound,
                 from: Endpoint::Interface(InterfaceId::new("worker")), to: Endpoint::Interface(ctx.interface.clone()),
@@ -9456,6 +9559,7 @@ mod tool_process_private_boundary_tests {
             assert_eq!(result.is_err(), corrupt);
             assert_eq!(wire.manifest_path.exists(), corrupt);
             assert_eq!(input_payload.exists(), corrupt);
+            assert_eq!(wire.context.path.exists(), corrupt);
             assert_eq!(output.read_payload_bytes().unwrap(), b"retained output");
             assert!(bound.exists());
             assert_eq!(captured.read_artifact_payload_bounded(limits.max_payload_bytes).unwrap(), payload);
@@ -10306,6 +10410,7 @@ mod tool_process_private_boundary_tests {
             let roots = BTreeMap::new();
             let formation = registry
                 .form(&WorkerEnvironmentFormationRequest {
+                    door_additional_root_bindings: &Default::default(),
                     door_interface: &door,
                     door_descriptor_hash: "hash-door",
                     door_driver_ref: "test_door",
@@ -10401,6 +10506,7 @@ mod tool_process_private_boundary_tests {
             materialized.exact_paths,
             std::iter::empty(),
             std::iter::empty(),
+            false,
             false,
             false,
             false,
@@ -10749,7 +10855,7 @@ mod tool_process_carrier_tests {
         };
         let limits = InterfaceHostIoLimits { max_control_frame_bytes: 65536, max_stderr_bytes: 65536, max_manifest_bytes: 65536, max_payload_bytes: 65536 };
         let captured = ToolProcessEnvelope::capture(&input, 16805, &limits).unwrap();
-        let wire = captured.materialize_for_process(&root, 1).unwrap();
+        let wire = captured.materialize_for_process(&root, 1, &limits).unwrap();
         assert!(serde_json::to_vec(&wire).unwrap().len() < limits.max_control_frame_bytes as usize);
         let invocation = wire.materialize(&root, 1, &limits).unwrap();
         assert_eq!(invocation.artifact_binding_payloads.iter().map(|binding| binding.artifact.clone()).collect::<Vec<_>>(), expected);
@@ -10762,6 +10868,12 @@ mod tool_process_carrier_tests {
     #[test]
     fn payload_bytes_remain_artifact_carriers_outside_the_control_frame() {
         let root = tempfile::tempdir().unwrap();
+        let limits = InterfaceHostIoLimits {
+            max_control_frame_bytes: 16 * 1024,
+            max_stderr_bytes: 16 * 1024,
+            max_manifest_bytes: 16 * 1024,
+            max_payload_bytes: 1024 * 1024,
+        };
         let payload = vec![b'a'; 400 * 1024];
         let binding_payload = vec![b'b'; 200 * 1024];
         let envelope = ToolProcessEnvelope {
@@ -10785,18 +10897,19 @@ mod tool_process_carrier_tests {
         };
         let wire = envelope
             .clone()
-            .materialize_for_process(root.path(), 7)
+            .materialize_for_process(root.path(), 7, &limits)
             .unwrap();
-        let shared = wire.artifact_bindings[0].manifest_path.clone();
+        let binding = wire.context.read(root.path(), 7, &limits).unwrap().artifact_bindings.remove(0);
+        let shared = binding.manifest_path.clone();
         let payload_path = shared.parent().unwrap().join("payload");
         #[cfg(unix)]
         let published_metadata = std::fs::metadata(&payload_path).unwrap();
         for request_id in 8..40 {
             let repeated = envelope
                 .clone()
-                .materialize_for_process(root.path(), request_id)
+                .materialize_for_process(root.path(), request_id, &limits)
                 .unwrap();
-            assert_eq!(repeated.artifact_bindings[0].manifest_path, shared);
+            assert_eq!(repeated.context.read(root.path(), request_id, &limits).unwrap().artifact_bindings[0].manifest_path, shared);
         }
         assert_eq!(
             std::fs::read_dir(root.path().join("bound-artifacts"))
@@ -10863,29 +10976,17 @@ mod tool_process_carrier_tests {
                 metadata.blocks() * 512, metadata.mode() & 0o777, metadata.nlink(),
             );
         }
-        let limits = InterfaceHostIoLimits {
-            max_control_frame_bytes: 16 * 1024,
-            max_stderr_bytes: 16 * 1024,
-            max_manifest_bytes: 16 * 1024,
-            max_payload_bytes: 1024 * 1024,
-        };
         let other = tempfile::tempdir().unwrap();
         let foreign = envelope
             .clone()
-            .materialize_for_process(other.path(), 7)
+            .materialize_for_process(other.path(), 7, &limits)
             .unwrap();
-        assert_ne!(foreign.artifact_bindings[0].manifest_path, shared);
-        let mut wrong_owner = wire.clone();
-        wrong_owner.artifact_bindings[0].manifest_path =
-            foreign.artifact_bindings[0].manifest_path.clone();
-        assert!(wrong_owner.materialize(root.path(), 7, &limits).is_err());
-        let mut wrong_reference = wire.clone();
-        wrong_reference.artifact_bindings[0].artifact.id = ArtifactId::new("context:other");
-        assert!(
-            wrong_reference
-                .materialize(root.path(), 7, &limits)
-                .is_err()
-        );
+        let foreign_binding = foreign.context.read(other.path(), 7, &limits).unwrap().artifact_bindings.remove(0);
+        assert_ne!(foreign_binding.manifest_path, shared);
+        assert!(super::read_tool_process_bound_artifact(&foreign_binding, root.path(), &limits).is_err());
+        let mut wrong_reference = binding;
+        wrong_reference.artifact.id = ArtifactId::new("context:other");
+        assert!(super::read_tool_process_bound_artifact(&wrong_reference, root.path(), &limits).is_err());
         let concurrent = tempfile::tempdir().unwrap();
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let publishers: Vec<_> = (0..4)
@@ -10916,8 +11017,8 @@ mod tool_process_carrier_tests {
         let mut changed_bytes = binding_payload.clone();
         changed_bytes[0] = b'c';
         changed.artifact_bindings[0] = ToolProcessBoundArtifact::new(changed.artifact_bindings[0].artifact.clone(), changed_bytes);
-        let changed_wire = changed.materialize_for_process(root.path(), 40).unwrap();
-        assert_ne!(changed_wire.artifact_bindings[0].manifest_path, shared);
+        let changed_wire = changed.materialize_for_process(root.path(), 40, &limits).unwrap();
+        assert_ne!(changed_wire.context.read(root.path(), 40, &limits).unwrap().artifact_bindings[0].manifest_path, shared);
         assert_eq!(
             changed_wire
                 .materialize(root.path(), 40, &limits)
@@ -10946,13 +11047,13 @@ mod tool_process_carrier_tests {
         assert!(
             envelope
                 .clone()
-                .materialize_for_process(root.path(), 41)
+                .materialize_for_process(root.path(), 41, &limits)
                 .is_err()
         );
         std::fs::write(&shared, &manifest_bytes).unwrap();
         std::fs::write(&payload_path, vec![b'x'; binding_payload.len()]).unwrap();
         assert!(wire.materialize(root.path(), 7, &limits).unwrap().artifact_binding_payloads[0].read_bytes().is_err());
-        assert!(envelope.materialize_for_process(root.path(), 41).is_err());
+        assert!(envelope.materialize_for_process(root.path(), 41, &limits).is_err());
         assert_eq!(std::fs::read(&payload_path).unwrap()[0], b'x');
     }
 }
@@ -11711,7 +11812,7 @@ pub mod owner_contract_tests {
         )?;
         envelope.worker_environment = invocation.worker_environment;
         envelope.worker_environment_kind = invocation.worker_environment_kind;
-        let envelope = envelope.materialize_for_process(&input_root, invocation.request_id)?;
+        let envelope = envelope.materialize_for_process(&input_root, invocation.request_id, &environment.host_io_limits)?;
         let command = ToolProcessCommand::Invoke {
             request_id: invocation.request_id,
             descriptor: invocation.descriptor,

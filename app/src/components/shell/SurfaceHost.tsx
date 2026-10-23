@@ -1,9 +1,10 @@
 import { lazy, Suspense } from "react";
+import type { RuntimeTopologyState } from "../../runtimeTopology";
 import type { HomeViewMode } from "../voice/VoiceView";
 import type { AdmittedClientSurfaceDocument, ClientSurfaceHostSource } from "../../client-surfaces/types";
 import type { VoiceSession } from "../voice/useVoiceSession";
 import { OcPaneGroup } from "../../design-system/layout";
-import type { SelectionRef, TopologySnapshot } from "../../data/topology";
+import type { SelectionRef } from "../../data/topology";
 import type { DashboardFilters, DashboardScope, DashboardTopologyMode } from "../../uiState";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import type { ChatWorkspace } from "../chat";
@@ -36,7 +37,7 @@ export type SurfaceHostProps = {
   onClearMovement?: () => void;
   accessProfile: OctopusClientAccessProfile;
   surface: ClientSurfaceDescriptor;
-  topology: TopologySnapshot;
+  topology: RuntimeTopologyState;
   query: string;
   onQueryChange: (value: string) => void;
   searchPlaceholder: string;
@@ -166,7 +167,7 @@ function SurfaceContent({
 function renderSurface(
   accessProfile: OctopusClientAccessProfile,
   surface: ClientSurfaceDescriptor,
-  topology: TopologySnapshot,
+  topology: RuntimeTopologyState,
   query: string,
   searchFocusTick: number,
   chatWorkspace: ChatWorkspace,

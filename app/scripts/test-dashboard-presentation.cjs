@@ -33,6 +33,7 @@ test("live transfer pages retain exact ledger order and pace later batches witho
   const rows = pages.flatMap((page) => page.movements), original = JSON.stringify(rows), requests = [];
   const animation = load("src/components/ArtifactTransferAnimation.tsx", {
     "../projectionClient": { readProjection: async (surface, request) => { assert.equal(surface, "projection.movements.list"); requests.push(request); return pages.shift(); } },
+    "../appearance": { useShouldReduceMotion: () => false },
     "../projectionLive": {},
   });
   assert.deepEqual(await animation.readArtifactTransferBatch(null), { nextSeq: 10, transfers: [] });
@@ -65,7 +66,8 @@ test("System transfer geometry follows layout changes and refuses ambiguous anch
   window.requestAnimationFrame = fn => { frames.set(++next, fn); return next; };
   window.cancelAnimationFrame = id => frames.delete(id);
   window.HTMLElement.prototype.getBoundingClientRect = function () { return { x: this.dataset.projectionInterface === "b" ? right : 0, y: 0, width: 10, height: 10 }; };
-  const animation = load("src/components/ArtifactTransferAnimation.tsx", { "../projectionClient": {}, "../projectionLive": {} });
+  const animation = load("src/components/ArtifactTransferAnimation.tsx", { "../projectionClient": {}, "../appearance": { useShouldReduceMotion: () => false },
+    "../projectionLive": {} });
   const transfers = [{ id: "geometry", sequence: 1, from: "a", to: "b", runId: "run", checkpointId: "checkpoint", startedAt: now }];
   const feed = { snapshot: () => transfers, subscribe: () => () => {}, presentation() {}, present() {} }, interfaces = { a: { type: "system", descriptor: { role: "worker" } }, b: { type: "system", descriptor: {} } };
   const frame = async time => { now = time; await React.act(async () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(time)); }); };
@@ -93,6 +95,7 @@ test("sustained bursts bound memory and lag while unrelated paths run together a
   const animation = load("src/components/ArtifactTransferAnimation.tsx", {
     "motion/react": { useReducedMotion: () => false },
     "../projectionClient": { hasProjectionBridge: () => true, readProjection: async (_surface, request) => { requests.push(request); return page; } },
+    "../appearance": { useShouldReduceMotion: () => false },
     "../projectionLive": { subscribeProjectionChanges: (listener) => { changed = listener; return () => { changed = null; }; } },
   });
   function Probe() { const current = animation.useArtifactTransferFeed({ mode: "live", endpoint: "fixture" }); feed = current.feed; displayed = { transfers: animation.useArtifactTransferList(feed), error: current.error }; return null; }
@@ -137,6 +140,7 @@ test("real feeds retain unseen anchor transfers independently per pane, expire s
   const animation = load("src/components/ArtifactTransferAnimation.tsx", {
     "motion/react": { useReducedMotion: () => false },
     "../projectionClient": { hasProjectionBridge: () => true, readProjection: async () => page },
+    "../appearance": { useShouldReduceMotion: () => false },
     "../projectionLive": { subscribeProjectionChanges: fn => { listeners.add(fn); return () => listeners.delete(fn); } },
   });
   const interfaces = { a: { type: "system", descriptor: { role: "worker" } }, b: { type: "system", descriptor: {} } };
@@ -180,7 +184,8 @@ test("request and return with distinct checkpoint traces have a visible gap and 
   Object.defineProperty(window.performance, "now", { value: () => now });
   window.requestAnimationFrame = (callback) => { const id = ++nextFrame; frames.set(id, callback); return id; };
   window.cancelAnimationFrame = (id) => frames.delete(id);
-  const animation = load("src/components/ArtifactTransferAnimation.tsx", { "../projectionClient": {}, "../projectionLive": {} });
+  const animation = load("src/components/ArtifactTransferAnimation.tsx", { "../projectionClient": {}, "../appearance": { useShouldReduceMotion: () => false },
+    "../projectionLive": {} });
   const runId = "run_operator_chat_36a5e9adea50641026079331752ee97d";
   const provider = "world_provider_chatgpt_36a5e9adea50641026079331752ee97d", context = "system_context_36a5e9adea50641026079331752ee97d";
   const raw = [

@@ -361,10 +361,17 @@ export function executionContextTaskCapabilities(
       if (Object.keys(slots).length) doorHostSlots[door] = slots;
     }
   }
+  for (const driver of selectedDrivers.filter((driver) => driver.rootSlots.includes("workspace_root"))) {
+    for (const door of driver.doorInterfaces) {
+      if (context?.sourceFolders?.length) {
+        doorHostSlots[door] = { ...doorHostSlots[door], workspace_root: context.sourceFolders[0] };
+      }
+    }
+  }
   if (accessMode === "full_access") {
-    const hostFilesystemRoot = context?.hostRootRefs[HOST_FILESYSTEM_ROOT_SLOT];
+    const hostFilesystemRoot = context?.fullAccessRoot;
     if (!hostFilesystemRoot) {
-      throw new Error(`Full access requires '${HOST_FILESYSTEM_ROOT_SLOT}' in the host manifest.`);
+      throw new Error("The host filesystem root is unavailable. Reload the task configuration.");
     }
     for (const driver of selectedDrivers.filter((candidate) => (
       candidate.rootSlots.includes(HOST_FILESYSTEM_ROOT_SLOT)
@@ -378,6 +385,7 @@ export function executionContextTaskCapabilities(
           );
         }
         slots[HOST_FILESYSTEM_ROOT_SLOT] = hostFilesystemRoot;
+        if (driver.rootSlots.includes("workspace_root") && !slots.workspace_root) slots.workspace_root = hostFilesystemRoot;
         doorHostSlots[door] = slots;
       }
     }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type HTMLAttributes, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, type HTMLAttributes, type ReactNode } from "react";
 import { useShouldReduceMotion } from "../appearance";
 import "./CadencedShimmerText.css";
 
@@ -8,7 +8,15 @@ type Props = HTMLAttributes<HTMLElement> & {
   highlight?: ReactNode;
 };
 
-export function CadencedShimmerText({ active = true, as: Element = "span", children, className, highlight, ...props }: Props) {
+const ShimmerEnabled = createContext(true);
+
+export function ShimmerActivityScope({ active, children }: { active: boolean; children: ReactNode }) {
+  const parentActive = useContext(ShimmerEnabled);
+  return <ShimmerEnabled value={parentActive && active}>{children}</ShimmerEnabled>;
+}
+
+export function CadencedShimmerText({ active: requestedActive = true, as: Element = "span", children, className, highlight, ...props }: Props) {
+  const active = useContext(ShimmerEnabled) && requestedActive;
   const reduceMotion = useShouldReduceMotion();
   const elementRef = useRef<HTMLElement | null>(null);
 

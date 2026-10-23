@@ -86,7 +86,7 @@ pub(crate) async fn author_failed_provider_source(
     ) {
         Ok(handoff) => match handoff
             .hand_failed_source(ProviderEmission {
-                artifact: materialize_consumed_source_outcome(ctx, turn, message,
+                artifact: materialize_consumed_source_outcome(ctx, descriptor, turn, message,
                     restore_consumed && handoff.consumes_context_free_independent_input().await)?,
                 route: ProviderEmissionRoute::ClientProjection,
             })
@@ -109,11 +109,11 @@ pub(crate) async fn author_failed_provider_source(
 }
 
 pub(crate) fn materialize_consumed_source_outcome(
-    ctx: &InterfaceLiftContext, turn: &QueuedTurn, message: &str, context_free_independent: bool,
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, turn: &QueuedTurn, message: &str, context_free_independent: bool,
 ) -> Result<octopus_interfaces::InterfaceArtifactFile, String> {
     if context_free_independent {
         let manifest = turn.envelope.read_artifact_manifest().map_err(|error| error.to_string())?;
-        if !is_inflight_turn_control_candidate_label(&manifest.label) {
+        if !is_inflight_turn_control_candidate_label(&manifest.label, descriptor) {
             return crate::handler::materialize_independent_input_receipt(
                 &ctx.interface_var_dir().join("emitted"), turn.seq, &manifest.label, &turn.envelope.artifact,
             ).map_err(|error| error.to_string());

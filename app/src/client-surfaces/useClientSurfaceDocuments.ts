@@ -21,6 +21,7 @@ export type ClientSurfaceDocumentRegistryState = {
   verdicts: ClientSurfaceAdmissionVerdict[];
   errors: string[];
   loading: boolean;
+  hydrated: boolean;
 };
 
 const EMPTY_SNAPSHOT: ClientSurfaceDocumentSnapshot = {
@@ -66,12 +67,13 @@ export function useClientSurfaceDocuments(accessProfile: "live" | "lab"): Client
     };
   }, [accessProfile, projectionGeneration]);
 
-  return useMemo(() => materializeRegistry(
+  return useMemo(() => ({ ...materializeRegistry(
     snapshotState.profile === accessProfile ? snapshotState.value : EMPTY_SNAPSHOT,
     snapshotState.profile === accessProfile ? readError : "",
     loading || snapshotState.profile !== accessProfile,
     accessProfile,
-  ), [accessProfile, loading, readError, snapshotState]);
+  ), hydrated: snapshotState.profile === accessProfile && snapshotState.value !== EMPTY_SNAPSHOT && !readError }),
+  [accessProfile, loading, readError, snapshotState]);
 }
 
 async function readSurfaceDocumentSnapshot(accessProfile: "live" | "lab"): Promise<ClientSurfaceDocumentSnapshot> {

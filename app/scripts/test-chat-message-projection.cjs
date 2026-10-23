@@ -16,10 +16,37 @@ function projectionStore(overrides = {}) {
   return Object.assign(createProjectionContext({ resolveRepoRoot: () => repoRoot, octopusHome: () => os.tmpdir() }), overrides);
 }
 function projectionFixture(fields = {}) {
-  return { operatorChatProtocol: protocol, descriptors: { interface: [{ id: 'provider', role: 'provider' }, { id: 'other-provider', role: 'provider' }], ee_template: [] },
+  return { octopusHome: os.tmpdir(), registryRoot: path.join(os.tmpdir(), 'registry'), operatorChatProtocol: protocol, descriptors: { interface: [{ id: 'provider', role: 'provider' }, { id: 'other-provider', role: 'provider' }], ee_template: [] },
     descriptorIndexes: { interface: new Map() }, eeInstances: [], runRecords: [], clientAgentCatalog: { document: { agents: [] } },
     structureMemo: new Map(), ledgerMemo: new Map(), ...fields };
 }
+
+test('trigger history groups delivery edges and uses the same task title as All tasks', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oct-trigger-history-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const entry = { runId: 'task', chatInterfaceId: 'chat', surfaceRole: 'task', writable: true, inbound: [], activity: [] };
+  const projection = projectionFixture({ octopusHome: root, registryRoot: path.join(root, 'registry') });
+  const store = projectionStore({ operatorOsScope: () => ({ client_runs: [{ run_id: 'task', interface_id: 'chat' }, { run_id: 'other', interface_id: 'other_chat' }] }),
+    operatorChatRunIndex: async () => [entry, { ...entry, runId: 'other', chatInterfaceId: 'other_chat' }] });
+  t.after(() => store.close());
+  const edge = (seq, run, kind, artifact = 'firing') => ({ ...movement(seq, 'cron.current_time', {}, { from: 'trigger', kind }),
+    artifact: { id: `cron.current_time:${artifact}` }, invocation_metadata: { runtime: { run } } });
+  const edges = [edge(1, 'controller', 'InterfaceArrival'), edge(2, 'task', 'InterfaceArrival'), edge(3, 'task', 'InterfaceOutbound')];
+  entry.activity = [edges[1]];
+  projection.descriptorIndexes.interface.set('trigger', { activation_sidecars: [{ activations: [{ activation_driver_ref: 'cron_life', config: { run_template: { id: 'run_review' } } }] }] });
+  const title = () => store.operatorChatTitle(projection, entry, new Map(), protocol);
+  const read = (rows = edges) => store.scheduledInterfaceEvidence(projection, 'trigger', { schedule: {} }, rows);
+  assert.equal(await title(), 'Review');
+  assert.deepEqual((await read()).deliveries.map(row => [row.run_id, row.chat_interface_id, row.title]), [['task', 'chat', 'Review']]);
+  const directory = path.join(root, 'state/change-journals/task'); fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'journal.json'), JSON.stringify({ schema_version: 1, run: 'task', outcome: 'unchanged', summary: 'Reviewed the activity window', changes: [] }));
+  assert.equal((await read()).deliveries[0].title, await title());
+  assert.equal(await title(), 'Reviewed the activity window');
+  assert.equal((await read([...edges, edge(4, 'other', 'InterfaceArrival'), edge(5, 'other', 'InterfaceOutbound')])).deliveries.length, 2);
+  assert.equal((await read([...edges, edge(6, 'task', 'InterfaceArrival', 'second')])).deliveries.length, 2);
+  assert.equal((await read([edges[0]])).deliveries[0].chat_interface_id, '');
+  assert.equal(require('../electron/projection/registryRows.cjs').projectionTruthChange('state/change-journals/task/journal.json'), 'runs');
+});
 function movement(seq, label, payload, { from = 'provider', to = 'chat', kind = 'InterfaceOutbound' } = {}) {
   const hex = seq.toString(16).padStart(64, '0');
   return { seq, recorded_at_unix_ms: seq * 100, kind, from: { Interface: from }, to: { Interface: to },
@@ -125,6 +152,28 @@ async function project(rows, writable) {
   return JSON.parse(JSON.stringify(await store.buildSingleOperatorChatMessages(projectionFixture(), entry, protocol)));
 }
 
+test('Home voice delegations open separate evidenced user turns without accepting another voice interface', async () => {
+  const inbound = [movement(1, protocol.inputLabel, { text: 'Typed request' }, { from: 'chat', kind: 'InterfaceArrival' }),
+    movement(20, 'realtime.delegation', { input_text: 'Enable Insights', delegation_id: 'voice-request', correlation_id: 'call' }, { from: 'voice-input', kind: 'InterfaceArrival' })];
+  const outbound = [finalAnswer(2, 'First reply'), finalAnswer(21, 'Enabled')];
+  outbound[1].payload.in_reply_to = inbound[1].artifact;
+  const entry = { runId: 'run', chatInterfaceId: 'chat', writable: true, inbound, outbound, activity: [...inbound, ...outbound],
+    record: { interface_state: { chat: { client_surface_role: 'home', provider_runtime_interface: 'provider', voice_context: { delegation_interface_id: 'voice-input' } } } } };
+  const store = projectionStore({ resolveLedgerArtifactPayloads: async rows => new Map(rows.map(row => [row, row.payload])) });
+  const messages = await store.buildSingleOperatorChatMessages(projectionFixture(), entry, protocol);
+  assert.deepEqual(messages.map(message => message.text), ['Typed request', 'First reply', 'Enable Insights', 'Enabled']);
+  assert.equal(messages[2].event_kind, 'message');
+  assert.equal(messages[2].event_data.voice.delegation_id, 'voice-request');
+  assert.deepEqual(messages[3].event_data.voice, { correlation_id: 'call', delegation_id: 'voice-request' });
+  for (const patch of [{ in_reply_to: { ...inbound[1].artifact, content: 'f'.repeat(64) } }, { in_reply_to: { ...inbound[1].artifact, id: 'another' } }]) {
+    Object.assign(outbound[1].payload, patch, { voice: { correlation_id: 'unproven', delegation_id: 'unproven' } });
+    assert.equal((await store.buildSingleOperatorChatMessages(projectionFixture(), entry, protocol)).at(-1).event_data.voice, undefined);
+  }
+  assert.equal(messages[3].latency_ms, 100);
+  assert.equal(await store.operatorChatTurnOpening(entry, inbound[1], protocol), 'waiting');
+  assert.equal(await store.operatorChatTurnOpening(entry, { ...inbound[1], from: { Interface: 'other-voice' } }, protocol), null);
+});
+
 test('both chat history paths preserve interleaved item identity and replace completed snapshots', async () => {
   for (const writable of [true, false]) for (const finalText of ['', 'Done!']) {
     const messages = await project([
@@ -153,18 +202,77 @@ test('provider identity and missing item identity never merge unrelated text', a
   }
 });
 
-test('completed partial answers retain their text without completing the turn', async () => {
-  assert.equal(operatorChatEventKind('turn.agent_message', protocol, { phase: 'partial_answer' }), 'message');
-  for (const writable of [true, false]) {
+test('completed answer items retain their text without completing the turn', async () => {
+  for (const phase of ['partial_answer', 'final_answer']) for (const writable of [true, false]) {
+    assert.equal(operatorChatEventKind('turn.agent_message', protocol, { phase }), 'message');
+    const answer = partialAnswer(2, 'Answer so far', 'partial');
+    answer.payload.phase = phase;
     const messages = await project([
-      delta(1, 'Answer', 'partial', 'partial_answer'), partialAnswer(2, 'Answer so far', 'partial'),
+      delta(1, 'Answer', 'partial', phase), answer,
       toolCall(3, 'started'), finalAnswer(4, 'Complete answer'),
     ], writable);
     assert.deepEqual(messages.map(message => message.text), ['Answer so far', 'Read', 'Complete answer']);
     assert.equal(messages[0].terminal, false);
-    assert.equal(messages[0].event_data.phase, 'partial_answer');
+    assert.equal(messages[0].event_data.phase, phase);
     assert.equal(messages.at(-1).terminal, true);
   }
+});
+
+test('declared chat outputs expose completed items before the turn stream and fold later delivery once', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oct-chat-progress-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const declared = await require('../electron/projection/providerDescriptors.cjs').readOperatorChatProtocol(path.join(repoRoot, 'registry'));
+  const rows = [commentary(2, 'Working', 'progress'), movement(4, 'turn.agent_message', {
+    text: 'Done', item_id: 'final', turn_id: 'turn', phase: 'final_answer', lifecycle: 'completed',
+  })];
+  const projection = projectionFixture({ durableRoot: root, operatorChatProtocol: declared, ledgerRows: rows,
+    ledgerRowsByRunSources: [new Map([['run', rows]])], runRecords: [{ run_id: 'run', interface_state: { chat: { provider_runtime_interface: 'provider' } } }] });
+  const store = projectionStore({ operatorOsScope: () => ({ client_runs: [{ run_id: 'run', interface_id: 'chat' }] }),
+    refreshLedgerProjection: async () => {}, resolveLedgerArtifactPayloads: async values => new Map(values.map(value => [value, value.payload])) });
+  t.after(() => store.close());
+  const read = async () => {
+    projection.operatorChatRunIndexCache = null;
+    const [entry] = await store.operatorChatRunIndex(projection);
+    return store.buildSingleOperatorChatMessages(projection, entry, declared);
+  };
+  const early = await read();
+  assert.deepEqual(early.map(message => [message.event_kind, message.text, message.terminal]), [['commentary', 'Working', false], ['message', 'Done', false]]);
+  const records = [
+    { type: 'header', schema_version: 1, seq: 0, provider_interface: 'provider', run: 'run', thread_id: 'thread', turn_id: 'turn', opened_source_movement_seq: 0, opened_at_unix_ms: 10 },
+    ...[delta(1, 'Working', 'progress', 'commentary'), delta(3, 'Done', 'final', 'final_answer')].map((row, index) => ({
+      type: 'event', seq: index + 1, source_movement_seq: 0, recorded_at_unix_ms: row.recorded_at_unix_ms, label: 'agent.message.delta', payload: row.payload,
+    })),
+    { type: 'seal', seq: 3, source_movement_seq: 5, recorded_at_unix_ms: 500, terminal_label: 'turn.completed', terminal_artifact_payload_blake3: 'a'.repeat(64) },
+  ];
+  rows.push(movement(5, 'turn.stream', { __raw: records.map(record => JSON.stringify(record)).join('\n') + '\n' }), finalAnswer(6, 'Done'));
+  const completed = await read();
+  assert.deepEqual(completed.map(message => message.text), ['Working', 'Done']);
+  assert.equal(completed.at(-1).terminal, true);
+});
+
+test('chat history and status use a caught-up ledger index without rescanning history', async (t) => {
+  const { DatabaseSync } = require('node:sqlite');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oct-chat-index-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const row = movement(0, 'turn.agent_message', {}), bytes = JSON.stringify(row) + '\n';
+  fs.writeFileSync(path.join(root, 'movements.jsonl'), bytes);
+  const db = new DatabaseSync(path.join(root, 'ledger-index.sqlite'));
+  db.exec(`CREATE TABLE index_meta(key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO index_meta VALUES ('schema_version', '4'), ('watermark', '1'), ('durable_end_offset', '${Buffer.byteLength(bytes)}');
+    CREATE TABLE movements(seq INTEGER PRIMARY KEY, lamport INTEGER, recorded_at_unix_ms INTEGER, trace TEXT, kind TEXT,
+      from_kind TEXT, from_id TEXT, to_kind TEXT, to_id TEXT, artifact_id TEXT, artifact_content TEXT,
+      runtime_run TEXT, runtime_checkpoint TEXT, runtime_interface TEXT);`);
+  db.prepare('INSERT INTO movements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(0, 0, 0, 'index-test', 'InterfaceOutbound', 'interface', 'provider', 'interface', 'chat', row.artifact.id, row.artifact.content, 'run', 'output', 'chat');
+  db.close();
+  const store = projectionStore({ refreshLedgerProjection: async () => { throw new Error('A valid, caught-up index must not rescan the ledger'); } });
+  t.after(() => store.close());
+  const projection = projectionFixture({ durableRoot: root, operatorChatStatusCursor: -1 });
+  assert.deepEqual((await store.operatorChatLedgerRows(projection, new Set(['run']))).get('run').map(row => row.seq), [0]);
+  assert.equal(projection.operatorChatStatusCursor, 0);
+  const delta = await store.operatorChatLedgerDelta(projection, new Set(['run']), 0);
+  assert.deepEqual(delta.rowsByRun.get('run'), []);
+  assert.equal(delta.nextMovementSeq, 0);
 });
 
 test('a sealed stream folds each delta position once even when it is delivered twice', async () => {

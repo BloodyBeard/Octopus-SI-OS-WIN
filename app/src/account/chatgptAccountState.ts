@@ -14,8 +14,9 @@ export type ChatgptAccountState = {
 
 export const EMPTY_CHATGPT_ACCOUNT_STATE: ChatgptAccountState = { account: null, loading: true, action: "idle", error: "", signInStatusError: "", signInUrl: "" };
 
-export function createChatgptAccountState(bridge: ChatgptAccountBridge) {
+export function createChatgptAccountState(bridge: ChatgptAccountBridge, home?: string) {
   let state = EMPTY_CHATGPT_ACCOUNT_STATE;
+  let disposed = false;
   let readGeneration = 0;
   let pendingRead: Promise<OctopusChatgptAccount | null> | null = null;
   let actionGeneration = 0;
@@ -33,9 +34,13 @@ export function createChatgptAccountState(bridge: ChatgptAccountBridge) {
     actionGeneration += 1;
   }
   function refresh(): Promise<OctopusChatgptAccount | null> {
+    if (disposed) return Promise.resolve(null);
     const generation = ++readGeneration;
-    update({ loading: true, error: "" });
+    update({ account: null, loading: true, error: "" });
     const request: Promise<OctopusChatgptAccount | null> = Promise.resolve().then(() => bridge.chatgptAccount()).then((account) => {
+      if (home !== undefined && account.octopusHome !== home) throw new Error("The provider account observation belongs to another Home.");
+      return account;
+    }).then((account) => {
       if (generation !== readGeneration) return pendingRead !== request ? pendingRead : state.account;
       update({ account, loading: false });
       return account;
@@ -48,6 +53,7 @@ export function createChatgptAccountState(bridge: ChatgptAccountBridge) {
     return request;
   }
   async function poll(generation: number) {
+    if (disposed) return;
     let terminal = false;
     try {
       const result = await bridge.chatgptSignInStatus(loginId);
@@ -76,15 +82,23 @@ export function createChatgptAccountState(bridge: ChatgptAccountBridge) {
     getSnapshot: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     refresh,
+    dispose() {
+      disposed = true;
+      readGeneration += 1;
+      pendingRead = null;
+      stopPolling();
+      state = EMPTY_CHATGPT_ACCOUNT_STATE;
+      listeners.clear();
+    },
     async retrySignInStatus() {
-      if (state.action !== "waiting" || !loginId || !state.signInStatusError) return;
+      if (disposed || state.action !== "waiting" || !loginId || !state.signInStatusError) return;
       stopPolling();
       update({ signInStatusError: "" });
       await poll(actionGeneration);
     },
     connect() { return bridge.onChatgptAccountChanged(() => { void refresh(); }); },
     async signIn() {
-      if (state.action !== "idle") return;
+      if (disposed || state.action !== "idle") return;
       stopPolling();
       const generation = actionGeneration;
       update({ action: "starting", error: "", signInStatusError: "", signInUrl: "" });
@@ -99,7 +113,7 @@ export function createChatgptAccountState(bridge: ChatgptAccountBridge) {
       }
     },
     async cancel() {
-      if (state.action !== "waiting" || !loginId) return;
+      if (disposed || state.action !== "waiting" || !loginId) return;
       stopPolling();
       update({ action: "cancelling", error: "", signInStatusError: "" });
       try {
@@ -113,16 +127,18 @@ export function createChatgptAccountState(bridge: ChatgptAccountBridge) {
       }
     },
     async logout() {
-      if (state.action !== "idle") return;
+      if (disposed || state.action !== "idle") return;
       stopPolling();
       readGeneration += 1;
       update({ action: "signing-out", error: "", signInStatusError: "", signInUrl: "" });
       try {
         const account = await bridge.chatgptLogout();
+        if (disposed) return;
         if (account.signedIn) throw new Error("ChatGPT logout was not confirmed.");
         readGeneration += 1;
         update({ account, loading: false, action: "idle" });
       } catch (error) {
+        if (disposed) return;
         await refresh();
         update({ action: "idle", error: message(error) });
       }

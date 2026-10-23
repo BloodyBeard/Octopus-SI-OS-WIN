@@ -326,7 +326,8 @@ async function main() {
     assert.equal(createdProject.parentEeId, first.rootEeId);
     const createdRecord = JSON.parse(await fs.readFile(path.join(octopusHomeRoot, "state", "ee_instances", `${createdProject.eeId}.json`), "utf8"));
     assert.equal(createdRecord.template_name, "project");
-    assert.deepEqual(createdRecord.config, configuredRoot.config);
+    assert.deepEqual(createdRecord.config, { ...configuredRoot.config,
+      octopus_os: { ...configuredRoot.config.octopus_os, source_folders: [] } });
     assert.equal(createdRecord.policy_narrowing, undefined);
     let updatedSidecar = JSON.parse(await fs.readFile(homeSidecarPath, "utf8"));
     assert.deepEqual(updatedSidecar.voice_context, voiceContext);
@@ -1543,6 +1544,9 @@ async function verifyTaskArchive(temporary) {
     await fs.writeFile(payloadFile, "retained payload evidence");
     const blobFile = path.join(home, "ledger", "retained.blob"); await fs.writeFile(blobFile, "retained blob evidence");
     const ledgerBefore = await fs.readFile(ledger, "utf8");
+    for (const interfaceId of [intakeId, doorId]) {
+      await fs.unlink(path.join(registry, "interface", interfaceId, "octopus_os.json"));
+    }
     const remove = async (extraHooks = {}) => {
       store.invalidate(false);
       return mutateOctopusOsWorkspace(registry, home, await read("projection.operator.os.scope"),
@@ -1899,11 +1903,11 @@ async function verifyProjectionReadinessBarrier(temporary) {
     resolveRepoRoot: () => path.resolve(__dirname, "../.."),
     sourceRegistry: () => registryRoot,
     octopusHome: () => octopusHomeRoot,
-    readWorkspaceSetupState: async options => {
+    inspectWorkspaceSetupState: async options => {
       workspaceReadCalls += 1;
       assert.equal(options.octopusHomeRoot, octopusHomeRoot);
       assert.equal(options.registryRoot, registryRoot);
-      return readWorkspaceSetupState(options);
+      return inspectWorkspaceSetupState(options);
     },
     projectEePolicies: async () => {
       policyProjectionCalls += 1;
@@ -1919,7 +1923,7 @@ async function verifyProjectionReadinessBarrier(temporary) {
   const request = { contract_version: 1, method: "projection.ee_instances.list", params: { include_ledger: false } };
   try {
     const initial = await store.read(request);
-    assert.ok(workspaceReadCalls > 0, "projection must use the injected workspace recovery owner");
+    assert.ok(workspaceReadCalls > 0, "projection must use the injected workspace inspection owner");
     assert.equal(initial.ee_instances.some((entry) => entry.ee_id === "ee_after_recovery"), false);
     assert.equal(policyProjectionCalls, 1);
     store.invalidate(false);
@@ -2048,10 +2052,14 @@ async function verifyRetiredConsentSetup() {
     const rootFile = path.join(home, "state", "ee_instances", `${outcome.rootEeId}.json`);
     const child = { ...JSON.parse(await fs.readFile(rootFile, "utf8")), ee_id: "ee_model_created", parent_ee_id: outcome.rootEeId, goal: "Model-authored goal" };
     await fs.writeFile(path.join(home, "state", "ee_instances", `${child.ee_id}.json`), JSON.stringify(child));
+    const sibling = { ...child, ee_id: "ee_independent_service", parent_ee_id: null, goal: "Maintain client" };
+    await fs.writeFile(path.join(home, "state", "ee_instances", `${sibling.ee_id}.json`), JSON.stringify(sibling));
     store.invalidate();
     const expanded = await readScope();
     assert.equal(expanded.status, "ready", expanded.errors.join("; "));
     assert.ok(expanded.projects.some((project) => project.ee_id === child.ee_id));
+    assert.ok(!expanded.projects.some((project) => project.ee_id === sibling.ee_id));
+    assert.ok(!expanded.environments.some((environment) => environment.ee_id === sibling.ee_id));
     assert.ok(!expanded.task_authoring_profiles.some((profile) => profile.ee_id === child.ee_id));
     assert.ok(!expanded.project_presentations.some((project) => project.ee_id === child.ee_id));
     const selected = { ...descriptor, interface_driver_config: { ...descriptor.interface_driver_config,
@@ -2619,7 +2627,7 @@ async function verifyProjectPolicies() {
     const scope = await fixtureProjectScope(home, registry, workspace);
     const request = { action: "create_project", operationId: "policy_create_12345678", workspace: fixtureWorkspaceIdentity(scope), parentEeId: workspace.rootEeId,
       expectedParentDigest: scope.environments.find((row) => row.eeId === workspace.rootEeId).recordDigest,
-      templateName: "operator_space", name: "General work", goal: "A concrete goal", presentation: { icon: "folder", color: "blue" } };
+      sourceFolders: [home, registry], templateName: "operator_space", name: "General work", goal: "A concrete goal", presentation: { icon: "folder", color: "blue" } };
     const options = { octopusHomeRoot: home, registryRoot: registry, scope, request, planOperatorSurface };
     const before = await fs.readdir(path.join(home, "state/ee_instances"));
     await assert.rejects(mutateWorkspaceProject({ ...options, request: { ...request, templateName: "missing" } }), /does not allow/);
@@ -2635,8 +2643,22 @@ async function verifyProjectPolicies() {
     await writeTemplate(registry, "operator_space", ["project"]);
     const created = await mutateWorkspaceProject(options);
     const child = JSON.parse(await fs.readFile(path.join(home, "state/ee_instances", `${created.eeId}.json`)));
+    assert.deepEqual(child.config.octopus_os.source_folders, [home, registry]);
     assert.equal(child.template_name, "operator_space"); assert.equal(child.parent_ee_id, workspace.rootEeId);
     assert.equal((await mutateWorkspaceProject(options)).changed, false);
+    const editScope = await fixtureProjectScope(home, registry, workspace);
+    const homeSidecar = JSON.parse(await fs.readFile(path.join(registry, "interface", workspace.homeInterfaceId, "octopus_os.json")));
+    const edit = { action: "update_project_presentation", operationId: "folder_edit_12345678",
+      workspace: fixtureWorkspaceIdentity(editScope),
+      projects: homeSidecar.presentation.projects.map(({ ee_id, ...presentation }) => ({ eeId: ee_id, ...presentation,
+        ...(ee_id === created.eeId ? { sourceFolders: [registry, home], expectedProjectDigest: editScope.environments.find((row) => row.eeId === ee_id).recordDigest } : {}) })) };
+    await assert.rejects(mutateWorkspaceProject({ ...options, scope: editScope, request: { ...edit,
+      projects: edit.projects.map((project) => project.eeId === created.eeId ? { ...project, expectedProjectDigest: "0".repeat(64) } : project) } }), /Project changed/);
+    await mutateWorkspaceProject({ ...options, scope: editScope, request: edit });
+    const edited = JSON.parse(await fs.readFile(path.join(home, "state/ee_instances", `${created.eeId}.json`)));
+    assert.deepEqual(edited.config.octopus_os.source_folders, [registry, home]);
+    assert.equal(edited.goal, child.goal);
+    assert.equal((await mutateWorkspaceProject({ ...options, scope: editScope, request: edit })).changed, false);
     const health = await readWorkspaceSetupState({ octopusHomeRoot: home, registryRoot: registry });
     assert.equal(health.status, "configured", health.errors.join("; "));
     await fs.writeFile(path.join(home, "state/ee_instances/ee_unreceipted.json"), JSON.stringify({ ...child, ee_id: "ee_unreceipted" }));

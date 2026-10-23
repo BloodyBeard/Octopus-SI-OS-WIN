@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(not(target_os = "macos"))]
+use std::process::Child;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -275,7 +277,7 @@ fn run_bounded_command(
         });
     }
     configure_process_group(&mut command);
-    let child = command
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -284,13 +286,17 @@ fn run_bounded_command(
             WorkerEnvError::ExecFailed(format!("{action} failed to spawn: {error}"))
         })?;
     let started = Instant::now();
+    let mut stdout = CommandCapture::new(child.stdout.take(), max_output_bytes);
+    let mut stderr = CommandCapture::new(child.stderr.take(), max_output_bytes);
     let mut owned = OwnedCommand {
+        #[cfg(target_os = "macos")]
+        group: octopus_util_pty::owned_process_group::OwnedProcessGroup::from_child(child),
+        #[cfg(not(target_os = "macos"))]
         process_group: child.id(),
+        #[cfg(not(target_os = "macos"))]
         child,
         cleaned: false,
     };
-    let mut stdout = CommandCapture::new(owned.child.stdout.take(), max_output_bytes);
-    let mut stderr = CommandCapture::new(owned.child.stderr.take(), max_output_bytes);
     let mut reason = None;
     let mut timed_out = false;
     let mut was_cancelled = false;
@@ -312,7 +318,7 @@ fn run_bounded_command(
             ));
             break;
         }
-        match owned.child.try_wait() {
+        match owned.observe_exit() {
             Ok(Some(observed)) => {
                 status = Some(observed);
                 break;
@@ -335,11 +341,11 @@ fn run_bounded_command(
         }
     }
     let mut cleanup_errors = Vec::new();
-    if let Err(error) = kill_command_group(owned.process_group) {
+    if let Err(error) = owned.kill_group() {
         cleanup_errors.push(format!("process-group termination failed: {error}"));
     }
     if status.is_none() {
-        if let Err(error) = owned.child.kill() {
+        if let Err(error) = owned.kill_root() {
             cleanup_errors.push(format!("child termination failed: {error}"));
         }
     }
@@ -350,7 +356,7 @@ fn run_bounded_command(
     loop {
         let progressed = stdout.drain_ready() | stderr.drain_ready();
         if status.is_none() {
-            match owned.child.try_wait() {
+            match owned.observe_exit() {
                 Ok(observed) => status = observed,
                 Err(error) => {
                     wait_error.get_or_insert_with(|| error.to_string());
@@ -358,7 +364,7 @@ fn run_bounded_command(
             }
         }
         #[cfg(unix)]
-        match octopus_util_pty::process_group::process_group_has_exited(owned.process_group) {
+        match owned.group_has_exited() {
             Ok(exited) => group_exited = exited,
             Err(error) => {
                 group_error.get_or_insert_with(|| error.to_string());
@@ -435,24 +441,54 @@ fn run_bounded_command(
 }
 
 struct OwnedCommand {
+    #[cfg(target_os = "macos")]
+    group: octopus_util_pty::owned_process_group::OwnedProcessGroup,
+    #[cfg(not(target_os = "macos"))]
     child: Child,
+    #[cfg(not(target_os = "macos"))]
     process_group: u32,
     cleaned: bool,
+}
+
+impl OwnedCommand {
+    fn observe_exit(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        #[cfg(target_os = "macos")]
+        { self.group.root_exit_status() }
+        #[cfg(not(target_os = "macos"))]
+        { self.child.try_wait() }
+    }
+
+    fn kill_group(&self) -> std::io::Result<()> {
+        #[cfg(target_os = "macos")]
+        { self.group.signal(libc::SIGKILL).map(|_| ()) }
+        #[cfg(not(target_os = "macos"))]
+        { kill_command_group(self.process_group) }
+    }
+
+    fn kill_root(&mut self) -> std::io::Result<()> {
+        #[cfg(target_os = "macos")]
+        { self.group.kill_root() }
+        #[cfg(not(target_os = "macos"))]
+        { self.child.kill() }
+    }
+
+    #[cfg(unix)]
+    fn group_has_exited(&self) -> std::io::Result<bool> {
+        #[cfg(target_os = "macos")]
+        { self.group.reap_if_finished() }
+        #[cfg(not(target_os = "macos"))]
+        { octopus_util_pty::process_group::process_group_has_exited(self.process_group) }
+    }
 }
 
 impl Drop for OwnedCommand {
     fn drop(&mut self) {
         if !self.cleaned {
-            let _ = kill_command_group(self.process_group);
-            let _ = self.child.kill();
-            let _ = self.child.try_wait();
+            let _ = self.kill_group();
+            let _ = self.kill_root();
+            let _ = self.observe_exit();
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-fn kill_command_group(process_group: u32) -> std::io::Result<()> {
-    octopus_util_pty::process_group::kill_process_group_with_member_fallback(process_group)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -671,6 +707,7 @@ mod tests {
 
     fn ctx_for(repo: &std::path::Path, wt: &std::path::Path) -> EnvContext {
         EnvContext {
+            additional_root_slots: Default::default(),
             root_slots: BTreeMap::from([
                 ("repo_root".to_string(), AbsPath::new(repo).unwrap()),
                 ("worktree_root".to_string(), AbsPath::new(wt).unwrap()),
@@ -726,6 +763,68 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn bounded_runner_reaps_root_only_after_its_remaining_group_closes() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "trap '' HUP; /bin/sleep 30 & printf '%s %s\\n' \"$$\" \"$!\"; exit 7"]);
+        let output = run_bounded_command(
+            command, Duration::from_secs(5), 1024, "root exit cleanup", &AtomicBool::new(false),
+        ).unwrap();
+        assert_eq!(output.exit_code, 7);
+        assert!(!output.timed_out);
+        assert!(output.duration < Duration::from_secs(3));
+        let ids: Vec<libc::pid_t> = std::str::from_utf8(&output.stdout).unwrap()
+            .split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+        assert_eq!(ids.len(), 2);
+        for pid in ids {
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bounded_runner_cancel_closes_owned_group_and_preserves_neighbor() {
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let cancelled = AtomicBool::new(false);
+        let mut neighbor_command = Command::new("/bin/sleep");
+        neighbor_command.arg("30");
+        configure_process_group(&mut neighbor_command);
+        let mut neighbor = neighbor_command.spawn().unwrap();
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !ready.exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                cancelled.store(true, Ordering::Release);
+            });
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "/bin/sleep 30 & printf '%s %s\\n' \"$$\" \"$!\"; : > \"$1\"; wait", "owned-cancel"])
+                .arg(&ready);
+            run_bounded_command(command, Duration::from_secs(5), 1024, "cancel cleanup", &cancelled)
+        });
+        let survived = neighbor.try_wait().unwrap().is_none();
+        neighbor.kill().unwrap();
+        neighbor.wait().unwrap();
+        assert!(survived);
+        let WorkerEnvError::ExecFailedWithOutput { captured, .. } = result.unwrap_err() else {
+            panic!("cancellation must retain its execution evidence");
+        };
+        assert!(captured.cancelled && captured.exit_observed && ready.exists());
+        assert!(captured.cleanup_errors.is_empty());
+        assert!(captured.stdout_complete && captured.stderr_complete);
+        let ids = std::str::from_utf8(&captured.output.stdout).unwrap().split_whitespace()
+            .map(|pid| pid.parse::<libc::pid_t>().unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        for pid in ids {
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn macos_floor_runs_cwd_relative_file_probe_in_worktree() {
         let root = std::env::temp_dir().join(format!(
             "octo_floor_macos_{}_{}",
@@ -766,6 +865,18 @@ mod tests {
             "cwd-relative file probe must succeed in the leased worktree; stderr={}",
             String::from_utf8_lossy(&out.stderr)
         );
+
+        assert!(Command::new("git").args(["init", "--quiet"])
+            .arg(&wt).status().unwrap().success());
+        let git_context = ctx_for(std::path::Path::new("/"), &wt);
+        let git_sandbox = project_sandbox(&git_worktree_spec(), &caps, &git_context).unwrap();
+        let status = run_sandboxed_in_worktree(
+            &git_sandbox, ProcessSandboxMode::Enforced, &AbsPath::new(&wt).unwrap(),
+            vec!["git".into(), "status".into(), "--short".into(), "--branch".into()],
+            Duration::from_secs(5), 4096, &AtomicBool::new(false),
+        ).unwrap();
+        assert_eq!(status.exit_code, 0, "{}", String::from_utf8_lossy(&status.stderr));
+        assert!(!status.timed_out && !status.stdout.is_empty());
 
         let outside = root.join("outside");
         let target = outside.to_string_lossy().into_owned();

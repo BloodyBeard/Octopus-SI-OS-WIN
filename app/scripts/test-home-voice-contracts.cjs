@@ -259,46 +259,81 @@ test('voice context includes only exact admitted Home text, with bounded omissio
   const message = (id, patch = {}) => ({ id, artifactId: id, runId: binding.runId, interfaceId: 'home-client', text: id, role: 'user', direction: 'in', eventKind: 'message', createdAtMs: 1, ...patch });
   const messages = Array.from({ length: 30 }, (_, i) => message(`message-${i}`));
   const selection = api.projectHomeVoiceContext([...messages, message('task', { runId: 'other' }), message('internal', { interfaceId: binding.providerId }), message('pending', { pending: true }), message('tool', { eventKind: 'tool' }), message('partial', { role: 'assistant', direction: 'out', eventKind: 'message_delta' }), message('reply', { role: 'assistant', direction: 'out', terminal: true })], binding.runId, 'home-client');
-  assert.equal(selection.initialItems.length, 25);
+  assert.equal(selection.initialItems.length, 1);
   assert.equal(selection.omittedMessageCount, 7);
   assert.equal(selection.truncated, false);
   assert.match(selection.disclosure, /7 older visible messages omitted/);
-  assert.equal(selection.initialItems.at(-1).role, 'assistant');
-  assert.equal(selection.initialItems.at(-1).content[0].text, 'reply');
+  assert.equal(selection.initialItems[0].role, 'developer');
+  assert.equal(selection.initialItems[0].content.length, 1);
+  const history = JSON.parse(selection.initialItems[0].content[0].text.split('\n\n')[1]);
+  assert.equal(history.source, 'home_text_history');
+  assert.equal(history.messages.length, 24);
+  assert.equal(history.messages.at(-1).role, 'assistant');
+  assert.equal(history.messages.at(-1).text, 'reply');
   const long = api.projectHomeVoiceContext([message('long', { text: '🙂'.repeat(30000) })], binding.runId, 'home-client');
   assert.match(long.disclosure, /truncated/);
   assert.equal(long.omittedMessageCount, 0);
   assert.equal(long.truncated, true);
-  assert.ok(Buffer.byteLength(long.initialItems[1].content[0].text) <= 24000);
+  assert.ok(Buffer.byteLength(JSON.parse(long.initialItems[0].content[0].text.split('\n\n')[1]).messages[0].text) <= 24000);
+  const voiceInput = message('spoken request', { interfaceId: binding.delegationInterfaceId, label: 'realtime.delegation' });
+  const spoken = api.projectHomeVoiceContext([voiceInput, { ...voiceInput, id: 'foreign', interfaceId: 'another-voice' },
+    message('spoken result', { role: 'assistant', direction: 'out', terminal: true })], binding.runId, 'home-client', binding.delegationInterfaceId);
+  assert.deepEqual(spoken.messages.map(row => row.text), ['spoken request', 'spoken result']);
   const current = { ...call(), callId: 'rtc_exact' };
+  await api.updateVoiceContext(current, spoken.messages[0], new AbortController().signal);
+  assert.equal(writes.length, 0, 'Native voice input is retained in history without being echoed into the live call');
   await api.updateVoiceContext(current, { id: 'message-31', role: 'user', text: 'A typed correction' }, new AbortController().signal);
   assert.equal(writes[0].label, 'realtime.session.update');
   assert.deepEqual([writes[0].payload.channel, writes[0].payload.update_id, writes[0].payload.call_id], ['context', 'home-context:message-31', 'rtc_exact']);
   assert.equal(writes[0].payload.delegation_id, null);
+  const voicedReply = api.projectHomeVoiceContext([message('voiced-result', { role: 'assistant', direction: 'out', terminal: true,
+    eventData: { voice: { correlation_id: current.correlationId, delegation_id: 'native-request' } } })], binding.runId, 'home-client').messages[0];
+  await api.updateVoiceContext(current, voicedReply, new AbortController().signal);
+  assert.equal(writes.at(-1).payload.delegation_id, 'native-request');
+  assert.equal(writes.at(-1).payload.channel, 'commentary');
+  const delivered = writes.length;
+  await api.updateVoiceContext(current, { ...voicedReply, id: 'old-call', voiceRequest: { correlationId: 'previous-call', delegationId: 'old-request' } }, new AbortController().signal);
+  assert.equal(writes.length, delivered);
   updateStatus = 'uncertain';
   await assert.rejects(api.updateVoiceContext(current, { id: 'message-32', role: 'user', text: 'Another correction' }, new AbortController().signal), /did not accept/);
 });
 
-test('voice shares public streamed progress and exact failures before Home finishes', async () => {
+test('voice routes progress and answers to their exact delegation without replaying text', async () => {
   const writes = [];
   const api = host(async () => ({ artifacts: [{ seq: 1, label: 'realtime.session.updated', payload: { correlation_id: 'offer-1', call_id: 'rtc_exact', update_id: writes.at(-1)?.payload.update_id, status: 'transport_written' } }] }), async request => writes.push(request));
-  const base = { id: 'rendered-item', artifactId: '', runId: 'home', interfaceId: 'client', role: 'assistant', direction: 'out', createdAtMs: 1, eventKind: 'commentary_delta', text: 'Checking the controls', eventData: { _event: { turn_id: 'turn', item_id: 'item' }, _stream: { stream_id: 'stream', stream_seq: 1, source_movement_seq: 20, byte_start_offset: 50, byte_end_offset: 150 } } };
+  const base = { id: 'rendered-item', artifactId: '', runId: 'home', interfaceId: 'client', role: 'assistant', direction: 'out', createdAtMs: 1, eventKind: 'commentary_delta', text: ' Checking the controls ', eventData: { voice: { correlation_id: 'offer-1', delegation_id: 'native-request' }, _event: { turn_id: 'turn', item_id: 'item' }, _stream: { stream_id: 'stream', stream_seq: 1, source_movement_seq: 20, byte_start_offset: 50, byte_end_offset: 150 } } };
   const first = api.projectHomeVoiceContext([base], 'home', 'client').messages[0];
-  const complete = api.projectHomeVoiceContext([{ ...base, artifactId: 'completed-ref', eventKind: 'commentary', text: 'Checking the controls now' }], 'home', 'client').messages[0];
+  const complete = api.projectHomeVoiceContext([{ ...base, artifactId: 'completed-ref', eventKind: 'commentary', text: 'Checking the controls now\n' }], 'home', 'client').messages[0];
   assert.equal(first.id, complete.id);
   const delta = api.voiceContextDelta(first, complete);
   assert.equal(delta.text, ' now'); assert.equal(delta.offset, first.text.length);
   assert.equal(api.voiceContextDelta(complete, complete), null);
   assert.throws(() => api.voiceContextDelta(first, { ...complete, text: 'Changed prefix' }), /already shared/);
-  const failed = api.projectHomeVoiceContext([{ ...base, artifactId: 'error-ref', eventKind: 'error', error: true, text: 'Home stopped: invalid context', eventData: {} }], 'home', 'client').messages[0];
+  const failed = api.projectHomeVoiceContext([{ ...base, artifactId: 'error-ref', eventKind: 'error', error: true, terminal: true, text: 'Home stopped: invalid context', eventData: {} }], 'home', 'client').messages[0];
   const current = { ...call(), callId: 'rtc_exact' };
   for (const message of [first, delta, failed]) await api.updateVoiceContext(current, message, new AbortController().signal);
   assert.deepEqual(writes.map(write => write.payload.channel), ['context', 'context', 'commentary']);
-  assert.equal(new Set(writes.map(write => write.payload.update_id)).size, 3);
-  assert.equal(JSON.parse(writes[2].payload.text).phase, 'error');
+  assert.deepEqual(writes.map(write => write.payload.delegation_id), ['native-request', 'native-request', null]);
+  assert.deepEqual(writes.map(write => write.payload.text), ['Checking the controls', ' now', 'Home stopped: invalid context']);
 });
 
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+
+test('voice streams answer text once and completion never repeats its prefix', async () => {
+  const writes = [];
+  const api = host(async () => ({ artifacts: [{ seq: 1, payload: { correlation_id: 'offer-1', call_id: 'rtc_exact', update_id: writes.at(-1)?.payload.update_id, status: 'transport_written' } }] }), async request => writes.push(request));
+  const partial = { id: 'answer', role: 'assistant', phase: 'reply', complete: false, text: 'Enabled' };
+  const complete = { ...partial, complete: true, text: 'Enabled Insights.' };
+  const delta = api.voiceContextDelta(partial, complete);
+  assert.deepEqual([delta.text, delta.offset], [' Insights.', 7]);
+  assert.throws(() => api.voiceContextDelta(partial, { ...complete, text: 'Insights is enabled.' }), /already shared/);
+  const current = { ...call(), callId: 'rtc_exact' };
+  for (const message of [partial, delta]) await api.updateVoiceContext(current, message, new AbortController().signal);
+  await api.updateVoiceContext(current, api.voiceContextDelta({ ...complete, complete: false }, complete), new AbortController().signal);
+  assert.deepEqual(writes.map(write => write.payload.channel), ['commentary', 'commentary']);
+  assert.equal(writes.map(write => write.payload.text).join(''), complete.text);
+  assert.equal(api.voiceContextDelta(complete, complete), null);
+});
 
 async function hookHarness() {
   const { JSDOM } = require('jsdom');
@@ -338,8 +373,9 @@ async function hookHarness() {
   for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, AudioContext, RTCPeerConnection: Peer, MediaStream: Stream, IS_REACT_ACT_ENVIRONMENT: true })) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   const api = {
     assertVoiceControlReady: async () => {},
+    waitForVoiceProviderReady: async () => { if (h.readyGate) await h.readyGate.promise; },
     canRetireVoiceCall: current => !current.answer || current.creationDisposition === 'not_created' || current.remoteClosed,
-    openVoiceCall(current, sdp, items) { h.offers.push({ current, sdp, items }); current.creationDisposition = 'unconfirmed'; current.answer = (async () => { if (h.answerGate) await h.answerGate.promise; current.callId = 'rtc_exact'; current.creationDisposition = 'created'; return { answer_sdp: h.answerSdp, sideband_connected: true }; })(); return current.answer; },
+    openVoiceCall(current, sdp, items) { h.offers.push({ current, sdp, items }); current.creationDisposition = 'unconfirmed'; current.answer = (async () => { if (h.answerGate) await h.answerGate.promise; current.callId = 'rtc_exact'; current.creationDisposition = 'created'; return { answer_sdp: h.answerSdp, sideband_connected: false }; })(); return current.answer; },
     closeVoiceCall(current) { if (current.remoteClosed) return Promise.resolve(); if (current.stop) return current.stop; current.closeRequested = true; const stopping = (async () => { if (!current.answer) return; await current.answer; h.closes.push(current.callId); if (h.closeGate) await h.closeGate.promise; if (h.requireLivePeerOnClose) assert.equal(h.peers.at(-1).connectionState, 'connected', 'Provider finalization requires the primary transport'); if (h.closeError) throw new Error(h.closeError); current.closedPayload = { transcript: h.closedTranscript ?? [] }; current.remoteClosed = true; })(); current.stop = stopping; void stopping.catch(() => { if (current.stop === stopping) current.stop = null; }); return stopping; },
     readVoiceArtifacts: async () => ({ artifacts: h.events.splice(0), afterSeq: 1, more: false }),
     updateVoiceContext: async (_, message) => { h.updates.push(message); if (h.updateGate) await h.updateGate.promise; if (h.updateError) throw new Error(h.updateError); },
@@ -353,6 +389,7 @@ async function hookHarness() {
     './voicePresentation': load('voicePresentation.ts'),
     './voiceTranscript': load('voiceTranscript.ts'),
     './voiceCallArtifacts': api,
+
   });
   function setPreferences(values) { Object.assign(preferences, values); }
   function Harness({ profile }) { h.current = useVoiceSession(profile); return null; }
@@ -367,6 +404,22 @@ async function hookHarness() {
   h.close = async () => { await h.unmount(); await tick(); dom.window.close(); for (const [key, descriptor] of globals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } };
   await h.profile('live'); return h;
 }
+
+test('microphone stays gated until the provider confirms its session, after WebRTC connects', async () => {
+  const h = await hookHarness();
+  try {
+    h.readyGate = deferred();
+    const starting = h.start(); await h.flush();
+    const stream = h.stream('mic-a');
+    await h.act(async () => h.microphones.at(-1).resolve(stream)); await h.flush();
+    assert.equal(h.peers[0].connectionState, 'connected');
+    assert.equal(stream.getAudioTracks()[0].enabled, false);
+    assert.equal(h.current.phase, 'connecting');
+    await h.act(async () => h.readyGate.resolve()); await h.act(async () => starting);
+    assert.equal(stream.getAudioTracks()[0].enabled, true);
+    assert.equal(h.current.phase, 'listening');
+  } finally { await h.close(); }
+});
 
 test('WebRTC offer and answer preserve their SDP bytes, including the final CRLF', async () => {
   const h = await hookHarness();

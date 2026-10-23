@@ -1,3 +1,4 @@
+import { ClientSurfaceVideo } from "./ClientSurfaceVideo";
 import { motion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, RefObject } from "react";
@@ -37,10 +38,10 @@ import {
 } from "./voiceSpatialControl";
 import "./client-surfaces.css";
 import { homeSurfaceLayoutIdentity } from "./homePresentation";
+import { HOME_SURFACE_FORMING, HOME_SURFACE_LEAVING } from "./homeSurfaceMotion";
+import { placeVoiceWidget, type WidgetRect } from "./voiceWidgetPlacement";
 
 const VOICE_WIDGET_LAYOUT_RESET_EVENT = "octopus:voice-widget-layout-reset";
-const VOICE_FORMING_TRANSITION = { delay: 0.5, duration: 0.42, ease: [0.19, 1, 0.22, 1] as [number, number, number, number] };
-const VOICE_LEAVING_TRANSITION = { duration: 0.36, ease: [0.4, 0, 1, 1] as [number, number, number, number] };
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
@@ -137,7 +138,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         initial={{ opacity: 0 }}
         ref={widgetResize.ref}
         style={widgetResize.style}
-        transition={voiceLeaving ? VOICE_LEAVING_TRANSITION : voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.16, ease: [0.19, 1, 0.22, 1] }}
+        transition={voiceLeaving ? HOME_SURFACE_LEAVING : voiceForming ? HOME_SURFACE_FORMING : { duration: 0.16, ease: [0.19, 1, 0.22, 1] }}
       >
         <button
           aria-label={`Move ${document.title}`}
@@ -196,7 +197,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         initial={{ opacity: 0, scale: 0.985, y: 5 }}
         ref={widgetResize.ref}
         style={widgetResize.style}
-        transition={voiceLeaving ? VOICE_LEAVING_TRANSITION : voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
+        transition={voiceLeaving ? HOME_SURFACE_LEAVING : voiceForming ? HOME_SURFACE_FORMING : { duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
       >
         <button
           aria-label={`Move ${document.title}`}
@@ -295,10 +296,7 @@ const DEFAULT_WIDGET_GEOMETRY: WidgetGeometry = {
   z: 1,
   slot: null,
 };
-const WIDGETS_REHOMED_TO_RIGHT_RAIL = new Set([
-  "builtin.voice.live-context",
-  "builtin.voice.insights",
-]);
+const widgetStageGeometries = new WeakMap<HTMLElement, Map<HTMLElement, WidgetGeometry>>();
 const WIDGET_EDGE_GAP = 8;
 const WIDGET_MIN_HEIGHT = 96;
 const WIDGET_MIN_WIDTH = 150;
@@ -397,22 +395,39 @@ export function useVoiceWidgetResize(
   const [interacting, setInteracting] = useState(false);
   const [layoutReady, setLayoutReady] = useState(false);
 
-  useEffect(() => {
-    if (geometryDocument.current === geometryKey) return;
-    geometryDocument.current = geometryKey;
-    active.current = null;
-    setInteracting(false);
-    setLayoutReady(false);
-    setGeometry(readWidgetGeometry(documentId, accessProfile));
-  }, [accessProfile, documentId, geometryKey]);
-
   useLayoutEffect(() => {
-    if (!placement) return;
     const element = ref.current;
     const stage = element?.closest<HTMLElement>(".voice-widget-canvas");
-    if (!element || !stage) return;
-    setGeometry((current) => initializeWidgetGeometry(element, stage, current, placement, sizePolicy));
-  }, [documentId, placement?.count, placement?.index, placement?.slot, sizePolicy]);
+    if (element && stage && geometryDocument.current === geometryKey && geometry.x != null && geometry.y != null) {
+      widgetStageGeometries.get(stage)?.set(element, geometry);
+    }
+  }, [geometry, geometryKey]);
+
+  useLayoutEffect(() => {
+    const changed = geometryDocument.current !== geometryKey;
+    const current = changed ? readWidgetGeometry(documentId, accessProfile) : geometry;
+    if (changed) {
+      geometryDocument.current = geometryKey;
+      active.current = null;
+      setInteracting(false);
+      setLayoutReady(false);
+      setGeometry(current);
+    }
+    const element = ref.current;
+    const stage = element?.closest<HTMLElement>(".voice-widget-canvas");
+    if (!placement || !element || !stage) return;
+    const next = initializeWidgetGeometry(element, stage, current, placement, sizePolicy);
+    let peers = widgetStageGeometries.get(stage);
+    if (!peers) widgetStageGeometries.set(stage, peers = new Map());
+    peers.set(element, next);
+    setGeometry(next);
+  }, [accessProfile, documentId, geometryKey, placement?.count, placement?.index, placement?.slot, sizePolicy]);
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    const stage = element?.closest<HTMLElement>(".voice-widget-canvas");
+    return () => { if (element && stage) widgetStageGeometries.get(stage)?.delete(element); };
+  }, [geometryKey]);
 
   useLayoutEffect(() => {
     if (!placement) return;
@@ -462,7 +477,12 @@ export function useVoiceWidgetResize(
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         if (active.current) return;
-        setGeometry((current) => constrainWidgetGeometry(element, stage, current, sizePolicy));
+        const peers = widgetStageGeometries.get(stage);
+        const current = peers?.get(element);
+        if (!peers || !current) return;
+        const next = initializeWidgetGeometry(element, stage, current, placement, sizePolicy);
+        peers.set(element, next);
+        setGeometry(next);
       });
     });
     observer.observe(stage);
@@ -632,9 +652,10 @@ export function useVoiceWidgetResize(
       setInteracting(false);
       const element = ref.current;
       const stage = element?.closest<HTMLElement>(".voice-widget-canvas");
-      setGeometry(element && stage
-        ? initializeWidgetGeometry(element, stage, { ...DEFAULT_WIDGET_GEOMETRY }, placement, sizePolicy)
-        : { ...DEFAULT_WIDGET_GEOMETRY });
+      const stored = readWidgetGeometry(documentId, accessProfile);
+      const next = element && stage ? initializeWidgetGeometry(element, stage, stored, placement, sizePolicy) : stored;
+      if (element && stage) widgetStageGeometries.get(stage)?.set(element, next);
+      setGeometry(next);
     };
     window.addEventListener(VOICE_WIDGET_LAYOUT_RESET_EVENT, reset);
     return () => window.removeEventListener(VOICE_WIDGET_LAYOUT_RESET_EVENT, reset);
@@ -765,31 +786,27 @@ function initializeWidgetGeometry(
 ): WidgetGeometry {
   const stageBounds = stage.getBoundingClientRect();
   if (!validWidgetStage(stageBounds)) return geometry;
-  const slotChanged = geometry.slot !== null && geometry.slot !== placement.slot;
-  const legacyRightRailPosition = geometry.slot === null
-    && placement.slot === "right"
-    && WIDGETS_REHOMED_TO_RIGHT_RAIL.has(element.dataset.surfaceDocument ?? "");
-  const current = slotChanged || legacyRightRailPosition
-    ? { ...geometry, stageHeight: null, stageWidth: null, x: null, y: null, slot: placement.slot }
-    : { ...geometry, slot: placement.slot };
+  const current = geometry.slot === placement.slot ? geometry : { ...geometry, slot: placement.slot };
   if (current.x != null && current.y != null) {
     return constrainWidgetGeometry(element, stage, current, policy);
   }
   const bounds = widgetSizeBounds(policy, stageBounds.width, stageBounds.height, element);
   const width = clamp(current.width ?? bounds.preferredWidth, bounds.minWidth, bounds.maxWidth);
   const height = clamp(current.height ?? bounds.preferredHeight, bounds.minHeight, bounds.maxHeight);
-  const count = Math.max(1, placement.count);
-  const index = clamp(placement.index, 0, count - 1);
-  const availableHeight = Math.max(height, stageBounds.height - WIDGET_EDGE_GAP * 2);
-  const stride = Math.min(height + 14, availableHeight / count);
-  const x = placement.slot === "left"
-    ? WIDGET_EDGE_GAP
-    : Math.max(WIDGET_EDGE_GAP, stageBounds.width - width - WIDGET_EDGE_GAP);
-  const y = clamp(
-    stageBounds.height / 2 + (index - (count - 1) / 2) * stride - height / 2,
-    WIDGET_EDGE_GAP,
-    Math.max(WIDGET_EDGE_GAP, stageBounds.height - height - WIDGET_EDGE_GAP),
-  );
+  const localRect = (node: HTMLElement): WidgetRect => {
+    const rect = node.getBoundingClientRect();
+    return { x: rect.left - stageBounds.left, y: rect.top - stageBounds.top, width: rect.width, height: rect.height };
+  };
+  const occupied = [...stage.querySelectorAll<HTMLElement>(":scope > [data-voice-slot]")]
+    .filter((peer) => peer !== element && !peer.hasAttribute("data-voice-leaving"))
+    .flatMap((peer): WidgetRect[] => {
+      const saved = widgetStageGeometries.get(stage)?.get(peer);
+      if (saved?.x != null && saved.y != null) return [{ x: saved.x, y: saved.y, width: saved.width ?? peer.offsetWidth, height: saved.height ?? peer.offsetHeight }];
+      return peer.style.visibility === "visible" ? [localRect(peer)] : [];
+    });
+  const protectedAreas = [...stage.closest(".voice-view")?.querySelectorAll<HTMLElement>("[data-voice-placement-obstacle]") ?? []]
+    .map(localRect).filter((rect) => rect.width > 0 && rect.height > 0);
+  const { x, y } = placeVoiceWidget(stageBounds, { width, height }, occupied, protectedAreas);
   return constrainWidgetGeometry(element, stage, {
     ...current,
     height,
@@ -1183,6 +1200,7 @@ function NativeNode({ context, documentId, node, onAction, path }: {
       </div>
     );
   }
+  if (node.type === "video") return <ClientSurfaceVideo key={node.source} source={node.source} title={node.title} />;
   if (node.type === "image") {
     const source = resolveText(node.source, context);
     const alt = node.alt ? resolveText(node.alt, context) : "";
@@ -1266,7 +1284,7 @@ function DonutChart({ label, segments, value }: {
   segments: Array<{ label: string; tone: ClientSurfaceTone; value: number }>;
   value: number;
 }) {
-  const circumference = 2 * Math.PI * 28;
+  const progress = Math.min(100, Math.max(0, value));
   return (
     <div className="client-surface-donut">
       <div className="client-surface-donut__legend">
@@ -1281,16 +1299,17 @@ function DonutChart({ label, segments, value }: {
       <div className="client-surface-donut__chart">
         <svg aria-hidden="true" viewBox="0 0 68 68">
           <circle className="client-surface-donut__track" cx="34" cy="34" fill="none" r="28" />
-          <circle
+          {progress > 0 ? <circle
             className="client-surface-donut__ring"
             cx="34"
             cy="34"
             fill="none"
+            pathLength="100"
             r="28"
-            strokeDasharray={`${Math.max(0, (Math.min(100, Math.max(0, value)) / 100) * circumference)} ${circumference}`}
-          />
+            strokeDasharray={progress < 100 ? `${progress} 100` : undefined}
+          /> : null}
         </svg>
-        <span><strong>{Math.round(value)}%</strong><small>{label}</small></span>
+        <span><strong>{Math.round(progress)}%</strong><small>{label}</small></span>
       </div>
     </div>
   );

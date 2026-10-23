@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createAnthropicAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/anthropic.ts";
 import { createAzureAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/azure.ts";
 import type { ProviderAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/base.ts";
@@ -340,7 +341,11 @@ function adapterFor(config: RuntimeProvider): ProviderAdapter {
   if (config.adapter === "anthropic") return createAnthropicAdapter(provider, config.cache_retention);
   if (config.adapter === "azure") return createAzureAdapter(provider);
   if (config.adapter === "claude-cli") {
+    const temporaryDirectory = stringValue(process.env.TMPDIR, "CLI private temporary directory");
     return createClaudeCliAdapter(provider, {
+      spawn: (command, args, options) => spawn(command, args, {
+        ...options, env: { ...options.env, CLAUDE_CODE_TMPDIR: temporaryDirectory },
+      }),
       usageAdmission: async () => ({ state: "unknown", checkedAt: Date.now() }),
       usageRefusal: () => undefined,
     });

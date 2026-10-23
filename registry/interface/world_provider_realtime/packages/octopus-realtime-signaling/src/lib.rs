@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 mod auth;
+mod client_context;
 mod handoff;
 mod life;
 mod protocol;
@@ -15,6 +16,7 @@ mod state;
 mod wire;
 
 pub use life::interface_life;
+pub use client_context::ClientContextEntry;
 
 pub const REALTIME_SIGNALING_INTERFACE_DRIVER_REF: &str = "realtime_webrtc";
 pub const SESSION_OFFER_LABEL: &str = "realtime.session.offer";
@@ -44,6 +46,8 @@ pub struct RealtimeConfig {
     pub model_hidden_tools: Vec<String>,
     pub context_output_labels: Vec<String>,
     pub session_snapshot_labels: Vec<String>,
+    #[serde(default)]
+    pub model_catalog: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -59,6 +63,8 @@ pub struct SessionOffer {
     pub correlation_id: String,
     pub delegation_interface: String,
     pub session: Value,
+    #[serde(default)]
+    pub client_context: Option<Vec<ClientContextEntry>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -69,7 +75,10 @@ pub struct SessionUpdate {
     pub update_id: String,
     pub delegation_id: Option<String>,
     pub channel: UpdateChannel,
+    #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub client_context: Option<Vec<ClientContextEntry>>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

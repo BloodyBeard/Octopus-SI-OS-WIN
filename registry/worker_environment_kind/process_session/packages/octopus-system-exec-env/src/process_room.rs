@@ -2466,6 +2466,7 @@ mod tests {
         let door_root_bindings = BTreeMap::new();
         let formed = registry
             .form(&WorkerEnvironmentFormationRequest {
+                door_additional_root_bindings: &Default::default(),
                 door_interface: &door,
                 door_descriptor_hash: "hash-door",
                 door_driver_ref: "system_exec_env",

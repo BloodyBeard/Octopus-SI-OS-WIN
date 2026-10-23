@@ -89,10 +89,15 @@ fn capture_fixture(root: &Path) -> RunCompositionRequest {
     worker["ceiling"]["interfaces"] = json!([
         "world_provider_fixture",
         "system_worker_memory_observer",
+        "system_context_memory_projection",
         "system_memory",
         "system_interface_authoring",
         "system_room"
     ]);
+    std::fs::write(worker_path, serde_json::to_vec(&worker).unwrap()).unwrap();
+    let worker_path = root.join("registry/interface/system_worker_template/policy.json");
+    let mut worker = read(&worker_path);
+    worker["ceiling"]["interfaces"].as_array_mut().unwrap().push(json!("system_worker_memory_observer"));
     std::fs::write(worker_path, serde_json::to_vec(&worker).unwrap()).unwrap();
     for (file, interfaces, tools) in [
         (
@@ -1323,7 +1328,7 @@ mod movement_gate {
         )
         .unwrap();
         let mut projection_session = ProviderHandoffSession::new(&projection_ctx).unwrap();
-        for turn in [1, 2] {
+        for turn in [1, 2, 3, 4] {
             let message = json!({"action":"followup","control_id":format!("turn-{turn}"),"text":format!("Original human-supplied task {turn}: preserve my explicit scope.")});
             let original_input =
                 boundary.file(&plan.receive_interface_id, &request.seed.label, &message);
@@ -1495,7 +1500,7 @@ mod movement_gate {
                     let mut limited = config.clone();
                     match bound {
                         "carriers" => limited.bounds.ancestry.max_carriers = 1,
-                        "fields" => limited.bounds.max_field_bytes = 12,
+                        "fields" => limited.bounds.max_field_bytes = 0,
                         "entries" => limited.bounds.max_snapshot_entries = 1,
                         "output" => {
                             limited.bounds.max_output_bytes = 1024;
@@ -1601,8 +1606,7 @@ mod movement_gate {
                         ee_instances_root: &root.join("ee"),
                         effect_root: Some(&root.join("memory-effects")),
                         maximum_bytes: 1 << 26,
-                        observed_run: None,
-                        run_records_root: None,
+                        observed_run: Some(&plan.run_id),
                     },
                 )
                 .unwrap()
@@ -1624,7 +1628,9 @@ mod movement_gate {
             } else {
                 (json!([]), None)
             };
-            let final_file=boundary.file(observer,"interface.artifact.output",&json!({"text":json!({"schema_version":1,"status":if turn==1 {"published"}else{"noop"},"source_run":plan.run_id,"reason":"Current experience outcome.","receipts":receipts}).to_string()}));
+            let decision = json!({"schema_version":1,"status":if turn==1 {"published"}else{"noop"},"source_run":plan.run_id,"reason":"Current experience outcome.","receipts":receipts}).to_string();
+            let text = if turn == 3 { format!("Result follows.\n```json\n{decision}\n```") } else { decision };
+            let final_file=boundary.file(observer,"interface.artifact.output",&json!({"text":text}));
             assert!(matches!(
                 boundary
                     .drive(model.hand_final(ProviderEmission {
@@ -1637,17 +1643,19 @@ mod movement_gate {
             let final_file = boundary.delivered(projection, "interface.artifact.output");
             let (final_row, final_input) = boundary.input(&final_file, projection);
             assert_eq!(final_row.from, Endpoint::Interface(outcome.into()));
+            let outcome_label = if turn == 3 { "memory.capture.error" } else { "memory.capture.outcome" };
             boundary.drive(drain_projection_life(
                 boundary.context(projection), boundary.context(capture), writer_run,
-                final_row.seq.0, "memory.capture.outcome",
+                final_row.seq.0, outcome_label,
             )).await;
-            let completed = boundary.delivered(capture, "memory.capture.outcome");
+            let completed = boundary.delivered(capture, outcome_label);
             let outcome: Value =
                 serde_json::from_slice(&completed.read_payload_bytes().unwrap()).unwrap();
             assert_eq!(
                 outcome["outcome"]["status"],
-                if turn == 1 { "published" } else { "noop" }
+                if turn == 3 { Value::Null } else { json!(if turn == 1 { "published" } else { "noop" }) }
             );
+            if turn == 3 { assert!(outcome["outcome_parse_error"].as_str().unwrap().contains("not a JSON")); }
             if turn == 1 {
                 assert!(outcome["evidence"].as_array().unwrap().len() >= 2);
             } else {

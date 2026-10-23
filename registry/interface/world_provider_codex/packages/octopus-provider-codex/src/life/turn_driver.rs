@@ -177,7 +177,7 @@ pub(crate) async fn drive_turn_with_retries_inner(
             .envelope
             .read_artifact_manifest()
             .map_err(|error| error.to_string())?;
-        if !is_inflight_turn_control_candidate_label(&manifest.label) {
+        if !is_inflight_turn_control_candidate_label(&manifest.label, descriptor) {
             let status = serde_json::from_slice::<serde_json::Value>(
                 &handoff.current_run_record_bytes().await,
             )

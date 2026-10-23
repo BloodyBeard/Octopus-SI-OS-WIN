@@ -590,6 +590,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   requestComposerPrediction(request) {
     return invokeAccess("octopus:composer-prediction", request);
   },
+  requestTaskTitle(request) {
+    return invokeAccess("octopus:task-title", request);
+  },
   async submitChatTurn(request) {
     return unwrapOperatorChatSubmitResult(await invokeAccess("octopus:submit-chat-turn", request));
   },

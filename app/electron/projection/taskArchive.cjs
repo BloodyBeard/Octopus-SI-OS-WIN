@@ -3,7 +3,7 @@ module.exports = { readClientTaskArchive, setOctopusOsTaskArchived };
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { readRegularJsonDocument } = require("./jsonFiles.cjs");
-const { assertRunPrivateStateIsOwned, scopedRecordPath, taskArchiveInterfaceIds } = require("./taskDeletion.cjs");
+const { assertRunPrivateStateIsOwned, scopedRecordPath, taskOwnedInterfaceIds } = require("./taskDeletion.cjs");
 const { exactObjectKeys, interfaceBindingId, isPlainRecord, numberValue, requiredBoolean, requiredDigest, requiredSafeRegistryId } = require("./values.cjs");
 
 function readClientTaskArchive(run, clientInterfaceId) {
@@ -72,7 +72,7 @@ async function setOctopusOsTaskArchived(registryRoot, octopusHomeRoot, scope, re
       throw new Error(`task '${runId}' has malformed authored topology`);
     }
     const archive = readClientTaskArchive(next, clientInterfaceId);
-    const exactInterfaces = await taskArchiveInterfaceIds(registryRoot, next, clientInterfaceId, runId);
+    const exactInterfaces = await taskOwnedInterfaceIds(registryRoot, next, clientInterfaceId, runId);
     assertRunPrivateStateIsOwned(next, exactInterfaces, runId);
     const ids = next.checkpoints.map((checkpoint) => requiredSafeRegistryId(checkpoint.id, "task checkpoint"));
     const activeIds = next.active_checkpoints.map((id) => requiredSafeRegistryId(id, "active task checkpoint"));

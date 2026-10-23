@@ -1,4 +1,45 @@
 use super::*;
+include!("rejected_final.rs");
+
+#[test]
+#[ignore = "requires explicitly selected read-only completed-source installation evidence"]
+fn selected_run_replays_completed_source_after_outgoing_withdrawal() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source: u64 = std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let dir = home.join("registry/interface").join(provider.as_str());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(dir.join("interface.json")).unwrap()).unwrap();
+    let life: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("life.json")).unwrap()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (arrivals, receiver) = tokio::sync::mpsc::channel(1); drop(receiver);
+    let ctx = InterfaceLiftContext::unprivileged(provider.clone(), dir, Some(descriptor.clone()), scratch.path().join("provider"),
+        home.join("ledger/movements.jsonl"), home.join("ledger/blobs"), home.join("ledger/ledger-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(), home.join("state/runs")), ("interface_hand_in_root".into(), home.join("interface-hand-in"))]),
+        arrivals, Default::default()).with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let path = home.join("state/runs").join(format!("{run}.json"));
+    let current = std::fs::read(&path).unwrap();
+    let mut replay = octopus_world_pyecho_life_runtime::LedgerReplayReader::open(&ctx).unwrap();
+    let mut input = None;
+    while let Some(batch) = replay.read_batch(256).unwrap() {
+        if let Some(row) = batch.into_iter().find(|row| row.movement.seq.0 == source) {
+            input = Some(replay.envelope(&row).unwrap()); break;
+        }
+    }
+    let input = input.unwrap(); let pinned = ctx.pinned_run_record_bytes(&input).unwrap();
+    for bytes in [&pinned, &current] {
+        let record = RunRecord::from_bytes(bytes).unwrap();
+        if let Some(pending) = persisted_pending_handoff(&record, &provider).unwrap() {
+            for item in pending.items {
+                let target = ctx.interface_var_dir().join(&item.manifest_relative_path);
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::copy(home.join("interfaces").join(provider.as_str()).join(&item.manifest_relative_path), target).unwrap();
+            }
+        }
+    }
+    ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx, &descriptor, &run, &input, source, &pinned).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), current);
+}
 
 #[tokio::test]
 async fn authoring_retains_exact_request_while_registry_changes() {
@@ -43,6 +84,126 @@ async fn authoring_retains_exact_request_while_registry_changes() {
 }
 
 #[tokio::test]
+async fn retained_pending_retries_exact_admission_with_declared_timeout_and_cancellation() {
+    use serde_json::json;
+    use octopus_ledger::{ArrivalFanoutMetadata, ArrivalFanoutScope, ArtifactDelivery, DeliveryMetadata, MovementMetadata, RefusedReason};
+    for mode in ["admitted", "timeout", "cancelled", "transport", "wrong_scope", "incomplete", "policy"] {
+        let mut fixture = CompletedInputReplayFixture::new();
+        fixture.handoff.config.result_timeout_ms = if mode == "timeout" { 120 } else { 3000 };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        fixture.handoff.ctx.arrivals = tx;
+        let authored = fixture.output(false, false, false);
+        let pending = authored.pending_handoff.clone();
+        let item = &pending.items[0];
+        let (file, reference) = load_pending_artifact(&fixture.handoff.var_dir, item).unwrap();
+        let original_payload = file.read_payload_bytes().unwrap();
+        let handoff = fixture.handoff.clone();
+        let _ownership = handoff.dispatch_ownership().await.unwrap();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let sending = async {
+            let result = handoff.hand_retained_pending(&pending, item, file.clone()).await;
+            let _ = done_tx.send(());
+            result
+        };
+        let receiving = async {
+            let mut attempts = 0;
+            let mut retained_id = None;
+            let mut original_scope = None;
+            let mut edge_template = None;
+            loop {
+                let arrival = tokio::select! {
+                    biased;
+                    _ = &mut done_rx => break,
+                    arrival = rx.recv() => arrival.unwrap(),
+                };
+                attempts += 1;
+                assert_eq!(arrival.artifact.read_payload_bytes().unwrap(), original_payload);
+                assert_eq!(ContentHash::of_bytes(&arrival.artifact.read_manifest_bounded(1 << 20).unwrap().manifest_bytes), reference.content);
+                let retained = arrival.retained.unwrap();
+                if let Some(id) = &retained_id { assert_eq!(&retained.id, id); }
+                else { retained_id = Some(retained.id.clone()); }
+                let mut edge = edge_template.get_or_insert_with(|| {
+                    fixture.edge(authored.content.as_bytes(), &item.checkpoint.id, &arrival.artifact, "worker".into(), MovementKind::InterfaceArrival);
+                    fixture.rows.pop().unwrap()
+                }).clone();
+                let runtime = edge.invocation_metadata.as_ref().unwrap().invocation().unwrap().runtime.clone();
+                let scope_seq = *original_scope.get_or_insert_with(|| {
+                    let mut scope = edge.clone();
+                    scope.kind = MovementKind::ArtifactMoved;
+                    scope.to = scope.from.clone();
+                    scope.invocation_metadata = Some(MovementMetadata::ArrivalFanout(ArrivalFanoutMetadata {
+                        arrival_fanout: ArrivalFanoutScope { identity: retained.id.clone(), targets: vec![runtime.clone().unwrap()] },
+                    }));
+                    let seq = scope.seq.0;
+                    fixture.rows.push(scope);
+                    seq
+                });
+                edge.seq.0 = fixture.rows.len() as u64; edge.lamport.0 = edge.seq.0;
+                if attempts == 1 {
+                    edge.kind = MovementKind::DeliveryRefused;
+                    edge.invocation_metadata = Some(MovementMetadata::Delivery(DeliveryMetadata {
+                        delivery_verdict: DeliveryVerdict::refused(RefusedReason::RegistryUnstable, json!({"message":"admission registry snapshot changed"})),
+                        runtime, source_movement_seq: None, delivery_scope_seq: Some(scope_seq),
+                    }));
+                    fixture.rows.push(edge); fixture.save();
+                    retained.reply.send(Ok(ArtifactDelivery::Pending { scope_seq })).unwrap();
+                    std::fs::write(file.manifest_path(), b"carrier changed after first dispatch").unwrap();
+                    continue;
+                }
+                let delivery = match mode {
+                    "admitted" => {
+                        let mut metadata = edge.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+                        metadata.delivery_scope_seq = Some(scope_seq); edge.invocation_metadata = Some(metadata.into());
+                        let seq = edge.seq.0; fixture.rows.push(edge.clone());
+                        for requirement in &item.checkpoint.required_verified_artifacts {
+                            let mark = octopus_interfaces::Mark::passed(requirement.mark.clone(), item.checkpoint.id.clone(), handoff.config.run.clone(),
+                                item.checkpoint.epoch, reference.clone(), requirement.verifier.clone(), octopus_ledger::VerifierPackagePin {
+                                    descriptor_content: ContentHash::of_bytes(b"descriptor"), script_content: ContentHash::of_bytes(b"script"),
+                                }, json!({}));
+                            edge.seq.0 = fixture.rows.len() as u64; edge.lamport.0 = edge.seq.0;
+                            edge.kind = MovementKind::MarkOutcomeAdmitted(requirement.mark.clone());
+                            edge.invocation_metadata = Some(mark.into()); fixture.rows.push(edge.clone());
+                        }
+                        fixture.save();
+                        Ok(ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { seq } })
+                    }
+                    "policy" => {
+                        let verdict = DeliveryVerdict::refused(RefusedReason::Policy, json!({"message":"revoked permission"}));
+                        edge.kind = MovementKind::DeliveryRefused;
+                        edge.invocation_metadata = Some(MovementMetadata::Delivery(DeliveryMetadata {
+                            delivery_verdict: verdict.clone(), runtime, source_movement_seq: None, delivery_scope_seq: Some(scope_seq),
+                        }));
+                        fixture.rows.push(edge); fixture.save();
+                        Ok(ArtifactDelivery::Complete { verdict })
+                    }
+                    "transport" => Err("fixture transport closed".into()),
+                    "wrong_scope" => Ok(ArtifactDelivery::Pending { scope_seq: scope_seq + 1 }),
+                    "incomplete" => Ok(ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { seq: edge.seq.0 } }),
+                    _ => Ok(ArtifactDelivery::Pending { scope_seq }),
+                };
+                retained.reply.send(delivery).unwrap();
+                if mode == "cancelled" { handoff.ctx.cancel.cancel(); }
+            }
+            attempts
+        };
+        let (result, attempts) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(sending, receiving) }).await.unwrap();
+        assert!(attempts >= 2, "{mode}: {result:?}");
+        match mode {
+            "admitted" => assert!(matches!(result.unwrap(), DeliveryVerdict::Admitted { .. })),
+            "policy" => assert!(matches!(result.unwrap(), DeliveryVerdict::Refused { reason: RefusedReason::Policy, .. })),
+            _ => assert!(result.unwrap_err().contains(match mode {
+                "timeout" => "timed out after 120ms", "cancelled" => "cancelled",
+                "transport" => "fixture transport closed", "wrong_scope" => "changed its original scope",
+                "incomplete" => "without all original edge decisions", _ => unreachable!(),
+            }), "{mode}"),
+        }
+        assert_eq!(fixture.rows.iter().filter(|row| row.kind == MovementKind::ArtifactMoved && row.artifact.as_ref() == Some(&reference)).count(), 1);
+        assert_eq!(fixture.rows.iter().filter(|row| row.kind == MovementKind::InterfaceArrival && row.artifact.as_ref() == Some(&reference)).count(), usize::from(mode == "admitted"));
+        assert_eq!(std::fs::read(&handoff.run_path).unwrap(), authored.content.as_bytes());
+    }
+}
+
+#[tokio::test]
 async fn pending_output_retains_original_fanout_across_restart_and_refuses_legacy_ambiguity() {
     use octopus_ledger::{ArrivalFanoutMetadata, ArrivalFanoutScope, ArtifactDelivery, DeliveryMetadata, MovementMetadata};
     let mut fixture = CompletedInputReplayFixture::new();
@@ -84,11 +245,11 @@ async fn pending_output_retains_original_fanout_across_restart_and_refuses_legac
         let own = fixture.rows.last_mut().unwrap();
         let mut metadata = own.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
         metadata.delivery_scope_seq = Some(scope_seq); own.invocation_metadata = Some(metadata.into()); fixture.save();
-        retained.reply.send(Ok(ArtifactDelivery::Pending {scope_seq})).unwrap();
+        retained.reply.send(Err("fixture transport closed after retaining scope".into())).unwrap();
         delivery_id
     };
     let (result, delivery_id) = tokio::join!(sending, receive);
-    assert!(result.unwrap_err().contains("unfinished original edges"));
+    assert!(result.unwrap_err().contains("fixture transport closed"));
     assert_eq!(handoff.pending_handoff_evidence(&pending).unwrap(), vec![None]);
     assert_eq!(std::fs::read(&handoff.run_path).unwrap(), authored.content.as_bytes());
     let mut cold = handoff.clone(); cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
@@ -337,6 +498,10 @@ struct CompletedInputReplayFixture {
 
 impl CompletedInputReplayFixture {
     fn new() -> Self {
+        Self::with_required_final(false)
+    }
+
+    fn with_required_final(required: bool) -> Self {
         use serde_json::json;
         let root = tempfile::tempdir().unwrap();
         let binding = |id: &str| json!(AuthoredInterfaceBinding::all(InterfaceId::new(id)));
@@ -346,7 +511,7 @@ impl CompletedInputReplayFixture {
                 "mark":"tool.call.allowed","artifact_label":"tool.call","verifier":"tool_call_allowed","params":{"tools":[tool]}
             })]).unwrap_or_default()
         });
-        let config: RunAuthoringConfig = serde_json::from_value(json!({
+        let mut config: RunAuthoringConfig = serde_json::from_value(json!({
             "run":"run","worker":"worker","provider_interface":"provider","authoring_source_interface":"writer",
             "file_write_tool":"write","file_write_label":"tool.call","file_write_result_label":"write.result","result_timeout_ms":1000,
             "checkpoints":[row("input","stable","room","provider",None),row("alternate","stable","alternate_room","provider",None),
@@ -356,6 +521,11 @@ impl CompletedInputReplayFixture {
                 row("writer_call","authoring_call","writer","writer_room",Some("write")),
                 row("writer_result","authoring_result","writer_room","provider",None)]
         })).unwrap();
+        if required {
+            let mut requirement = config.checkpoints.iter().find(|cp| cp.name == "tool").unwrap().required_verified_artifacts[0].clone();
+            requirement.artifact_label = "answer".into();
+            config.checkpoints.iter_mut().find(|cp| cp.name == "client").unwrap().required_verified_artifacts = vec![requirement];
+        }
         let topology = BoundRunAuthoringTopology { schema_version:2,run:config.run.clone(),worker:config.worker.clone(),
             provider_interface:config.provider_interface.clone(),authoring_source_interface:config.authoring_source_interface.clone(),
             payload_artifact_bindings:Vec::new(),writer_run:None,checkpoints:config.checkpoints.clone() };
@@ -762,6 +932,25 @@ async fn outstanding_results_preserve_context_and_require_exact_consumption() {
     assert!(result_inputs::validate_saved(&fixture.handoff.ctx, &record,
         &RunRecord::from_bytes(forked.content.as_bytes()).unwrap(), &fixture.handoff.config).is_err());
     let bridge = fixture.handoff.author_result_invocation(&current).unwrap();
+    {
+        let mut peer = record.clone();
+        peer.interface_state.insert("peer".into(), BTreeMap::from([("input_seq".into(), source.into())]));
+        peer.checkpoints.iter_mut().find(|cp| cp.id.as_str() == "control").unwrap().epoch.0 += 1;
+        let peer_bytes = serde_json::to_vec(&peer).unwrap();
+        let preimage = fixture.handoff.authored_run_preimage(&peer_bytes, &bridge).unwrap();
+        assert_eq!(preimage, current);
+        let rebased = authoring_retry::rebase_authored_run(&preimage, &peer_bytes, &bridge, &fixture.handoff.config, Some(JsonFormat::Compact)).unwrap();
+        let after = RunRecord::from_bytes(rebased.content.as_bytes()).unwrap();
+        assert_eq!(after.interface_state[&InterfaceId::new("peer")], peer.interface_state[&InterfaceId::new("peer")]);
+        assert_eq!(after.checkpoint(&"control".into()), peer.checkpoint(&"control".into()));
+        assert_eq!(result_inputs::definition_source(&peer, &after, &fixture.handoff.config).unwrap(), Some(source));
+        result_inputs::validate_saved(&fixture.handoff.ctx, &peer, &after, &fixture.handoff.config).unwrap();
+        let mut forged = bridge.clone();
+        forged.content.push(' ');
+        assert!(fixture.handoff.authored_run_preimage(&peer_bytes, &forged).is_err());
+        peer.checkpoints.iter_mut().find(|cp| cp.id == receiving.id).unwrap().artifact_bindings[0].access.delete = true;
+        assert!(authoring_retry::rebase_authored_run(&preimage, &serde_json::to_vec(&peer).unwrap(), &bridge, &fixture.handoff.config, Some(JsonFormat::Compact)).is_err());
+    }
     let raw_handoff = fixture.handoff.clone();
     let bridged = RunRecord::from_bytes(bridge.content.as_bytes()).unwrap();
     assert!(bridged.checkpoint(&receiving.id).is_none());

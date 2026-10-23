@@ -63,6 +63,35 @@ function callback(name, environment) {
   return Function(...Object.keys(environment), code)(...Object.values(environment));
 }
 
+test("message branches navigate to the task draft and retain the source pane history", () => {
+  const { taskDraftActions } = load("src/components/shell/taskDraftActions.ts");
+  const calls = [];
+  let accepted = true;
+  const target = {
+    continueInNewTask: message => { calls.push(["continue", message]); return accepted; },
+    editUserMessageInNewTask: (...args) => { calls.push(["edit", ...args]); return accepted; },
+  };
+  const wrap = callback("workspaceWithTaskDraftActions", {
+    taskDraftActions, chatWorkspace: target,
+    setProjectFilterEeId: id => calls.push(["filter", id]),
+    setSecondaryPaneOpen: open => calls.push(["secondary", open]),
+    setSecondaryPaneFocused: focused => calls.push(["focus", focused]),
+    selectSurface: (surface, run) => calls.push(["navigate", surface, run]),
+  });
+  const source = { activeRunId: "home", renderedMessages: [{ id: "old" }, { id: "edited" }] };
+  const actions = wrap(source);
+  assert.equal(actions.editUserMessageInNewTask(source.renderedMessages[1], "correction"), true);
+  assert.deepEqual(calls[0], ["edit", source.renderedMessages[1], "correction", source.renderedMessages]);
+  assert.deepEqual(calls.at(-1), ["navigate", "chat", ""]);
+  assert.equal(source.activeRunId, "home", "Home keeps its identity while the task pane opens the branch");
+  calls.length = 0;
+  assert.equal(actions.continueInNewTask({ id: "reply" }), true);
+  assert.deepEqual(calls.at(-1), ["navigate", "chat", ""]);
+  calls.length = 0; accepted = false;
+  assert.equal(actions.continueInNewTask({ id: "invalid" }), false);
+  assert.equal(calls.length, 1, "a refused branch never leaves the source pane");
+});
+
 test("one history crosses destinations and keeps the selected duplicate after invalid entries disappear", () => {
   const current = {
     entries: [state.clientDestination("voice"), state.clientDestination("chat", "task-a"), state.clientDestination("missing"), state.clientDestination("voice"), state.clientDestination("chat", "deleted"), state.clientDestination("inbox")],
@@ -202,6 +231,7 @@ test("returning to a new task through the rail preserves its unsent draft", () =
 test("opening an existing task or pressing plus uses Tasks without opening Home", () => {
   const calls = [];
   const open = callback("openChat", {
+    projectFilterEeId: "",
     chatWorkspace: { selectRun: (id) => calls.push(["task", id]), createChat: (projectId) => calls.push(projectId ? ["new", projectId] : ["new"]) },
     setSecondaryPaneOpen: (value) => calls.push(["side-pane", value]),
     setSecondaryPaneFocused: (value) => calls.push(["focused", value]),
@@ -213,6 +243,18 @@ test("opening an existing task or pressing plus uses Tasks without opening Home"
   assert.deepEqual(calls.splice(0), [["new"], ["side-pane", false], ["focused", false], ["surface", "chat", ""]]);
   open("", "project-a");
   assert.deepEqual(calls[0], ["new", "project-a"]);
+});
+
+test("opening a task outside the selected project reveals it in All tasks", () => {
+  const selected = [], filters = [];
+  const open = callback("openChat", {
+    projectFilterEeId: "project-a", clientProjectScopeIds: workspaces.clientProjectScopeIds,
+    agentProjectWorkspace: { projects: [{ id: "project-a" }, { id: "child", parentId: "project-a" }] },
+    chatWorkspace: { runs: [{ runId: "nested", eeId: "child" }, { runId: "triggered", eeId: "root" }], selectRun: (id) => selected.push(id) },
+    setProjectFilterEeId: (id) => filters.push(id), setSecondaryPaneOpen() {}, setSecondaryPaneFocused() {}, selectSurface() {},
+  });
+  open("nested"); assert.deepEqual(filters, []);
+  open("triggered"); assert.deepEqual(filters, [""]); assert.deepEqual(selected, ["nested", "triggered"]);
 });
 
 test("Home opens its surface, Dashboard restores its view, and Inbox, Applications and Drivers open directly", () => {

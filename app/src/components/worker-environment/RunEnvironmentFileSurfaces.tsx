@@ -1,3 +1,4 @@
+import { OcLoadingRows, OcLoadingText } from "../../design-system/LoadingSkeleton";
 import { File as CodeFile } from "@pierre/diffs/react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useAppearance } from "../../appearance";
@@ -356,7 +357,7 @@ function LiveFilesSurface({ active, environment, onOpenFile, surface }: {
             </div>
           )
         ) : rootLoading && !treePaths.length ? (
-          <OctopusPanelNote>Loading directory entries…</OctopusPanelNote>
+          <OcLoadingRows label="Loading directory entries…" />
         ) : !treePaths.length ? (
           <OctopusPanelNote>No files in this folder</OctopusPanelNote>
         ) : (
@@ -731,11 +732,11 @@ export function FilePreviewSurface({ active, environment, path, surface }: {
             value={editDraft}
           />
         ) : liveState === "loading" ? (
-          <div className="we-file-preview-state">Reading projected file…</div>
+          <div className="we-file-preview-state"><OcLoadingText label="Reading projected file…" /></div>
         ) : liveState === "error" ? (
           <div className="we-file-preview-state is-error">{liveError}</div>
         ) : binaryPreviewState === "loading" ? (
-          <div className="we-file-preview-state">Loading bounded binary preview…</div>
+          <div className="we-file-preview-state"><OcLoadingText label="Loading bounded binary preview…" /></div>
         ) : binaryPreviewState === "error" ? (
           <div className="we-file-unsupported" role="alert">
             <strong>Preview could not be loaded</strong>

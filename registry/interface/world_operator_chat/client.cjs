@@ -27,6 +27,11 @@ module.exports = {
     waitForInterface: waitForInterfaceSocket,
     handIn: (input) => options.handInArtifact({ ...input, endpoint: interfaceEndpoint(options.octopusHome(), input.interfaceId) }),
   }, request),
+  requestTaskTitle: (options, request) => require("./task-titles.cjs").requestTaskTitle({
+    ...options, withRunLock: withOperatorRunAuthoringLock, withTopologyLock: withOperatorWorkspaceTopologyLock,
+    waitForInterface: waitForInterfaceSocket,
+    handIn: (input) => options.handInArtifact({ ...input, endpoint: interfaceEndpoint(options.octopusHome(), input.interfaceId) }),
+  }, request),
   updateOperatorChatPins,
   validateProviderAccountObservation,
   verifyProviderAccount,

@@ -1,3 +1,4 @@
+import { OcSkeleton } from "../../design-system/LoadingSkeleton";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { OcButton, OcIconButton, OcMenuItem, OcMenuSectionLabel } from "../../design-system/components";
 import { OcDropdown } from "../../design-system/OcDropdown";
@@ -193,9 +194,9 @@ function LoadingRows() {
     <div className="flex flex-col gap-px" role="status">
       <span className="sr-only">Loading triggers…</span>
       {[32, 24, 28].map((width) => (
-        <div aria-hidden="true" className="flex h-[var(--height-token-row)] w-full items-center gap-3 px-2 motion-safe:animate-pulse" key={width}>
-          <span className="h-4 max-w-full rounded bg-text/10" style={{ width: width * 4 }} />
-          <span className="ms-auto h-3 w-12 shrink-0 rounded bg-text/10" />
+        <div aria-hidden="true" className="flex h-[var(--height-token-row)] w-full items-center gap-3 px-2" key={width}>
+          <OcSkeleton size="lg" width={width * 4} />
+          <OcSkeleton className="ms-auto shrink-0" size="sm" width={48} />
         </div>
       ))}
     </div>

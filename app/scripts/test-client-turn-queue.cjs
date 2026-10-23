@@ -54,6 +54,7 @@ for (const submissionStarted of [false, true]) {
     return true;
   });
 }
+assert.equal(operatorChatSubmitFailure(Object.assign(new Error("Configuration refused"), { deliveryState: "not_sent" })).error.deliveryState, "not_sent");
 assert.equal(queueSubmissionFailureStatus(new Error("IPC connection lost"), true), "unknown");
 assert.equal(queueSubmissionFailureStatus(new Error("Local validation failed"), false), "failed");
 assert.throws(() => unwrapOperatorChatSubmitResult({ error: { deliveryState: "not_sent" } }), error => {

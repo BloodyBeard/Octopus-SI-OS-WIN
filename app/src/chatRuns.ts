@@ -11,6 +11,7 @@ export type ChatRun = {
   agentColor?: string;
   runId: string;
   title: string;
+  titleGenerationNeeded?: boolean;
   chatInterfaceId: string;
   clientSurfaceRole: "home" | "task";
   writable: boolean;
@@ -60,6 +61,8 @@ export type ChatTerminalMessage = {
 };
 
 export type ChatExecutionContext = {
+  sourceFolders: string[];
+  fullAccessRoot: string;
   eeId: string;
   agentCatalogDigest: string;
   defaultTaskAccessMode: TaskAccessMode;
@@ -306,6 +309,7 @@ type RawChatRunRow = {
   agent_color?: unknown;
   run_id?: unknown;
   title?: unknown;
+  title_generation_needed?: unknown;
   chat_interface_id?: unknown;
   client_surface_role?: unknown;
   writable?: unknown;
@@ -403,6 +407,7 @@ export function projectChatRuns(response: { chats?: RawChatRunRow[] }): ChatRun[
     .map((row) => ({
       runId: asString(row.run_id),
       title: asString(row.title) || asString(row.run_id) || "Chat",
+      titleGenerationNeeded: row.title_generation_needed === true,
       chatInterfaceId: asString(row.chat_interface_id),
       clientSurfaceRole: row.client_surface_role === "home" ? ("home" as const) : ("task" as const),
       writable: row.writable === true,
@@ -548,6 +553,8 @@ export function projectChatExecutionContexts(
       eeId,
       agentCatalogDigest: asString(row.agent_catalog_digest),
       defaultTaskAccessMode: normalizeTaskAccessMode(row.default_task_access_mode),
+      sourceFolders: asStringArray(row.source_folders),
+      fullAccessRoot: asString(row.full_access_root),
       hostRootRefs: Object.fromEntries(Object.entries(asRecord(row.host_root_refs)).flatMap(([slot, root]) => (
         typeof root === "string" && root ? [[slot, root]] : []
       ))),

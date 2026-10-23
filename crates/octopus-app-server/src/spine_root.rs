@@ -1298,12 +1298,19 @@ fn form_interface_policy_for_interface(
             let declared = by_id.get(original).ok_or_else(|| {
                 format!("original '{}' of interface '{}' is not loaded", original.as_str(), interface.as_str())
             })?;
+            octopus_policy::validate_interface_policy_copy(&exact.interface_policy, &declared.interface_policy)
+                .map_err(|error| format!("interface '{}' admitted by '{}': {error}", interface.as_str(), original.as_str()))?;
             octopus_policy::form_interface_policy_values(&declared.interface_policy.variables, &[&declared.interface_policy.values])
         })
         .transpose()?;
     let boundary_extra = worker_layers
         .iter()
-        .filter_map(|layer| layer.get(&exact.id).or_else(|| exact.copy_of.as_ref().and_then(|id| layer.get(id))))
+        .flat_map(|layer| {
+            [Some(&exact.id), exact.copy_of.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter_map(|id| layer.get(id))
+        })
         .chain(original_values.as_ref())
         .collect::<Vec<_>>();
     let ee_layers = if apply_ee_overrides {
@@ -1457,7 +1464,7 @@ fn registry_ee_state(
                 instance
                     .parent_ee
                     .as_ref()
-                    .is_some_and(|parent| tree.get(parent).is_some())
+                    .is_none_or(|parent| tree.get(parent).is_some())
                     .then_some(id.clone())
             })
             .collect::<Vec<_>>();
@@ -2032,6 +2039,12 @@ mod required_artifact_verification_tests {
             .unwrap(),
         )
         .unwrap();
+        let service_template = registry.join("ee_template/service");
+        std::fs::create_dir_all(&service_template).unwrap();
+        std::fs::write(service_template.join("ee_template.json"),
+            br#"{"id":"service","goal_class":"service","allowed_tools":[],"allowed_child_ee_templates":[]}"#).unwrap();
+        std::fs::write(ee_instances_root.join("ee_service.json"),
+            br#"{"ee_id":"ee_service","template_name":"service","parent_ee_id":null,"goal":"Independent service"}"#).unwrap();
         let blobs: SharedBlobs = Arc::new(Mutex::new(InMemoryBlobs::new()));
 
         let embedded = build_embedded_spine(SpineRootConfig {
@@ -2048,6 +2061,9 @@ mod required_artifact_verification_tests {
         assert!(embedded.interfaces_loaded.is_empty());
         assert!(embedded.worker_interface_policies.is_empty());
         assert_eq!(embedded.existence_ee_id, EeId::new("ee_existence"));
+        let snapshot = embedded.live_registry.read().unwrap();
+        assert_eq!(snapshot.ee_tree.ancestors(&EeId::new("ee_service")).unwrap(), vec![EeId::new("ee_service")]);
+        drop(snapshot);
         assert!(
             embedded
                 .live_registry

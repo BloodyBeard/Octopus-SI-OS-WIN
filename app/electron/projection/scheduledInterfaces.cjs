@@ -7,9 +7,9 @@ const { parseScheduledDueAt } = require("../scheduledTime.cjs");
 const { activationDriverRef, cronScheduleFingerprint, parseCronActivationDocument, scheduledInterfaceDisplayName } = require("./cronActivation.cjs");
 const { readJsonFile, readOptionalRegularJsonDocument, stableJson } = require("./jsonFiles.cjs");
 const { movementBoundaryInterface, movementRunId, readChangeJournal } = require("./movementRows.cjs");
-const { baseInterfaceRows } = require("./registryRows.cjs");
+const { baseInterfaceRows, octopusOsInterfaceSidecars } = require("./registryRows.cjs");
 const { runInterfaceReferences } = require("./taskDeletion.cjs");
-const { arrayValue, interfaceBindingId, isAdmittedInterfaceArtifactMovement, ledgerArtifactLabel, numberValue, objectOrEmpty, rowTimeMs, stringValue } = require("./values.cjs");
+const { arrayValue, interfaceBindingId, isAdmittedInterfaceArtifactMovement, ledgerArtifactId, ledgerArtifactLabel, numberValue, objectOrEmpty, rowTimeMs, stringValue } = require("./values.cjs");
 
 function scheduledInterfacesProjection(store) {
   function scheduledScopeOptions(projection) {
@@ -122,7 +122,7 @@ function scheduledInterfacesProjection(store) {
   async function scheduledInterfaceEvidence(projection, interfaceId, config, evidenceRows) {
     let lastRunAtMs = 0;
     let lastMovementSeq = 0;
-    const deliveries = [];
+    const firings = new Map();
     const deadline = config.schedule.due_at == null ? null : parseScheduledDueAt(config.schedule.due_at);
     for (const movement of evidenceRows) {
       if (
@@ -138,7 +138,13 @@ function scheduledInterfacesProjection(store) {
         lastRunAtMs = at;
         lastMovementSeq = seq;
       }
-      deliveries.push({ seq, at_ms: at, run_id: movementRunId(movement) });
+      const artifactId = ledgerArtifactId(movement);
+      const runId = movementRunId(movement);
+      const targets = firings.get(artifactId) ?? new Map();
+      if (!targets.has(runId) || seq < targets.get(runId).seq) {
+        targets.set(runId, { seq, at_ms: at, run_id: runId });
+      }
+      firings.set(artifactId, targets);
     }
     const schedule = config.schedule;
     let nextRunAtMs = null;
@@ -190,10 +196,20 @@ function scheduledInterfacesProjection(store) {
       if (Number.isFinite(parsed)) lastRunAtMs = parsed;
     }
     const clientRuns = new Map(arrayValue(store.operatorOsScope(projection).client_runs).map((row) => [stringValue(row.run_id), row]));
+    const deliveries = [...firings.values()].flatMap((targets) => {
+      const rows = [...targets.values()];
+      const tasks = rows.filter((row) => clientRuns.has(row.run_id));
+      return tasks.length ? tasks : rows.sort((left, right) => left.seq - right.seq).slice(0, 1);
+    });
     const recent = deliveries.sort((left, right) => right.seq - left.seq).slice(0, 8);
+    const entries = recent.some((row) => clientRuns.has(row.run_id))
+      ? new Map((await store.operatorChatRunIndex(projection)).map((entry) => [entry.runId, entry])) : new Map();
+    const sidecars = octopusOsInterfaceSidecars(projection);
     for (const delivery of recent) {
       delivery.chat_interface_id = stringValue(clientRuns.get(delivery.run_id)?.interface_id);
       delivery.journal = delivery.run_id ? await readChangeJournal(projection, delivery.run_id) : null;
+      const entry = entries.get(delivery.run_id);
+      delivery.title = entry ? await store.operatorChatTitle(projection, entry, sidecars, objectOrEmpty(projection.operatorChatProtocol)) : "";
     }
     return {
       lastRunAtMs: lastRunAtMs || null,

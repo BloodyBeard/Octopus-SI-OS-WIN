@@ -240,9 +240,16 @@ impl TaskRetirementContext {
     }
 }
 
+#[derive(Default)]
+struct RetirementLedgerCache {
+    boundary: Option<RetirementLedgerBoundary>,
+    grant_rows: BTreeMap<octopus_ledger::ContentHash, (usize, Vec<u8>)>,
+}
+
 fn ledger_boundary(
     request: &TaskRetirementRequest,
     prior: Option<&RetirementLedgerBoundary>,
+    cache: &mut RetirementLedgerCache,
 ) -> Result<RetirementLedgerBoundary, String> {
     let path = request.ledger_root.join("movements.jsonl");
     let bytes = regular(&path, None)?.unwrap_or_default();
@@ -274,13 +281,31 @@ fn ledger_boundary(
         .iter()
         .map(|record| &record.run)
         .collect::<BTreeSet<_>>();
-    let mut sequence = 0;
-    let mut offset = 0;
     let decoder = octopus_ledger_store::DurableMovementDecoder::for_log(&path);
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let movement = decoder
-            .decode(line, sequence as usize)
+    let reuse = match (&cache.boundary, prior) {
+        (None, _) => false,
+        (Some(checked), Some(prior)) if checked == prior => true,
+        _ => return Err("retirement ledger cache differs from its held proof".into()),
+    };
+    if reuse {
+        for (line, row) in cache.grant_rows.values() {
+            decoder.decode_projection(row, *line).map_err(|error| error.to_string())?;
+        }
+    }
+    let mut sequence = if reuse { prior.unwrap().sequence } else { 0 };
+    let mut offset = if reuse { prior_offset } else { 0 };
+    for line in bytes[offset..].split_inclusive(|byte| *byte == b'\n') {
+        let (movement, grant) = decoder
+            .decode_projection(line, sequence as usize)
             .map_err(|error| error.to_string())?;
+        if let Some(grant) = grant {
+            if !cache.grant_rows.contains_key(&grant)
+                && serde_json::from_slice::<Value>(line).map_err(|error| error.to_string())?
+                    .pointer("/invocation_metadata/grant_content").is_some()
+            {
+                cache.grant_rows.insert(grant, (sequence as usize, line.to_vec()));
+            }
+        }
         if movement.seq.0 != sequence {
             return Err("retirement ledger is not contiguous".into());
         }
@@ -307,17 +332,21 @@ fn ledger_boundary(
     if offset == prior_offset && prior.is_some_and(|prior| prior.sequence != sequence) {
         return Err("retirement ledger ends at a different sequence boundary".into());
     }
-    Ok(RetirementLedgerBoundary {
+    let boundary = RetirementLedgerBoundary {
         complete_offset: bytes.len() as u64,
         sequence,
-        sha256: digest(&bytes),
-    })
+        sha256: prior.filter(|_| prior_offset == bytes.len()).map(|prior| prior.sha256.clone())
+            .unwrap_or_else(|| digest(&bytes)),
+    };
+    cache.boundary = Some(boundary.clone());
+    Ok(boundary)
 }
 
 fn verify_held(
     context: &TaskRetirementContext,
     request: &TaskRetirementRequest,
     previous: Option<&HeldRetirementProof>,
+    cache: &mut RetirementLedgerCache,
 ) -> Result<HeldRetirementProof, String> {
     request.validate(true)?;
     request.assert_unbound()?;
@@ -325,10 +354,10 @@ fn verify_held(
         if context.proof(previous.ledger_boundary.clone())? != *previous {
             return Err("retirement held proof belongs to another exact transaction".into());
         }
-        ledger_boundary(request, Some(&previous.ledger_boundary))?
+        ledger_boundary(request, Some(&previous.ledger_boundary), cache)?
     } else {
         let proof = request.inspect(true)?;
-        let boundary = ledger_boundary(request, None)?;
+        let boundary = ledger_boundary(request, None, cache)?;
         if proof
             .preimages
             .iter()
@@ -420,6 +449,112 @@ fn inventory_ids(value: &Value) -> Result<BTreeSet<String>, String> {
     let ids = values.iter().map(|id| inventory_id(id).map(str::to_owned)).collect::<Result<BTreeSet<_>, _>>()?;
     if ids.len() != values.len() { return Err("retirement inventory repeats an owner".into()); }
     Ok(ids)
+}
+
+fn prediction_interfaces(registry: &Path, record: &Value, source: &str, provider: &str) -> Result<BTreeSet<String>, String> {
+    let config_path = registry.join("interface/world_operator_chat/composer-predictions.json");
+    let config: Value = serde_json::from_slice(&regular(&config_path, Some(16384))?
+        .ok_or("retirement suggestion contract is absent")?).map_err(|error| error.to_string())?;
+    let client = inventory_id(&config["client_template"])?;
+    let worker_template = inventory_id(&config["worker_template"])?;
+    let suffix = digest(&serde_json::to_vec(&[source, provider]).map_err(|error| error.to_string())?)[..24].to_owned();
+    let run = format!("run_client_maintenance_{suffix}");
+    let input = format!("{client}_input_{suffix}");
+    let result = format!("{client}_result_{suffix}");
+    let worker = format!("{worker_template}_{suffix}");
+    let state = &record["interface_state"][&input]["composer_prediction"];
+    let request = &state["request"];
+    let epoch = state["epoch"].as_u64().filter(|value| *value <= 9_007_199_254_740_991)
+        .ok_or("retirement suggestion generation is malformed")?;
+    let sequence = request["source_movement_seq"].as_u64().filter(|value| *value <= 9_007_199_254_740_991)
+        .ok_or("retirement suggestion source sequence is malformed")?;
+    let reference = &request["source"];
+    if request.as_object().is_none_or(|object| object.len() != 4)
+        || reference.as_object().is_none_or(|object| object.len() != 2)
+        || reference["id"].as_str().is_none_or(str::is_empty)
+        || reference["content"].as_array().is_none_or(|bytes| bytes.len() != 32 || bytes.iter().any(|byte| byte.as_u64().is_none_or(|byte| byte > 255)))
+        || request["request_id"] != format!("prediction-{sequence}") || request["reply_to"] != result
+    { return Err("retirement suggestion request ownership is malformed".into()); }
+    let binding = |id: &str, label: &str| serde_json::json!({"interface":id,
+        "config":{"artifact_policy":{"mode":"allow","names":[label],"namespaces":[]}}});
+    let input_label = inventory_id(&config["request_label"])?;
+    let result_label = inventory_id(&config["result_label"])?;
+    let expected = serde_json::json!({"id":run,"ee":inventory_id(&record["ee"])?,"worker":worker,
+        "trace":format!("trace:{run}"),"status":"running",
+        "interface_state":{&input:{"composer_prediction":{"source_run":source,"request":request,"epoch":epoch}}},
+        "checkpoints":[
+            {"id":"cp_input","run":run,"trace":format!("trace:{run}:input:{epoch}"),"epoch":epoch,
+                "interface_binding":binding(&input,input_label),"outbound_interface_bindings":[binding(provider,input_label)],
+                "artifact_bindings":[{"id":reference["id"]}],"required_verified_artifacts":[]},
+            {"id":"cp_result","run":run,"trace":format!("trace:{run}:result:{epoch}"),"epoch":epoch,
+                "interface_binding":binding(&result,result_label),"outbound_interface_bindings":[],
+                "artifact_bindings":[],"required_verified_artifacts":[]}],"active_checkpoints":["cp_input","cp_result"]});
+    if *record != expected { return Err("retirement suggestion differs from its exact source ownership".into()); }
+    Ok(BTreeSet::from([input, result, worker]))
+}
+
+fn title_interfaces(registry: &Path, record: &Value, source: &str, source_provider: &str, provider: &str) -> Result<BTreeSet<String>, String> {
+    let config: Value = serde_json::from_slice(&regular(&registry.join("interface/world_operator_chat/task-titles.json"), Some(16384))?
+        .ok_or("retirement title contract is absent")?).map_err(|error| error.to_string())?;
+    let client = inventory_id(&config["client_template"])?;
+    let worker_template = inventory_id(&config["worker_template"])?;
+    let provider_template = inventory_id(&config["provider_template"])?;
+    let suffix = digest(&serde_json::to_vec(&[source, source_provider]).map_err(|error| error.to_string())?)[..24].to_owned();
+    let run = format!("run_client_title_{suffix}");
+    let input = format!("{client}_title_input_{suffix}");
+    let result = format!("{client}_title_result_{suffix}");
+    let worker = format!("{worker_template}_title_{suffix}");
+    if provider != format!("{provider_template}_title_{suffix}") {
+        return Err("retirement title belongs to another source provider".into());
+    }
+    let state = &record["interface_state"][&input]["task_title"];
+    let request = &state["request"];
+    let sequence = request["source_movement_seq"].as_u64().filter(|value| *value <= 9_007_199_254_740_991)
+        .ok_or("retirement title source sequence is malformed")?;
+    let reference = &request["source"];
+    if request.as_object().is_none_or(|object| object.len() != 7)
+        || reference.as_object().is_none_or(|object| object.len() != 2)
+        || reference["id"].as_str().is_none_or(str::is_empty)
+        || reference["content"].as_array().is_none_or(|bytes| bytes.len() != 32 || bytes.iter().any(|byte| byte.as_u64().is_none_or(|byte| byte > 255)))
+        || request["request_id"] != format!("title-{sequence}") || request["reply_to"] != result
+        || request["text_pointer"].as_str().is_none_or(str::is_empty)
+        || !request["instructions"].is_string() || !request["output_schema"].is_object()
+    { return Err("retirement title request ownership is malformed".into()); }
+    let expected_files = [(&input, vec!["interface.json", "activation.json", "life.json"]),
+        (&result, vec!["interface.json", "activation.json", "life.json"]),
+        (&worker, vec!["interface.json", "policy.json"]), (&provider.to_owned(), vec!["interface.json", "life.json"])]
+        .into_iter().flat_map(|(id, names)| names.into_iter().map(move |name| format!("interface/{id}/{name}"))).collect::<BTreeSet<_>>();
+    let files = state["files"].as_object().ok_or("retirement title has no ownership inventory")?;
+    if files.keys().cloned().collect::<BTreeSet<_>>() != expected_files
+        || files.values().any(|value| value.as_str().is_none_or(|value| value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())))
+    { return Err("retirement title ownership inventory escapes its private interfaces".into()); }
+    let binding = |id: &str, label: &str| serde_json::json!({"interface":id,
+        "config":{"artifact_policy":{"mode":"allow","names":[label],"namespaces":[]}}});
+    let input_label = inventory_id(&config["request_label"])?;
+    let result_label = inventory_id(&config["result_label"])?;
+    let completed = record["status"] == "idle";
+    let expected = serde_json::json!({"id":run,"ee":inventory_id(&record["ee"])?,"worker":worker,
+        "trace":format!("trace:{run}"),"status":if completed {"idle"} else {"running"},
+        "interface_state":{&input:{"task_title":{"source_run":source,"source_provider":source_provider,"request":request,"files":files}}},
+        "checkpoints":[
+            {"id":"cp_input","run":run,"trace":format!("trace:{run}:input"),"epoch":0,
+                "interface_binding":binding(&input,input_label),"outbound_interface_bindings":[binding(provider,input_label)],
+                "artifact_bindings":[{"id":reference["id"]}],"required_verified_artifacts":[]},
+            {"id":"cp_result","run":run,"trace":format!("trace:{run}:result"),"epoch":0,
+                "interface_binding":binding(&result,result_label),"outbound_interface_bindings":[],
+                "artifact_bindings":[],"required_verified_artifacts":[]}],
+        "active_checkpoints":if completed {serde_json::json!([])} else {serde_json::json!(["cp_input","cp_result"])}});
+    if *record != expected { return Err("retirement title differs from its exact source ownership".into()); }
+    Ok(BTreeSet::from([input, result, worker, provider.to_owned()]))
+}
+
+fn client_companion_interfaces(registry: &Path, record: &Value, row: &TaskRetirementRecord, source: &TaskRetirementRecord) -> Result<BTreeSet<String>, String> {
+    if row.target_run != source.run { return Err("retirement client companion belongs to another source".into()); }
+    if row.role == "title" {
+        title_interfaces(registry, record, source.run.as_str(), source.provider_interface.as_str(), row.provider_interface.as_str())
+    } else if row.role == "prediction" && row.provider_interface == source.provider_interface {
+        prediction_interfaces(registry, record, source.run.as_str(), row.provider_interface.as_str())
+    } else { Err("retirement client companion belongs to another source provider".into()) }
 }
 
 fn record_interfaces(record: &Value, depth: usize) -> Result<BTreeSet<String>, String> {
@@ -531,6 +666,14 @@ impl RetirementDirectoryEvidence {
         } else if !declarations.is_empty() {
             return Err("retirement source has ambiguous maintenance ownership".into());
         }
+        for row in context.selection.records.iter().filter(|row| matches!(row.role.as_str(), "prediction" | "title")) {
+            let record = records.get(row.run.as_str()).ok_or("retirement client companion record is absent")?;
+            let owned = client_companion_interfaces(&context.roots.registry_root, record, row, selected)?;
+            if owned.iter().any(|id| companions.contains(id) || !context.selection.interface_ids.iter().any(|selected| selected.as_str() == id)) {
+                return Err("retirement suggestion overlaps or escapes its exact private inventory".into());
+            }
+            companions.extend(owned);
+        }
         Ok(Self { documents, used: BTreeSet::new(), records, source: source_id, client, companions, tools, collection })
     }
 
@@ -545,6 +688,33 @@ impl RetirementDirectoryEvidence {
             return Err("retirement directory belongs to an unselected interface".into());
         }
         if self.companions.contains(owner) { return Ok(()); }
+        let source = self.records[&self.source].clone();
+        let intakes = source["interface_state"].as_object().ok_or("retirement source has no private state")?.iter()
+            .filter(|(id, state)| state.get("input_intake").is_some()
+                && (id.as_str() == owner || state["input_intake"]["writer"]["door"].as_str() == Some(owner)))
+            .collect::<Vec<_>>();
+        if intakes.len() > 1 { return Err("retirement input ownership is ambiguous".into()); }
+        if let Some((id, state)) = intakes.first() {
+            let interface = InterfaceId::from(id.as_str());
+            let config: crate::input_intake::InputIntakeConfig = serde_json::from_value(state["input_intake"].clone())
+                .map_err(|error| error.to_string())?;
+            config.validate(&interface)?;
+            let selected = context.selection.records.iter().find(|row| row.role == "source").ok_or("retirement source is absent")?;
+            let intake = self.read(context.roots.registry_root.join("interface").join(id).join("interface.json"))?;
+            let provider = self.read(context.roots.registry_root.join("interface").join(config.provider_interface.as_str()).join("interface.json"))?;
+            let worker = self.read(context.roots.registry_root.join("interface").join(selected.worker.as_str()).join("policy.json"))?;
+            if config.run != self.source || config.provider_interface != selected.provider_interface
+                || intake["id"].as_str() != Some(id.as_str()) || intake["interface_driver_ref"] != "checked_input_intake"
+                || !config.matches_declaration(&intake["interface_driver_config"]["private_config"]["input_intake"])?
+                || provider["id"].as_str() != Some(config.provider_interface.as_str())
+                || provider["interface_driver_config"]["private_config"]["input_intake"]["interface_id"].as_str() != Some(id.as_str())
+                || worker["id"].as_str() != Some(selected.worker.as_str())
+                || [id.as_str(), config.writer.door.as_str(), config.provider_interface.as_str()].iter().any(|pin|
+                    worker["ceiling"]["interfaces"].as_array().is_none_or(|pins| !pins.iter().any(|value| value.as_str() == Some(*pin))))
+                || worker["ceiling"]["tools"].as_array().is_none_or(|tools| !tools.iter().any(|tool| tool.as_str() == Some(config.writer.tool.as_str())))
+            { return Err("retirement input writer differs from its exact source ownership".into()); }
+            return Ok(());
+        }
         let client = self.client.clone().ok_or("retirement source has no declared private client owner")?;
         let sidecar: super::OctopusOsInterfaceSidecar = serde_json::from_value(self.read(
             context.roots.registry_root.join("interface").join(owner).join("octopus_os.json"),
@@ -878,7 +1048,8 @@ pub fn serve_task_retirement() -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     };
-    let mut proof = verify_held(&context, &request, context.prior_proof.as_ref())?;
+    let mut ledger_cache = RetirementLedgerCache::default();
+    let mut proof = verify_held(&context, &request, context.prior_proof.as_ref(), &mut ledger_cache)?;
     let mut scope = RetirementDirectoryScope::new(&context, true)?;
     let mut output = std::io::stdout().lock();
     retirement_send(&mut output, &proof)?;
@@ -888,18 +1059,18 @@ pub fn serve_task_retirement() -> Result<(), String> {
             RetirementCommand::Release {} => return Ok(()),
             RetirementCommand::AssertHeld {} => {
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 retirement_send(&mut output, &proof)?;
             }
             RetirementCommand::SnapshotDirectory { transaction_id, path } => {
                 scope.transaction(&transaction_id)?;
                 scope.snapshot(&path)?;
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 let preimage = snapshot_directory(&path, DigestAlgorithm::Sha256).map_err(|error| error.to_string())?;
                 scope.preimage(&path, &preimage)?;
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 retirement_send(&mut output, &RetirementDirectoryResponse::DirectorySnapshot {
                     schema_version: 1, operation_id: context.operation_id.clone(), proof: proof.clone(), path, preimage,
                 })?;
@@ -909,13 +1080,13 @@ pub fn serve_task_retirement() -> Result<(), String> {
                 scope.operation(&operation_id)?;
                 for movement in &moves { scope.movement(movement)?; }
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 let result = publish_directory_moves(&operation_id, &moves).map_err(|error| error.to_string())?;
                 for receipt in &result.receipts {
                     if receipt.outcome == PublicationOutcome::Applied { scope.removed.insert(receipt.movement.source.clone()); }
                 }
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 retirement_send(&mut output, &RetirementDirectoryResponse::DirectoryPublication {
                     schema_version: 1, operation_id: context.operation_id.clone(), proof: proof.clone(), publication_operation_id: operation_id, result,
                 })?;
@@ -928,10 +1099,10 @@ pub fn serve_task_retirement() -> Result<(), String> {
                     return Err("retirement reclaim changed the original destination or exact preimage".into());
                 }
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 reclaim_directory(&tombstone, &receipt, &expected).map_err(|error| error.to_string())?;
                 scope.assert_evidence()?;
-                proof = verify_held(&context, &request, Some(&proof))?;
+                proof = verify_held(&context, &request, Some(&proof), &mut ledger_cache)?;
                 retirement_send(&mut output, &RetirementDirectoryResponse::DirectoryReclaimed {
                     schema_version: 1, operation_id: context.operation_id.clone(), proof: proof.clone(), tombstone, receipt,
                 })?;
@@ -1046,7 +1217,7 @@ impl TaskRetirementRequest {
                 || !interfaces.contains(&selected.provider_interface)
                 || !matches!(
                     selected.role.as_str(),
-                    "source" | "observer" | "projection" | "writer"
+                    "source" | "observer" | "projection" | "writer" | "prediction" | "title"
                 )
             {
                 return Err("retirement record changed its exact path, preimage or owner".into());
@@ -1076,7 +1247,14 @@ impl TaskRetirementRequest {
             return Err("retirement selection requires one exact source".into());
         }
         for selected in &selection.records {
-            if selected.role == "writer" {
+            if matches!(selected.role.as_str(), "prediction" | "title") {
+                let original: Value = serde_json::from_str(&self.original_records[&selected.run]).map_err(|error| error.to_string())?;
+                for id in client_companion_interfaces(&self.registry_root, &original, selected, sources[0])? {
+                    if !selection.interface_ids.iter().any(|selected| selected.as_str() == id) {
+                        return Err("retirement suggestion interface is outside its selection".into());
+                    }
+                }
+            } else if selected.role == "writer" {
                 let target = records
                     .get(&selected.target_run)
                     .ok_or("retirement writer target is absent")?;
@@ -1164,11 +1342,17 @@ impl TaskRetirementRequest {
             regular(&movements, None)?.as_deref().map(digest),
         );
         let mut limits = None;
+        for selected in self.selection.records.iter().filter(|record| matches!(record.role.as_str(), "prediction" | "title")) {
+            let policy = document(&self.registry_root.join("interface").join(selected.worker.as_str()).join("policy.json"), &mut pins)?;
+            if policy["id"].as_str() != Some(selected.worker.as_str())
+                || ["tools", "wek"].iter().any(|key| policy["ceiling"][key].as_array().is_none_or(|items| !items.is_empty()))
+            { return Err("retirement client companion has an effect-capable worker ceiling".into()); }
+        }
         for selected in self
             .selection
             .records
             .iter()
-            .filter(|record| record.role != "writer")
+            .filter(|record| !matches!(record.role.as_str(), "writer" | "prediction" | "title"))
         {
             let record = &records[&selected.run];
             let provider = &selected.provider_interface;
@@ -1318,6 +1502,15 @@ fn registry_documents(root: &Path, filename: &str, pins: &mut BTreeMap<PathBuf, 
         if kind.is_symlink() { return Err("retirement registry cannot follow an aliased owner".into()); }
         if !kind.is_dir() { continue; }
         let id = entry.file_name().into_string().map_err(|_| "retirement registry owner is not UTF-8")?;
+        if id == ".octopus-publication" {
+            #[cfg(unix)] {
+                use std::os::unix::fs::PermissionsExt;
+                if entry.metadata().map_err(|error| error.to_string())?.permissions().mode() & 0o077 != 0 {
+                    return Err("retirement publication metadata is not private".into());
+                }
+            }
+            continue;
+        }
         component(&id)?;
         documents.push((id, document(&entry.path().join(filename), pins)?));
     }

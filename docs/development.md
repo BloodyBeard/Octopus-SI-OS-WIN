@@ -89,10 +89,13 @@ Startup reconciles the bundled baseline against its recorded installation
 manifest. Optional packages use their own manifests and receipts. Both need
 to distinguish the shipped files from local changes: replacing the entire
 Home registry would erase the configuration the system is designed to evolve.
-Package manifests declare the JSON configuration fields that may differ;
-repair preserves those declared fields and refuses conflicting changes to
-package-owned content. Other authorized descriptor edits can still exist, but
-they require an explicit ownership decision before package repair.
+Authorized local changes to descriptors, role artifacts and package code do
+not invalidate an installed package. Doctor validates the active contracts and
+runs the declared probes; it does not compare installed bytes with the bundle.
+Receipts record installation and update provenance, and a newer source appears
+as an available update. Updates preserve local edits and refuse overlapping
+file changes until they are resolved explicitly. Package manifests additionally
+declare JSON configuration fields that updates must carry across releases.
 
 An update never drops an installed owner silently. A package that stops
 shipping one lists it under `retired_members`; the update removes it in the same

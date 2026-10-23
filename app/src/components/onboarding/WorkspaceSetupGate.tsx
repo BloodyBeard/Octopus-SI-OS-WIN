@@ -34,6 +34,8 @@ import {
   resumeClientSetup,
 } from "../../projectionClient";
 import { useProjectionStructureGeneration } from "../../projectionLive";
+import { useChatgptAccount } from "../../account/useChatgptAccount";
+import { ChatGptSignInGate } from "./ChatGptSignInGate";
 import { chatgptSignInCompleted } from "../../onboarding/chatgptSignIn";
 import { OcButton } from "../../design-system/components";
 import { OctopusLoadingLogo, OctopusLoadingState } from "../OctopusLoadingLogo";
@@ -47,6 +49,7 @@ import {
 type Props = {
   accessProfile: OctopusClientAccessProfile;
   children: ReactNode;
+  runtimeHome: string;
 };
 
 type WorkspaceReceipt = {
@@ -119,7 +122,7 @@ type LocalPackagesProjection = {
 type GateSnapshot = {
   workspace: WorkspaceProjection;
   scope: ScopeProjection;
-  localPackages: LocalPackagesProjection;
+  localPackages: LocalPackagesProjection | null;
   clientSetup: OctopusClientSetupState | null;
 };
 
@@ -172,7 +175,50 @@ const AWAITING_SIGN_IN: WorkspaceSetupApplyState = {
   error: "",
 };
 
-export function WorkspaceSetupGate({ accessProfile, children }: Props) {
+export function WorkspaceSetupGate({ accessProfile, runtimeHome, children }: Props) {
+  if (accessProfile !== "live") return <>{children}</>;
+  if (!runtimeHome) return <OpeningState />;
+  return <WorkspaceHomeGate key={runtimeHome} runtimeHome={runtimeHome}>{children}</WorkspaceHomeGate>;
+}
+
+function WorkspaceHomeGate({ runtimeHome, children }: Pick<Props, "runtimeHome" | "children">) {
+  useChatgptAccount(false, runtimeHome);
+  const structureGeneration = useProjectionStructureGeneration();
+  const [snapshot, setSnapshot] = useState<GateSnapshot | null>(null);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    void readGateSnapshot(false).then((next) => {
+      if (!active) return;
+      setSnapshot(next);
+      setError("");
+    }, (failure) => {
+      if (!active) return;
+      setSnapshot(null);
+      setError(failure instanceof Error ? failure.message : String(failure));
+    });
+    return () => { active = false; };
+  }, [structureGeneration, retry]);
+  if (error) return <GateState title="Workspace could not be checked" detail={error} tone="danger"
+    action={<OcButton onClick={() => setRetry((value) => value + 1)}>Try again</OcButton>} />;
+  if (!snapshot) return <OpeningState />;
+  if (snapshot.clientSetup?.status === "complete") {
+    const matrix = completedSetupMatrix(snapshot, null);
+    if (matrix.mode === "shell") return <>{children}</>;
+    return <GateState title={matrix.title} detail={matrix.detail} tone="danger"
+      action={<OcButton onClick={() => setRetry((value) => value + 1)}>Check again</OcButton>} />;
+  }
+  return <WorkspaceAccountSetupGate runtimeHome={runtimeHome}>{children}</WorkspaceAccountSetupGate>;
+}
+
+function WorkspaceAccountSetupGate({ runtimeHome, children }: Pick<Props, "runtimeHome" | "children">) {
+  const account = useChatgptAccount();
+  if (!account.account?.signedIn || account.account.octopusHome !== runtimeHome) return <ChatGptSignInGate />;
+  return <WorkspaceSetupFlow accessProfile="live">{children}</WorkspaceSetupFlow>;
+}
+
+function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHome">) {
   const extensions = useClientExtensions(accessProfile);
   const structureGeneration = useProjectionStructureGeneration();
   const [snapshot, setSnapshot] = useState<GateSnapshot | null>(null);
@@ -230,7 +276,7 @@ export function WorkspaceSetupGate({ accessProfile, children }: Props) {
   }), []);
 
   const catalogResult = useMemo<CatalogResult>(() => {
-    if (!snapshot || extensions.loading) return { catalog: [], pack: null, error: "", warning: "" };
+    if (!snapshot?.localPackages || extensions.loading) return { catalog: [], pack: null, error: "", warning: "" };
     try {
       return buildCatalog(snapshot.localPackages, extensions, snapshot.clientSetup);
     } catch (error) {
@@ -725,6 +771,43 @@ function proveCompletedClientSetup(
   }
 }
 
+function completedSetupMatrix(snapshot: GateSnapshot, draft: WorkspaceSetupDraft | null): GateMatrix {
+  const setup = snapshot.clientSetup!;
+  const receipt = snapshot.workspace.receipt;
+  if (
+    !setup.receiptDigest
+    || snapshot.workspace.status !== "configured"
+    || !receipt
+    || receipt.operationId !== setup.operationId
+    || receipt.requestDigest !== setup.plan.workspace.request_digest
+    || !workspaceIdentityMatchesScope(receipt, snapshot.scope)
+  ) {
+    return {
+      mode: "blocked",
+      title: "Completed setup does not match Home",
+      detail: "The aggregate setup receipt and the visible workspace disagree, so Octopus will not guess which one is current.",
+    };
+  }
+  if (draft?.step === "applying") {
+    if (draft.operationId !== setup.operationId) {
+      return {
+        mode: "blocked",
+        title: "Another workspace is already configured",
+        detail: "The unfinished choices belong to a different setup and were not applied.",
+        recovery: "discard_draft",
+      };
+    }
+    if (!workspaceProjectMappingsMatchScope(receipt, snapshot.scope) || !sameProjectKeys(receipt, draft)) {
+      return {
+        mode: "blocked",
+        title: "Completed setup does not match the reviewed projects",
+        detail: "The initial project tree differs from the choices being applied, so Octopus did not open the workspace.",
+      };
+    }
+  }
+  return { mode: "shell", title: "", detail: "" };
+}
+
 function resolveGateMatrix(
   snapshot: GateSnapshot,
   draft: WorkspaceSetupDraft | null,
@@ -768,42 +851,7 @@ function resolveGateMatrix(
     }
     return { mode: "resume", title: "Finishing setup", detail: "Octopus is continuing from the last verified step." };
   }
-  if (setup?.status === "complete") {
-    const receipt = snapshot.workspace.receipt;
-    if (
-      snapshot.workspace.status !== "configured"
-      || !receipt
-      || receipt.operationId !== setup.operationId
-      || receipt.requestDigest !== setup.plan.workspace.request_digest
-      || !workspaceIdentityMatchesScope(receipt, snapshot.scope)
-    ) {
-      return {
-        mode: "blocked",
-        title: "Completed setup does not match Home",
-        detail: "The aggregate setup receipt and the visible workspace disagree, so Octopus will not guess which one is current.",
-      };
-    }
-    if (draft?.step === "applying") {
-      if (draft.operationId !== setup.operationId) {
-        return {
-          mode: "blocked",
-          title: "Another workspace is already configured",
-          detail: "The unfinished choices belong to a different setup and were not applied.",
-          recovery: "discard_draft",
-        };
-      }
-      if (!workspaceProjectMappingsMatchScope(receipt, snapshot.scope) || !sameProjectKeys(receipt, draft)) {
-        return {
-          mode: "blocked",
-          title: "Completed setup does not match the reviewed projects",
-          detail: "The initial project tree differs from the choices being applied, so Octopus did not open the workspace.",
-        };
-      }
-      const mismatch = savedDraftMismatch(setup, draft, snapshot, catalogResult, extensions);
-      if (mismatch) return mismatch;
-    }
-    return { mode: "shell", title: "", detail: "" };
-  }
+  if (setup?.status === "complete") return completedSetupMatrix(snapshot, draft);
   if (snapshot.workspace.status === "configured") {
     const receipt = snapshot.workspace.receipt;
     if (!receipt || !workspaceIdentityMatchesScope(receipt, snapshot.scope)) {
@@ -1190,8 +1238,8 @@ function providerStatusText(
   return "Provider sign-in status is currently unavailable.";
 }
 
-function requireWorkspacePack(localPackages: LocalPackagesProjection): WorkspacePack {
-  if (localPackages.packs.length !== 1) {
+function requireWorkspacePack(localPackages: LocalPackagesProjection | null): WorkspacePack {
+  if (!localPackages || localPackages.packs.length !== 1) {
     throw new ProductSetupError("Octopus needs exactly one local workspace setup pack before Welcome can continue.");
   }
   return localPackages.packs[0];
@@ -1301,17 +1349,19 @@ function resetApplyingDraft(
   setApplyState(APPLY_IDLE);
 }
 
-async function readGateSnapshot(): Promise<GateSnapshot> {
-  const [workspaceRaw, scopeRaw, localPackagesRaw, clientSetup] = await Promise.all([
+async function readGateSnapshot(includeCatalog = true): Promise<GateSnapshot> {
+  const [workspaceRaw, scopeRaw, clientSetup] = await Promise.all([
     readWorkspaceSetupState(),
     readProjection("projection.operator.os.scope"),
-    readProjection("projection.operator.os.local_packages"),
     readCurrentClientSetup(),
   ]);
+  const localPackages = includeCatalog && clientSetup?.status !== "complete"
+    ? parseLocalPackagesProjection(await readProjection("projection.operator.os.local_packages"))
+    : null;
   return {
     workspace: parseWorkspaceProjection(workspaceRaw),
     scope: parseScopeProjection(scopeRaw),
-    localPackages: parseLocalPackagesProjection(localPackagesRaw),
+    localPackages,
     clientSetup,
   };
 }

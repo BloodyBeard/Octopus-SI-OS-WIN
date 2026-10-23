@@ -51,6 +51,23 @@ pub fn validate_interface_policy_declaration(
     form_interface_policy_values(&declaration.variables, &[&declaration.values]).map(|_| ())
 }
 
+pub fn validate_interface_policy_copy(
+    copy: &InterfacePolicyDeclaration,
+    original: &InterfacePolicyDeclaration,
+) -> Result<(), String> {
+    for (name, definition) in &original.variables {
+        let copied = copy.variables.get(name).ok_or_else(|| {
+            format!("interface copy omits original policy variable '{name}'")
+        })?;
+        if copied.reduce != definition.reduce {
+            return Err(format!(
+                "interface copy changes the reducer of original policy variable '{name}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn form_interface_policy(
     declaration: &InterfacePolicyDeclaration,
     worker_layer: Option<&InterfacePolicyValues>,

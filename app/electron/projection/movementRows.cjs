@@ -13,6 +13,7 @@ const { arrayValue, contentHashHex, endpointId, filterByString, isPathInside, le
 
 function projectionRequiresFullLedger(method, params) {
   if (params.include_ledger === false && [
+    "projection.runtime.topology",
     "projection.runtime.snapshot",
     "projection.ee_instances.list",
     "projection.runs.list",
@@ -137,8 +138,8 @@ async function immutableClientAction(row) {
   );
   const text = bytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Client action payload must be UTF-8 JSON.");
-  const { parseClientAction } = await import("../clientActionSemantics.mjs");
-  return parseClientAction(JSON.parse(text));
+  const { parseClientActionRequest } = await import("../clientActionSemantics.mjs");
+  return parseClientActionRequest(JSON.parse(text));
 }
 
 async function openValidatedLedgerIndex(projection) {
@@ -317,28 +318,34 @@ async function nestedArtifactMedia(payloadBytes) {
   };
 }
 
-async function readStableArtifactBytes(filePath, maximumBytes, label) {
+async function readStableArtifactBytes(filePath, maximumBytes, label, onStableFile) {
   const stat = await fs.lstat(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${label} is not a regular file.`);
   if (stat.size < 0 || stat.size > maximumBytes) throw new Error(`${label} exceeds the ${maximumBytes} byte preview boundary.`);
   const handle = await fs.open(filePath, "r");
   try {
     const before = await handle.stat();
+    if (!before.isFile() || before.dev !== stat.dev || before.ino !== stat.ino || before.size !== stat.size) {
+      throw new Error(`${label} changed before it was read.`);
+    }
     const bytes = await handle.readFile();
     const after = await handle.stat();
-    if (bytes.byteLength !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+    if (bytes.byteLength !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
       throw new Error(`${label} changed while it was being read.`);
     }
+    onStableFile?.({ path: filePath, identity: [after.dev, after.ino, after.size, after.mtimeMs, after.ctimeMs] });
     return bytes;
   } finally {
     await handle.close();
   }
 }
 
-async function readStableContentAddressedArtifactBytes(filePath, expectedHash, maximumBytes, label) {
-  const bytes = await readStableArtifactBytes(filePath, maximumBytes, label);
+async function readStableContentAddressedArtifactBytes(filePath, expectedHash, maximumBytes, label, onVerifiedFile) {
+  let evidence;
+  const bytes = await readStableArtifactBytes(filePath, maximumBytes, label, (value) => { evidence = value; });
   const actualHash = Buffer.from(blake3(bytes)).toString("hex");
   if (actualHash !== expectedHash) throw new Error(`${label} does not match its content-addressed digest.`);
+  onVerifiedFile?.(evidence);
   return bytes;
 }
 
@@ -471,12 +478,14 @@ function formatCanonicalSchemaErrors(errors) {
 }
 
 async function loadLedgerArtifactPayload(row, hex, required = false, projection = null) {
+  const files = [];
+  const onVerifiedFile = (file) => files.push(file);
   if (projection) {
     const resolved = await readContentAddressedArtifactProjection({
       blobsRoot: path.join(path.dirname(row.source_file), "blobs"), manifestHash: hex,
-      artifactId: ledgerArtifactId(row), label: ledgerArtifactLabel(row), projection,
+      artifactId: ledgerArtifactId(row), label: ledgerArtifactLabel(row), projection, onVerifiedFile,
     });
-    return { payload: resolved.payload, cacheable: true, retainedBytes: resolved.projection.projected_bytes };
+    return { payload: resolved.payload, cacheable: true, retainedBytes: resolved.projection.projected_bytes, files };
   }
   const blobPath = path.join(path.dirname(row.source_file), "blobs", hex);
   let bytes;
@@ -486,6 +495,7 @@ async function loadLedgerArtifactPayload(row, hex, required = false, projection 
       hex,
       ARTIFACT_MANIFEST_PREVIEW_MAX_BYTES,
       "ledger artifact manifest",
+      onVerifiedFile,
     );
   } catch (error) {
     if (error?.code === "ENOENT" && !required) return { payload: null, cacheable: false, retainedBytes: 0 };
@@ -496,10 +506,10 @@ async function loadLedgerArtifactPayload(row, hex, required = false, projection 
   try {
     manifest = JSON.parse(text);
   } catch {
-    return { payload: { __raw: text }, cacheable: true, retainedBytes: bytes.byteLength };
+    return { payload: { __raw: text }, cacheable: true, retainedBytes: bytes.byteLength, files };
   }
   const payloadPath = stringValue(manifest?.payload_path);
-  if (!payloadPath) return { payload: manifest, cacheable: true, retainedBytes: bytes.byteLength };
+  if (!payloadPath) return { payload: manifest, cacheable: true, retainedBytes: bytes.byteLength, files };
   if (!path.isAbsolute(payloadPath)) {
     throw new Error(`ledger artifact manifest payload_path must be absolute: ${payloadPath}`);
   }
@@ -514,6 +524,7 @@ async function loadLedgerArtifactPayload(row, hex, required = false, projection 
       expectedPayloadHash,
       ledgerArtifactLabel(row) === "turn.stream" ? 256 * 1024 * 1024 : ARTIFACT_PREVIEW_MAX_BYTES,
       "ledger artifact payload",
+      onVerifiedFile,
     );
   } catch (error) {
     if (error?.code === "ENOENT" && !required) return { payload: manifest, cacheable: false, retainedBytes: 0 };
@@ -521,9 +532,9 @@ async function loadLedgerArtifactPayload(row, hex, required = false, projection 
   }
   const payloadText = payloadBytes.toString("utf8");
   try {
-    return { payload: JSON.parse(payloadText), cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength };
+    return { payload: JSON.parse(payloadText), cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength, files };
   } catch {
-    return { payload: { __raw: payloadText }, cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength };
+    return { payload: { __raw: payloadText }, cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength, files };
   }
 }
 

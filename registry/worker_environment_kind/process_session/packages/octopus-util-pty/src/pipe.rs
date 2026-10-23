@@ -1,7 +1,12 @@
 use std::collections::HashMap;
+#[cfg(not(target_os = "macos"))]
 use std::io;
 use std::io::ErrorKind;
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -12,14 +17,19 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
+#[cfg(not(target_os = "macos"))]
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+#[cfg(not(target_os = "macos"))]
 use tokio::task::JoinHandle;
 
+#[cfg(not(target_os = "macos"))]
 use crate::process::exit_code_from_status;
+#[cfg(not(target_os = "macos"))]
 use crate::process::ChildTerminator;
 use crate::process::ProcessHandle;
+#[cfg(not(target_os = "macos"))]
 use crate::process::ProcessSignal;
 use crate::process::SpawnedProcess;
 
@@ -32,6 +42,7 @@ enum WindowsChildTerminator {
     Process(u32),
 }
 
+#[cfg(not(target_os = "macos"))]
 struct PipeChildTerminator {
     #[cfg(windows)]
     windows: WindowsChildTerminator,
@@ -39,6 +50,7 @@ struct PipeChildTerminator {
     process_group_id: u32,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl ChildTerminator for PipeChildTerminator {
     fn signal(&mut self, signal: ProcessSignal) -> io::Result<()> {
         match signal {
@@ -225,7 +237,7 @@ async fn spawn_process_with_stdin_mode(
             }
         }
     };
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let process_group_id = child
         .id()
         .ok_or_else(|| io::Error::other("missing child pid"))?;
@@ -233,6 +245,41 @@ async fn spawn_process_with_stdin_mode(
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    #[cfg(target_os = "macos")]
+    let group = Arc::new(crate::owned_process_group::OwnedProcessGroup::from_child(child));
+    #[cfg(target_os = "macos")]
+    let (stdin, stdout, stderr) = {
+        // Keep process waiting entirely in OwnedProcessGroup; Tokio owns only
+        // the pipes, so its orphan reaper cannot release our root PID.
+        let streams = (|| -> std::io::Result<_> {
+            Ok((
+                stdin.map(tokio::process::ChildStdin::from_std).transpose()?,
+                stdout.map(tokio::process::ChildStdout::from_std).transpose()?,
+                stderr.map(tokio::process::ChildStderr::from_std).transpose()?,
+            ))
+        })();
+        match streams {
+            Ok(streams) => streams,
+            Err(error) => {
+                let cleanup = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    group.signal(libc::SIGKILL)?;
+                    while !group.reap_if_finished()? {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Ok::<(), std::io::Error>(())
+                }).await;
+                return Err(match cleanup {
+                    Ok(Ok(())) => anyhow::anyhow!("pipe stream setup failed: {error}"),
+                    Ok(Err(cleanup)) => anyhow::anyhow!(
+                        "pipe stream setup failed: {error}; process cleanup failed: {cleanup}"
+                    ),
+                    Err(_) => anyhow::anyhow!(
+                        "pipe stream setup failed: {error}; process cleanup timed out"
+                    ),
+                });
+            }
+        }
+    };
 
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -280,14 +327,17 @@ async fn spawn_process_with_stdin_mode(
 
     let (exit_tx, exit_rx) = oneshot::channel::<i32>();
     let exit_status = Arc::new(AtomicBool::new(false));
+    #[cfg(not(target_os = "macos"))]
     let wait_exit_status = Arc::clone(&exit_status);
     let exit_code = Arc::new(StdMutex::new(None));
+    #[cfg(not(target_os = "macos"))]
     let wait_exit_code = Arc::clone(&exit_code);
     #[cfg(windows)]
     let wait_job = match &windows_terminator {
         WindowsChildTerminator::Job(job) => Some(Arc::clone(job)),
         WindowsChildTerminator::Process(_) => None,
     };
+    #[cfg(not(target_os = "macos"))]
     let wait_handle: JoinHandle<()> = tokio::spawn(async move {
         let code = match child.wait().await {
             Ok(status) => {
@@ -309,9 +359,16 @@ async fn spawn_process_with_stdin_mode(
         }
         let _ = exit_tx.send(code);
     });
+    #[cfg(target_os = "macos")]
+    let wait_handle = crate::owned_process_group::spawn_waiter(
+        Arc::clone(&group), Arc::clone(&exit_status), Arc::clone(&exit_code), exit_tx, false,
+    );
 
     let handle = ProcessHandle::new(
         writer_tx,
+        #[cfg(target_os = "macos")]
+        Box::new(group),
+        #[cfg(not(target_os = "macos"))]
         Box::new(PipeChildTerminator {
             #[cfg(windows)]
             windows: windows_terminator,

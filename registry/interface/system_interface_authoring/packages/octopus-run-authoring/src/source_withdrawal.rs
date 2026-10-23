@@ -125,7 +125,7 @@ fn validate_transition(before: &RunRecord, after: &RunRecord, config: &RunAuthor
     Ok(())
 }
 
-fn validate_source(reader: &mut impl CheckedRunEvidenceReader, record: &RunRecord, provider: &InterfaceId, seq: u64, reference: &ArtifactRef) -> Result<Movement, String> {
+pub(super) fn validate_source(reader: &mut impl CheckedRunEvidenceReader, record: &RunRecord, provider: &InterfaceId, seq: u64, reference: &ArtifactRef) -> Result<Movement, String> {
     let movement = reader.admitted_movement(seq)?.ok_or("withdrawal source has no admitted movement")?;
     let metadata = movement.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation()).ok_or("withdrawal source has no invocation")?;
     let runtime = metadata.runtime.as_ref().ok_or("withdrawal source has no runtime coordinate")?;

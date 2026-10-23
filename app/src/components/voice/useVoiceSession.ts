@@ -11,7 +11,7 @@ import { nextProjectionChange } from "../../projectionLive";
 import { useClientPreferences, useSetClientPreferences } from "../../clientPreferences";
 import { isVoiceCallActive, voiceTranscriptActivity, type VoiceTranscriptEntry } from "./voicePresentation";
 import { createVoiceTranscript } from "./voiceTranscript";
-import { assertVoiceControlReady, canRetireVoiceCall, closeVoiceCall, deliverVoiceRecording, openVoiceCall, readVoiceArtifacts, updateVoiceContext, voiceContextDelta, type VoiceCall, type VoiceCallBinding, type VoiceContextMessage, type VoiceContextSelection } from "./voiceCallArtifacts";
+import { assertVoiceControlReady, canRetireVoiceCall, closeVoiceCall, deliverVoiceRecording, openVoiceCall, readVoiceArtifacts, updateVoiceClientContext, updateVoiceContext, voiceContextDelta, waitForVoiceProviderReady, type VoiceCall, type VoiceCallBinding, type VoiceContextMessage, type VoiceContextSelection } from "./voiceCallArtifacts";
 
 export type VoicePhase = "idle" | "requesting" | "connecting" | "listening" | "muted" | "recovering" | "ending" | "closure_unconfirmed" | "ended" | "error";
 
@@ -400,13 +400,13 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
       await waitForIceGathering(peer, startupAbort.signal);
       if (!current()) return;
       const offerSdp = requiredSessionDescription(peer.localDescription?.sdp, "Voice produced no WebRTC offer.");
-      const answer = await openVoiceCall(call, offerSdp, selection?.initialItems);
+      const answer = await openVoiceCall(call, offerSdp, selection?.initialItems, selection?.clientContext);
       if (!current()) return;
-      if (answer.sideband_connected !== true) throw new Error("Voice provider control connection is not ready.");
-      providerReadyRef.current = true;
       await peer.setRemoteDescription({ type: "answer", sdp: requiredSessionDescription(answer.answer_sdp, "Voice provider returned no answer SDP.") });
       await waitForPeerConnectionConnected(peer, generation, generationRef, REALTIME_CONNECTION_TIMEOUT_MS, startupAbort.signal);
+      await waitForVoiceProviderReady(call, startupAbort.signal);
       if (!current()) return;
+      providerReadyRef.current = true;
 
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
@@ -507,6 +507,7 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
     const signal = startupAbortRef.current?.signal;
     if (!call?.callId || !signal || !providerReadyRef.current || peerConnectionRef.current?.connectionState !== "connected" || (phase !== "listening" && phase !== "muted")) return;
     if (selection.runId !== callContextRef.current?.runId || selection.interfaceId !== callContextRef.current?.interfaceId) return;
+    callContextRef.current = selection;
     const generation = generationRef.current;
     const shared = sharedContextRef.current;
     const pending = pendingContextRef.current;
@@ -520,15 +521,27 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
       setError(errorText(failure));
       return;
     }
-    if (!pending.size) return;
+    const observationPending = () => {
+      const context = callContextRef.current?.clientContext;
+      const identity = `client-observation:${JSON.stringify(context)}`;
+      return context && JSON.stringify(context) !== JSON.stringify(call.clientContext)
+        && !contextFailureRef.current.has(identity) ? { context, identity } : null;
+    };
+    if (!pending.size && !observationPending()) return;
     if (contextPumpRef.current) return contextUpdateRef.current;
     contextPumpRef.current = true;
-    setPendingContextCount(pending.size);
+    setPendingContextCount(pending.size + (observationPending() ? 1 : 0));
     const operation = contextUpdateRef.current.then(async () => {
       let sendingId = "";
       try {
-        while (pending.size) {
+        while (pending.size || observationPending()) {
           if (generation !== generationRef.current || signal.aborted || call.closeRequested) return;
+          const observation = observationPending();
+          if (observation) {
+            sendingId = observation.identity;
+            await updateVoiceClientContext(call, observation.context, signal);
+            continue;
+          }
           const message = pending.values().next().value!;
           pending.delete(message.id);
           sendingId = message.id;

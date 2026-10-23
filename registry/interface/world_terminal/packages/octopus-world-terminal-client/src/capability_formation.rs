@@ -821,33 +821,6 @@ fn resolve_ee_chain<'a>(
             request.ee_instance_policy_narrowing.len()
         )));
     }
-    let roots = templates
-        .values()
-        .filter(|template| template.bootstrap_root)
-        .collect::<Vec<_>>();
-    let root = match roots.as_slice() {
-        [root] => *root,
-        [] => {
-            return Err(contract("EE template registry declares no bootstrap root"));
-        }
-        _ => {
-            return Err(contract(format!(
-                "EE template registry ambiguously declares bootstrap roots [{}]",
-                roots
-                    .iter()
-                    .map(|template| template.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
-    };
-    if request.ee_template_chain[0] != root.id {
-        return Err(contract(format!(
-            "EE template chain starts at '{}' instead of bootstrap root '{}'",
-            request.ee_template_chain[0].as_str(),
-            root.id.as_str()
-        )));
-    }
     let mut chain = Vec::with_capacity(request.ee_template_chain.len());
     for id in &request.ee_template_chain {
         let template = templates.get(id).ok_or_else(|| {
@@ -1137,6 +1110,20 @@ mod tests {
         assert!(matches!(form_capability_topology(&registry, &request), Err(CapabilityFormationError::Registry { surface: "interface", .. })));
         assert_eq!(std::fs::read(policy_path).unwrap(), policy_before);
         assert_eq!(std::fs::read(registry.join("ee_template/existence/ee_template.json")).unwrap(), std::fs::read(source.join("ee_template/existence/ee_template.json")).unwrap());
+    }
+
+    #[test]
+    fn independent_maintenance_root_forms_without_bootstrap_ancestry() {
+        let registry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry").canonicalize().unwrap();
+        let request = CapabilityFormationRequest::new(InterfaceId::new("system_worker_client_maintenance"),
+            [EeTemplateId::new("client_maintenance")]);
+        let topology = form_capability_topology(&registry, &request).unwrap();
+        assert!(topology.granted_tools.is_empty());
+        assert!(topology.tool_bindings.is_empty());
+        assert_eq!(topology.ee_template_chain, request.ee_template_chain);
+        let denied = CapabilityFormationRequest::new(InterfaceId::new("system_worker_client_maintenance"),
+            [EeTemplateId::new("client_maintenance"), EeTemplateId::new("existence")]);
+        assert!(form_capability_topology(&registry, &denied).is_err());
     }
 
     #[test]

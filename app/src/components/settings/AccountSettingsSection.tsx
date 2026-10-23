@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { OcLoadingText } from "../../design-system/LoadingSkeleton";
 import { useChatgptAccount } from "../../account/useChatgptAccount";
 import { useChatgptUsage } from "../../account/useChatgptUsage";
 import { accountPlanLabel } from "../../account/chatgptUsageModel";
@@ -14,7 +15,7 @@ export function AccountSettingsSection() {
   const usage = useChatgptUsage(account);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const busy = state.action !== "idle";
-  const status = state.loading ? "Checking account…" : !account ? "Unavailable"
+  const status = !account ? "Unavailable"
     : account.signedIn ? accountPlanLabel(account.planType) : "Signed out";
   async function refresh() {
     const refreshed = await state.refresh?.();
@@ -27,8 +28,8 @@ export function AccountSettingsSection() {
     </div> : null}
     <AccountSection title="Account" {...settingsTargetProps("account.identity")}>
       <div className="account-row-list">
-        <OcSettingsRow label="Status" control={<span className="account-value">{status}</span>} />
-        <OcSettingsRow label="Email" control={<span className="account-value">{state.loading ? "Loading…" : account?.email ?? "Unavailable"}</span>} />
+        <OcSettingsRow label="Status" control={<span className="account-value">{state.loading && !account ? <OcLoadingText label="Checking account…">Account status</OcLoadingText> : status}</span>} />
+        <OcSettingsRow label="Email" control={<span className="account-value">{state.loading && !account ? <OcLoadingText label="Loading account email…">Account email address</OcLoadingText> : account?.email ?? "Unavailable"}</span>} />
       </div>
     </AccountSection>
     <div {...settingsTargetProps("account.usage")} className="account-usage-sections">

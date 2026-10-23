@@ -37,6 +37,7 @@ pub(crate) fn codex_projection_output_labels(
             &client_projection_output_labels,
         )?;
     operator_continuity_from_private_config(&config.private_config)?;
+    input_message_contracts(&config.private_config)?;
     Ok(client_projection_output_labels)
 }
 
@@ -170,6 +171,7 @@ pub(crate) fn is_provider_turn_input(
     let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
         InterfaceDriverError::FailedClosed("provider descriptor has no driver configuration".into())
     })?;
+    if is_declared_input_message(descriptor, &manifest.label) { return Ok(true); }
     if let Some(peer) = admitted_peer_message(input, config.private_config.get("input_intake"))? {
         return Ok(peer.action != PeerAction::Interrupt);
     }
@@ -200,5 +202,5 @@ pub(crate) fn is_provider_turn_input(
             "provider input has no admitted checkpoint binding snapshot".into(),
         ));
     }
-    Ok(matches!(decode_provider_input(&bytes, &manifest.label, source, &operations, None)?, ProviderInput::Turn(_)))
+    Ok(matches!(decode_provider_input(&bytes, &manifest.label, source, &operations, None, &config.private_config)?, ProviderInput::Turn(_)))
 }

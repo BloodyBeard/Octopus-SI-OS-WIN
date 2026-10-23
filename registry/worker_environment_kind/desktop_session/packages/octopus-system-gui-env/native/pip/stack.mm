@@ -1057,6 +1057,7 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
     for(NSNumber *all in @[@NO,@YES]){NSMenuItem *choice=[[NSMenuItem alloc] initWithTitle:all.boolValue?_text.hideForAllGroups:_text.hideForGroup action:@selector(hideFromMenu:) keyEquivalent:@""];choice.target=self;choice.representedObject=@[item.identity,all];[menu addItem:choice];}
     [menu popUpMenuPositioningItem:nil atLocation:CGPointMake(_hideFrame.origin.x,_hideFrame.origin.y) inView:_controlView];return;
   }
+  if([control isEqual:@"hide"]){_callbacks.hideGroupsRequested(@[item.groupID],NO);return;}
   if([control isEqual:@"placement"]&&(placement==2||![self canRequestAccessory]))return;
   BOOL accessory=[control isEqual:@"placement"];if(!accessory&&![control isEqual:@"hide"])return;
   _pendingPlacement=item.identity;_pendingRole=accessory?OCTPIPStackAccessory:OCTPIPStackMain;

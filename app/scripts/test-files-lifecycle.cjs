@@ -260,7 +260,7 @@ test("actual Files leaf retains drafts and rejects stale file-read completions",
   window.octopusTransport = { ...transport, listOsFiles: async ({ rootId, path: p }) => ({ rootId, path: p, entries: [] }) };
   const stub = (p, value) => stubs.set(path.resolve(root, `src/${p}`), value);
   const noop = () => null, node = ({ children }) => React.createElement("div", null, children);
-  stub("appearance", { useAppearance: () => ({ darkCodeTheme: "default", lightCodeTheme: "default", themeMode: "light", codeFontSize: 12 }) });
+  stub("appearance", { useShouldReduceMotion: () => false, useAppearance: () => ({ darkCodeTheme: "default", lightCodeTheme: "default", themeMode: "light", codeFontSize: 12 }) });
   stub("design-system/components", { OcButton: noop, OcIconButton: noop, OcMenuItem: noop });
   stub("design-system/OcDropdown", { OcDropdown: noop }); stub("runtimeFormat", { copyText: async () => true }); stub("toasts", { appToast: { danger() {}, success() {} } });
   stub("components/artifacts/ArtifactPreview", { ArtifactPreview: noop }); stub("components/artifacts/artifactFileOperations", { safeArtifactFilename: (s) => s });

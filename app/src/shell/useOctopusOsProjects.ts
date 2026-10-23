@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createLatestProjectionRead } from "./latestProjectionRead";
 import type { OctopusClientAccessProfile } from "../electron";
 import type { ClientAgentPresetInput } from "../agentPresets";
 import { DEFAULT_PROJECT_COLOR } from "../design-system/projectColors";
@@ -20,6 +21,7 @@ export type OctopusOsEnvironmentSummary = {
 };
 
 export type OctopusOsProjectDraft = {
+  sourceFolders: string[];
   name: string;
   icon: string;
   color: string;
@@ -28,6 +30,7 @@ export type OctopusOsProjectDraft = {
 };
 
 export type OctopusOsProjectEdit = {
+  sourceFolders: string[];
   projectId: string;
   name: string;
   icon: string;
@@ -65,6 +68,7 @@ export type OctopusOsProjectWorkspace = {
 };
 
 type ScopeEnvironment = {
+  sourceFolders: string[];
   eeId: string;
   parentEeId: string;
   templateName: string;
@@ -120,6 +124,14 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const requestGeneration = useRef(0);
+  const scopeReads = useMemo(() => createLatestProjectionRead<unknown>(), [profile, runtimeHome]);
+  useLayoutEffect(() => () => scopeReads.invalidate(), [scopeReads]);
+  useLayoutEffect(() => {
+    requestGeneration.current += 1;
+    setScope(EMPTY_SCOPE);
+    setError("");
+    setProjects(profile === "live" ? [] : readClientChatProjects(profile));
+  }, [profile, runtimeHome]);
   const projectionGeneration = useProjectionStructureGeneration();
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
@@ -129,8 +141,8 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     requestGeneration.current = generation;
     setLoading(true);
     try {
-      const raw = await readProjection<unknown>("projection.operator.os.scope");
-      if (generation !== requestGeneration.current) return;
+      const raw = await scopeReads.request(() => readProjection<unknown>("projection.operator.os.scope"));
+      if (raw === undefined) return;
       if (profile !== "live") {
         const local = readClientChatProjects(profile);
         const projected = normalizeHomeProjection(raw);
@@ -153,7 +165,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     } finally {
       if (generation === requestGeneration.current) setLoading(false);
     }
-  }, [profile]);
+  }, [profile, scopeReads]);
 
   useEffect(() => {
     void reload();
@@ -211,6 +223,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
       const next = [...projectsRef.current, {
         id: crypto.randomUUID(),
         name: draft.name,
+        sourceFolders: draft.sourceFolders,
         icon: draft.icon,
         color: draft.color,
         parentId: draft.parentId,
@@ -238,6 +251,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         expectedParentDigest: parent.recordDigest,
         templateName: draft.templateName,
         name: draft.name,
+        sourceFolders: draft.sourceFolders,
         goal: draft.name,
         presentation: { icon: draft.icon, color: draft.color },
       });
@@ -248,7 +262,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     const current = projectsRef.current.find((project) => project.id === edit.projectId);
     if (!current) throw new Error(`Project '${edit.projectId}' is no longer available`);
     const next = projectsRef.current.map((project) => project.id === edit.projectId
-      ? { ...project, name: edit.name, icon: edit.icon, color: edit.color }
+      ? { ...project, name: edit.name, icon: edit.icon, color: edit.color, sourceFolders: edit.sourceFolders }
       : project);
     if (profile !== "live") {
       await persistPresentation(next);
@@ -261,6 +275,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         workspace: workspaceMutationIdentity(scope),
         projects: next.map((project) => ({
           eeId: project.id,
+          ...(project.id === edit.projectId ? { sourceFolders: edit.sourceFolders, expectedProjectDigest: current.recordDigest } : {}),
           name: project.name,
           icon: project.icon,
           color: project.color,
@@ -521,6 +536,7 @@ function normalizeEnvironment(value: unknown): ScopeEnvironment | null {
   if (!eeId) return null;
   return {
     eeId,
+    sourceFolders: list(isRecord(value.config) && isRecord(value.config.octopus_os) ? value.config.octopus_os.source_folders : []).map(text).filter(Boolean),
     parentEeId: text(value.parent_ee_id),
     templateName: text(value.template_name),
     goal: text(value.goal) || eeId,
@@ -560,6 +576,7 @@ function mergeProjectedProjects(
     const visual = configured.get(id);
     return {
       id,
+      sourceFolders: environment.sourceFolders,
       name: visual?.name || environment.goal,
       icon: visual?.icon || "briefcase",
       color: visual?.color || DEFAULT_PROJECT_COLOR,

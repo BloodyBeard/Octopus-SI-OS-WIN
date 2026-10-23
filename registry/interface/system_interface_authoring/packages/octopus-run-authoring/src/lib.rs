@@ -413,6 +413,8 @@ struct PendingHandoff {
     dispatch_fenced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     withdrawal: Option<Box<source_withdrawal::Withdrawal>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement: Option<Box<rejected_final::Rejection>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     standing: Vec<PendingHandoffItem>,
 }
@@ -432,6 +434,8 @@ impl PendingHandoff {
 
 mod context_publication;
 mod pending_delivery;
+mod rejected_final;
+pub use rejected_final::RejectedFinalOutput;
 mod standing_routes;
 pub use standing_routes::{open_standing_handoff_before, standing_route_admits_only};
 mod result_inputs;

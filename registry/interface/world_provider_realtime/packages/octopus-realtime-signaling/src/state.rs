@@ -37,6 +37,10 @@ pub struct Call {
     pub delegations: BTreeSet<String>,
     pub updates: BTreeMap<String, Operation>,
     pub stops: BTreeMap<String, Operation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_context: Option<Vec<crate::ClientContextEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_configuration: Option<Value>,
 }
 
 impl Call {
@@ -65,6 +69,12 @@ impl Call {
             .as_ref()
             .map_or(Value::Null, |id| Value::String(id.clone()));
         body
+    }
+    pub fn delegation_body(&self, mut body: Value) -> Value {
+        if let Some(context) = &self.client_context {
+            body["client_context"] = serde_json::json!(context);
+        }
+        self.event_body(body)
     }
 }
 
@@ -119,6 +129,9 @@ impl Store {
                     .map_err(|_| "realtime private state is malformed")?;
                 if state.version != 1 {
                     return Err("unsupported realtime private state version".into());
+                }
+                for call in state.calls.values() {
+                    crate::client_context::validate(call.client_context.as_deref())?;
                 }
                 state
             }

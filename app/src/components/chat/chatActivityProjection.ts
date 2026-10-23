@@ -43,32 +43,8 @@ export function toRender(message: ChatRunMessage): ChatRenderMessage {
   };
 }
 
-type ProjectedMessageIdentity = {
-  ids: Set<string>;
-  messageTextKeys: Set<string>;
-};
-
-function messageTextIdentity(message: ChatRenderMessage): string {
-  return (message.eventKind ?? "message") === "message"
-    ? `${message.role}\0${message.text.trim()}`
-    : "";
-}
-
-function projectedMessageIdentity(messages: readonly ChatRenderMessage[]): ProjectedMessageIdentity {
-  const ids = new Set<string>();
-  const messageTextKeys = new Set<string>();
-  for (const message of messages) {
-    ids.add(message.id);
-    const textKey = messageTextIdentity(message);
-    if (textKey) messageTextKeys.add(textKey);
-  }
-  return { ids, messageTextKeys };
-}
-
-function projectedMessageIncludes(identity: ProjectedMessageIdentity, message: ChatRenderMessage): boolean {
-  if (identity.ids.has(message.id)) return true;
-  const textKey = messageTextIdentity(message);
-  return Boolean(textKey && identity.messageTextKeys.has(textKey));
+function projectedMessageIdentity(message: ChatRenderMessage): string {
+  return JSON.stringify([message.runId ?? "", message.interfaceId ?? "", message.id]);
 }
 
 function liveEventIdentity(eventData: Record<string, unknown>, eventKind: ChatRunEventKind) {
@@ -322,7 +298,7 @@ export function mergeRenderedMessages(
   steering: ChatRenderMessage[],
   showPending: boolean,
 ): ChatRenderMessage[] {
-  const projectedIdentity = projectedMessageIdentity(projected);
+  const projectedIdentity = new Set(projected.map(projectedMessageIdentity));
   const projectedTerminalErrors = projected.filter((message) => (
     message.error === true && message.terminal === true
   ));
@@ -346,7 +322,7 @@ export function mergeRenderedMessages(
     ? [
       ...projected,
       ...pendingWithoutProjectedTerminalErrors.filter((bubble) => (
-        !projectedMessageIncludes(projectedIdentity, bubble)
+        !projectedIdentity.has(projectedMessageIdentity(bubble))
       )),
     ]
     : projected;
@@ -381,7 +357,7 @@ export function mergeRenderedMessages(
   }
   const merged = [
     ...primary,
-    ...steering.filter((bubble) => !projectedMessageIncludes(projectedIdentity, bubble)),
+    ...steering.filter((bubble) => !projectedIdentity.has(projectedMessageIdentity(bubble))),
   ].map((message) => {
     if (message.role !== "user" || message.eventKind !== "steering" || !message.runId) return message;
     if (message.eventData?.steering_status === "input_recorded") return message;

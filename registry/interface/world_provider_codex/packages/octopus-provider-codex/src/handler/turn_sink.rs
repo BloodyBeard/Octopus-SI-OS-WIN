@@ -55,6 +55,43 @@ pub(crate) struct NativeRunInvocation<'a> {
     pub(crate) current_record: &'a octopus_runtime::run_record::RunRecord,
 }
 
+pub(crate) fn normalize_output_identity(
+    output: &mut CodexTurnOutput,
+    turn_input: Option<&ArtifactRef>,
+) -> Result<(), InterfaceDriverError> {
+    let object = output.value.as_object_mut().ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "Codex provider output must be a self-identifying JSON object".to_string(),
+        )
+    })?;
+    match object.get("label") {
+        Some(serde_json::Value::String(label)) if label == &output.label => {}
+        Some(_) => {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex provider output payload conflicts with manifest label '{}'",
+                output.label
+            )));
+        }
+        None => {
+            object.insert(
+                "label".to_string(),
+                serde_json::Value::String(output.label.to_string()),
+            );
+        }
+    }
+    if matches!(output.route, ProviderEmissionRoute::ClientProjection | ProviderEmissionRoute::ClientProjectionWithVerifiedInputs { .. })
+        && let Some(source) = turn_input
+    {
+        let source = serde_json::to_value(source)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        if object.get("in_reply_to").is_some_and(|value| value != &source) {
+            return Err(InterfaceDriverError::FailedClosed("Codex output conflicts with its admitted turn input".into()));
+        }
+        object.insert("in_reply_to".into(), source);
+    }
+    Ok(())
+}
+
 impl TurnSink<'_> {
     pub(crate) fn bind_live_stream(&self, thread_id: &str, turn_id: &str) -> Result<(), InterfaceDriverError> {
         if !self.live_stream_rules.enabled() {
@@ -219,27 +256,8 @@ impl TurnSink<'_> {
         &self,
         output: &mut CodexTurnOutput,
     ) -> Result<(), InterfaceDriverError> {
-        let object = output.value.as_object_mut().ok_or_else(|| {
-            InterfaceDriverError::Protocol(
-                "Codex provider output must be a self-identifying JSON object".to_string(),
-            )
-        })?;
-        match object.get("label") {
-            Some(serde_json::Value::String(label)) if label == &output.label => {}
-            Some(_) => {
-                return Err(InterfaceDriverError::FailedClosed(format!(
-                    "Codex provider output payload conflicts with manifest label '{}'",
-                    output.label
-                )));
-            }
-            None => {
-                object.insert(
-                    "label".to_string(),
-                    serde_json::Value::String(output.label.to_string()),
-                );
-            }
-        }
-        Ok(())
+        let continuity = self.continuity_snapshot();
+        normalize_output_identity(output, continuity.as_ref().and_then(|state| state.turn_input.as_ref()))
     }
 
     pub(crate) fn materialize_normalized(
@@ -331,7 +349,24 @@ impl TurnSink<'_> {
         self.materialize_with_boundary(output, false)
     }
 
-    pub(crate) fn send(&self, mut output: CodexTurnOutput) -> Result<(), InterfaceDriverError> {
+    pub(crate) fn send(&self, output: CodexTurnOutput) -> Result<(), InterfaceDriverError> {
+        self.send_observation(output, false)
+    }
+
+    pub(crate) fn send_progress(&self, output: CodexTurnOutput) -> Result<(), InterfaceDriverError> {
+        if output.route != ProviderEmissionRoute::ClientProjection {
+            return Err(InterfaceDriverError::FailedClosed(
+                "turn progress requires an ordinary client projection".into(),
+            ));
+        }
+        self.send_observation(output, true)
+    }
+
+    fn send_observation(
+        &self,
+        mut output: CodexTurnOutput,
+        progress: bool,
+    ) -> Result<(), InterfaceDriverError> {
         if !self.projection_admits(&output) {
             return Ok(());
         }
@@ -356,7 +391,11 @@ impl TurnSink<'_> {
             }
             LiveStreamDisposition::Artifact => {
                 let emission = self.materialize_normalized(output, true)?;
-                self.emit.send_turn(emission)
+                if progress {
+                    self.emit.send_progress(emission)
+                } else {
+                    self.emit.send_turn(emission)
+                }
             }
         }
     }
@@ -879,7 +918,7 @@ pub(crate) fn flush_pending_delta(
         .payload
         .insert("seq".to_string(), serde_json::Value::Number((*seq).into()));
     *seq += 1;
-    sink.send(CodexTurnOutput::client(
+    sink.send_progress(CodexTurnOutput::client(
         label,
         serde_json::Value::Object(chunk.payload),
     ))

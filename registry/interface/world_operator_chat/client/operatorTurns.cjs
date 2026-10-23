@@ -10,6 +10,7 @@ const { assertOperatorAttachmentInputLimits, materializeAttachments, operatorMes
 const { commitClientWrites, fileExists, resolveRegistryRoot, waitForInterfaceSocket, withOperatorWorkspaceTopologyLock, withRunAuthoringLock } = require("./publication.cjs");
 const { readConfig, resolveEeInstancesRoot, resolveInstallationRoot, resolvePackageExecutable } = require("./roots.cjs");
 const { planOperatorChatSurface } = require("./surfacePlanning.cjs");
+const { validatePlannedHostBindings } = require("./hostBindings.cjs");
 const { assertPublicationExpansion, canonicalJson, interfaceEndpoint, interfaceSocketIdentity, operatorContextArtifactBindings, operatorDoorHostSlots, operatorPayloadArtifactBindings, operatorSelectedWorkerEnvironmentKinds, operatorSurfaceRole, planOperatorChatTopology, plannedAdditionalRunWrites, plannedClientWrite, safeContractToken, validatePlannedRunRecord } = require("./topologyPlan.cjs");
 const { absolutePath, arrayValue, assertAdmitted, nonNegativeInteger, numberValue, optionalServiceTier, randomToken, readJsonDocumentIfPresent, requiredArray, requiredFunction, requiredObject, requiredString, requiredTrimmedString, safeSegment, sha256Hex, stringValue } = require("./values.cjs");
 
@@ -132,7 +133,7 @@ async function submitOperatorTurn(options, request) {
     } else {
       pendingAttachmentPlans = await planOperatorAttachments(attachmentRoot, attachmentInputs);
       const attachments = pendingAttachmentPlans.map((plan) => plan.attachment);
-      const clientContext = await operatorTurnClientContext(options, clientSurfaceRole);
+      const clientContext = await operatorTurnClientContext(options, clientSurfaceRole, request?.clientContext);
       const messageBytes = Buffer.from(JSON.stringify({
         text,
         message_id: messageId,
@@ -271,6 +272,7 @@ async function submitOperatorTurn(options, request) {
         clientSurfaceRole,
         continuation: request?.continuation,
       });
+      await validatePlannedHostBindings({ octopusHome, registryRoot: resolveRegistryRoot(options), plan });
       return {
         submission: {
           modelInterfaceId: plan.modelInterfaceId,
@@ -354,9 +356,13 @@ async function submitOperatorTurn(options, request) {
     }
     throw new Error(`operator chat run '${runId}' has no active exact client input`);
   });
-  const { submission, clientWrites, outboundCursorOffset, previousClientSocket } = requestedRunId
-    ? await authorSubmission()
-    : await withOperatorWorkspaceTopologyLock(octopusHome, authorSubmission);
+  const preparation = await (requestedRunId
+    ? authorSubmission()
+    : withOperatorWorkspaceTopologyLock(octopusHome, authorSubmission)).catch((error) => {
+      error.deliveryState = "not_sent";
+      throw error;
+    });
+  const { submission, clientWrites, outboundCursorOffset, previousClientSocket } = preparation;
 
   await waitForInterfaceSocket(octopusHome, chatInterfaceId, timeoutMs, previousClientSocket);
   const messageAdmission = await withOperatorMessageAdmissionLock(

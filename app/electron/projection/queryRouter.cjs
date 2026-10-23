@@ -4,14 +4,29 @@ const path = require("node:path");
 const { parseProjectionReadRequest } = require("../projectionReadContract.cjs");
 const { DESCRIPTOR_REGISTRIES } = require("./constants.cjs");
 const { filterByEnvelopeKind, filterInterfaceArtifactTransferTargets, movementPayloadPreview, pendingArtifactRows, projectionRequiresFullLedger } = require("./movementRows.cjs");
-const { providerInterfaceDescriptorRows } = require("./providerDescriptors.cjs");
-const { baseInterfaceRows, bindingRows, descriptorInventoryRows, descriptorKindRows, descriptorRows, eeInstanceRows, eeTemplateDescriptorRows, eeTemplateRows, envelopeRows, filterInterfaces, goalRows, markKindRows, markRows, policyRows, projectionSnapshot, readRunRecords, recordCheckpointRowsFor, requiredVerifiedArtifactOutcomeIndex, runCheckpointRows, runRows, toolRows, verifierRows, workerEnvironmentRows, workerRows } = require("./registryRows.cjs");
+const { readProviderInterfaceDescriptors } = require("./providerDescriptors.cjs");
+const { bindingRows, descriptorInventoryRows, descriptorKindRows, descriptorRows, eeInstanceRows, eeTemplateDescriptorRows, eeTemplateRows, envelopeRows, filterInterfaces, goalRows, markKindRows, markRows, policyRows, projectionSnapshot, readRunRecords, recordCheckpointRowsFor, requiredVerifiedArtifactOutcomeIndex, runCheckpointRows, runRows, toolRows, verifierRows, workerEnvironmentRows, workerRows } = require("./registryRows.cjs");
 const { arrayValue, limitRows, objectOrEmpty, requiredString, stringValue } = require("./values.cjs");
+
+const PACKAGE_INVENTORY_METHODS = new Set([
+  "projection.runtime.snapshot",
+  "projection.operator.os.local_packages",
+  "projection.operator.os.applications",
+  "projection.operator.os.drivers",
+  "projection.operator.chat.contexts",
+]);
 
 function queryRouterProjection(store) {
   async function readProjection(request) {
     await store.beforeRead();
     const { method, params } = parseProjectionReadRequest(request);
+    if (method === "projection.operator.providers.list") {
+      const home = store.octopusHome();
+      store.ensureProjectionWatchers();
+      const providers = await readProviderInterfaceDescriptors(path.join(home, "registry"));
+      if (home !== store.octopusHome()) throw new Error("Provider catalogue Home changed during read");
+      return { providers };
+    }
     if (method === "projection.interface_artifacts.list" || method === "projection.client_actions.list"
       || method === "projection.movements.list") {
       const home = store.octopusHome();
@@ -52,10 +67,14 @@ function queryRouterProjection(store) {
       ) };
     }
     const repoRoot = store.resolveRepoRoot();
-    const projection = await store.cachedFileProjection(
+    const includeLedger = projectionRequiresFullLedger(method, params);
+    let projection = await store.cachedFileProjection(
       repoRoot,
-      projectionRequiresFullLedger(method, params),
+      includeLedger,
     );
+    if (PACKAGE_INVENTORY_METHODS.has(method)) {
+      projection = await store.withFileProjectionPackages(projection, includeLedger);
+    }
     switch (method) {
       case "projection.runtime.snapshot":
         return projectionSnapshot(projection);
@@ -204,8 +223,6 @@ function queryRouterProjection(store) {
         return { messages: await store.operatorChatMessages(projection, requiredString(params.run_id, "run_id")) };
       case "projection.operator.chat.search":
         return await store.operatorChatSearch(projection, params);
-      case "projection.operator.providers.list":
-        return { providers: providerInterfaceDescriptorRows(baseInterfaceRows(projection)) };
       case "projection.operator.providers.status":
         return { providers: await store.operatorProviderStatusRows(projection) };
       case "projection.scheduled_interfaces.list":

@@ -42,7 +42,65 @@ fn call() -> Call {
         delegations: BTreeSet::new(),
         updates: BTreeMap::new(),
         stops: BTreeMap::new(),
+        client_context: None,
+        session_configuration: None,
     }
+}
+
+#[tokio::test]
+async fn client_observation_is_retained_without_voice_messages_and_replayed_exactly() {
+    let context = |state: &str| -> Vec<crate::ClientContextEntry> { serde_json::from_value(json!([
+        {"name":"client_observation","text":json!({"widgets":[{"widget_id":"arbitrary.widget.Ω","source_digest":"sha256:0123456789abcdef","state":state}]}).to_string()}
+    ])).unwrap() };
+    let key = "OCTOPUS_CLIENT_OBSERVATION_TEST_BEARER";
+    unsafe { std::env::set_var(key, "fixture-context-secret"); }
+    let mut config = config("http://127.0.0.1:1/live", "ws://127.0.0.1:1/live", LiveProtocol::CodexLive);
+    config.private.auth = crate::auth::AuthConfig::BearerEnv { env_key: key.into() };
+    let root = tempfile::tempdir().unwrap(); let mut store = Store::open(root.path(), 1_048_576).unwrap();
+    let legacy = serde_json::to_value(call()).unwrap(); assert!(legacy.get("client_context").is_none());
+    let mut owner: Call = serde_json::from_value(legacy).unwrap(); assert!(owner.client_context.is_none());
+    owner.auth_owner = Some(config.private.auth.resolve().await.unwrap().owner);
+    owner.client_context = Some(context("hidden")); store.state.calls.insert("offer".into(), owner);
+    let instructions = "Custom instructions from this accepted offer";
+    store.state.calls.get_mut("offer").unwrap().session_configuration = Some(json!({"instructions":instructions,
+        "audio":{"output":{"voice":"marin"}},"delegation":{"type":"client"}}));
+    let accepted_configuration = store.state.calls["offer"].session_configuration.clone();
+    let (control, mut commands) = mpsc::channel::<SidebandCommand>(1);
+    let controls = BTreeMap::from([("rtc_fixture".into(), control)]);
+    let (_events, mut incoming) = mpsc::channel(1);
+    let update = |id: &str, state: &str| SessionUpdate { call_id: "rtc_fixture".into(), correlation_id: "offer".into(), update_id: id.into(), delegation_id: None, channel: UpdateChannel::Context, text: String::new(), client_context: Some(context(state)) };
+    for protocol in [LiveProtocol::CodexLive, LiveProtocol::OpenaiLive] {
+        assert!(update_frames(protocol, &update("first", "visible")).unwrap_err().contains("delegation metadata"));
+    }
+    config.transport.request_timeout_ms = Some(10);
+    let first = update("first", "visible");
+    update_call(&config, &mut store, &controls, &mut incoming, first.clone(), "first".into()).await.unwrap();
+    assert_eq!(store.state.calls["offer"].client_context, first.client_context);
+    update_call(&config, &mut store, &controls, &mut incoming, update("second", "removed"), "second".into()).await.unwrap();
+    store = Store::open(root.path(), 1_048_576).unwrap();
+    update_call(&config, &mut store, &controls, &mut incoming, first, "first".into()).await.unwrap();
+    assert!(update_call(&config, &mut store, &controls, &mut incoming, update("first", "hidden"), "changed".into()).await.unwrap_err().contains("different content"));
+    let mut mixed = update("mixed", "hidden"); mixed.text = "Do something".into();
+    assert!(update_call(&config, &mut store, &controls, &mut incoming, mixed, "mixed".into()).await.unwrap_err().contains("no text"));
+    assert!(commands.try_recv().is_err(), "client metadata must never enter the voice connection");
+    assert_eq!(store.state.calls["offer"].status, "attached");
+    assert_eq!(store.state.calls["offer"].session_configuration, accepted_configuration);
+    assert_eq!(store.state.calls["offer"].updates.len(), 2);
+    assert!(store.state.pending.iter().all(|item| item.body["status"] == "context_retained"));
+    let restored = Store::open(root.path(), 1_048_576).unwrap();
+    assert_eq!(restored.state.calls["offer"].client_context, Some(context("removed")));
+    for protocol in [LiveProtocol::CodexLive, LiveProtocol::OpenaiLive] {
+        let mut call = restored.state.calls["offer"].clone();
+        let event = if protocol == LiveProtocol::CodexLive { json!({"type":"delegation.created","item":{"id":"B","type":"delegation","target":"client","content":[{"type":"input_text","text":"Show it"}]}}) }
+            else { json!({"type":"session.delegation.created","delegation":{"id":"B","target":"client"}}) };
+        let output = accept_event(protocol, &mut call, &event, 1_048_576).unwrap();
+        assert_eq!(output.last().unwrap().1["client_context"], json!(context("removed")));
+        call.client_context = Some(context("visible"));
+        assert_eq!(output.last().unwrap().1["client_context"], json!(context("removed")));
+    }
+    let mut oversized = context("visible"); oversized[0].text = "é".repeat(2049);
+    assert!(crate::client_context::validate(Some(&oversized)).is_err());
+    unsafe { std::env::remove_var(key); }
 }
 
 #[test]
@@ -189,6 +247,7 @@ fn strict_config_and_utf8_updates_do_not_select_models_or_rewrite_channels() {
         delegation_id: Some("work".into()),
         channel: UpdateChannel::Context,
         text: "é".repeat(401),
+        client_context: None,
     };
     let frames = update_frames(LiveProtocol::CodexLive, &update).unwrap();
     assert_eq!(frames.len(), 2);
@@ -204,9 +263,12 @@ fn strict_config_and_utf8_updates_do_not_select_models_or_rewrite_channels() {
     );
     update.channel = UpdateChannel::Commentary;
     assert_eq!(
-        update_frames(LiveProtocol::CodexLive, &update).unwrap()[0]["channel"],
+        update_frames(LiveProtocol::CodexLive, &update).unwrap().last().unwrap()["channel"],
         "speakable"
     );
+    let spoken = update_frames(LiveProtocol::CodexLive, &update).unwrap();
+    assert!(spoken.iter().all(|frame| frame["channel"] == "speakable" && frame["delegation_item_id"] == "work"));
+    assert_eq!(spoken.iter().map(|frame| frame["content"][0]["text"].as_str().unwrap()).collect::<String>(), update.text);
     update.channel = UpdateChannel::Instructions;
     assert!(update_frames(LiveProtocol::CodexLive, &update).is_err());
     assert_eq!(
@@ -269,8 +331,8 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
             let body: Value = serde_json::from_slice(&bytes[offset..]).unwrap();
             assert_eq!(body["session"]["model"], "gpt-live-1-codex");
             assert_eq!(body["session"]["delegation"]["type"], "client");
-            assert_eq!(body["session"]["audio"]["output"]["voice"], "maple");
-            assert!(body["session"]["instructions"].is_string());
+            assert_eq!(body["session"]["audio"]["output"]["voice"], "ember");
+            assert_eq!(body["session"]["instructions"], "Custom accepted voice instructions");
             assert!(body["session"].get("id").is_none());
             if protocol == LiveProtocol::CodexLive {
                 assert!(headers.contains("intent=quicksilver&architecture=avas"));
@@ -297,6 +359,11 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
             socket.write_all(answer.as_bytes()).await.unwrap();
         });
         let socket_task = tokio::spawn(async move {
+            let (mut inactive, _) = ws.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            inactive.read(&mut request).await.unwrap();
+            inactive.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            drop(inactive);
             let (stream, _) = ws.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_hdr_async(
                 stream,
@@ -322,6 +389,7 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
             )
             .await
             .unwrap();
+            socket.send(Message::Text(json!({"type":"session.started"}).to_string().into())).await.unwrap();
             let update: Value =
                 serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
                     .unwrap();
@@ -357,6 +425,13 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
         });
         let config = config(&http_url, &ws_url, protocol);
         if protocol == LiveProtocol::CodexLive {
+            let client = LiveClient::connect(&config).await.unwrap();
+            let invalid = merge_session(&config.private.session, &json!({"initial_items":[{
+                "type":"message","role":"developer","content":[
+                    {"type":"input_text","text":"First"},{"type":"input_text","text":"Second"}]}]}), &config.private.model).unwrap();
+            let refusal = client.open_call("v=0\r\n", &invalid).await.err().unwrap();
+            assert!(matches!(refusal.creation_disposition, crate::wire::CreationDisposition::NotCreated));
+            assert!(refusal.error.contains("exactly one text content part"));
             let mut missing_selector = config.clone();
             missing_selector.transport.headers.clear();
             assert!(LiveClient::connect(&missing_selector)
@@ -373,7 +448,8 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
             offer_sdp: "v=0\r\n".into(),
             correlation_id: "offer".into(),
             delegation_interface: "home_provider".into(),
-            session: json!({"initial_items":[{"type":"message","role":"assistant","content":[{"type":"input_text","text":"Prior reply"}]}]}),
+            session: json!({"instructions":"Custom accepted voice instructions","initial_items":[{"type":"message","role":"assistant","content":[{"type":"input_text","text":"Prior reply"}]}]}),
+            client_context: Some(vec![crate::ClientContextEntry { name: "client_observation".into(), text: "{\"widgets\":[]}".into() }]),
         };
         offer_call(
             &config,
@@ -386,9 +462,13 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
         )
         .await
         .unwrap();
+        let retained = store.state.calls["offer"].session_configuration.as_ref().unwrap();
+        assert_eq!(retained["instructions"], "Custom accepted voice instructions");
+        assert_eq!(retained["audio"], config.private.session["audio"]);
+        assert!(retained.get("initial_items").is_none()); assert!(retained.get("model").is_none());
         assert_eq!(
             store.state.calls["offer"].answer.as_ref().unwrap()["sideband_connected"],
-            true
+            false
         );
         offer_call(
             &config,
@@ -412,6 +492,20 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
         )
         .await
         .is_err());
+        let activated = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
+        apply_sideband_events(&config, &mut store, [activated]).unwrap();
+        assert_eq!(store.state.calls["offer"].status, "attached");
+        let observation = SessionUpdate {
+            call_id: "rtc_fixture".into(), correlation_id: "offer".into(),
+            update_id: "client-observation".into(), delegation_id: None,
+            channel: UpdateChannel::Context, text: String::new(),
+            client_context: Some(vec![crate::ClientContextEntry {
+                name: "client_observation".into(), text: "{\"widgets\":[\"visible\"]}".into(),
+            }]),
+        };
+        update_call(&config, &mut store, &controls, &mut rx, observation.clone(), "observation-digest".into()).await.unwrap();
+        assert_eq!(store.state.calls["offer"].client_context, observation.client_context);
+        assert_eq!(store.state.calls["offer"].updates["client-observation"].result.as_ref().unwrap()["status"], "context_retained");
         store
             .state
             .calls
@@ -426,6 +520,7 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
             delegation_id: Some("work".into()),
             channel: UpdateChannel::Commentary,
             text: "Verified result".into(),
+            client_context: None,
         };
         update_call(
             &config,
@@ -652,7 +747,7 @@ async fn invalid_answers_preserve_created_identity_and_request_timeout_stays_unc
         configuration.private.auth = crate::auth::AuthConfig::BearerEnv { env_key: key.into() };
         let root = tempfile::tempdir().unwrap(); let mut store = Store::open(root.path(), 1_048_576).unwrap();
         let mut controls = BTreeMap::new(); let (events, _) = mpsc::channel(128);
-        offer_call(&configuration, &mut store, &mut controls, &events, SessionOffer { offer_sdp: "v=0\r\n".into(), correlation_id: "offer".into(), delegation_interface: "home_provider".into(), session: json!({}) }, "digest".into(), 1).await.unwrap();
+        offer_call(&configuration, &mut store, &mut controls, &events, SessionOffer { offer_sdp: "v=0\r\n".into(), correlation_id: "offer".into(), delegation_interface: "home_provider".into(), session: json!({}), client_context: None }, "digest".into(), 1).await.unwrap();
         let restored = Store::open(root.path(), 1_048_576).unwrap(); let call = &restored.state.calls["offer"];
         assert_eq!(call.call_id.as_deref(), identity); assert_eq!(call.answer.as_ref().unwrap()["creation_disposition"], disposition);
         assert_eq!(call.answer.as_ref().unwrap()["ok"], false); assert!(controls.is_empty());

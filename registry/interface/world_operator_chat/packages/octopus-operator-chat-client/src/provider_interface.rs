@@ -31,6 +31,15 @@ pub(crate) fn plan_provider_interface(
         driver_config.private_config.insert("worker_instruction_artifacts".into(), serde_json::json!(worker_role_artifacts));
     }
     collection_context::configure_inline_selection(&mut driver_config.private_config, inline_context_ids)?;
+    if identity.surface_role == "home" {
+        if let Some(instructions) = driver_config.private_config.get_mut("instruction_artifacts") {
+            let instructions = instructions.as_array_mut().ok_or("instruction_artifacts must be an array")?;
+            let delivery = home_outputs::context_id(identity);
+            if !instructions.iter().any(|value| value.as_str() == Some(delivery.as_str())) {
+                instructions.push(serde_json::json!(delivery));
+            }
+        }
+    }
     if let Some(names) = driver_config.private_config.get_mut("model_tool_names") {
         let source_names: BTreeMap<String, String> = serde_json::from_value(names.clone())
             .map_err(|error| format!("model_tool_names is malformed: {error}"))?;
@@ -317,6 +326,7 @@ pub(crate) fn configure_provider_secret_owner_root(
     driver_config.host_slots.insert(
         "provider_secret_owner_root".to_string(),
         octopus_interfaces::HostSlotOverride {
+            additional_paths: Vec::new(),
             path: private_root.join(credential_owner),
         },
     );

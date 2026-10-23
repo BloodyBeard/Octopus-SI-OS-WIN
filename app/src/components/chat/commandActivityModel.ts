@@ -38,7 +38,6 @@ export function commandActivityModel(message: ChatRenderMessage): CommandActivit
   const status = text(output.status || (native ? data.status : "")).toLowerCase();
   const rawExit = output.exit_code ?? output.exitCode ?? data.exit_code ?? data.exitCode;
   const exitCode = typeof rawExit === "number" && Number.isInteger(rawExit) && rawExit >= 0 ? rawExit : null;
-  const running = output.running === true || ["running", "yielded"].includes(resultState);
   const continuationAvailable = body.continuation_available === true;
   const failure = text(body.error_text) || text(output.failure) || text(record(output.failure).message) || text(record(data.error).message)
     || (typeof data.error === "string" ? data.error : "");
@@ -48,6 +47,7 @@ export function commandActivityModel(message: ChatRenderMessage): CommandActivit
   const failed = Boolean(failure || message.error || data.ok === false) || ["failed", "failure", "error", "declined", "rejected"].includes(status);
   const exited = output.exited === true || exitCode !== null || resultState === "completed" || (body.completed === true && !body.process_id)
     || (native && ["completed", "complete", "done", "success", "succeeded", "exited"].includes(status));
+  const running = !exited && (output.running === true || ["running", "yielded"].includes(resultState));
   const started = message.pending === true || ["started", "starting", "running", "working", "in_progress", "inprogress", "pending", "queued", "streaming", "progress"]
     .includes(invocationStatus.toLowerCase());
   const phase: CommandPhase = timedOut ? "timed_out" : interrupted ? "interrupted" : failed ? "failed"
@@ -98,7 +98,7 @@ export function commandActivityModel(message: ChatRenderMessage): CommandActivit
 }
 
 export function commandOutcomeLabel(model: CommandActivityModel, isCode = false): string {
-  if (model.phase === "running") return model.yielded ? "Still running" : "Running";
+  if (model.phase === "running") return model.yielded ? model.processId ? "Running at last check" : "Still running" : "Running";
   const exit = model.exitCode === null ? "" : ` · exit code ${model.exitCode}`;
   if (model.phase === "timed_out") return `Timed out${exit}`;
   if (model.phase === "interrupted") return `Interrupted${exit}`;

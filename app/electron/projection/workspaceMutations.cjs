@@ -127,7 +127,7 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
       return hooks.mutateWorkspaceProject(workspaceProjectMutationScope(snapshot), request);
     }
     if (action === "delete_task") {
-      return deleteOctopusOsTask(
+      const remove = () => deleteOctopusOsTask(
         registryRoot,
         octopusHomeRoot,
         snapshot,
@@ -136,6 +136,7 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
         hooks.commitClientAuthoring,
         hooks,
       );
+      return hooks.taskLifecycle ? hooks.taskLifecycle.withTaskLifecycleLock(request.runId, remove) : remove();
     }
     if (action === "configure_application") {
       return configureOctopusOsApplication(

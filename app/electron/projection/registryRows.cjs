@@ -23,6 +23,9 @@ function projectionTruthChange(filename) {
   if (segments[0] === "state" && segments[1] === "runs") {
     return segments.length === 3 && segments[2].endsWith(".json") ? "runs" : null;
   }
+  if (segments[0] === "state" && segments[1] === "change-journals") {
+    return segments.length === 4 && segments[3] === "journal.json" ? "runs" : null;
+  }
   if (segments[0] === "state" && segments[1] === "ee_instances") {
     return segments.length === 3 && segments[2].endsWith(".json") ? "policy" : null;
   }
@@ -498,17 +501,16 @@ function projectedFilesystemRootSurfaces({ formation, id, lifecycle, rootBinding
   ])].sort((left, right) => Number(writableSlots.has(right)) - Number(writableSlots.has(left)) || left.localeCompare(right));
   const seenRoots = new Set();
   let projectedIndex = 0;
-  return projectedSlots.flatMap((slot) => {
-      const root = bindings.get(slot);
+  return projectedSlots.flatMap((slot) => [bindings.get(slot), ...arrayValue(formation.door_additional_root_bindings?.[slot])].flatMap((root, index) => {
       if (!root || !path.isAbsolute(root) || seenRoots.has(root)) return [];
       seenRoots.add(root);
       const writable = writableSlots.has(slot);
       const first = projectedIndex === 0;
       projectedIndex += 1;
       return [{
-        id: `${id}:files:${slot}`,
+        id: `${id}:files:${slot}${index ? `:${index}` : ""}`,
         kind: "files",
-        label: first ? "Files" : rootSlotLabel(slot),
+        label: first ? "Files" : index ? path.basename(root) || root : rootSlotLabel(slot),
         mode: "direct",
         status,
         protocol: writable ? "filesystem.readwrite" : "filesystem.readonly",
@@ -516,7 +518,7 @@ function projectedFilesystemRootSurfaces({ formation, id, lifecycle, rootBinding
         read_only: !writable,
         data: { slot, writable },
       }];
-    });
+    }));
 }
 
 async function projectedGitSurfaces({ id, kindCapabilities, lifecycle, rootBindings, status }) {

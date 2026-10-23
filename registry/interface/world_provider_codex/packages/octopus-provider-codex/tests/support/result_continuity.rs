@@ -1,4 +1,89 @@
 #[test]
+fn forwarded_result_preserves_its_exact_native_wait() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut input = model_policy_input(serde_json::json!(["gpt-5.5"]));
+    let runtime = input.metadata.as_ref().unwrap().runtime.as_ref().unwrap().clone();
+    let payload = serde_json::json!({"label":"read.result","tool":"read","correlation_id":"call-a","ok":true,"body":{"text":"ok"}});
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let original = InterfaceArtifactFile::write(temp.path().join("original"), "read.result", &bytes).unwrap();
+    let source = original.pin_manifest_into_blob(&mut octopus_ledger::InMemoryBlobs::new()).unwrap().artifact;
+    input.artifact_file = InterfaceArtifactFile::write(temp.path().join("forwarded"), "read.result", &bytes).unwrap();
+    input.artifact = input.artifact_file.pin_manifest_into_blob(&mut octopus_ledger::InMemoryBlobs::new()).unwrap().artifact;
+    assert_ne!(input.artifact, source);
+    input.artifact_binding_payloads = vec![ArtifactBindingPayload::new(source.clone(), bytes)];
+    input.metadata.as_mut().unwrap().artifact_binding_refs = vec![source.clone()];
+    input.metadata.as_mut().unwrap().grant.artifact_access.insert(source.id.to_string(), octopus_runtime::ArtifactAccess::read_only());
+    let requirement = serde_json::json!({"mark":"corresponds","verifier":"tool_result_correspondence","artifact_label":"read.result",
+        "params":{"call_artifact":source,"tool":"read","correlation_id":"call-a","params":{},"invocation":{
+            "source":{"artifact":source,"source_movement_seq":40},"artifact":input.artifact,"manifest_relative_path":"invocation/result.json"}}});
+    let binding = serde_json::json!({"interface":"result-door","config":{"artifact_policy":{"mode":"all"}}});
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&serde_json::to_vec(&serde_json::json!({
+        "id":runtime.run,"ee":runtime.ee,"worker":runtime.worker,"trace":"trace","status":"running",
+        "active_checkpoints":[runtime.checkpoint],"checkpoints":[{"id":runtime.checkpoint,"run":runtime.run,"trace":"trace","epoch":1,
+            "interface_binding":binding,"outbound_interface_bindings":[],"artifact_bindings":[{"id":source.id}],"required_verified_artifacts":[requirement]}],
+        "interface_state":{runtime.interface.as_str():{"run_authoring_binding":{"schema_version":2,"run":runtime.run,"worker":runtime.worker,
+            "provider_interface":runtime.interface,"authoring_source_interface":"writer","checkpoints":[{"name":"result","role":"result_input",
+                "interface_binding":binding,"outbound_interface_bindings":[],"include_context":true,"required_verified_artifacts":[requirement]}]}}}
+    })).unwrap()).unwrap();
+    let pending = continuity(runtime.interface.as_str(), runtime.run.as_str(), "thread-a", 5, Some(CodexPendingContinuity::DynamicTool {
+        native_operation:None,turn_id:"turn-a".into(),call_id:"call-a".into(),tool:"read".into(),
+    }));
+    let mut result: SessionContextArtifact = serde_json::from_value(session_artifact("original-result", "read.result", payload.clone(), 40)).unwrap();
+    result.source_artifact = source;
+    let call = serde_json::from_value(session_artifact("call", "tool.call", serde_json::json!({"label":"tool.call",CODEX_CONTINUITY_FIELD:pending}), 30)).unwrap();
+    let session = vec![call, result];
+    let sources = continuity_input_sources(&record, &input).unwrap();
+    let recovered = recover_codex_continuity_from_current_session(&session, &sources, &runtime.interface, runtime.run.as_str(), &codex_context_labels()).unwrap().unwrap();
+    assert_eq!(recovered, pending);
+    let call = bound("exact-call", serde_json::json!({"label":"tool.call", "tool":"read", "correlation_id":"call-a", "arguments":{}, CODEX_CONTINUITY_FIELD:pending}));
+    input.artifact_binding_payloads.push(call.clone());
+    input.metadata.as_mut().unwrap().artifact_binding_refs.push(call.artifact.clone());
+    input.metadata.as_mut().unwrap().grant.artifact_access.insert(call.artifact.id.to_string(), octopus_runtime::ArtifactAccess::read_only());
+    let mut value = serde_json::to_value(&record).unwrap();
+    value["checkpoints"][0]["artifact_bindings"].as_array_mut().unwrap().push(serde_json::json!({"id":call.artifact.id}));
+    value["checkpoints"][0]["required_verified_artifacts"][0]["params"]["call_artifact"] = serde_json::to_value(&call.artifact).unwrap();
+    let template = &mut value["interface_state"][runtime.interface.as_str()]["run_authoring_binding"]["checkpoints"][0];
+    template["static_artifact_bindings"] = serde_json::json!([call.artifact.id]);
+    template["required_verified_artifacts"][0]["params"]["call_artifact"] = serde_json::to_value(&call.artifact).unwrap();
+    let pinned = serde_json::to_vec(&value).unwrap();
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&pinned).unwrap();
+    let context = octopus_run_authoring::context_artifact_payloads(&record, input.metadata.as_ref().unwrap(), &input.artifact_binding_payloads).unwrap();
+    assert!(context.iter().all(|payload| payload.artifact != call.artifact));
+    let prior = continuity(runtime.interface.as_str(), runtime.run.as_str(), "thread-a", 4, None);
+    let prior = serde_json::from_value(session_artifact("prior-commentary", "turn.agent_message", serde_json::json!({"label":"turn.agent_message",CODEX_CONTINUITY_FIELD:prior}), 25)).unwrap();
+    let session_without_call = vec![prior, session[1].clone()];
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interface.json")).unwrap()).unwrap();
+    let mut descriptor = descriptor;
+    descriptor.id = runtime.interface.clone();
+    assert_eq!(recover_provider_result_continuity(&descriptor, &input, None, &session_without_call, &runtime.run, &pinned).unwrap(), Some(pending.clone()));
+    let previous_pending = continuity(runtime.interface.as_str(), runtime.run.as_str(), "thread-a", 4, Some(CodexPendingContinuity::DynamicTool {
+        native_operation: None, turn_id: "turn-a".into(), call_id: "call-previous".into(), tool: "read".into(),
+    }));
+    let previous_call = serde_json::from_value(session_artifact("previous-call", "tool.call",
+        serde_json::json!({"label":"tool.call", CODEX_CONTINUITY_FIELD:previous_pending}), 25)).unwrap();
+    let previous_result = serde_json::from_value(session_artifact("previous-result", "read.result",
+        serde_json::json!({"label":"read.result","tool":"read","correlation_id":"call-previous","ok":true,"body":{"text":"earlier"}}), 26)).unwrap();
+    let projected_settlement = vec![previous_call, previous_result, session[1].clone()];
+    assert_eq!(recover_provider_result_continuity(&descriptor, &input, None, &projected_settlement,
+        &runtime.run, &pinned).unwrap(), Some(pending.clone()));
+    let settled = continuity(runtime.interface.as_str(), runtime.run.as_str(), "thread-a", 5, None);
+    let mut recorded_settlement = projected_settlement.clone();
+    recorded_settlement.push(serde_json::from_value(session_artifact("recorded-settlement", "turn.agent_message",
+        serde_json::json!({"label":"turn.agent_message", CODEX_CONTINUITY_FIELD:settled}), 35)).unwrap());
+    assert!(recover_provider_result_continuity(&descriptor, &input, None, &recorded_settlement,
+        &runtime.run, &pinned).unwrap().is_none());
+    let mut foreign = session_without_call.clone();
+    foreign[0].payload[CODEX_CONTINUITY_FIELD]["run"] = serde_json::json!("other-run");
+    assert!(recover_provider_result_continuity(&descriptor, &input, None, &foreign, &runtime.run, &pinned).is_err());
+    let wrong = serde_json::json!({"label":"read.result","tool":"read","correlation_id":"call-a","ok":true,"body":{"text":"changed"}});
+    input.artifact_binding_payloads[0] = ArtifactBindingPayload::new(sources[1].clone(), serde_json::to_vec(&wrong).unwrap());
+    assert!(continuity_input_sources(&record, &input).is_err());
+    input.artifact_binding_payloads[0] = ArtifactBindingPayload::new(sources[1].clone(), serde_json::to_vec(&payload).unwrap());
+    input.metadata.as_mut().unwrap().grant.artifact_access.clear();
+    assert!(continuity_input_sources(&record, &input).is_err());
+}
+
+#[test]
 fn successive_tool_results_use_admitted_session_continuity() {
     let temp = tempfile::tempdir().unwrap();
     let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(

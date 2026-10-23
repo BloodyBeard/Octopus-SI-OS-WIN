@@ -5,11 +5,29 @@ mod terminal_composition;
 fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
     std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
-            .block_on(native_terminal_handoff_cases());
+            .block_on(native_terminal_handoff_cases(None));
     }).unwrap().join().unwrap();
 }
 
-async fn native_terminal_handoff_cases() {
+#[test]
+fn native_progress_is_admitted_before_the_next_provider_output() {
+    std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+            .block_on(native_terminal_handoff_cases(Some(25)));
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn registry_unstable_pending_keeps_native_turn_and_delivers_exact_tool_output() {
+    std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+            .block_on(native_terminal_handoff_cases(Some(26)));
+    }).unwrap().join().unwrap();
+}
+
+include!("retained_native_delivery.rs");
+
+async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
     use octopus_interfaces::DeliveryVerdict;
     use octopus_run_authoring::ProviderSourceRecovery;
     use octopus_runtime::run_record::RunRecord;
@@ -71,6 +89,7 @@ async fn native_terminal_handoff_cases() {
         expected_source: &ArtifactRef, delivered_before: usize, count: usize, with_answer: bool, phase: usize, ack_bootstrap: bool,
     ) -> Vec<(String,ArtifactRef,u64)> {
             let mut delivered=Vec::new(); let mut writes=0;
+            let mut transient_scope = None;
             loop { tokio::select! {
                 accepted=listener.accept()=> {
                     let mut ws=tokio_tungstenite::accept_async(accepted.unwrap().0).await.unwrap();
@@ -129,8 +148,10 @@ async fn native_terminal_handoff_cases() {
                     let items=pending["items"].as_array().unwrap();
                     let (cp,standing)=match items.iter().find(|item|item["artifact_label"]==label) {
                         Some(item) => {
-                            assert_eq!(items.len(),if ack_bootstrap || with_answer || count==2 || label==TURN_INTERRUPTED_RESULT_LABEL {1}else{2});
-                            assert_eq!(pending["terminal"],ack_bootstrap || items.last().unwrap()["artifact_label"]==TURN_INTERRUPTED_RESULT_LABEL);
+                            if phase != 26 {
+                                assert_eq!(items.len(),if ack_bootstrap || with_answer || count==2 || label==TURN_INTERRUPTED_RESULT_LABEL {1}else{2});
+                                assert_eq!(pending["terminal"],ack_bootstrap || items.last().unwrap()["artifact_label"]==TURN_INTERRUPTED_RESULT_LABEL);
+                            }
                             (current_record.checkpoint(&serde_json::from_value(item["checkpoint"]["id"].clone()).unwrap()).unwrap(),false)
                         }
                         None => {
@@ -144,9 +165,26 @@ async fn native_terminal_handoff_cases() {
                     let mut row=edge(&gate_ctx,&current,cp,&incoming.artifact,MovementKind::InterfaceArrival,current_record.worker.clone());
                     let scope=retain(gate_ctx,&incoming,&row);
                     if (phase==2 && label==TURN_INTERRUPTED_RESULT_LABEL) || (!ack_bootstrap && with_answer && phase==0 && label=="turn.completed") {
-                        incoming.retained.unwrap().reply.send(Ok(octopus_ledger::ArtifactDelivery::Pending {scope_seq:scope.unwrap()})).unwrap();break;
+                        incoming.retained.unwrap().reply.send(Err("fixture transport closed after retaining scope".into())).unwrap();break;
                     }
                     let mut metadata=row.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();metadata.delivery_scope_seq=scope;row.invocation_metadata=Some(metadata.into());
+                    if phase == 26 && delivered.is_empty() {
+                        let retained = incoming.retained.as_ref().unwrap();
+                        let exact = (retained.id.clone(), scope.unwrap(), row.artifact.clone());
+                        if let Some(original) = &transient_scope { assert_eq!(&exact, original); }
+                        else {
+                            transient_scope = Some(exact);
+                            let mut refused = row.clone(); refused.kind = MovementKind::DeliveryRefused;
+                            refused.invocation_metadata = Some(octopus_ledger::MovementMetadata::Delivery(octopus_ledger::DeliveryMetadata {
+                                delivery_verdict: DeliveryVerdict::refused(octopus_ledger::RefusedReason::RegistryUnstable, json!({"message":"registry changed before admission"})),
+                                runtime: row.invocation_metadata.as_ref().unwrap().invocation().unwrap().runtime.clone(),
+                                source_movement_seq: None, delivery_scope_seq: scope,
+                            }));
+                            append(gate_ctx, refused);
+                            incoming.retained.unwrap().reply.send(Ok(octopus_ledger::ArtifactDelivery::Pending { scope_seq: scope.unwrap() })).unwrap();
+                            continue;
+                        }
+                    }
                     let seq=append(&gate_ctx,row);
                     let payload:serde_json::Value=serde_json::from_slice(&incoming.artifact.read_payload_bytes().unwrap()).unwrap_or(json!({}));
                     if let Some(continuity)=payload.get("codex_continuity") {
@@ -886,6 +924,12 @@ async fn native_terminal_handoff_cases() {
         std::fs::create_dir_all(plan.run_write.path.parent().unwrap()).unwrap(); std::fs::write(&plan.run_write.path,&initial).unwrap();
         let mut descriptor:InterfaceDescriptor=serde_json::from_slice(&std::fs::read(root.join("registry/interface").join(&plan.provider_interface_id).join("interface.json")).unwrap()).unwrap();
         let canonical=super::tests::descriptor();
+        if settlement_phase == Some(26) {
+            descriptor.interface_driver_ref = canonical.interface_driver_ref.clone();
+            for (key, value) in &canonical.interface_driver_config.as_ref().unwrap().private_config {
+                descriptor.interface_driver_config.as_mut().unwrap().private_config.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
         for key in ["context_output_labels","client_projection_output_labels","session_snapshot_labels","live_stream"] {
             descriptor.interface_driver_config.as_mut().unwrap().private_config.insert(key.into(), canonical.interface_driver_config.as_ref().unwrap().private_config[key].clone());
         }
@@ -906,6 +950,38 @@ async fn native_terminal_handoff_cases() {
         let before_context=record.interface_state[&descriptor.id]["context_generation"].as_u64().unwrap();
         let mut state=serde_json::to_value(continuity(before_context,Some(if with_stop {"interrupted_pending"}else{"pending"}))).unwrap();
         state["provider_interface"]=json!(descriptor.id); state["run"]=json!(run);
+        if settlement_phase == Some(26) {
+            let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+            let file=artifact(&root.join("message"),"operator.message",json!({"text":"start","message_id":"initial"}));
+            let row=edge(&ctx,&initial,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file); let source_seq=append(&ctx,row);
+            let handoff=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&input,source_seq,&initial).unwrap();
+            let (stream, emissions)=ProviderOutputStream::channel();
+            let (terminal_tx,terminal_rx)=tokio::sync::oneshot::channel();
+            let control=CodexTurnControlBroker::new(Some(source_seq));
+            let forward=forward_provider_emissions(EmissionForwarding {
+                ctx:&ctx,descriptor:&descriptor,control:&control,handoff,
+                interrupted_effects:InterruptedEffectArbiter::new(ctx.clone()),durable_interrupted_continuity:None,native_terminal_source:None,
+                source_envelope:input.clone(),run:run.clone(),source_artifact:input.artifact.clone(),result_source_movement_seq:source_seq,resolving_interrupted_result:false,
+            },emissions,terminal_rx);
+            let forward=async {forward.await.inspect_err(|error| eprintln!("retained native forwarder: {error}"))};
+            let native=retained_admission_native_turn(root,&descriptor,&input,&record,source_seq,&control,stream,terminal_tx);
+            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,usize::MAX,false,26,false);
+            let forwarded=tokio::time::timeout(std::time::Duration::from_secs(10),async {
+                tokio::select! {
+                    result=async {tokio::join!(native,forward)} => result.1.unwrap(),
+                    _=gate => panic!("admission gate ended before native turn"),
+                }
+            }).await.unwrap();
+            assert!(forwarded.outputs >= 3);
+            let rows=std::fs::read_to_string(&ctx.movements_path).unwrap().lines().map(|line|serde_json::from_str::<Movement>(line).unwrap()).collect::<Vec<_>>();
+            let refused=rows.iter().find(|row|matches!(&row.invocation_metadata,Some(octopus_ledger::MovementMetadata::Delivery(meta)) if meta.delivery_verdict.awaits_current_source())).unwrap();
+            let scope=match &refused.invocation_metadata {Some(octopus_ledger::MovementMetadata::Delivery(meta))=>meta.delivery_scope_seq.unwrap(),_=>unreachable!()};
+            assert_eq!(rows.iter().filter(|row|row.kind==MovementKind::ArtifactMoved && row.artifact==refused.artifact).count(),1);
+            assert_eq!(rows.iter().filter(|row|row.kind==MovementKind::InterfaceArrival && row.invocation_metadata.as_ref().and_then(|m|m.invocation()).is_some_and(|m|m.delivery_scope_seq==Some(scope))).count(),1);
+            return;
+        }
         if settlement_phase==Some(25) {
             let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
                 && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
@@ -914,15 +990,32 @@ async fn native_terminal_handoff_cases() {
             let input=source_envelope(&ctx,root,&row,file);let source_seq=append(&ctx,row);
             let handoff=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&input,source_seq,&initial).unwrap();
             state["context_generation"]=json!(before_context+1);
-            let output=artifact(&ctx.interface_var_dir().join("pending"),"interface.artifact.output",json!({"label":"interface.artifact.output","codex_continuity":state}));
-            let mut pending=Vec::new();
-            let held=hold_newest_stream_emission(&handoff,&mut pending,(ProviderEmission{artifact:output,route:ProviderEmissionRoute::ClientProjection},None,Vec::new())).await.unwrap();
-            assert_eq!((held,pending.len()),(0,1));
-            let close=Box::pin(close_stream_emissions(&handoff,&mut pending,true));
-            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true);
-            let (closed,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(close,gate)}).await.unwrap();
-            assert!(matches!(closed.unwrap(),(0,Some(octopus_run_authoring::ProviderHandoffOutcome::Admitted{..}))));
-            assert_eq!(delivered.len(),1);assert!(pending.is_empty());
+            let progress=artifact(&ctx.interface_var_dir().join("progress"),"turn.agent_message",json!({"label":"turn.agent_message","phase":"commentary","text":"Working","codex_continuity":state}));
+            let (sender,receiver_emissions)=tokio::sync::mpsc::unbounded_channel();
+            let (terminal_sender,terminal_receiver)=tokio::sync::oneshot::channel();
+            sender.send(ProviderStreamEmission::Progress(ProviderEmission{artifact:progress,route:ProviderEmissionRoute::ClientProjection})).unwrap();
+            let broker=CodexTurnControlBroker::new(Some(source_seq));
+            let forward=forward_provider_emissions(EmissionForwarding {
+                ctx:&ctx,descriptor:&descriptor,control:&broker,handoff:handoff.clone(),
+                interrupted_effects:InterruptedEffectArbiter::new(ctx.clone()),
+                durable_interrupted_continuity:None,native_terminal_source:None,
+                source_envelope:input.clone(),run:run.clone(),source_artifact:input.artifact.clone(),
+                result_source_movement_seq:source_seq,resolving_interrupted_result:false,
+            },receiver_emissions,terminal_receiver);
+            let gate=async {
+                let first=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,false).await;
+                assert_eq!(first.len(),1);
+                assert_eq!(first[0].0,"turn.agent_message");
+                state["context_generation"]=json!(before_context+2);
+                let output=artifact(&ctx.interface_var_dir().join("pending"),"interface.artifact.output",json!({"label":"interface.artifact.output","codex_continuity":state}));
+                sender.send(ProviderStreamEmission::Turn(ProviderEmission{artifact:output,route:ProviderEmissionRoute::ClientProjection})).unwrap();
+                drop(sender);
+                terminal_sender.send(true).unwrap();
+                pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true).await
+            };
+            let (forwarded,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(forward,gate)}).await.unwrap();
+            assert_eq!(forwarded.unwrap().outputs,2);
+            assert_eq!(delivered.len(),1);
             let current=RunRecord::from_bytes(&std::fs::read(&plan.run_write.path).unwrap()).unwrap();
             let settled=&current.interface_state[&descriptor.id]["pending_handoff"];
             assert_eq!((settled["source_movement_seq"].clone(),settled["terminal"].clone()),(json!(source_seq),json!(true)));
@@ -1069,7 +1162,7 @@ async fn native_terminal_handoff_cases() {
         all_delivered.extend(delivered);
         if with_answer && phase==0 {
             assert!(!control.is_finished(),"a refused closure must retain its control owner");
-            assert!(result.unwrap_err().contains("unfinished original edges")); assert_eq!(all_delivered.len(),2);
+            assert!(result.unwrap_err().contains("fixture transport closed")); assert_eq!(all_delivered.len(),2);
             let labels=codex_context_output_labels(&descriptor).unwrap(); let snapshots=codex_session_snapshot_labels(&descriptor).unwrap();
             assert_eq!(native_result_admitted_prefix(&ctx,&run,source_seq,&emissions,&snapshots,&labels).unwrap().len(),2);
             let mut shuffled=emissions.iter().map(|e|ProviderEmission{artifact:e.artifact.clone(),route:e.route.clone()}).collect::<Vec<_>>(); shuffled.swap(1,2);
@@ -1168,8 +1261,12 @@ async fn native_terminal_handoff_cases() {
             assert_eq!(receipt.payload["codex_continuity"]["context_generation"],json!(settled_generation+1));
         }
     }
+    if let Some(phase) = selected_phase {
+        case(false,false,false,Some(phase),false).await;
+        return;
+    }
     for (with_stop, with_answer, native_interrupted, settlement_phase) in [
-        (false,false,false,Some(25)),(false,false,false,Some(22)),(false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
+        (false,false,false,Some(22)),(false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
         (false,false,true,None),(true,false,true,None),(false,false,true,Some(0)),(false,false,true,Some(2)),(false,false,true,Some(3)),(false,false,true,Some(4)),(false,false,true,Some(5)),(false,false,true,Some(6)),(false,false,true,Some(7)),(false,false,true,Some(8)),(false,false,true,Some(9)),(false,false,true,Some(10)),(false,false,true,Some(11)),(false,false,true,Some(12)),(false,false,true,Some(13)),
         (false,false,true,Some(14)),(false,false,true,Some(15)),(false,false,true,Some(16)),(false,false,true,Some(17)),(false,false,true,Some(18)),(false,false,true,Some(19)),
         (false,false,true,Some(20)),(false,false,true,Some(21)),

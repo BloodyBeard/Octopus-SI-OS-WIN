@@ -57,7 +57,7 @@ Policy gives every run a universal context that answers exactly two questions:
 2. **What do I need to do?**
 
 Those two answers are what let a run create a sub-goal, and that sub-goal
-create another - each receiving a different, narrower grant. The root is
+create another - each receiving a different, narrower grant. The initial root is
 `existence`. If it decides it needs a self-improvement environment and none
 exists, it creates one with narrower policy; that one can create narrower
 still.
@@ -169,7 +169,8 @@ rest hangs off them.
   denials.
 - `allowed_child_ee_templates` - what may be created beneath it.
 - `allowed_root_slots` - which host paths rooms here may be given.
-- `bootstrap_root` - whether this template is the root of a Home.
+- `bootstrap_root` - selects the single initial seed template. Other authored
+  parentless EEs form independent chains from their own policy.
 
 An EE instance (`state/ee_instances/<ee_id>.json`) records its template, its
 parent, its goal text, and any further `policy_narrowing`.
@@ -233,9 +234,11 @@ descriptor it was copied from (`copy_of`), and an allowance admits a copy by
 its own id or by that original; a hard block on an original reaches every
 declared copy. A copy admitted by its original is never wider than it: the
 original must exist, a worker copy's ceiling is intersected with the
-original's, an interface copy's policy is formed together with the original's,
-and a tool copy counts as its original only while its executable, handler and
-schema match and its authority stays within the original's. When an update
+original's, and an interface copy keeps every original policy variable and its
+reducer. Its defaults and values may narrow the original; dropping a variable
+or changing its reduction rule refuses formation. Worker and EE overrides for
+both identities apply together. A tool copy counts as its original only while
+its executable, handler and schema match and its authority stays within the original's. When an update
 changes an original, a copy still on the previous contract is outside that
 admission until the client's package adoption rewrites it; the adoption forms
 its grant over the contracts it writes.

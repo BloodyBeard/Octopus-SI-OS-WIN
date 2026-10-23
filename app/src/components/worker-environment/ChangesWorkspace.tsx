@@ -1,3 +1,4 @@
+import { OcLoadingRows } from "../../design-system/LoadingSkeleton";
 import { parseDiffFromFile, preloadHighlighter, type FileDiffMetadata, type SelectedLineRange } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
@@ -882,7 +883,7 @@ export function ChangesWorkspace({ active, assistantCodeComments = [], emptyIllu
                       )}
                       selectedLines={selectedLines}
                     />
-                  ) : <div className="we-change-loading">Loading diff…</div>}
+                  ) : <OcLoadingRows className="we-change-loading" label="Loading diff…" />}
                 </div>
               ) : null}
             </section>
