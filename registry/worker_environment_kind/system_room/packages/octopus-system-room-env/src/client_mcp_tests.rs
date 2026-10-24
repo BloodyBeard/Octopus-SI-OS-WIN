@@ -41,6 +41,24 @@ fn mcp_lifecycle_catalogue_and_exact_calls_are_validated() {
     assert!(refused["error"]["message"].as_str().unwrap().contains("/document/glyph"));
     document["glyph"]=json!("weather");document["revision"]=json!(2);document["render"]["density"]=json!("comfortable");
     assert!(matches!(server.receive(call("publish_widget",json!({"interface":"target","document":document}))),Reply::Call{..}));
+    for source in [
+        "https://example.org/photo.jpg", "file:///photo.png", "blob:https://example.org/image",
+        "data:image/svg+xml;base64,PHN2Zy8+", "data:image/png;base64,not base64",
+    ].into_iter().map(str::to_owned).chain([format!("data:image/png;base64,{}", "A".repeat(524288))]) {
+        document["render"]["root"] = json!({"type":"image","source":source,"alt":"Photo"});
+        assert!(matches!(server.receive(call("publish_widget", json!({"interface":"target","document":document}))),
+            Reply::Message(value) if value["error"]["code"] == -32602), "unsupported image reached emission");
+    }
+    for source in [
+        json!("data:image/avif;base64,YQ=="), json!("data:image/gif;base64,YQ=="),
+        json!("data:image/jpeg;base64,YQ=="), json!("data:image/png;base64,YQ=="),
+        json!("data:image/webp;base64,YQ=="), json!("DATA:IMAGE/PNG;BASE64,YQ=="),
+        json!({"path":"data.photo"}), json!({"path":"sources.photos.0.data_url","fallback":null}),
+    ] {
+        document["render"]["root"] = json!({"type":"image","source":source,"alt":"Photo"});
+        assert!(matches!(server.receive(call("publish_widget", json!({"interface":"target","document":document}))),
+            Reply::Call { .. }), "supported image or binding was refused");
+    }
     let Reply::Call { id, entry, arguments } = server.receive(call("read_artifact", json!({"id":"visible"}))) else { panic!() };
     assert_eq!(id, "call");
     assert_eq!(entry.name, "read_artifact");
