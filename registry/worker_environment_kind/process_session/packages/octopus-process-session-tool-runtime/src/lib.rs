@@ -8490,19 +8490,18 @@ async fn hand_tool_effect_indeterminate(
         "effect_state": "in_flight_outcome_unknown"
     });
     if let Some((tool, error)) = failure {
-        let bounded = error.chars().take(4096).collect::<String>();
         let object = details
             .as_object_mut()
             .ok_or_else(|| "tool effect failure details are not an object".to_string())?;
         object.insert("tool".to_string(), serde_json::json!(tool));
-        object.insert("error".to_string(), serde_json::json!(bounded));
+        object.insert("error".to_string(), serde_json::json!(error));
         object.insert(
             "error_blake3".to_string(),
             serde_json::json!(blake3::hash(error.as_bytes()).to_hex().to_string()),
         );
         object.insert(
             "error_truncated".to_string(),
-            serde_json::json!(error.chars().count() > 4096),
+            serde_json::json!(false),
         );
     }
     hand_tool_failure(
@@ -8582,21 +8581,89 @@ fn bounded_tool_failure_error(
     let rendered = serde_json::to_string(&error_details)
         .map_err(|error| format!("tool failure details did not encode: {error}"))?;
     if rendered.chars().count() > MAX_CHARS {
-        let digest = blake3::hash(rendered.as_bytes()).to_hex().to_string();
-        error_details.insert(
-            "failure_details".to_string(),
-            serde_json::json!({
-                "truncated": true,
-                "blake3": digest,
-                "encoded_chars": rendered.chars().count(),
-            }),
-        );
+        let mut bounded = serde_json::json!({
+            "truncated": true,
+            "blake3": blake3::hash(rendered.as_bytes()).to_hex().to_string(),
+            "encoded_chars": rendered.chars().count(),
+        });
+        if let Some(fields) = details.as_object() {
+            for (key, value) in fields {
+                if key == "error" || value.is_array() || value.is_object()
+                    || bounded.get(key).is_some()
+                {
+                    continue;
+                }
+                bounded[key] = value.clone();
+                if bounded.to_string().chars().count() > MAX_CHARS / 4 {
+                    bounded.as_object_mut().unwrap().remove(key);
+                }
+            }
+        }
+        let diagnostic = details.get("error").and_then(serde_json::Value::as_str)
+            .unwrap_or(&rendered);
+        let diagnostic_chars = diagnostic.chars().count();
+        let mut retained_chars = diagnostic_chars.min(MAX_CHARS);
+        bounded["error_blake3"] =
+            serde_json::json!(blake3::hash(diagnostic.as_bytes()).to_hex().to_string());
+        loop {
+            let preview = if retained_chars == diagnostic_chars {
+                diagnostic.to_string()
+            } else {
+                let head = diagnostic.chars().take(retained_chars.div_ceil(2)).collect::<String>();
+                let tail = diagnostic.chars().rev().take(retained_chars / 2)
+                    .collect::<Vec<_>>().into_iter().rev().collect::<String>();
+                format!("{head}\n… [middle omitted] …\n{tail}")
+            };
+            bounded["error"] = serde_json::json!(preview);
+            bounded["error_truncated"] = serde_json::json!(retained_chars < diagnostic_chars);
+            bounded["error_omitted_chars"] =
+                serde_json::json!(diagnostic_chars - retained_chars);
+            error_details.insert("failure_details".to_string(), bounded.clone());
+            if serde_json::to_string(&error_details)
+                .map_err(|error| format!("tool failure preview did not encode: {error}"))?
+                .chars().count() <= MAX_CHARS
+            {
+                break;
+            }
+            retained_chars /= 2;
+        }
     }
     Ok(octopus_tool_handlers::ToolResultError::new(
         failure_class,
         format!("tool process failed with class '{failure_class}'"),
     )
     .with_details(error_details))
+}
+
+
+#[test]
+fn oversized_tool_failures_preserve_recovery_evidence() {
+    use octopus_tool_handlers::ToolResultArtifact;
+    for failure_class in ["tool_process_failure", TOOL_EFFECT_INDETERMINATE] {
+        let details = serde_json::json!({
+            "tool": "test.write",
+            "effect_state": "in_flight_outcome_unknown",
+            "error": format!("write outcome unknown: {}disk is full", "\n\0\"\\🦑".repeat(3000)),
+        });
+        let error = bounded_tool_failure_error(42, failure_class, &details).unwrap();
+        let result = ToolResultArtifact::failure("test.write", Some("call-42".into()), error);
+        let result: ToolResultArtifact = serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.correlation_id.as_deref(), Some("call-42"));
+        let error = result.error.unwrap();
+        assert_eq!(error.code, failure_class);
+        let bounded = error.details.unwrap();
+        assert!(serde_json::to_string(&bounded).unwrap().chars().count() <= 4096);
+        assert_eq!(bounded["source_movement_seq"], 42);
+        assert_eq!(bounded["failure_details"]["effect_state"], "in_flight_outcome_unknown");
+        let diagnostic = bounded["failure_details"]["error"].as_str().unwrap();
+        assert!(diagnostic.starts_with("write outcome unknown: "));
+        assert!(diagnostic.ends_with("disk is full"));
+        assert_eq!(bounded["failure_details"]["truncated"], true);
+    }
+    let details = serde_json::json!({"error": "permission denied", "tool": "test.write"});
+    let error = bounded_tool_failure_error(43, "tool_process_failure", &details).unwrap();
+    assert_eq!(error.details.unwrap()["failure_details"], details);
 }
 
 fn read_bounded_tool_door_ledger_line<R: BufRead>(
