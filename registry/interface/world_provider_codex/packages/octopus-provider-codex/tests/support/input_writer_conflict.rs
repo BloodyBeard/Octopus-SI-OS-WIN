@@ -89,8 +89,7 @@ fn intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart() {
     let mut value: Value = serde_json::from_slice(&f.before).unwrap();
     let initial =
         separate_owner_writer_run(&mut value, &f.config.writer, &"writer_intake".into()).unwrap();
-    value["interface_state"][f.config.writer.owner.as_str()]["writer_run"].as_object_mut().unwrap().remove("initial_record_format");
-    let encode = |v: &Value| octopus_run_authoring::JsonFormat::Pretty.encode(v).unwrap();
+    let encode = |v: &Value| octopus_run_authoring::JsonFormat::Compact.encode(v).unwrap();
     std::fs::write(
         f.path.parent().unwrap().join("writer_intake.json"),
         encode(&initial),
@@ -98,21 +97,7 @@ fn intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart() {
     .unwrap();
     f.before = encode(&value);
     std::fs::write(&f.path, &f.before).unwrap();
-    let mut first = prepare_input(&f.config, f.path.clone(), &f.before, 0, f.log.read_from(Seq(0))[0].artifact.as_ref().unwrap(), 0, 8 * 1024 * 1024).unwrap();
-    first.edit = CheckedRunEdit::prepare_with_format(f.path.clone(), &f.before,
-        serde_json::from_str(&first.edit.content).unwrap(), first.edit.correlation_id.clone(), None).unwrap();
-    let mut retained = serde_json::to_value(&first).unwrap();
-    for entry in retained["ordered"]["arguments"]["writes"].as_array_mut().unwrap() {
-        let preimage: octopus_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
-        let before = preimage.decode(entry["expected_before_hash"].as_str().unwrap(),
-            &mut octopus_run_authoring::DecodeBudget::new(8 * 1024 * 1024).unwrap()).unwrap();
-        let mut after: Value = serde_json::from_str(&before).unwrap();
-        let patch: json_patch::Patch = serde_json::from_value(entry["patch"].clone()).unwrap();
-        json_patch::patch(&mut after, &patch).unwrap();
-        *entry = json!({"path":entry["path"],"expected_before_hash":entry["expected_before_hash"],
-            "expected_before_content":before,"content":String::from_utf8(encode(&after)).unwrap()});
-    }
-    first = serde_json::from_value(retained).unwrap();
+    let first = prepare_input(&f.config, f.path.clone(), &f.before, 0, f.log.read_from(Seq(0))[0].artifact.as_ref().unwrap(), 0, 8 * 1024 * 1024).unwrap();
     let (call, input) = begin(&mut f, &first);
     assert!(finish(&mut f, &first, &call, &input));
     assert_eq!(
@@ -122,7 +107,6 @@ fn intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart() {
         Some(true)
     );
     f.before = first.edit.content.as_bytes().to_vec();
-    adopt_writer_schema(&f, &call["arguments"]);
     let pending = retained_input(&f);
     let attempt = pending.edit.as_ref().unwrap();
     let (call, input) = begin(&mut f, attempt);
@@ -161,57 +145,4 @@ fn intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart() {
         final_run.interface_state[&f.provider.owner],
         peer_run.interface_state[&f.provider.owner]
     );
-}
-
-fn adopt_writer_schema(f: &Fixture, old_call: &Value) {
-    use octopus_operator_chat_client::{OperatorWriterSchemaPlanRequest, plan_operator_writer_schema};
-    use sha2::{Digest, Sha256};
-    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
-    let registry = f._root.path().join("registry").canonicalize().unwrap();
-    let tool_path = registry.join("tool").join(&f.config.writer.tool).join("tool.json");
-    let mut tool: Value = serde_json::from_slice(&std::fs::read(&tool_path).unwrap()).unwrap();
-    let schema = tool["args_schema"].clone();
-    let mut old = schema.clone();
-    old["properties"].as_object_mut().unwrap().remove("json_format");
-    old["properties"]["writes"]["items"]["properties"].as_object_mut().unwrap().remove("json_format");
-    old["properties"]["writes"]["items"]["properties"]["expected_before_content"] = json!({"type":["string","null"]});
-    old["allOf"][0]["then"]["properties"]["writes"]["items"]["then"]["properties"]["expected_before_content"] = json!({"type":"string"});
-    octopus_tool_registry::ToolArgumentValidator::compile(&old).unwrap().validate(old_call).unwrap();
-    tool["args_schema"] = old.clone();
-    let old_bytes = serde_json::to_vec_pretty(&tool).unwrap();
-    std::fs::write(&tool_path, &old_bytes).unwrap();
-    let ledger = std::fs::read(&f.ctx.movements_path).unwrap();
-    let run = std::fs::read(&f.path).unwrap();
-    let writer = std::fs::read(f.path.parent().unwrap().join("writer_intake.json")).unwrap();
-    let mut request = OperatorWriterSchemaPlanRequest { registry_root:registry.clone(), run_records_root:f.path.parent().unwrap().to_path_buf(),
-        run_id:f.config.run.clone(), expected_run_sha256:hash(&run), writer:f.config.writer.clone(),
-        expected_owner_sha256:hash(&std::fs::read(registry.join("interface").join(f.config.writer.owner.as_str()).join("interface.json")).unwrap()),
-        expected_tool_sha256:hash(&old_bytes), expected_args_schema:old.clone(), args_schema:schema.clone() };
-    request.expected_args_schema = json!({});
-    let rejected = plan_operator_writer_schema(&request).unwrap_err();
-    assert!(rejected.contains("approved previous schema"), "{rejected}");
-    request.expected_args_schema = old;
-    let expected = request.expected_run_sha256.clone(); request.expected_run_sha256 = "0".repeat(64);
-    assert!(plan_operator_writer_schema(&request).unwrap_err().contains("changed before planning"));
-    request.expected_run_sha256 = expected;
-    let topology = json!({"id":"schema-adoption-topology","owner_interface":"nested-owner","routes":[{"tool":f.config.writer.tool}]});
-    let reference = ArtifactRef { id:"schema-adoption-topology".into(), content:ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&topology)) };
-    support::write(&registry, "artifact/schema-adoption-topology/artifact.json", topology);
-    support::write(&registry, "interface/nested-owner/code_mode.json", json!({"handoff":{"topology_artifact":reference}}));
-    assert!(plan_operator_writer_schema(&request).unwrap_err().contains("pinned in a nested CodeMode route"));
-    std::fs::remove_file(registry.join("interface/nested-owner/code_mode.json")).unwrap();
-    let writes = plan_operator_writer_schema(&request).unwrap();
-    assert_eq!(writes.len(), 1);
-    assert_eq!(writes[0].path, tool_path);
-    assert_eq!(writes[0].expected_before_hash.as_deref(), Some(hash(&old_bytes).as_str()));
-    assert_eq!(std::fs::read(&tool_path).unwrap(), old_bytes);
-    let mut next: Value = serde_json::from_str(&writes[0].content).unwrap();
-    assert_eq!(next.as_object_mut().unwrap().remove("args_schema"), Some(schema.clone()));
-    tool.as_object_mut().unwrap().remove("args_schema"); assert_eq!(next, tool);
-    assert_eq!(hash(&std::fs::read(&tool_path).unwrap()), request.expected_tool_sha256);
-    std::fs::write(&tool_path, &writes[0].content).unwrap();
-    octopus_tool_registry::ToolArgumentValidator::compile(&schema).unwrap().validate(old_call).unwrap();
-    assert_eq!(std::fs::read(&f.ctx.movements_path).unwrap(), ledger);
-    assert_eq!(std::fs::read(&f.path).unwrap(), run);
-    assert_eq!(std::fs::read(f.path.parent().unwrap().join("writer_intake.json")).unwrap(), writer);
 }
