@@ -34,6 +34,11 @@
     "tool_call_verifier": "tool_call_allowed",
     "result_timeout_ms": 30000
   },
+  "tool_result_receiving": {
+    "mark": "tool.result.corresponds",
+    "verifier": "tool_result_correspondence",
+    "params": {}
+  },
   "terminal_label": "interface.artifact.output",
   "input_pointers": [
     "/text"

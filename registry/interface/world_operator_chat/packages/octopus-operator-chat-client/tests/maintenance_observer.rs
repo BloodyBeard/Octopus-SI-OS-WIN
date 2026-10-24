@@ -1710,3 +1710,32 @@ mod movement_gate {
         }
     }
 }
+
+#[test]
+fn observer_tool_results_keep_call_specific_verified_receiving() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let request = capture_fixture(&root);
+    let plan = plan_run_composition(&request).unwrap();
+    let source: Value = serde_json::from_str(&plan.run_write.content).unwrap();
+    let observer = &source["interface_state"][&plan.provider_interface_id]["maintenance_observer"];
+    let provider = observer["provider_interface"].as_str().unwrap();
+    let templates = observer["initial_record"]["interface_state"][provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap();
+    let output = templates.iter().find(|cp| cp["role"] == "provider_tool_output").unwrap();
+    let tools = output["required_verified_artifacts"][0]["params"]["tools"].as_array().unwrap();
+    let receiving = output["result_receiving"].as_object().expect("observer must declare verified result waits");
+    assert_eq!(receiving.len(), tools.len());
+    for tool in tools {
+        let tool = tool.as_str().unwrap();
+        assert_eq!(receiving[tool]["artifact_label"], format!("{tool}.result"));
+        assert_eq!(receiving[tool]["mark"], "tool.result.corresponds");
+        assert_eq!(receiving[tool]["verifier"], "tool_result_correspondence");
+    }
+    let door = &output["outbound_interface_bindings"][0]["interface"];
+    assert!(!templates.iter().any(|cp| &cp["interface_binding"]["interface"] == door));
+    let policy = root.join("registry/interface/system_worker_memory_observer/policy.json");
+    let mut value = read(&policy);
+    value["ceiling"]["mark_outcomes"].as_array_mut().unwrap().retain(|mark| mark != "tool.result.corresponds");
+    std::fs::write(policy, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(plan_run_composition(&request).unwrap_err().contains("tool-result correspondence mark"));
+}

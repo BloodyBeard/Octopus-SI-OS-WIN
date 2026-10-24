@@ -295,9 +295,9 @@ struct ClientRunConfig {
     _rest: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct ToolResultReceiving {
+pub struct ToolResultReceiving {
     mark: octopus_descriptors::MarkId,
     verifier: octopus_descriptors::VerifierId,
     params: serde_json::Value,

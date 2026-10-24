@@ -20,6 +20,8 @@ pub struct MaintenanceObserverConfig {
     pub reader_tools: Vec<SelectedToolSeed>,
     pub publication_writer: SelectedToolSeed,
     pub authoring: CompositionAuthoring,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_receiving: Option<ToolResultReceiving>,
     pub terminal_label: String,
     pub input_pointers: Vec<String>,
     #[serde(default)]
@@ -285,6 +287,14 @@ pub fn plan_maintenance_observer(
     let run_id = format!("run_memory_observer_{suffix}");
     let chain = resolve_live_ee_policy_chain(&request.roots.ee_instances_root, &source_run.ee)
         .map_err(|e| e.to_string())?;
+    if let Some(result) = &cfg.tool_result_receiving {
+        let policy: WorkerInterfacePolicy = serde_json::from_slice(&std::fs::read(
+            interface_root.join(&cfg.worker_template_interface_id).join("policy.json"),
+        ).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+        if !result_receiving_authorized(registry, &chain, &policy, result)? {
+            return Err("observer worker/EE policy does not admit the tool-result correspondence mark".into());
+        }
+    }
     if capabilities.registry_root() != registry.as_path() {
         return Err("maintenance capabilities were loaded from another registry root".into());
     }
@@ -348,7 +358,7 @@ pub fn plan_maintenance_observer(
             worker: cfg.worker_template_interface_id.clone(),
             tool_call_mark: cfg.authoring.tool_call_mark.clone(),
             tool_call_verifier: cfg.authoring.tool_call_verifier.clone(),
-            tool_result_receiving: None,
+            tool_result_receiving: cfg.tool_result_receiving.clone(),
             listen_env: String::new(),
             context_artifact_bindings: Vec::new(),
             _rest: Default::default(),

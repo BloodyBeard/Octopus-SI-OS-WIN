@@ -53,7 +53,8 @@
     "mark_outcomes": [
       "memory.experience.admitted",
       "memory.capture.completed",
-      "tool.call.allowed"
+      "tool.call.allowed",
+      "tool.result.corresponds"
     ],
     "hard_blocked_tools": [],
     "artifact_verbs": [
