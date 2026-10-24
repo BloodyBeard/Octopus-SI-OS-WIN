@@ -383,18 +383,25 @@ impl CodexAppServerInterfaceDriver {
             recovered = reconcile_current_session_continuity(Some(stopped), recovered)?;
             if let Some(state) = recovered.clone() { sink.set_continuity(state); }
         }
+        let revised_history = revised_message_history(&current_session_context, &effective_source_artifact,
+            &effective_manifest_label, &effective_request_bytes)?;
+        if revised_history.replaces.is_some() && (self.has_pending_request(&scope).await
+            || recovered.as_ref().is_some_and(codex_continuity_waits_for_result)) {
+            return Err(InterfaceDriverError::FailedClosed("A message cannot be edited while its work is unresolved".into()));
+        }
         let mut assembled_context = assemble_current_context(
             &context_payloads,
             &bound_session_contexts,
             &runtime.interface,
             &session_snapshot_labels,
+            &revised_history.artifacts,
             &current_session_context,
             &effective_source_artifact,
             self.model_result_projection()?,
         )?;
         let recovered_result_context = match (&provider_input, recovered.as_ref()) {
             (ProviderInput::Turn(_) | ProviderInput::Resume { .. }, Some(state)) if !codex_continuity_waits_for_result(state) => {
-                resumed_model_context(&current_session_context, &effective_source_artifact, state, self.model_result_projection()?)?
+                resumed_model_context(&revised_history.artifacts, &effective_source_artifact, state, self.model_result_projection()?)?
             }
             _ => None,
         };
@@ -411,6 +418,12 @@ impl CodexAppServerInterfaceDriver {
         assembled_context.static_context_bytes.extend_from_slice(
             &serde_json::to_vec(&native_catalog.tool_names).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?,
         );
+        if let Some(revision) = &revised_history.revision {
+            assembled_context.static_context_bytes.extend_from_slice(
+                &serde_json::to_vec(&serde_json::json!({"message_revision":revision}))
+                    .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?);
+            assembled_context.session_context_available = true;
+        }
         let authored_context_generation = read_codex_context_generation(&run_record, &runtime.interface)?
             .checked_add(deferred_context_generations)
             .ok_or_else(|| InterfaceDriverError::FailedClosed("Codex authored context generation overflowed".to_string()))?;
@@ -620,6 +633,7 @@ impl CodexAppServerInterfaceDriver {
             _ => None,
         };
         let inspect_settled_history = matches!(&provider_input, ProviderInput::Turn(_))
+            && revised_history.replaces.is_none()
             && !thread_compact_requested
             && peer_message.as_ref().is_none_or(|peer| peer.action != PeerAction::Queue)
             && recovered_turn_start_dispatches.is_empty();
@@ -697,6 +711,12 @@ impl CodexAppServerInterfaceDriver {
         });
         if retiring_history {
             sink.admit_native_history_retirement().await?;
+        }
+        if let Some(replaces) = &revised_history.replaces {
+            sink.send(CodexTurnOutput::client(INTERFACE_CONTEXT_UPDATED_LABEL, serde_json::json!({
+                "phase":"message_revised", "replaces_message":replaces,
+                "source_artifact":effective_source_artifact,
+            })))?;
         }
 
         if let Some(peer) = peer_message.as_ref().filter(|peer| peer.action == PeerAction::Queue) {

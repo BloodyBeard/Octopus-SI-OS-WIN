@@ -22,99 +22,457 @@
     {
       "registry_kind": "tool",
       "owner": "artifact.append",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "artifact.list",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "artifact.read",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "artifact.search",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "client.mcp",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "artifact.send",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "file.list",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "file.read",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "file.write",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "skill.capture",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "skill.get",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "skill.list",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "skill.search",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "tool",
       "owner": "skill.upsert",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "interface",
       "owner": "system_context",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "life.json",
+          "fields": [
+            {
+              "pointer": "/processes/0/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "interface",
       "owner": "system_room",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]},{"path":"interface.json","fields":[{"pointer":"/interface_driver_config","schema":{"type":"object","required":["private_config"],"properties":{"private_config":{"type":"object","required":["context_artifact_bindings"],"properties":{"context_artifact_bindings":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string","minLength":1,"pattern":"^[^/\\\\\\u0000]+$"}},"additionalProperties":false},"uniqueItems":true}},"additionalProperties":false}},"additionalProperties":false}}]}]
+      "configuration": [
+        {
+          "path": "life.json",
+          "fields": [
+            {
+              "pointer": "/processes/0/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "path": "interface.json",
+          "fields": [
+            {
+              "pointer": "/interface_driver_config",
+              "schema": {
+                "type": "object",
+                "required": [
+                  "private_config"
+                ],
+                "properties": {
+                  "private_config": {
+                    "type": "object",
+                    "required": [
+                      "context_artifact_bindings"
+                    ],
+                    "properties": {
+                      "context_artifact_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "id"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "pattern": "^[^/\\\\\\u0000]+$"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "uniqueItems": true
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ]
     },
-    {"registry_kind":"tool","owner":"context.discover","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"tool","owner":"context.read","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"tool","owner":"context.prepare_publication","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"artifact","owner":"artifact-system-library","data_directories":["entries","usage"]},
-    {"registry_kind":"artifact","owner":"artifact-context-collection-guide"}
-  ],
-  "retired_members": [
-    {"registry_kind":"interface","owner":"system_room_discord_gateway"},
-    {"registry_kind":"interface","owner":"system_room_matrix_gateway"},
-    {"registry_kind":"interface","owner":"system_room_slack_gateway"},
-    {"registry_kind":"interface","owner":"system_room_telegram_gateway"},
-    {"registry_kind":"interface","owner":"system_room_whatsapp_gateway"},
-    {"registry_kind":"tool","owner":"file.write.discord_gateway"},
-    {"registry_kind":"tool","owner":"file.write.matrix_gateway"},
-    {"registry_kind":"tool","owner":"file.write.slack_gateway"},
-    {"registry_kind":"tool","owner":"file.write.telegram_gateway"},
-    {"registry_kind":"tool","owner":"file.write.whatsapp_gateway"}
+    {
+      "registry_kind": "tool",
+      "owner": "context.discover",
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "context.read",
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "context.prepare_publication",
+      "configuration": [
+        {
+          "path": "tool.json",
+          "fields": [
+            {
+              "pointer": "/process/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-system-library",
+      "data_directories": [
+        "entries",
+        "usage"
+      ]
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-context-collection-guide"
+    }
   ]
 }

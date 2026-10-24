@@ -3,6 +3,8 @@ import type { OctopusClientAccessProfile, OctopusClientAttachmentStageHandle, Oc
 import { Glyph } from "../IconGlyphs";
 import { cubicCirclePath, threeQuarterRingPath } from "../icon-glyphs/geometric-primitives";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { ContextUsageIndicator } from "./ContextUsageIndicator";
+import type { ContextUsage } from "./contextUsage";
 import type { ChatAttachment } from "./types";
 import { useLocalDictation } from "./useLocalDictation";
 import { appToast } from "../../toasts";
@@ -28,11 +30,13 @@ type Props = {
   providerInterfaces: OctopusProviderInterface[];
   providerInterfacesLoaded?: boolean;
   providerInterfacesRefreshing?: boolean;
+  modelSelectionLoading?: boolean;
   activeProvider?: OctopusProviderInterface;
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
   serviceTier?: string;
+  contextUsage?: ContextUsage | null;
   executionContexts?: ChatExecutionContext[];
   agentPresets?: readonly ClientAgentDefinition[];
   agentPresetId?: string;
@@ -44,6 +48,7 @@ type Props = {
   driverNames?: string[];
   eeId?: string;
   runId?: string;
+  runtimeHome: string;
   suggestionSourceSequence?: number;
   workerEnvironmentRooms?: ChatWorkerEnvironmentRoom[];
   workerInterfaceId?: string;
@@ -55,6 +60,7 @@ type Props = {
   canSteer?: boolean;
   onSteer?: () => void;
   editingQueuedTurn?: boolean;
+  hasQueuedMessages?: boolean;
   onCancelQueuedEdit?: () => void;
   submitBlockReason?: string;
   interruptPending?: boolean;
@@ -98,11 +104,13 @@ export function ChatComposer({
   providerInterfaces,
   providerInterfacesLoaded = true,
   providerInterfacesRefreshing = false,
+  modelSelectionLoading = false,
   activeProvider,
   providerInterfaceId,
   providerModel,
   reasoningEffort,
   serviceTier,
+  contextUsage = null,
   executionContexts,
   agentPresets,
   agentPresetId,
@@ -114,6 +122,7 @@ export function ChatComposer({
   driverNames,
   eeId,
   runId,
+  runtimeHome,
   suggestionSourceSequence,
   workerEnvironmentRooms,
   workerInterfaceId,
@@ -125,6 +134,7 @@ export function ChatComposer({
   canSteer = false,
   onSteer,
   editingQueuedTurn = false,
+  hasQueuedMessages = false,
   onCancelQueuedEdit,
   submitBlockReason = "",
   interruptPending = false,
@@ -194,7 +204,7 @@ export function ChatComposer({
   const voiceLayoutActive = dictation.isDictating || dictation.isTranscribing;
   const suggestion = useComposerSuggestion(runId ?? "", suggestionSourceSequence, accessProfile === "live"
     && activeProvider?.runtimeHandlerRef === "codex_app_server" && !turnOpen && !isSubmitting
-    && !editingQueuedTurn && !voiceLayoutActive);
+    && !editingQueuedTurn && !voiceLayoutActive, runtimeHome);
   const hasSubmissionPayload = Boolean(text.trim() || attachments.length);
   const stopAvailable = turnOpen && !hasSubmissionPayload && !editingQueuedTurn && Boolean(onInterrupt);
   const resumeActionAvailable = !stopAvailable
@@ -431,7 +441,7 @@ export function ChatComposer({
               </div>
             </div>
           ) : null}
-          {variant === "task" && executionContexts ? (
+          {variant === "task" && executionContexts && !hasQueuedMessages ? (
             <ComposerUtilityBar
               contexts={executionContexts}
               agentPresets={agentPresets ?? []}
@@ -548,12 +558,13 @@ export function ChatComposer({
                   <div className="flex min-w-0 w-full shrink-0 items-center justify-end gap-2">
                     <div className="flex min-w-0 flex-1 justify-end">
                       <div className="flex shrink-0 items-center gap-2">
+                        <ContextUsageIndicator usage={contextUsage} />
                         {variant === "task" && (runId || agentPresetId && workerInterfaceId) ? (
                           <ProviderModelPicker
                             activeProvider={activeProvider}
                             interfaceLocked={executionContextLocked === true}
                             listenToGlobalCommands={listenToGlobalCommands}
-                            loading={!providerInterfacesLoaded || providerInterfacesRefreshing}
+                            loading={modelSelectionLoading || !providerInterfacesLoaded || providerInterfacesRefreshing}
                             onModelChange={onProviderModelChange}
                             onRefreshModels={onProviderModelsRefresh}
                             onReasoningEffortChange={onReasoningEffortChange}

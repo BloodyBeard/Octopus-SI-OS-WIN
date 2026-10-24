@@ -110,14 +110,17 @@ const press = async (target, type) => {
   await settle();
 };
 
-test("a task whose history is loading shows only its loading status", async () => {
-  await show(workspace({ loadingMessages: true, renderedMessages: [] }));
+test("history loading hides stale messages while preserving the composer", async () => {
+  await show(workspace({ loadingMessages: true }));
   const status = query('[role="status"][aria-label="Loading task"]');
   assert.ok(status);
   assert.equal(status.getAttribute("aria-busy"), "true");
-  assert.ok(!query(".thread-scroll-container") && !query("[data-composer]") && !query("[data-thread-title]"));
+  const composer = query("[data-composer]");
+  assert.ok(composer && query(".thread-scroll-container"));
+  assert.doesNotMatch(query(".thread-scroll-container").textContent, /The report balances/);
   await show(workspace());
   assert.ok(!query('[aria-label="Loading task"]'));
+  assert.equal(query("[data-composer]"), composer);
   assert.match(query(".thread-scroll-container").textContent, /The report balances\./);
 });
 
@@ -141,10 +144,18 @@ test("switching tasks keeps the thread mounted and restores each task's reading 
   list.scrollTop = -400;
   list.dispatchEvent(new w.Event("scroll"));
   await settle(45);
+  const composer = query("[data-composer]");
+  await show({ ...taskB, loadingMessages: true });
+  assert.equal(query("[data-composer]"), composer);
+  assert.doesNotMatch(query(".thread-scroll-container").textContent, /[ab] answer/);
   await show(taskB);
   assert.ok(query(".thread-scroll-container") === list, "a task switch must not remount the thread");
   assert.equal(list.scrollTop, 0);
+  await show({ ...taskA, loadingMessages: true });
+  list.scrollTop = 0;
+  list.dispatchEvent(new w.Event("scroll"));
   await show(taskA);
+  assert.equal(query("[data-composer]"), composer);
   assert.equal(list.scrollTop, -400);
 });
 
@@ -198,7 +209,7 @@ test("Home activity shows the Home task read-only with its own empty state", asy
   assert.match(section.textContent, /The report balances\./);
   assert.ok(!query("[data-composer]"), "Home activity has no composer");
   await showHome(workspace({ activeRun: null, renderedMessages: [], activeMessageCount: 0 }));
-  assert.match(query('section[aria-label="Home activity"]').textContent, /No activity yet/);
+  assert.doesNotMatch(query('section[aria-label="Home activity"]').textContent, /No activity yet/);
   assert.ok(!query(".octopus-chat-home"));
 });
 

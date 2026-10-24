@@ -36,12 +36,6 @@
   background: currentColor;
 }
 
-.sidebar-task-status[data-state="waiting"] .sidebar-task-status-dot { animation: sidebar-task-attention 2.2s ease-in-out infinite; }
-@keyframes sidebar-task-attention {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 0%, transparent); }
-  50% { box-shadow: 0 0 0 3px color-mix(in oklab, currentColor 22%, transparent); }
-}
-
 .sidebar-task-status[data-reduce-motion] .sidebar-task-status-orbit,
 .sidebar-task-status[data-reduce-motion] .sidebar-task-status-dot { animation: none; }
 .sidebar-task-title[data-unread="true"] { font-weight: 500; }

@@ -172,7 +172,6 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
 
       <footer className="quick-task-composer">
         <QueuedMessageList
-          notice={chat.queueNotice}
           messages={chat.queuedTurns}
           paused={chat.queuePaused}
           sendNowAvailable={chat.canSendQueued}
@@ -195,6 +194,8 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           applicationSelectionLocked={chat.applicationSelectionLocked}
           applicationSelectionLockReason={chat.applicationSelectionLockReason}
           canSubmit={chat.canSubmit}
+          contextUsage={chat.contextUsage}
+          hasQueuedMessages={chat.queuedTurns.length > 0}
           canQueue={chat.canQueue}
           onQueue={chat.queueCurrentTurn}
           editingQueuedTurn={chat.editingQueuedTurn}
@@ -230,11 +231,13 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           providerInterfaces={chat.providerInterfaces}
           providerInterfacesLoaded={chat.providerInterfacesLoaded}
           providerInterfacesRefreshing={chat.providerInterfacesRefreshing}
+          modelSelectionLoading={chat.modelSelectionLoading}
           reasoningEffort={chat.reasoningEffort}
           serviceTier={chat.serviceTier}
           resumeAvailable={chat.resumeAvailable}
           runId={chat.activeRunId}
           suggestionSourceSequence={chat.activeRun?.lastTerminalMessage?.movementSeq}
+          runtimeHome={runtimeHome}
           submissionMode={chat.busy ? "queue" : "send"}
           canSteer={chat.canSteer}
           onSteer={chat.steerCurrentTurn}

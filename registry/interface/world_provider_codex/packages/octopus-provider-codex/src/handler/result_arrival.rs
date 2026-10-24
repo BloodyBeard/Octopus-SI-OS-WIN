@@ -107,6 +107,34 @@ impl CodexAppServerInterfaceDriver {
                 }
                 if let Some(pending) = recovered.as_ref().and_then(|state| state.pending.as_ref()) {
                     validate_recovered_operator_response(response, pending)?;
+                    if matches!(response, OperatorResponseArtifact::UserInput { .. }) {
+                        let state = recovered.as_ref().expect("pending continuity");
+                        if state.context_generation != context_generation || state.interrupted_pending.is_some()
+                            || state.native_terminal.is_some() || state.tool_operator_request.is_some()
+                        {
+                            return Err(InterfaceDriverError::FailedClosed("question response changed its pending native context".into()));
+                        }
+                        let handle = self.client.lock().await.request_handle();
+                        if let Some(terminal) = read_exact_terminal_turn(&handle, &self.next_request_id,
+                            &state.thread_id, pending_turn_id(pending)).await.map_err(InterfaceDriverError::FailedClosed)?
+                            && terminal.exact_turn(&state.thread_id, Some(pending_turn_id(pending)))?.status == TurnStatus::Interrupted
+                        {
+                            let request = exact_pending_question(&frame.current_session_context, state, response)?;
+                            let events = take_native_terminal_events(&mut *self.client.lock().await, &terminal, &state.thread_id, pending_turn_id(pending))?;
+                            continuations.cut_turn = Some(CutTurnContinuation {
+                                context: cut_turn_context(&frame.current_session_context, effective_source_artifact, state,
+                                    "request_user_input", effective_manifest_label, frame.effective_request_bytes, self.model_result_projection()?)?,
+                                activity: CodexTurnOutput::client(TURN_OPERATOR_REQUEST_RESOLVED_LABEL, serde_json::json!({
+                                    "request_id": response.request_id()?, "request_artifact": request,
+                                    "response_artifact": effective_source_artifact, "thread_id": state.thread_id,
+                                    "turn_id": pending_turn_id(pending), "recovery": "interrupted_question",
+                                    "native_terminal": terminal,
+                                })).with_native_terminal_events(events),
+                                activity_already_admitted: false,
+                            });
+                            return Ok(Arrival::Continue);
+                        }
+                    }
                     continuations.operator = Some((response.clone(), pending.clone()));
                 }
             }

@@ -1,0 +1,38 @@
+use super::*;
+
+#[test]
+fn indeterminate_writer_requires_exact_failure_and_unadvanced_readback() {
+    let writer = CheckedRunWriter {
+        owner: InterfaceId::new("world_provider_test"), source: InterfaceId::new("system_authoring_test"),
+        door: InterfaceId::new("system_room_test"), tool: "file.write.test".into(),
+        call_label: "tool.call".into(), result_label: "file.write.test.result".into(),
+    };
+    let record = |id: &str| JsonFormat::Compact.encode(&json!({
+        "id":"writer", "ee":"ee_test", "worker":"system_worker_test", "status":"idle", "trace":"trace:writer",
+        "interface_state":{}, "active_checkpoints":[id], "checkpoints":[{
+            "id":id, "run":"writer", "epoch":0, "trace":"trace:result", "artifact_bindings":[],
+            "required_verified_artifacts":[], "interface_binding":{"interface":writer.door,"config":{"artifact_policy":{"mode":"all"}}},
+            "outbound_interface_bindings":[{"interface":writer.owner,"config":{"artifact_policy":{"mode":"all"}}}]
+        }]
+    })).unwrap();
+    let before = record("result_0");
+    let after = record("result_1");
+    let args = OrderedArguments { ordered:true, writes:vec![
+        OrderedEntry::prepare(PathBuf::from("/runs/writer.json"), &before, &after, Some(JsonFormat::Compact)).unwrap(),
+        OrderedEntry::Content(OrderedContentEntry {path:PathBuf::from("/runs/target.json"), content:"after".into(), expected_before_content:"before".into(), expected_before_hash:ContentHash::of_bytes(b"before").to_hex()})
+    ]};
+    let pinned = RunRecord::from_bytes(&before).unwrap();
+    let cp = &pinned.checkpoints[0];
+    let metadata = InvocationMetadata::new(Default::default())
+        .with_runtime(octopus_ledger::RuntimeInvocationMetadata {run:pinned.id.clone(), ee:pinned.ee.clone(), worker:pinned.worker.clone(), checkpoint:cp.id.clone(), interface:writer.owner.clone(), epoch:0, run_record_hash:Some(ContentHash::of_bytes(&before).to_hex())})
+        .with_outbound_interface_bindings(vec![writer.owner.clone()])
+        .with_checkpoint_binding_policy(CheckpointBindingPolicySnapshot {inbound:cp.interface_binding.clone().unwrap(), outbound:cp.outbound_interface_bindings.clone()})
+        .with_checkpoint_admission(octopus_ledger::CheckpointAdmissionMetadata {artifact_label:writer.result_label.clone(), required_artifact_labels:vec![], complete:true});
+    let result: ToolResultArtifact = serde_json::from_value(json!({"tool":writer.tool,"label":writer.result_label,"ok":false,
+        "error":{"code":"tool_effect_indeterminate","message":"disk full","details":{"source_movement_seq":10,"failure_details":{
+            "source_movement_seq":10,"tool":writer.tool,"effect_state":"in_flight_outcome_unknown"}}}
+    })).unwrap();
+    assert_eq!(args.checked_result(&writer, &metadata, &before, &result, 1048576, 10).unwrap(), OrderedTargetEffect::UncertainWriter);
+    assert!(args.checked_result(&writer, &metadata, &before, &result, 1048576, 11).is_err());
+    assert!(args.checked_result(&writer, &metadata, &after, &result, 1048576, 10).is_err());
+}

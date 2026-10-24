@@ -24,7 +24,8 @@ function operatorOsProjection(store) {
       const matches = [...new Set([
         ...projectedRunInterfaceIds(record),
         ...arrayValue(record.archived_client_interface_ids),
-      ])].filter((interfaceId) => clientInterfaces.has(interfaceId));
+      ])].filter((interfaceId) => clientInterfaces.has(interfaceId)
+        && record.interface_state?.[interfaceId]?.client_surface_role !== undefined);
       if (matches.length > 1) {
         errors.push(`run '${record.run_id}' projects more than one exact Octopus OS client interface`);
         continue;

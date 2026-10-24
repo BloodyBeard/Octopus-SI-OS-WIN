@@ -42,6 +42,8 @@ async function assertPackMembers() {
     "mark/tool.result.corresponds",
     "verifier/memory_capture_outcome",
     "verifier/memory_experience",
+    "verifier/operator_approval",
+    "verifier/operator_input",
     "verifier/tool_call_allowed",
     "verifier/tool_result_correspondence",
   ]);
@@ -60,7 +62,7 @@ async function copyBaseline(activeRegistryRoot) {
   }
 }
 
-async function assertInterfaceImportClosure() {
+async function assertInterfaceImportClosure(publicationExecutable) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-interface-import-closure-")));
   try {
     const source = path.join(root, "source");
@@ -85,7 +87,7 @@ async function assertInterfaceImportClosure() {
         ...(includeOwner ? [{ registry_kind: "interface", owner: "world_code_owner" }] : []),
       ],
     });
-    const roots = { publication: require("./support/native-publication.cjs").nativePublication(), sourceRegistryRoot: source, activeRegistryRoot: active, libraryRoot: library, stateRoot: state };
+    const roots = { publication: require("./support/native-publication.cjs").nativePublication(publicationExecutable), sourceRegistryRoot: source, activeRegistryRoot: active, libraryRoot: library, stateRoot: state };
     await writeJson(path.join(importer, "interface.json"), { id: "world_importer" });
     await writeJson(path.join(importer, "life.json"), { processes: [{ bin: "interface://world_code_owner/packages/bin/life" }] });
     await writeJson(path.join(owner, "interface.json"), { id: "world_code_owner" });
@@ -200,9 +202,9 @@ async function assertPackageCopyBudget(packageIds, executable, root) {
 }
 
 async function run(preparedExecutable) {
-  await assertInterfaceImportClosure();
   if (!preparedExecutable) buildTopologyBinary();
   const executable = preparedExecutable ?? path.join(repoRoot, "target", "debug", "octopus-operator-chat-topology");
+  await assertInterfaceImportClosure(executable);
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-codex-pack-closure-")));
   try {
     const binary = path.join(root, "target", "debug", "octopus-operator-chat-topology");
@@ -281,6 +283,22 @@ async function run(preparedExecutable) {
       expectedSourceDigests,
     });
     assert.equal(result.changed, true);
+
+    for (const owner of await fs.readdir(path.join(activeRegistryRoot, "interface"))) {
+      if (owner === ".octopus-publication") continue;
+      const descriptor = JSON.parse(await fs.readFile(path.join(activeRegistryRoot, "interface", owner, "interface.json"), "utf8"));
+      const continuity = descriptor.interface_driver_config?.private_config?.operator_continuity;
+      for (const contract of Object.values(continuity ?? {}).filter(value => value && typeof value === "object")) {
+        for (const requirement of Object.values(contract).filter(value => value && typeof value === "object" && value.verifier)) {
+          const verifierRoot = path.join(activeRegistryRoot, "verifier", requirement.verifier);
+          const verifier = JSON.parse(await fs.readFile(path.join(verifierRoot, "verifier.json"), "utf8"));
+          assert.equal(verifier.id, requirement.verifier);
+          assert.ok((await fs.stat(path.join(verifierRoot, verifier.script))).isFile());
+          const mark = JSON.parse(await fs.readFile(path.join(activeRegistryRoot, "mark", requirement.mark, "mark.json"), "utf8"));
+          assert.equal(mark.id, requirement.mark);
+        }
+      }
+    }
 
     catalog = await readLocalPackageCatalog(roots);
     const installedPack = catalog.packs.find((entry) => entry.id === "codex");

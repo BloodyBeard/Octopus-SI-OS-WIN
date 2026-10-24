@@ -183,57 +183,7 @@ function normalizeSecondaryPaneTab(value: unknown): SecondaryPaneTabState | null
   const row = value as Record<string, unknown>;
   const id = boundedPaneText(row.id, 512);
   const target = normalizeWorkspacePaneTarget(row.target);
-  if (id && target) return { id, target };
-  const surfaceId = boundedPaneText(row.surfaceId, 512);
-  const runId = boundedPaneText(row.runId, 512);
-  const storedWorkspaceKey = row.workspaceKey === "dashboard" || row.workspaceKey === "octopus-os"
-    ? row.workspaceKey
-    : null;
-  if (!id) return null;
-  const operator = row.operatorWorkspace;
-  if (operator && typeof operator === "object" && !Array.isArray(operator)) {
-    const operatorRow = operator as Record<string, unknown>;
-    if (operatorRow.kind === "files") {
-      const target = normalizeFilesOpenTarget(operatorRow.target);
-      if (operatorRow.target !== undefined && !target) return null;
-      return {
-        id,
-        target: {
-          kind: "files",
-          workspaceKey: storedWorkspaceKey ?? "dashboard",
-          ...(target ? { openTarget: target } : {}),
-        },
-      };
-    }
-    if (operatorRow.kind === "terminal") {
-      const terminalId = boundedPaneText(operatorRow.terminalId, 128);
-      const title = boundedPaneText(operatorRow.title, 120);
-      return terminalId ? {
-        id,
-        target: {
-          kind: "terminal",
-          terminalId,
-          title,
-          workspaceKey: storedWorkspaceKey ?? "dashboard",
-        },
-      } : null;
-    }
-    return null;
-  }
-  const workerEnvironment = normalizeWorkerEnvironmentPaneTarget(row.workerEnvironment);
-  if (workerEnvironment) {
-    return {
-      id,
-      target: {
-        kind: "worker_environment",
-        target: workerEnvironment,
-        workspaceKey: storedWorkspaceKey ?? "dashboard",
-      },
-    };
-  }
-  if (!surfaceId) return null;
-  const workspaceKey = storedWorkspaceKey ?? legacySecondaryWorkspace(surfaceId);
-  return workspaceSurfacePaneTab(workspaceKey, surfaceId, runId);
+  return id && target ? { id, target } : null;
 }
 
 function normalizeWorkspacePaneTarget(value: unknown): SecondaryPaneTabState["target"] | null {
@@ -282,12 +232,6 @@ function normalizeWorkspacePaneTarget(value: unknown): SecondaryPaneTabState["ta
     return target ? { kind: "worker_environment", target, workspaceKey } : null;
   }
   return null;
-}
-
-function legacySecondaryWorkspace(surfaceId: string): ClientWorkspaceKey {
-  return ["voice", "chat", "scheduled", "applications", "drivers"].includes(surfaceId)
-    ? "octopus-os"
-    : "dashboard";
 }
 
 function normalizeWorkerEnvironmentPaneTarget(value: unknown): WorkerEnvironmentPaneTarget | null {

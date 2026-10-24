@@ -32,7 +32,6 @@ import { createReviewTaskSeed } from "./chat/reviewTask";
 import { dispatchOpenTaskSourcesPane } from "./chat/taskSourcesPane";
 import { WorkspacePaneHeaderActions, useWorkspacePaneHeaderActionsHost } from "./shell/WorkspacePaneHeaderActions";
 import { recordClientTaskRead } from "../shell/clientWorkspaces";
-import { OctopusLoadingState } from "./OctopusLoadingLogo";
 import { chatProductError } from "./chat/chatProductError";
 import type { FilesOpenTarget } from "./files/types";
 import {
@@ -414,9 +413,11 @@ export function ChatView({
         applicationSelectionLocked={chat.applicationSelectionLocked}
         applicationSelectionLockReason={chat.applicationSelectionLockReason}
         canSubmit={chat.canSubmit}
+        contextUsage={chat.contextUsage}
         canQueue={chat.canQueue}
         onQueue={chat.queueCurrentTurn}
         editingQueuedTurn={chat.editingQueuedTurn}
+        hasQueuedMessages={chat.queuedTurns.length > 0}
         onCancelQueuedEdit={chat.cancelQueuedEdit}
         eeId={chat.eeId}
         executionContextLocked={Boolean(chat.activeRunId)}
@@ -450,6 +451,7 @@ export function ChatView({
         providerInterfaces={chat.providerInterfaces}
         providerInterfacesLoaded={chat.providerInterfacesLoaded}
         providerInterfacesRefreshing={chat.providerInterfacesRefreshing}
+        modelSelectionLoading={chat.modelSelectionLoading}
         projectedFileSources={projectedFileSources}
         pausedQueueSubmissionCount={chat.pausedQueueSubmissionCount}
         reasoningEffort={chat.reasoningEffort}
@@ -458,6 +460,7 @@ export function ChatView({
         resumeAvailable={chat.resumeAvailable}
         runId={chat.activeRunId}
         suggestionSourceSequence={chat.activeRun?.lastTerminalMessage?.movementSeq}
+        runtimeHome={chat.runtimeHome}
         submissionMode={chat.busy ? "queue" : "send"}
         submitBlockReason={chat.submitBlockReason}
         text={chat.text}
@@ -481,7 +484,6 @@ export function ChatView({
       ) : null}
       <QueuedMessageList
         messages={chat.queuedTurns}
-        notice={chat.queueNotice}
         paused={chat.queuePaused}
         sendNowAvailable={chat.canSendQueued}
         onDelete={chat.deleteQueuedTurn}
@@ -513,14 +515,6 @@ export function ChatView({
   ) : (
     <div className="min-w-0 w-full" data-dropdown-overlay-side="top">{composerStack}</div>
   );
-
-  if (chat.loadingMessages) {
-    return (
-      <section className={chatViewClassName(composerVisible, headerMode)}>
-        <OctopusLoadingState className="surface-content-loading-state" label="Loading task" />
-      </section>
-    );
-  }
 
   return (
     <section className={chatViewClassName(composerVisible, headerMode)}>
@@ -592,24 +586,24 @@ export function ChatView({
           <div className="chat-conversation-pane">
             <ChatMessageList
               activityPresentation={activityPresentation}
-              activeMessageCount={chat.activeMessageCount}
+              activeMessageCount={chat.loadingMessages ? 0 : chat.activeMessageCount}
               conversationId={chat.activeRunId}
               contentX={summaryContentX}
               dragOver={composerVisible && chat.dragOver}
               dropEnabled={composerVisible}
-              emptyLabel={composerVisible ? undefined : chat.activeRun?.archived ? "No messages in this archived task" : "No activity yet"}
-              emptyState={chat.activeRunId || !composerVisible ? "empty-task" : "new-task"}
+              emptyLabel={chat.activeRun?.archived ? "No messages in this archived task" : undefined}
+              emptyState={chat.loadingMessages ? "loading-task" : chat.activeRunId || !composerVisible ? "empty-task" : "new-task"}
               backdrop={octopuses ? <OctopusSwarm runs={chat.runs} /> : undefined}
               findActiveIndex={activeFindIndex}
               findQuery={findOpen ? chat.messageQuery : ""}
-              messages={chat.renderedMessages}
+              messages={chat.loadingMessages ? [] : chat.renderedMessages}
               listenToGlobalCommands={commandsActive}
               pinnedArtifactIds={chat.activeRun?.pinnedArtifactIds ?? []}
               pinningArtifactIds={chat.pinningArtifactIds}
               taskActionsEnabled={composerVisible}
               toolPresentations={chat.toolPresentations}
               onContinueInNewTask={chat.continueInNewTask}
-              onEditUserMessage={chat.editUserMessageInNewTask}
+              onEditUserMessage={chat.editUserMessage}
               onSteerUserMessage={chat.steerUserMessage}
               steerableMessageId={chat.steerableMessageId}
               onOperatorRequestResponse={chat.respondToOperatorRequest}

@@ -4,6 +4,7 @@ import type { ChatDraftValue } from "./useChatDraftState";
 import type { ChatAttachment, ChatQueuedTurnStatus, ChatRenderMessage } from "./types";
 
 export type QueuedChatTurn = {
+  replacesMessage?: { id: string; content: string };
   id: string;
   messageId: string;
   runKey: string;

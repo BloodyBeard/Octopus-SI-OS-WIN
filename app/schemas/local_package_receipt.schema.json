@@ -16,18 +16,47 @@
     "members"
   ],
   "properties": {
-    "schema": { "const": "octopus.local_package_receipt" },
-    "schema_version": { "enum": [1, 2] },
-    "package_id": { "$ref": "#/$defs/id" },
-    "package_version": { "type": "string", "minLength": 1, "maxLength": 64 },
-    "product_kind": { "enum": ["application", "driver", "artifact"] },
-    "product_id": { "$ref": "#/$defs/id" },
-    "operation_id": { "$ref": "#/$defs/operationId" },
-    "manifest_digest": { "$ref": "#/$defs/digest" },
-    "source_digest": { "$ref": "#/$defs/digest" },
+    "schema": {
+      "const": "octopus.local_package_receipt"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "package_id": {
+      "$ref": "#/$defs/id"
+    },
+    "package_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "product_kind": {
+      "enum": [
+        "application",
+        "driver",
+        "artifact"
+      ]
+    },
+    "product_id": {
+      "$ref": "#/$defs/id"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/operationId"
+    },
+    "manifest_digest": {
+      "$ref": "#/$defs/digest"
+    },
+    "source_digest": {
+      "$ref": "#/$defs/digest"
+    },
     "required_packages": {
-      "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
-      "items": { "$ref": "#/$defs/id" }
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/id"
+      }
     },
     "members": {
       "type": "array",
@@ -36,61 +65,154 @@
       "uniqueItems": true,
       "items": {
         "type": "object",
-        "required": ["registry_kind", "owner", "target", "digest"],
+        "required": [
+          "registry_kind",
+          "owner",
+          "target",
+          "digest",
+          "source_files"
+        ],
         "properties": {
-          "registry_kind": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "owner": { "$ref": "#/$defs/id" },
-          "target": { "$ref": "#/$defs/relativePath" },
-          "digest": { "$ref": "#/$defs/digest" },
-          "content_digest": { "$ref": "#/$defs/digest" },
+          "registry_kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "owner": {
+            "$ref": "#/$defs/id"
+          },
+          "target": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "content_digest": {
+            "$ref": "#/$defs/digest"
+          },
           "materialized_files": {
             "type": "array",
             "items": {
-              "type": "object", "required": ["path", "sha256", "size", "mode"], "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "path",
+                "sha256",
+                "size",
+                "mode"
+              ],
+              "additionalProperties": false,
               "properties": {
-                "path": { "type": "string", "minLength": 1 },
-                "sha256": { "$ref": "#/$defs/digest" },
-                "size": { "type": "integer", "minimum": 0 },
-                "mode": { "type": "integer", "minimum": 0, "maximum": 511 }
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "mode": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 511
+                }
               }
             }
           },
           "configuration": {
-            "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
-            "items": { "$ref": "#/$defs/configurationEntry" }
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/configurationEntry"
+            }
           },
           "source_files": {
             "type": "array",
             "items": {
-              "type": "object", "required": ["path", "sha256", "size", "mode"], "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "path",
+                "sha256",
+                "size",
+                "mode"
+              ],
+              "additionalProperties": false,
               "properties": {
-                "path": { "type": "string", "minLength": 1 },
-                "sha256": { "$ref": "#/$defs/digest" },
-                "size": { "type": "integer", "minimum": 0 },
-                "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
-                "owned_sha256": { "$ref": "#/$defs/digest" },
-                "configuration_digest": { "$ref": "#/$defs/digest" }
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "mode": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 511
+                },
+                "owned_sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "configuration_digest": {
+                  "$ref": "#/$defs/digest"
+                }
               },
               "dependentRequired": {
-                "owned_sha256": ["configuration_digest"],
-                "configuration_digest": ["owned_sha256"]
+                "owned_sha256": [
+                  "configuration_digest"
+                ],
+                "configuration_digest": [
+                  "owned_sha256"
+                ]
               }
             }
           },
           "json_files": {
-            "type": "array", "maxItems": 4096,
+            "type": "array",
+            "maxItems": 4096,
             "items": {
-              "type": "object", "required": ["path", "sha256", "size"], "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "path",
+                "sha256",
+                "size"
+              ],
+              "additionalProperties": false,
               "properties": {
-                "path": { "type": "string", "minLength": 1, "maxLength": 512 },
-                "sha256": { "$ref": "#/$defs/digest" },
-                "size": { "type": "integer", "minimum": 0 },
-                "owned_sha256": { "$ref": "#/$defs/digest" },
-                "configuration_digest": { "$ref": "#/$defs/digest" }
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "owned_sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "configuration_digest": {
+                  "$ref": "#/$defs/digest"
+                }
               },
               "dependentRequired": {
-                "owned_sha256": ["configuration_digest"],
-                "configuration_digest": ["owned_sha256"]
+                "owned_sha256": [
+                  "configuration_digest"
+                ],
+                "configuration_digest": [
+                  "owned_sha256"
+                ]
               }
             }
           }
@@ -100,13 +222,6 @@
     }
   },
   "additionalProperties": false,
-  "allOf": [
-    {
-      "if": { "properties": { "schema_version": { "const": 2 } } },
-      "then": { "properties": { "members": { "items": { "required": ["source_files"] } } } },
-      "else": { "properties": { "members": { "items": { "not": { "anyOf": [{ "required": ["source_files"] }, { "required": ["configuration"] }] } } } } }
-    }
-  ],
   "$defs": {
     "configurationEntry": {
       "type": "object",
@@ -146,9 +261,18 @@
         }
       }
     },
-    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "operationId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{8,96}$" },
-    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,96}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "relativePath": {
       "type": "string",
       "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"

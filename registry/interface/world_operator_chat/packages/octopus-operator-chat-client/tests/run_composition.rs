@@ -11,16 +11,62 @@ fn enable_native_profile(root: &std::path::Path) {
     let declared: Value = serde_json::from_slice(&std::fs::read(source).unwrap()).unwrap();
     let path = "registry/interface/world_provider_fixture/interface.json";
     let mut provider: Value = serde_json::from_slice(&std::fs::read(root.join(path)).unwrap()).unwrap();
-    provider["interface_driver_config"]["private_config"]["run_affordance_profile"] = declared["interface_driver_config"]["private_config"]["run_affordance_profile"].clone();
+    for field in ["run_affordance_profile", "client_projection_output_labels"] {
+        provider["interface_driver_config"]["private_config"][field] = declared["interface_driver_config"]["private_config"][field].clone();
+    }
     write(root, path, provider);
 }
 
-fn adoption_request(root: &std::path::Path, request: &RunCompositionRequest, plan: &RunCompositionPlan) -> Value {
-    use sha2::Digest;
-    let provider = request.roots.registry_root.join("interface").join(&plan.provider_interface_id).join("interface.json");
-    json!({"roots":request.roots,"ledger_root":root.join("ledger"),"client_template_interface":"world_operator_chat",
-        "run_id":plan.run_id,"expected_run_hash":format!("{:x}",sha2::Sha256::digest(std::fs::read(&plan.run_write.path).unwrap())),
-        "expected_provider_hash":format!("{:x}",sha2::Sha256::digest(std::fs::read(provider).unwrap()))})
+#[test]
+fn current_amendment_checks_future_routes_before_they_can_disable_control() {
+    use octopus_operator_chat_client::run_composition::current_run::*;
+    use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
+    use octopus_ledger::ContentHash;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut request = support::client_fixture(&root);
+    enable_native_profile(&root);
+    let descriptor: Value = serde_json::from_slice(&std::fs::read(root.join("registry/interface/world_provider_fixture/interface.json")).unwrap()).unwrap();
+    let labels = descriptor["interface_driver_config"]["private_config"]["client_projection_output_labels"].as_array().unwrap().iter().filter(|label| **label != "interface.artifact.output" && **label != "turn.error").cloned().collect::<Vec<_>>();
+    request.communication.output_selection = Some(serde_json::from_value(json!({"record_labels":labels,"return_labels":["interface.artifact.output","turn.error"]})).unwrap());
+    let composition = plan_run_composition(&request).unwrap();
+    for file in composition_candidate_writes(&composition) {
+        std::fs::create_dir_all(file.path.parent().unwrap()).unwrap();
+        std::fs::write(file.path, file.content).unwrap();
+    }
+    let initial: Value = serde_json::from_str(&composition.run_write.content).unwrap();
+    let pending = pending_tool_handoff(&request, &composition, &initial).to_string();
+    std::fs::write(&composition.run_write.path, &pending).unwrap();
+    let current = RunRecord::from_bytes(pending.as_bytes()).unwrap();
+    let provider = composition.provider_interface_id.clone();
+    let mut after = json!(current);
+    after["interface_state"][&provider]["run_authoring_binding"]["checkpoints"].as_array_mut().unwrap().push(json!({
+        "name":"future_peer", "role":"provider_artifact_output", "include_context":false,
+        "interface_binding":{"interface":provider,"config":{"artifact_policy":{"mode":"allow","names":["peer.reply"],"namespaces":[]}}},
+        "outbound_interface_bindings":[{"interface":"system_worker_unselected","config":{"artifact_policy":{"mode":"all"}}}],
+        "required_verified_artifacts":[]
+    }));
+    let policy = root.join("registry/interface/system_worker_unselected/policy.json");
+    let mut worker: Value = serde_json::from_slice(&std::fs::read(&policy).unwrap()).unwrap();
+    worker["role_artifacts"] = json!(["role-future-peer"]);
+    std::fs::write(policy, worker.to_string()).unwrap();
+    write(&root, "registry/artifact/role-future-peer/artifact.json", json!({"id":"role-future-peer","label":"context.reference","text":"Future peer role"}));
+    let caller_policy = root.join("registry/interface").join(current.worker.as_str()).join("policy.json");
+    let caller_before = std::fs::read(&caller_policy).unwrap();
+    let mut caller: Value = serde_json::from_slice(&caller_before).unwrap();
+    caller["ceiling"]["interfaces"].as_array_mut().unwrap().push(json!("system_worker_unselected"));
+    let activation = octopus_app_server::RegistryCandidateWrite { path:caller_policy, content:caller.to_string(),
+        expected_before_hash:Some(ContentHash::of_bytes(&caller_before).to_hex()) };
+    let door = composition.authoring.capability_doors["system_room"].clone();
+    let reader = composition.authoring.capability_tools["file.write"].clone();
+    let error = plan_current_run_amendment(&request.roots, &current, &provider.into(), CurrentRunRequest {
+        amendment_key:"missing-future-role".into(), publications:vec![], selection:None,
+        authored:Some(AuthoredCurrentRun { expected_before_hash:ContentHash::of_bytes(pending.as_bytes()).to_hex(),
+            expected_before:json!(current), run_record:after, writes:vec![activation] }),
+    }, ProviderCapabilityBridge { tool:reader.clone(), correlation_id:"readback".into(),
+        arguments_hash:ContentHash::of_bytes(b"{}").to_hex(), return_interface:door.clone().into() }, &[(reader,door.into())]).err().expect("an unbound future role must reject the amendment");
+    assert!(error.contains("role-future-peer"), "{error}");
+    assert_eq!(std::fs::read(&composition.run_write.path).unwrap(), pending.as_bytes());
 }
 
 fn pending_tool_handoff(request: &RunCompositionRequest, plan: &RunCompositionPlan, before: &Value) -> Value {
@@ -66,7 +112,7 @@ fn pending_tool_handoff(request: &RunCompositionRequest, plan: &RunCompositionPl
 }
 
 #[test]
-fn legacy_current_selection_materializes_defaults_and_preserves_provider_life_while_attaching() {
+fn current_default_tool_selection_preserves_provider_life_while_attaching() {
     use octopus_operator_chat_client::{SelectedToolSeed,run_composition::current_run::*};
     use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
     use octopus_ledger::ContentHash;
@@ -802,309 +848,6 @@ fn composition_binds_planned_native_catalog_and_task_coordinates_before_validati
     let child=plan_run_composition(&request).unwrap();
     let provider:Value=serde_json::from_str(&child.descriptor_writes.iter().find(|write|write.tag==format!("interface:{}",child.provider_interface_id)).unwrap().content).unwrap();
     assert_eq!(provider["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["client_template_interface_id"],"world_operator_chat");
-    for edit in composition_candidate_writes(&child) {
-        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(edit.path,edit.content).unwrap();
-    }
-    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap();
-    std::fs::write(root.join("ledger/movements.jsonl"),"").unwrap();
-    let provider_path=request.roots.registry_root.join("interface").join(&child.provider_interface_id).join("interface.json");
-    let mut old=provider.clone();
-    let defaults=old["interface_driver_config"]["private_config"]["run_affordances"]["defaults"].as_object_mut().unwrap();
-    defaults.remove("client_template_interface_id"); defaults.insert("return_interface_ids".into(),json!(["chosen.destination"]));
-    std::fs::write(&provider_path,serde_json::to_vec_pretty(&old).unwrap()).unwrap();
-    let source_path=root.join("registry/interface/world_provider_fixture/interface.json");
-    let mut source:Value=serde_json::from_slice(&std::fs::read(&source_path).unwrap()).unwrap();
-    source["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["operations"][0]["description"]=json!("Updated release description");
-    std::fs::write(&source_path,serde_json::to_vec_pretty(&source).unwrap()).unwrap();
-    let original_run=std::fs::read(&child.run_write.path).unwrap();
-    let plan_adoption=|| {
-        octopus_operator_chat_client::native_run_authoring::plan_existing_adoption(&serde_json::from_value(adoption_request(&root,&request,&child)).unwrap())
-            .map(|plan|serde_json::to_value(plan).unwrap())
-    };
-    let adopted=plan_adoption().unwrap(); assert_eq!(adopted["status"],"planned"); assert_eq!(adopted["writes"].as_array().unwrap().len(),2);
-    let updated:Value=serde_json::from_str(adopted["writes"][1]["content"].as_str().unwrap()).unwrap();
-    let mut expected=old.clone();
-    let private=&mut expected["interface_driver_config"]["private_config"];
-    private["run_affordances"]["defaults"]["client_template_interface_id"]=json!("world_operator_chat");
-    private["run_affordances"]["catalog_artifact"]=updated["interface_driver_config"]["private_config"]["run_affordances"]["catalog_artifact"].clone();
-    private["run_affordance_profile"]=source["interface_driver_config"]["private_config"]["run_affordance_profile"].clone();
-    assert_eq!(updated,expected);
-    let catalog_path=adopted["writes"][0]["path"].as_str().unwrap();
-    let catalog_bytes=std::fs::read(catalog_path).unwrap();
-    let mut local:Value=serde_json::from_slice(&catalog_bytes).unwrap(); local["text"]=json!("Locally authored catalog");
-    std::fs::write(catalog_path,serde_json::to_vec(&local).unwrap()).unwrap();
-    assert!(plan_adoption().unwrap_err().contains("prior owner-generated"));
-    std::fs::write(catalog_path,catalog_bytes).unwrap();
-    let mut explicit=old.clone();
-    explicit["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["client_template_interface_id"]=Value::Null;
-    std::fs::write(&provider_path,serde_json::to_vec(&explicit).unwrap()).unwrap();
-    let explicit=plan_adoption().unwrap();
-    let explicit:Value=serde_json::from_str(explicit["writes"][1]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(explicit["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["client_template_interface_id"],Value::Null);
-    std::fs::write(&provider_path,serde_json::to_vec_pretty(&old).unwrap()).unwrap();
-    for edit in adopted["writes"].as_array().unwrap() {std::fs::write(edit["path"].as_str().unwrap(),edit["content"].as_str().unwrap()).unwrap();}
-    assert_eq!(plan_adoption().unwrap()["status"],"unchanged");
-    assert_eq!(std::fs::read(&child.run_write.path).unwrap(),original_run);
-}
-
-#[test]
-fn native_result_receiving_adoption_preserves_legacy_rows_and_declared_authority() {
-    use octopus_operator_chat_client::native_run_authoring::plan_existing_adoption;
-    use octopus_run_authoring::provider_context_bindings;
-    let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
-    let request = support::client_fixture(&root); enable_native_profile(&root);
-    let plan = plan_run_composition(&request).unwrap();
-    let provider = &plan.provider_interface_id;
-    let fresh: Value = serde_json::from_str(&plan.run_write.content).unwrap();
-    let templates = fresh["interface_state"][provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap();
-    let outputs = templates.iter().filter(|cp|cp["role"]=="provider_tool_output").cloned().collect::<Vec<_>>();
-    assert!(!outputs.is_empty());
-    for output in &outputs {
-        let tools = output["required_verified_artifacts"][0]["params"]["tools"].as_array().unwrap();
-        assert_eq!(output["result_receiving"].as_object().unwrap().len(),tools.len());
-        for tool in tools {
-            assert_eq!(output["result_receiving"][tool.as_str().unwrap()],json!({"mark":"tool.result.corresponds",
-                "artifact_label":format!("{}.result",tool.as_str().unwrap()),"verifier":"tool_result_correspondence","params":{}}));
-        }
-        assert!(!templates.iter().any(|input|input["role"]=="stable"
-            && input["interface_binding"]["interface"]==output["outbound_interface_bindings"][0]["interface"]));
-    }
-    let config_path=root.join("registry/interface/world_operator_chat/client.json");
-    let mut config:Value=serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-    let mut prior_config=config.clone();prior_config["run"].as_object_mut().unwrap().remove("tool_result_receiving");
-    std::fs::write(&config_path,prior_config.to_string()).unwrap();
-    let plan=plan_run_composition(&request).unwrap();
-    for write in composition_candidate_writes(&plan) {
-        std::fs::create_dir_all(write.path.parent().unwrap()).unwrap(); std::fs::write(write.path,write.content).unwrap();
-    }
-    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap(); std::fs::write(root.join("ledger/movements.jsonl"),b"").unwrap();
-    let provider=&plan.provider_interface_id;
-    let legacy:Value=serde_json::from_str(&plan.run_write.content).unwrap();
-    let parsed=RunRecord::from_bytes(plan.run_write.content.as_bytes()).unwrap();
-    let context=provider_context_bindings(&parsed,&provider.clone().into()).unwrap();
-    let returns=parsed.checkpoints.iter().filter(|cp|cp.inbound_interface().is_some_and(|door|plan.authoring.capability_doors.values().any(|id|id==door.as_str()))
-        && cp.outbound_interfaces().any(|id|id.as_str()==provider)).map(|cp|cp.id.clone()).collect::<Vec<_>>();
-    assert!(!returns.is_empty());
-    let worker_path=request.roots.registry_root.join("interface").join(&plan.worker_interface_id).join("policy.json");
-    let mut ceiling:Value=serde_json::from_slice(&std::fs::read(&worker_path).unwrap()).unwrap();
-    ceiling["ceiling"]["mark_outcomes"]=json!(["tool.call.allowed"]);
-    std::fs::write(&worker_path,serde_json::to_vec(&ceiling).unwrap()).unwrap();
-    config["result_receiving_updates"].as_array_mut().unwrap().push(json!({"worker_template_interface":"system_worker_template","mark_outcomes":["tool.call.allowed"]}));
-    std::fs::write(config_path,serde_json::to_vec(&config).unwrap()).unwrap();
-    let adoption = || plan_existing_adoption(&serde_json::from_value(adoption_request(&root,&request,&plan)).unwrap())
-        .map(|value|serde_json::to_value(value).unwrap());
-    let adopted=adoption().unwrap(); assert_eq!(adopted["status"],"planned"); assert_eq!(adopted["writes"].as_array().unwrap().len(),2);
-    let next:Value=serde_json::from_str(adopted["writes"].as_array().unwrap().iter().find(|write|write["path"]==json!(plan.run_write.path)).unwrap()["content"].as_str().unwrap()).unwrap();
-    assert_eq!(next["checkpoints"],legacy["checkpoints"]);
-    assert_eq!(next["interface_state"][provider]["authoring_generation"],legacy["interface_state"][provider]["authoring_generation"]);
-    assert_eq!(next["interface_state"][provider]["frontier_checkpoint_ids"],legacy["interface_state"][provider]["frontier_checkpoint_ids"]);
-    assert_eq!(provider_context_bindings(&RunRecord::from_bytes(next.to_string().as_bytes()).unwrap(),&provider.clone().into()).unwrap(),context);
-    for id in returns { assert!(!next["active_checkpoints"].as_array().unwrap().contains(&json!(id))); }
-    let mut blocked=ceiling.clone();blocked["ceiling"]["mark_outcomes"]=json!([]);std::fs::write(&worker_path,blocked.to_string()).unwrap();
-    let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-    std::fs::write(&worker_path,ceiling.to_string()).unwrap();
-    let ee_path=root.join("ee/ee_existence.json");let ee_before=std::fs::read(&ee_path).unwrap();
-    let mut narrowed:Value=serde_json::from_slice(&ee_before).unwrap();narrowed["policy_narrowing"]["allowed_mark_outcomes"]=json!(["tool.call.allowed"]);
-    std::fs::write(&ee_path,narrowed.to_string()).unwrap();
-    let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-    std::fs::write(&ee_path,ee_before).unwrap();
-    let mut pending=legacy.clone();pending["interface_state"][provider]["pending_handoff"]=json!({"terminal":false,"source_movement_seq":0});
-    std::fs::write(&plan.run_write.path,pending.to_string()).unwrap();
-    assert!(adoption().unwrap_err().contains("pending_handoff is malformed"));
-    let pending=pending_tool_handoff(&request,&plan,&legacy);
-    std::fs::write(&plan.run_write.path,pending.to_string()).unwrap();
-    let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-    let mut archived=legacy.clone();
-    let client=archived["interface_state"].as_object().unwrap().iter()
-        .find(|(_,state)|state.get("client_surface_role").is_some()).unwrap().0.clone();
-    archived["interface_state"][&client]["client_archive"]=json!({"schema_version":1,"active_checkpoints":legacy["active_checkpoints"],
-        "checkpoints_digest":"0".repeat(64),"archived_at_ms":1});
-    archived["active_checkpoints"]=json!([]);
-    std::fs::write(&plan.run_write.path,archived.to_string()).unwrap();
-    let deferred=adoption().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-    assert!(deferred["reason"].as_str().unwrap().contains("archived task"));
-    assert!(deferred["preimages"].as_array().unwrap().iter().any(|pin|pin["path"]==json!(ee_path)));
-    std::fs::write(&plan.run_write.path,legacy.to_string()).unwrap();
-    for write in adopted["writes"].as_array().unwrap() {std::fs::write(write["path"].as_str().unwrap(),write["content"].as_str().unwrap()).unwrap();}
-    assert_eq!(adoption().unwrap()["status"],"unchanged");
-}
-
-#[test]
-fn package_provider_contract_adoption_preserves_local_settings_and_pending_work() {
-    use octopus_operator_chat_client::native_run_authoring::plan_existing_adoption;
-    let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
-    let request = support::client_fixture(&root); enable_native_profile(&root);
-    let child = plan_run_composition(&request).unwrap();
-    for edit in composition_candidate_writes(&child) {
-        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(edit.path, edit.content).unwrap();
-    }
-    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap(); std::fs::write(root.join("ledger/movements.jsonl"), "").unwrap();
-    let provider_path = root.join("registry/interface").join(&child.provider_interface_id).join("interface.json");
-    let before = std::fs::read(&provider_path).unwrap(); let run_before = std::fs::read(&child.run_write.path).unwrap();
-    let source_path = "registry/interface/world_provider_fixture/interface.json";
-    let mut source: Value = serde_json::from_slice(&std::fs::read(root.join(source_path)).unwrap()).unwrap();
-    let messages = json!({"fixture.request":{"text_fields":["question"],"client_context_field":"observation","identity_required":false}});
-    source["interface_driver_config"]["private_config"]["input_messages"] = messages.clone();
-    write(&root, source_path, source);
-    let plan = || plan_existing_adoption(&serde_json::from_value(adoption_request(&root, &request, &child)).unwrap())
-        .map(|plan| serde_json::to_value(plan).unwrap());
-    let adopted = plan().unwrap(); assert_eq!(adopted["status"], "planned");
-    assert_eq!(adopted["writes"].as_array().unwrap().len(), 1); assert_eq!(adopted["writes"][0]["path"], json!(provider_path));
-    let mut next: Value = serde_json::from_str(adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(next["interface_driver_config"]["private_config"].as_object_mut().unwrap().remove("input_messages"), Some(messages));
-    assert_eq!(next, serde_json::from_slice::<Value>(&before).unwrap());
-    assert_eq!(std::fs::read(&provider_path).unwrap(), before);
-    let pending = pending_tool_handoff(&request, &child, &serde_json::from_slice(&run_before).unwrap());
-    std::fs::write(&child.run_write.path, serde_json::to_vec(&pending).unwrap()).unwrap();
-    let deferred = plan().unwrap(); assert_eq!(deferred["status"], "deferred"); assert_eq!(deferred["writes"], json!([]));
-    std::fs::write(&child.run_write.path, &run_before).unwrap();
-    next["interface_driver_config"]["private_config"]["input_messages"] = json!({"local.request":{"text_fields":["local"],"identity_required":false}});
-    std::fs::write(&provider_path, serde_json::to_vec(&next).unwrap()).unwrap();
-    let local = std::fs::read(&provider_path).unwrap(); let deferred = plan().unwrap();
-    assert_eq!(deferred["status"], "deferred"); assert_eq!(deferred["writes"], json!([]));
-    assert!(deferred["reason"].as_str().unwrap().contains("locally authored fields [input_messages]"));
-    assert_eq!(std::fs::read(&provider_path).unwrap(), local);
-    std::fs::write(&provider_path, adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(plan().unwrap()["status"], "unchanged"); assert_eq!(std::fs::read(&child.run_write.path).unwrap(), run_before);
-}
-
-#[test]
-fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlement() {
-    use octopus_operator_chat_client::{SelectedToolSeed, native_run_authoring::plan_existing_adoption};
-    let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
-    let mut request = support::client_fixture(&root); enable_native_profile(&root);
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
-    for name in ["interface.json", "life.json"] {
-        write(&root, &format!("registry/interface/system_context/{name}"),
-            serde_json::from_slice(&std::fs::read(source.join("registry/interface/system_context").join(name)).unwrap()).unwrap());
-    }
-    for id in ["artifact-context-collection-guide", "artifact-system-library"] {
-        let relative = format!("registry/artifact/{id}/artifact.json");
-        write(&root, &relative, serde_json::from_slice(&std::fs::read(source.join(&relative)).unwrap()).unwrap());
-    }
-    for (file, pointer, item) in [
-        ("registry/interface/system_worker_template/policy.json", "/ceiling/tools", "client.mcp"),
-        ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces", "system_context"),
-        ("registry/ee_template/existence/ee_template.json", "/allowed_tools", "client.mcp"),
-        ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces", "system_context"),
-        ("ee/ee_existence.json", "/policy_narrowing/allowed_tools", "client.mcp"),
-        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces", "system_context"),
-    ] {
-        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
-        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!(item)); write(&root,file,value);
-    }
-    let mut canonical: Value = serde_json::from_slice(&std::fs::read(source.join("registry/tool/client.mcp/tool.json")).unwrap()).unwrap();
-    let mut config: Value = serde_json::from_slice(&std::fs::read(root.join("registry/interface/world_operator_chat/client.json")).unwrap()).unwrap();
-    canonical["process"]["authority"]["allow_process_signals"] = json!(true);
-    for predecessor in config["tool_contract_updates"][0]["predecessors"].as_array_mut().unwrap() {
-        predecessor["/process/authority/allow_process_signals"] = json!(false);
-    }
-    write(&root, "registry/interface/world_operator_chat/client.json", config.clone());
-    let mut previous = canonical.clone();
-    for (pointer, value) in config["tool_contract_updates"][0]["predecessors"][0].as_object().unwrap() {
-        *previous.pointer_mut(pointer).unwrap() = value.clone();
-    }
-    write(&root,"registry/tool/client.mcp/tool.json",previous);
-    request.selected_tools.push(SelectedToolSeed {tool:"client.mcp".into(),interface:"system_context".into(),worker_environment_kind:"system_room".into()});
-    let child = plan_run_composition(&request).unwrap();
-    for edit in composition_candidate_writes(&child) {
-        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(edit.path,edit.content).unwrap();
-    }
-    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap(); std::fs::write(root.join("ledger/movements.jsonl"),"").unwrap();
-    write(&root,"registry/tool/client.mcp/tool.json",canonical.clone());
-    let tool = &child.authoring.capability_tools["client.mcp"];
-    let tool_path = root.join("registry/tool").join(tool).join("tool.json");
-    let before = std::fs::read(&tool_path).unwrap(); let run_before = std::fs::read(&child.run_write.path).unwrap();
-    let plan = || plan_existing_adoption(&serde_json::from_value(adoption_request(&root,&request,&child)).unwrap())
-        .map(|plan|serde_json::to_value(plan).unwrap());
-    let adopted = plan().unwrap(); assert_eq!(adopted["status"],"planned");
-    assert_eq!(adopted["writes"].as_array().unwrap().len(),1); assert_eq!(adopted["writes"][0]["path"],json!(tool_path));
-    let next: Value = serde_json::from_str(adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(next["handler_config"],canonical["handler_config"]);
-    assert_eq!(next["process"]["authority"]["allow_process_signals"], true);
-    for fields in config["tool_contract_updates"][0]["predecessors"].as_array().unwrap() {
-        let mut previous = next.clone();
-        for (pointer, value) in fields.as_object().unwrap() { *previous.pointer_mut(pointer).unwrap() = value.clone(); }
-        std::fs::write(&tool_path,serde_json::to_vec(&previous).unwrap()).unwrap();
-        let replay=plan().unwrap();assert_eq!(replay["status"],"planned");
-        assert_eq!(serde_json::from_str::<Value>(replay["writes"][0]["content"].as_str().unwrap()).unwrap(),next);
-    }
-    std::fs::write(&tool_path,&before).unwrap();
-    let current = RunRecord::from_bytes(&run_before).unwrap();
-    let call = octopus_interfaces::InterfaceArtifactFile::write(root.join("accepted-call"), "tool.call",
-        &serde_json::to_vec(&json!({"tool":tool,"arguments":{},"correlation_id":"pending-contract-call"})).unwrap()).unwrap();
-    let accepted = call.load_into_blob(&mut octopus_ledger_store::DurableBlobs::open(root.join("ledger/blobs")).unwrap()).unwrap().artifact;
-    let door = child.authoring.capability_doors["system_context"].clone();
-    let metadata = octopus_interfaces::InvocationMetadata::new(octopus_interfaces::GrantProjection {
-        tools:vec![tool.clone()], ..Default::default()
-    }).with_runtime(octopus_interfaces::RuntimeInvocationMetadata {
-        run:current.id.clone(), ee:current.ee.clone(), worker:current.worker.clone(),
-        checkpoint:current.checkpoints[0].id.clone(), interface:door.clone().into(), epoch:0, run_record_hash:None,
-    });
-    let accepted = octopus_ledger::Movement { seq:octopus_ledger::Seq(0), lamport:octopus_ledger::Lamport(1), recorded_at_unix_ms:1,
-        trace:current.trace.clone(), kind:octopus_ledger::MovementKind::InterfaceOutbound,
-        from:octopus_ledger::Endpoint::Interface(child.provider_interface_id.clone().into()),
-        to:octopus_ledger::Endpoint::Interface(door.into()), artifact:Some(accepted), invocation_metadata:Some(metadata.into()) };
-    std::fs::write(root.join("ledger/movements.jsonl"),format!("{}\n",serde_json::to_string(&accepted).unwrap())).unwrap();
-    let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-    assert!(deferred["reason"].as_str().unwrap().contains("accepted tool work"));assert_eq!(std::fs::read(&tool_path).unwrap(),before);
-    std::fs::write(root.join("ledger/movements.jsonl"),"").unwrap();
-    let mut pending: Value = serde_json::from_slice(&run_before).unwrap(); pending["interface_state"][&child.provider_interface_id]["pending_handoff"]=json!({"terminal":false,"source_movement_seq":0});
-    std::fs::write(&child.run_write.path,serde_json::to_vec(&pending).unwrap()).unwrap();
-    assert!(plan().unwrap_err().contains("pending_handoff is malformed"));
-    let pending=pending_tool_handoff(&request,&child,&serde_json::from_slice(&run_before).unwrap());
-    std::fs::write(&child.run_write.path,serde_json::to_vec(&pending).unwrap()).unwrap();
-    let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-    assert_eq!(std::fs::read(&tool_path).unwrap(),before);std::fs::write(&child.run_write.path,&run_before).unwrap();
-    let sidecar=root.join("registry/interface").join(&child.authoring.capability_doors["system_context"]).join("octopus_os.json");
-    let ownership=std::fs::read(&sidecar).unwrap(); let mut wrong:Value=serde_json::from_slice(&ownership).unwrap();wrong["owner_interface"]=json!("foreign");
-    std::fs::write(&sidecar,serde_json::to_vec(&wrong).unwrap()).unwrap();assert!(plan().unwrap_err().contains("exact client"));std::fs::write(&sidecar,ownership).unwrap();
-    let provider_path=root.join("registry/interface").join(&child.provider_interface_id).join("interface.json");
-    let provider:Value=serde_json::from_slice(&std::fs::read(&provider_path).unwrap()).unwrap();
-    let catalog_path=root.join("registry/artifact").join(provider["interface_driver_config"]["private_config"]["run_affordances"]["catalog_artifact"]["id"].as_str().unwrap()).join("artifact.json");
-    let source_path=root.join("registry/interface/world_provider_fixture/interface.json");
-    let prior_source=std::fs::read(&source_path).unwrap();let mut updated_source:Value=serde_json::from_slice(&prior_source).unwrap();
-    updated_source["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["text"]=json!("Updated package catalog");
-    std::fs::write(&source_path,serde_json::to_vec(&updated_source).unwrap()).unwrap();
-    assert_eq!(plan().unwrap()["writes"].as_array().unwrap().len(),3);
-    let protected=[&child.run_write.path,&provider_path,&catalog_path,&source_path,&sidecar].map(|path|(path,std::fs::read(path).unwrap()));
-    for pointer in ["/handler_config/mcp/tools/3/input_schema", "/handler_config/mcp/tools/0/description", "/description"] {
-        let base=if pointer.starts_with("/handler_config") {before.clone()} else {adopted["writes"][0]["content"].as_str().unwrap().as_bytes().to_vec()};
-        let mut local:Value=serde_json::from_slice(&base).unwrap(); *local.pointer_mut(pointer).unwrap()=if pointer.ends_with("input_schema") {json!({"type":"object","required":["locally_authored"]})} else {json!("Local tool description")};
-        std::fs::write(&tool_path,serde_json::to_vec(&local).unwrap()).unwrap();let retained=std::fs::read(&tool_path).unwrap();
-        if pointer.starts_with("/handler_config") {
-            assert!(plan().unwrap_err().contains("outside the actual formed grant"),"a wider copy is not admitted by its original");
-            assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
-            for (path,bytes) in &protected {assert_eq!(&std::fs::read(path).unwrap(),bytes);}
-            continue;
-        }
-        let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
-        assert!(deferred["reason"].as_str().unwrap().contains("locally authored tools"));assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
-        for (path,bytes) in &protected {assert_eq!(&std::fs::read(path).unwrap(),bytes);}
-    }
-    let worker_path=root.join("registry/interface").join(&child.worker_interface_id).join("policy.json");
-    let worker_before=std::fs::read(&worker_path).unwrap();let mut blocked:Value=serde_json::from_slice(&worker_before).unwrap();
-    blocked["ceiling"]["hard_blocked_tools"]=json!([tool]);std::fs::write(&worker_path,serde_json::to_vec(&blocked).unwrap()).unwrap();
-    assert!(plan().unwrap_err().contains("outside the actual formed grant"));std::fs::write(&worker_path,worker_before).unwrap();
-    for (pointer,value) in [("/id",json!("foreign.tool")),("/interface",json!("foreign_door")),("/process",Value::Null),
-        ("/process/bin",json!(""))] {
-        let mut invalid:Value=serde_json::from_slice(&before).unwrap();*invalid.pointer_mut(pointer).unwrap()=value;
-        std::fs::write(&tool_path,serde_json::to_vec(&invalid).unwrap()).unwrap();let retained=std::fs::read(&tool_path).unwrap();
-        let error=plan().unwrap_err();if matches!(pointer,"/id"|"/interface") {assert!(error.contains("another exact identity or door"));}
-        assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
-    }
-    std::fs::write(&source_path,prior_source).unwrap();
-    std::fs::write(&tool_path,&before).unwrap();
-    std::fs::write(&tool_path,adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(plan().unwrap()["status"],"unchanged");assert_eq!(std::fs::read(&child.run_write.path).unwrap(),run_before);
-    let provider:Value=serde_json::from_slice(&std::fs::read(provider_path).unwrap()).unwrap();
-    request.selected_tools=serde_json::from_value(provider["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["tools"].clone()).unwrap();
-    request.identity_seed="future-child-with-inherited-selection".into();
-    request.communication.receive_interface_id="system_worker_future_child".into();
-    let future=plan_run_composition(&request).unwrap();
-    let future_tool=future.descriptor_writes.iter().find(|write|write.tag==format!("tool:{}",future.authoring.capability_tools["client.mcp"])).unwrap();
-    let future_tool:Value=serde_json::from_str(&future_tool.content).unwrap();
-    assert_eq!(future_tool["handler_config"],canonical["handler_config"]);
 }
 
 #[tokio::test]
@@ -1325,26 +1068,8 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         assert_eq!(prepare(&scope,json!({"kind":"owner_inputs","desired_inputs":[]}),&current()).unwrap()["status"], "deferred");
         let (seq,input) = b.input(&message,&provider); let pinned = b.ctx.pinned_run_record_bytes(&input).unwrap();
         let handoff = ProviderHandoffSession::new(&b.ctx).unwrap().from_invocation(&b.ctx,b.ctx.descriptor_snapshot.as_ref().unwrap(),&plan.run_id.clone().into(),&input,seq,&pinned).unwrap();
-        assert_eq!(cli("--plan-native-adoption",&adoption_request(&root,&request,&plan)).unwrap()["status"],"deferred");
-        let unfinished_ledger=std::fs::read(root.join("ledger/movements.jsonl")).unwrap();
         let output = b.file("interface.artifact.output", &json!({"text":"fixture settled"}));
         b.finish(async { handoff.hand_final(ProviderEmission {artifact:output,route:ProviderEmissionRoute::ClientProjection}).await.map(|_| ()) }).await;
-        let adoption=adoption_request(&root,&request,&plan);
-        assert_eq!(cli("--plan-native-adoption",&adoption).unwrap()["status"],"planned");
-        let mut missing=adoption.clone(); missing["ledger_root"]=json!(root.join("unadmitted"));
-        std::fs::create_dir(root.join("unadmitted")).unwrap(); std::fs::write(root.join("unadmitted/movements.jsonl"),unfinished_ledger).unwrap();
-        std::os::unix::fs::symlink(root.join("ledger/blobs"),root.join("unadmitted/blobs")).unwrap();
-        std::os::unix::fs::symlink(root.join("ledger/metadata"),root.join("unadmitted/metadata")).unwrap();
-        assert_eq!(cli("--plan-native-adoption",&missing).unwrap()["status"],"deferred");
-        let stop=b.file("operator.turn.control",&json!({"action":"stop","control_id":"adoption-stop"}));
-        assert!(matches!(b.admit(&stop,&client).await,DeliveryVerdict::Admitted{..}));
-        let stopped_plan=cli("--plan-native-adoption",&adoption_request(&root,&request,&plan)).unwrap();
-        assert_eq!(stopped_plan["status"],"deferred"); assert_eq!(stopped_plan["writes"],json!([]));
-        let (stop_seq,stop_input)=b.input(&stop,&provider); let stop_pin=b.ctx.pinned_run_record_bytes(&stop_input).unwrap();
-        let stopped=ProviderHandoffSession::new(&b.ctx).unwrap().from_invocation(&b.ctx,b.ctx.descriptor_snapshot.as_ref().unwrap(),&plan.run_id.clone().into(),&stop_input,stop_seq,&stop_pin).unwrap();
-        let acknowledged=b.file("turn.control.acknowledged",&json!({"action":"stop","source_movement_seq":stop_seq}));
-        b.finish(async {stopped.hand_final(ProviderEmission {artifact:acknowledged,route:ProviderEmissionRoute::ClientProjection}).await.map(|_|())}).await;
-        assert_eq!(cli("--plan-native-adoption",&adoption_request(&root,&request,&plan)).unwrap()["status"],"planned");
         let settled = current(); let writes = b.writes;
         scope["key"] = json!("ordinary-rearm");
         assert_eq!(prepare(&scope,json!({"kind":"rearm"}),&settled).unwrap()["status"], "prepared");

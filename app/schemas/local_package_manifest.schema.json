@@ -15,39 +15,74 @@
     "members"
   ],
   "properties": {
-    "schema": { "const": "octopus.local_package" },
-    "schema_version": { "const": 1 },
-    "id": { "$ref": "#/$defs/id" },
-    "version": { "$ref": "#/$defs/version" },
-    "product_kind": { "enum": ["application", "driver", "artifact"] },
-    "product_id": { "$ref": "#/$defs/id" },
-    "release_status": { "enum": ["system", "optional"] },
+    "schema": {
+      "const": "octopus.local_package"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/id"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    },
+    "product_kind": {
+      "enum": [
+        "application",
+        "driver",
+        "artifact"
+      ]
+    },
+    "product_id": {
+      "$ref": "#/$defs/id"
+    },
+    "release_status": {
+      "enum": [
+        "system",
+        "optional"
+      ]
+    },
     "display": {
       "type": "object",
-      "required": ["name", "description", "developer", "category"],
+      "required": [
+        "name",
+        "description",
+        "developer",
+        "category"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 96 },
-        "description": { "type": "string", "minLength": 1, "maxLength": 480 },
-        "developer": { "type": "string", "minLength": 1, "maxLength": 96 },
-        "category": { "$ref": "#/$defs/id" },
-        "icon": { "type": "string", "maxLength": 64 }
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 480
+        },
+        "developer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "category": {
+          "$ref": "#/$defs/id"
+        },
+        "icon": {
+          "type": "string",
+          "maxLength": 64
+        }
       },
       "additionalProperties": false
     },
-    "required_packages": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
-    "retired_members": {
+    "required_packages": {
       "type": "array",
-      "minItems": 1,
-      "maxItems": 512,
+      "maxItems": 128,
       "uniqueItems": true,
       "items": {
-        "type": "object",
-        "required": ["registry_kind", "owner"],
-        "properties": {
-          "registry_kind": {"enum": ["interface", "worker_environment_kind", "tool", "artifact", "mark", "verifier", "ee_template"]},
-          "owner": {"$ref": "#/$defs/id"}
-        },
-        "additionalProperties": false
+        "$ref": "#/$defs/id"
       }
     },
     "members": {
@@ -57,7 +92,10 @@
       "uniqueItems": true,
       "items": {
         "type": "object",
-        "required": ["registry_kind", "owner"],
+        "required": [
+          "registry_kind",
+          "owner"
+        ],
         "properties": {
           "registry_kind": {
             "enum": [
@@ -70,19 +108,30 @@
               "ee_template"
             ]
           },
-          "owner": { "$ref": "#/$defs/id" },
-          "primary": { "type": "boolean" },
+          "owner": {
+            "$ref": "#/$defs/id"
+          },
+          "primary": {
+            "type": "boolean"
+          },
           "data_directories": {
-            "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
-            "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
           },
           "configuration": {
-            "type": "array", "minItems": 1, "maxItems": 64,
-            "items": { "$ref": "#/$defs/configurationEntry" }
-          },
-          "configuration_predecessors": {
-            "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
-            "items": { "$ref": "#/$defs/configurationEntry" }
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/$defs/configurationEntry"
+            }
           }
         },
         "additionalProperties": false

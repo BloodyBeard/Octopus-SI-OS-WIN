@@ -3,7 +3,7 @@ const { loadOperatorTaskLifecycle, submitOperatorTurn } = require("./client/oper
 const { updateOperatorChatPins } = require("./client/pinnedContext.cjs");
 const { loginProviderAccount, refreshProviderModels, validateProviderAccountObservation, verifyProviderAccount } = require("./client/providerAccounts.cjs");
 const { loadStoragePublisher, publishOperatorFiles, waitForInterfaceSocket, withOperatorRunAuthoringLock, withOperatorWorkspaceTopologyLock } = require("./client/publication.cjs");
-const { adoptOperatorChatPackageUpdates, assertGenericOperatorChatArtifactAllowed, planOperatorChatPackageAdoption, planOperatorChatSurface, planOperatorChatTaskAmendment, submitOperatorTurnControl } = require("./client/surfacePlanning.cjs");
+const { assertGenericOperatorChatArtifactAllowed, planOperatorChatSurface, planOperatorChatTaskAmendment, submitOperatorTurnControl } = require("./client/surfacePlanning.cjs");
 const { releaseOperatorTaskWorkerEnvironments } = require("./client/taskEnvironments.cjs");
 const { interfaceEndpoint } = require("./client/topologyPlan.cjs");
 
@@ -11,12 +11,10 @@ module.exports = {
   loadStoragePublisher,
   publishOperatorFiles,
   loadOperatorTaskLifecycle,
-  adoptOperatorChatPackageUpdates,
   assertGenericOperatorChatArtifactAllowed,
   loginProviderAccount,
   planOperatorChatSurface,
   planOperatorChatTaskAmendment,
-  planOperatorChatPackageAdoption,
   readOperatorChatArtifacts,
   refreshProviderModels,
   releaseOperatorTaskWorkerEnvironments,

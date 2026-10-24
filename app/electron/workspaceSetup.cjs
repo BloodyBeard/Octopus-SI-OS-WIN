@@ -560,11 +560,10 @@ function parseRetirementSelection(value) {
 
 function parseRetirementJournal(value, journal) {
   const retirement = exactObject(value, ["schema_version", "selection", "selection_digest", "directory_inventory", "proof"],
-    ["schema_version", "selection", "selection_digest", "proof", ...(value?.schema_version === 2 ? ["directory_inventory"] : [])], "Task retirement journal");
+    ["schema_version", "selection", "selection_digest", "proof", "directory_inventory"], "Task retirement journal");
   const selection = parseRetirementSelection(retirement.selection);
   const selectionDigest = sha256(Buffer.from(stableJson(selection)));
-  if (![1, 2].includes(retirement.schema_version) || retirement.selection_digest !== selectionDigest
-    || retirement.schema_version === 1 && Object.hasOwn(retirement, "directory_inventory")) {
+  if (retirement.schema_version !== 2 || retirement.selection_digest !== selectionDigest) {
     throw new Error("Task retirement journal changed its selection pin");
   }
   for (const row of selection.records) {
@@ -577,7 +576,7 @@ function parseRetirementJournal(value, journal) {
       throw new Error("Task retirement publication barrier differs from its source Run");
     }
   }
-  const inventory = retirement.schema_version === 2 ? parseRetirementDirectoryInventory(retirement.directory_inventory) : null;
+  const inventory = parseRetirementDirectoryInventory(retirement.directory_inventory);
   const ctx = { operation_id: journal.operation_id, selection_digest: selectionDigest, selection,
     ...(inventory ? { directory_inventory: inventory } : {}), originals: selection.records.map(({ file, expected_digest }) => ({ file, expected_digest })).sort((a, b) => a.file.localeCompare(b.file)) };
   ctx.retired = ctx.originals.map(({ file }) => ({ file, expected_digest: null }));
@@ -590,7 +589,7 @@ function parseRetirementJournal(value, journal) {
     throw new Error("Task retirement cleanup started without a durable held proof");
   }
   if (proof && journal.writes.some((write) => !["applied", "unchanged"].includes(write.state))
-    || journal.phase === "cleaned" && journal.removals.some((removal) => removal.state !== (journal.schema_version >= 3 ? "reclaimed" : "moved"))
+    || journal.phase === "cleaned" && journal.removals.some((removal) => removal.state !== "reclaimed")
     || journal.phase === "rolled_back" && journal.writes.some((write) => !["rolled_back", "unchanged"].includes(write.state))) {
     throw new Error("Task retirement journal phase differs from its durable target writes");
   }
@@ -2412,7 +2411,7 @@ async function stageWorkspaceTransaction(roots, request, writes, receipt, schema
       writes: journalWrites.map((write, index) => ({ ...write,
         publication: journalPublication(request.operationId, index,
           writes[index].content === null ? 0 : Buffer.byteLength(writes[index].content),
-          write.before_file ? fsSync.statSync(path.join(stagingRoot, write.before_file)).size : 0, false, publicationAttempt) })),
+          write.before_file ? fsSync.statSync(path.join(stagingRoot, write.before_file)).size : 0, publicationAttempt) })),
     };
     await writeJournal(stagingRoot, journal);
     await fs.rename(stagingRoot, transactionRoot);
@@ -2532,7 +2531,7 @@ async function stageClientAuthoringTransaction(roots, plan) {
       writes: journalWrites.map((write, index) => ({ ...write,
         publication: journalPublication(plan.operationId, index,
           plan.writes[index].content === null ? 0 : Buffer.byteLength(plan.writes[index].content),
-          write.before_file ? fsSync.statSync(path.join(stagingRoot, write.before_file)).size : 0, false, publicationAttempt) })),
+          write.before_file ? fsSync.statSync(path.join(stagingRoot, write.before_file)).size : 0, publicationAttempt) })),
       removals: journalRemovals,
       ...(plan.condition ? { condition: plan.condition } : {}),
       ...(plan.retirement ? { retirement: { schema_version: 2, selection: plan.retirement,
@@ -2905,7 +2904,7 @@ function requireDirectoryPublisher(roots, held) {
 }
 
 function directoryUncertain(label) {
-  const error = new Error(`${label}: original native directory publication evidence is unavailable; checked legacy import is required`);
+  const error = new Error(`${label}: original native directory publication evidence is unavailable; initialize a fresh Home`);
   error.code = "workspace_directory_publication_uncertain";
   return error;
 }
@@ -3159,10 +3158,10 @@ async function directoryEntriesIfPresent(directory) {
   }
 }
 
-function journalPublication(operationId, index, bytes, rollbackBytes, legacyApplied = false, attemptId = crypto.randomUUID()) {
+function journalPublication(operationId, index, bytes, rollbackBytes, attemptId = crypto.randomUUID()) {
   return { attempt_id: attemptId, operation_id: `workspace:${operationId}:${attemptId}:${index}:forward`,
     rollback_operation_id: `workspace:${operationId}:${attemptId}:${index}:rollback`, bytes, rollback_bytes: rollbackBytes,
-    started: false, rollback_started: false, receipt: null, rollback_receipt: null, legacy_applied: legacyApplied };
+    started: false, rollback_started: false, receipt: null, rollback_receipt: null };
 }
 
 function publicationUncertain(write) {
@@ -3188,16 +3187,6 @@ async function applyJournalWrite(roots, transactionRoot, journal, index) {
   const destinationRoot = allowedDestinationRoot(roots, write.destination);
   await validateExistingPath(destinationRoot, write.destination);
   const content = await journalContent(transactionRoot, write);
-  if (!write.publication) {
-    const current = await readFileIfPresent(write.destination);
-    const digest = current ? sha256(current) : null;
-    if (digest === write.after_digest && digest !== write.before_digest) throw publicationUncertain(write);
-    if (digest !== write.before_digest) throw new Error(`Workspace destination '${write.destination}' changed during commit`);
-    const before = await journalContent(transactionRoot, write, true);
-    write.publication = journalPublication(journal.operation_id, index,
-      content === null ? 0 : Buffer.byteLength(content), before === null ? 0 : Buffer.byteLength(before));
-    await writeJournal(transactionRoot, journal);
-  }
   await publishJournalOperation(roots, transactionRoot, journal, index, content, false);
   await verifyAppliedWrite(write);
 }
@@ -3323,7 +3312,7 @@ async function rollbackTransaction(roots, transactionRoot) {
       throw publicationUncertain(write);
     }
     if (currentDigest === write.before_digest && (!write.publication
-      || !write.publication.started && !write.publication.legacy_applied
+      || !write.publication.started
       || write.publication.receipt?.outcome === "not_applied")) {
       if (write.state !== "rolled_back") {
         journal.writes[index].state = "rolled_back";
@@ -3335,14 +3324,7 @@ async function rollbackTransaction(roots, transactionRoot) {
       throw new Error(`Workspace rollback found changed bytes at '${write.destination}'`);
     }
     const before = await journalContent(transactionRoot, write, true);
-    if (!write.publication) {
-      if (write.state !== "applied") throw publicationUncertain(write);
-      const after = await journalContent(transactionRoot, write);
-      write.publication = journalPublication(journal.operation_id, index,
-        after === null ? 0 : Buffer.byteLength(after), before === null ? 0 : Buffer.byteLength(before), true);
-      await writeJournal(transactionRoot, journal);
-    }
-    if (!write.publication.legacy_applied && write.publication.receipt?.outcome !== "applied") throw publicationUncertain(write);
+    if (write.publication?.receipt?.outcome !== "applied") throw publicationUncertain(write);
     await publishJournalOperation(roots, transactionRoot, journal, index, before, true);
     const restored = await readFileIfPresent(write.destination);
     if ((restored ? sha256(restored) : null) !== write.before_digest) throw new Error(`Workspace rollback restoration for '${write.tag}' changed`);
@@ -3617,7 +3599,7 @@ function parseClientAuthoringJournal(value) {
     ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals"],
     "Client authoring transaction journal",
   );
-  if (journal.schema !== "octopus.client_authoring_transaction" || ![1, 2, 3, 4].includes(journal.schema_version)
+  if (journal.schema !== "octopus.client_authoring_transaction" || ![3, 4].includes(journal.schema_version)
     || (journal.schema_version === 4) !== Object.hasOwn(journal, "condition")) {
     throw new Error("Client authoring transaction journal has an unsupported schema");
   }
@@ -3664,7 +3646,7 @@ function parseClientAuthoringJournalRemoval(value, index, journal) {
     ],
     [
       "destination", "type", "expected_dev", "expected_ino", "tree_digest", "tree_entries",
-      "tombstone", "tag", "state", ...(journal.schema_version >= 3 ? ["publication"] : []),
+      "tombstone", "tag", "state", "publication",
     ],
     `Client authoring journal removal ${index + 1}`,
   );
@@ -3815,7 +3797,7 @@ function parseSetupJournal(value) {
     ["schema", "schema_version", "operation_id", "request_digest", "phase", "receipt", "writes"],
     "Workspace transaction journal",
   );
-  if (journal.schema !== "octopus.workspace_setup_transaction" || ![1, 2].includes(journal.schema_version)) {
+  if (journal.schema !== "octopus.workspace_setup_transaction" || journal.schema_version !== 2) {
     throw new Error("Workspace transaction journal has an unsupported schema");
   }
   const phases = new Set(["staged", "committing", "published", "committed", "rolling_back"]);
@@ -3861,7 +3843,7 @@ function parseProjectJournal(value) {
     ["schema", "schema_version", "operation_id", "request_digest", "phase", "receipt", "writes"],
     "Workspace Project transaction journal",
   );
-  if (journal.schema !== "octopus.workspace_project_transaction" || ![1, 2].includes(journal.schema_version)) {
+  if (journal.schema !== "octopus.workspace_project_transaction" || journal.schema_version !== 2) {
     throw new Error("Workspace Project transaction journal has an unsupported schema");
   }
   const phases = new Set(["staged", "committing", "published", "committed", "rolling_back"]);
@@ -3912,7 +3894,7 @@ function parseJournalWrite(value, index, allowDeletion, journal) {
     [
       "destination", "expected_before_digest", "before_digest", "after_digest", "after_file",
       "before_file", "tag", "publish_barrier", "state",
-      ...(journal.schema_version >= 2 ? ["publication"] : []),
+      "publication",
     ],
     `Workspace journal write ${index + 1}`,
   );
@@ -3960,15 +3942,13 @@ function parsePublicationReceipt(value, operationId, destination, before, after,
 }
 
 function parseJournalPublication(value, write, index, journal) {
-  const fields = ["attempt_id", "operation_id", "rollback_operation_id", "bytes", "rollback_bytes", "started", "rollback_started", "receipt", "rollback_receipt", "legacy_applied"];
+  const fields = ["attempt_id", "operation_id", "rollback_operation_id", "bytes", "rollback_bytes", "started", "rollback_started", "receipt", "rollback_receipt"];
   const publication = exactObject(value, fields, fields, "Workspace journal publication");
-  const expected = journalPublication(journal.operation_id, index, publication.bytes, publication.rollback_bytes, false, publication.attempt_id);
+  const expected = journalPublication(journal.operation_id, index, publication.bytes, publication.rollback_bytes, publication.attempt_id);
   if (typeof publication.attempt_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(publication.attempt_id)
     || publication.operation_id !== expected.operation_id || publication.rollback_operation_id !== expected.rollback_operation_id
-    || typeof publication.started !== "boolean" || typeof publication.rollback_started !== "boolean" || typeof publication.legacy_applied !== "boolean"
-    || publication.legacy_applied && (journal.schema_version !== 1 || publication.started || publication.receipt !== null
-      || !["applied", "rolled_back"].includes(write.state))
-    || write.state === "unchanged" && (publication.started || publication.rollback_started || publication.legacy_applied)
+    || typeof publication.started !== "boolean" || typeof publication.rollback_started !== "boolean"
+    || write.state === "unchanged" && (publication.started || publication.rollback_started)
     || write.after_digest === null && publication.bytes !== 0 || write.before_digest === null && publication.rollback_bytes !== 0) {
     throw new Error("Workspace journal publication has invalid immutable coordinates");
   }
@@ -3979,9 +3959,9 @@ function parseJournalPublication(value, write, index, journal) {
   const rollbackReceipt = publication.rollback_receipt === null ? null : parsePublicationReceipt(publication.rollback_receipt,
     publication.rollback_operation_id, write.destination, write.after_digest, write.before_digest, rollbackBytes);
   if (receipt && !publication.started || rollbackReceipt && !publication.rollback_started
-    || write.state === "applied" && !publication.legacy_applied && receipt?.outcome !== "applied"
-    || publication.rollback_started && !publication.legacy_applied && receipt?.outcome !== "applied"
-    || write.state === "rolled_back" && (publication.legacy_applied || receipt?.outcome === "applied") && rollbackReceipt?.outcome !== "applied"
+    || write.state === "applied" && receipt?.outcome !== "applied"
+    || publication.rollback_started && receipt?.outcome !== "applied"
+    || write.state === "rolled_back" && (receipt?.outcome === "applied") && rollbackReceipt?.outcome !== "applied"
     || write.state === "rolled_back" && publication.started && !["applied", "not_applied"].includes(receipt?.outcome)) {
     throw new Error("Workspace journal state lacks its exact publication evidence");
   }
@@ -4273,7 +4253,7 @@ function journalPublicationEvidence(journal) {
 
 function parsePublicationEvidence(value, operationId, writes) {
   const evidence = exactObject(value, ["schema_version", "writes", "condition"], ["schema_version", "writes"], "Workspace publication evidence");
-  if (![1, 2, 3, 4].includes(evidence.schema_version) || !Array.isArray(evidence.writes) || evidence.writes.length !== writes.length
+  if (![2, 3, 4].includes(evidence.schema_version) || !Array.isArray(evidence.writes) || evidence.writes.length !== writes.length
     || (evidence.schema_version === 4) !== Object.hasOwn(evidence, "condition")) {
     throw new Error("Workspace publication evidence differs from its write set");
   }
@@ -4318,13 +4298,9 @@ async function writeClientAuthoringReceipt(roots, receiptValue) {
 }
 
 async function verifyClientAuthoringReceipt(roots, receipt) {
+  if (!receipt.publication_evidence) throw new Error("Client authoring receipt has no publication evidence");
   for (const write of receipt.writes) {
     allowedDestinationRoot(roots, write.destination);
-    const bytes = await readFileIfPresent(write.destination);
-    const digest = bytes ? sha256(bytes) : null;
-    if (digest !== write.digest) {
-      throw new Error(`Client authoring receipt '${receipt.operation_id}' write drifted`);
-    }
   }
   for (const removal of receipt.removals) {
     allowedDestinationRoot(roots, removal.destination);
@@ -4586,14 +4562,14 @@ async function verifyJournalWrites(writes) {
 }
 
 async function verifyAppliedWrite(write) {
-  const bytes = await readFileIfPresent(write.destination);
-  if (write.after_digest === null) {
-    if (bytes) throw new Error(`Workspace write '${write.tag}' was not deleted`);
+  if (write.state === "unchanged" && write.before_digest === write.after_digest
+    && !write.publication.started && !write.publication.receipt) {
     return;
   }
-  if (!bytes || sha256(bytes) !== write.after_digest) {
-    throw new Error(`Workspace write '${write.tag}' is not materialized`);
-  }
+  const publication = write.publication;
+  if (publication?.receipt?.outcome !== "applied") throw publicationUncertain(write);
+  parsePublicationReceipt(publication.receipt, publication.operation_id, write.destination,
+    write.before_digest, write.after_digest, publication.bytes);
 }
 
 function receiptOutcome(receipt, changed) {

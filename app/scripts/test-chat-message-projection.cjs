@@ -346,3 +346,43 @@ test('a sealed stream without its seal row is not projected', async () => {
   const event = { type: 'event', seq: 1, source_movement_seq: 1, recorded_at_unix_ms: 1_001, label: 'agent.message.delta', payload: { text: 'Hel', item_id: 'answer', turn_id: 'turn' } };
   await assert.rejects(project([movement(2, 'turn.stream', { __raw: [header, event].map(row => JSON.stringify(row)).join('\n') + '\n' })], true), /no seal row/);
 });
+
+
+test('message revision receipt replaces only the admitted latest turn', async () => {
+  const old = movement(1, protocol.inputLabel, { message_id: "old", text: "Original", attachments: [] }, { from: "chat", kind: "InterfaceArrival" });
+  const edit = movement(3, protocol.inputLabel, { message_id: "edit", text: "Corrected", attachments: [], replaces_message: old.artifact }, { from: "chat", kind: "InterfaceArrival" });
+  const receipt = movement(4, 'interface.context.updated', { phase: 'message_revised', replaces_message: old.artifact, source_artifact: edit.artifact });
+  const entry = { runId: 'run', chatInterfaceId: 'chat', writable: true, inbound: [old, edit], outbound: [finalAnswer(2, 'Original reply')],
+    record: { interface_state: { chat: { provider_runtime_interface: 'provider' } } } };
+  const store = projectionStore({ resolveLedgerArtifactPayloads: async rows => new Map(rows.map(row => [row, row.payload])) });
+  const read = () => store.buildSingleOperatorChatMessages(projectionFixture(), entry, protocol);
+  assert.deepEqual((await read()).map(row => row.text), ['Original', 'Original reply', 'Corrected']);
+  entry.outbound.push(receipt, finalAnswer(5, 'Revised reply'));
+  const messages = await read();
+  assert.deepEqual(messages.map(row => row.text), ['Corrected', 'Revised reply']);
+  assert.equal(messages[0].event_data.message_revision_receipt.from_movement_seq, 1);
+  entry.outbound.push(receipt);
+  assert.deepEqual((await read()).map(row => row.text), ['Corrected', 'Revised reply']);
+  entry.writable = false; entry.activity = [...entry.inbound, ...entry.outbound];
+  assert.deepEqual((await read()).map(row => row.text), ['Corrected', 'Revised reply']);
+  assert.equal(old.payload.text, 'Original');
+});
+
+
+test('assistant display edits survive replay without changing ledger messages', () => {
+  const { applyAssistantTextEdits } = require('../electron/projection/assistantTextEdits.cjs');
+  const edit = { provider_interface: 'provider', turn_id: 'turn', item_id: 'item', original_text: 'original', text: 'edited', edited_at_ms: 1 };
+  const document = { schema_version: 1, run_id: 'run', edits: [edit] };
+  const original = { run_id: 'run', role: 'assistant', event_kind: 'message', text: 'original', artifact_id: 'original-artifact',
+    event_data: { turn_id: 'turn', item_id: 'item', _activity_origin: { interface_id: 'provider' } } };
+  const rows = [original, { ...original, movement_seq: 100 }, { ...original, run_id: 'neighbor' }];
+  const result = applyAssistantTextEdits(rows, 'run', document);
+  assert.deepEqual(result.map(row => row.text), ['edited', 'edited', 'original']);
+  assert.equal(original.text, 'original');
+  assert.equal(result[0].artifact_id, original.artifact_id);
+  assert.equal(result[0].event_data._client_text_edit.original_text, 'original');
+  assert.throws(() => applyAssistantTextEdits([{ ...original, text: 'changed' }], 'run', document), /needs review/);
+  assert.throws(() => applyAssistantTextEdits(rows, 'other', document), /do not match/);
+  assert.throws(() => applyAssistantTextEdits(rows, 'run', { ...document, edits: [edit, edit] }), /repeat/);
+  assert.equal(applyAssistantTextEdits(rows, 'run', null), rows);
+});

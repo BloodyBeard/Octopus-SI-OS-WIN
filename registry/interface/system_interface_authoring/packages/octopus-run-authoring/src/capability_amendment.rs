@@ -304,6 +304,31 @@ pub fn rebase_plan(current: &RunRecord, amendment: ProviderCapabilityAmendment) 
     prepare_plan(ProviderCapabilityAmendment {before, after, ..amendment})
 }
 
+pub fn prospective_capability_record(amendment: &ProviderCapabilityAmendment) -> Result<RunRecord, String> {
+    let mut future = record(&amendment.after)?;
+    let topology = topology(&future, &amendment.provider_interface)?;
+    let config = topology.config(&amendment.authoring_profile);
+    let roles = current_mandatory_role_artifacts(&future, &config)?;
+    let context = current_context_artifacts(&future, &config)?;
+    for template in &topology.checkpoints {
+        if template.owner_authoring.is_some() || matches!(template.role,
+            RunAuthoringCheckpointRole::AuthoringCall | RunAuthoringCheckpointRole::AuthoringResult
+            | RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput) {
+            continue;
+        }
+        let id = format!("prospective_{}_{}", amendment.amendment_key, template.name);
+        if future.checkpoints.iter().any(|cp| cp.id.as_str() == id) {
+            return Err(format!("prospective capability checkpoint '{id}' already exists"));
+        }
+        let bindings = if template.include_context { &context } else { &roles }
+            .iter().map(|id| json!({"id":id})).collect::<Vec<_>>();
+        let checkpoint = materialize_checkpoint(template, &id, &future.id, &bindings);
+        future.checkpoints.push(serde_json::from_value(checkpoint).map_err(|e| e.to_string())?);
+        future.active_checkpoints.push(id.into());
+    }
+    Ok(future)
+}
+
 impl ProviderOutputHandoff {
     pub async fn checked_capability_baseline(&self, hash: &str, expected_before: &Value) -> Result<Vec<u8>, String> {
         let hash = ContentHash::from_hex(hash).filter(|value|value.to_hex()==hash).ok_or("capability baseline needs an exact content hash")?;

@@ -54,6 +54,7 @@ pub(crate) async fn emit_terminal_error_message(
         &current_session_context,
         run,
         &handoff.current_run_record_bytes().await,
+        handoff.deferred_context_generations().await,
     ) {
         Ok(continuity) => {
             crate::handler::materialize_terminal_turn_error_payload(

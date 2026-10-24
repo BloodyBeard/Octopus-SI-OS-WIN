@@ -152,8 +152,12 @@ delivery queue.
 **The registry snapshot guard.** The in-memory registry is reloaded only when
 the descriptor tree actually changed: a metadata-only walk folds a fingerprint
 over the descriptor kinds, and the heavy parse and validation run only when it
-moves. If the fingerprint cannot be computed, the snapshot reloads
-unconditionally.
+moves. Before/after observations must agree. Unreadable or stably malformed
+descriptors fail closed; concurrent writes return `RegistryUnstable`. Retained
+delivery preserves that typed refusal even before its fan-out scope exists.
+The sender waits within its declared timeout and cancellation boundary, keeping
+the same artifact and delivery identity. It does not repeat the producing effect
+or replace a retained scope. Policy refusals remain terminal.
 
 Both are caches that rebuild from the log.
 

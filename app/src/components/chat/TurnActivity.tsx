@@ -1000,7 +1000,7 @@ function WorkedForBoundary({ elapsed, reducedMotion, status }: {
   return (
     <motion.div
       animate={{ height: "auto", opacity: 1 }}
-      initial={status === "working" ? { height: 0, opacity: 0 } : false}
+      initial={false}
       style={{ overflow: "hidden" }}
       transition={{ duration: reducedMotion ? 0 : 0.3, ease: [0.19, 1, 0.22, 1] }}
     >

@@ -2500,6 +2500,7 @@
             "turn.review.entered",
             "turn.review.exited",
             "turn.context.compaction",
+            "turn.token_usage",
             "turn.started",
             "turn.completed",
             "turn.model.rerouted",
@@ -2533,19 +2534,29 @@
       },
       "input_messages": {
         "operator.message": {
-          "text_fields": ["text", "prompt"],
+          "text_fields": [
+            "text",
+            "prompt"
+          ],
           "client_context_field": "client_context",
           "attachments_field": "attachments",
           "identity_field": "message_id",
           "identity_required": false
         },
         "realtime.delegation": {
-          "text_fields": ["input_text"],
+          "text_fields": [
+            "input_text"
+          ],
           "client_context_field": "client_context",
           "identity_field": "delegation_id",
           "identity_required": true,
-          "context_fields": ["call_id", "correlation_id"],
-          "request_context_fields": {"transcript": "array"}
+          "context_fields": [
+            "call_id",
+            "correlation_id"
+          ],
+          "request_context_fields": {
+            "transcript": "array"
+          }
         }
       },
       "run_authoring_profile": {
@@ -2996,7 +3007,8 @@
         ],
         "active_turn_stream_labels": [
           "provider.account.rate_limits.updated",
-          "account.rate_limits"
+          "account.rate_limits",
+          "turn.token_usage"
         ],
         "phase_rules": [
           {
@@ -3021,6 +3033,7 @@
         "turn.error",
         "operator.approval.request",
         "operator.elicitation.request",
+        "operator.user_input.request",
         "turn.agent_message",
         "turn.reasoning",
         "turn.plan.update"
@@ -3083,6 +3096,7 @@
         "turn.review.entered",
         "turn.review.exited",
         "turn.context.compaction",
+        "turn.token_usage",
         "turn.started",
         "turn.completed",
         "turn.model.rerouted",
@@ -3169,7 +3183,8 @@
           "features.request_permissions_tool=false",
           "features.sleep_tool=false",
           "features.current_time_reminder=false",
-          "tools.experimental_request_user_input.enabled=false"
+          "tools.experimental_request_user_input.enabled=true",
+          "features.default_mode_request_user_input=true"
         ],
         "home_env": "CODEX_HOME",
         "isolated_cwd": "codex-cwd",

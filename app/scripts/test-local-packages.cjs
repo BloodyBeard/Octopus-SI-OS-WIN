@@ -7,8 +7,6 @@ const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const {
   applyLocalApplicationPack,
-  adoptLocalPackageUpdates,
-  prepareLocalPackageUpdateBaselines,
   inspectLocalPackageInstallation,
   readLocalPackageCatalog,
   readLocalPackageInstallation,
@@ -141,19 +139,6 @@ async function crashChild(mode, root) {
         if (progress.phase === "copying") { require("node:fs").writeSync(1, "paused\n"); process.kill(process.pid, "SIGSTOP"); }
       } });
     throw new Error("live package preparation did not pause");
-  }
-  if (mode.startsWith("update-")) {
-    await adoptLocalPackageUpdates({ ...roots, onProgress(progress) {
-      if (progress.phase === mode.slice(7)) process.kill(process.pid, "SIGKILL");
-    } });
-    throw new Error("update crash point was not reached");
-  }
-  if (mode === "baseline-receipting") {
-    await prepareLocalPackageUpdateBaselines({ ...roots, operationId: "baseline_capture_001",
-      packageIds: ["application.test_provider"], expectedSourceDigests: { "application.test_provider": currentPackage.source_digest },
-      expectedReceiptDigests: { "application.test_provider": currentPackage.receipt_digest }, assertMutable: async () => {},
-      onProgress(progress) { if (progress.phase === "receipting") process.kill(process.pid, "SIGKILL"); } });
-    throw new Error("baseline receipt crash point was not reached");
   }
   if (mode === "rollback-install") {
     await applyLocalApplicationPack({
@@ -309,52 +294,6 @@ print(json.dumps(rows))
     assert.deepEqual(await fs.readFile(sibling), bytes);
     process.stdout.write(`APFS package clone fixture: ${JSON.stringify({ before, after })}\n`);
   } finally { nativeFiles.cloneFile = original; await fs.rm(root, { recursive: true, force: true }); }
-}
-
-async function concurrentUpdateFixture() {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-concurrent-update-")));
-  let child;
-  try {
-    const roots = await createFixture(root), id = "application.test_provider";
-    const source = path.join(roots.sourceRegistryRoot, "interface/world_test_provider/assets");
-    const active = path.join(roots.activeRegistryRoot, "interface/world_test_provider/assets");
-    await writeJson(path.join(source, "item.json"), { original: true });
-    child = spawn(process.execPath, [__filename, "--child", "hold-live", root], { stdio: ["ignore", "pipe", "pipe"] });
-    const exited = once(child, "exit");
-    assert.equal(await Promise.race([once(child.stdout, "data").then(([data]) => data.toString()),
-      exited.then(() => { throw new Error("package writer exited before its preparation boundary"); })]), "paused\n");
-    const pending = await transactionEntries(roots);
-    assert.equal(pending.length, 1);
-    await assert.rejects(readLocalPackageCatalog(roots), error => error.code === "package_maintenance_busy");
-    assert.deepEqual(await transactionEntries(roots), pending);
-    child.kill("SIGKILL"); await exited; child = null;
-    const current = packageRecord(await readLocalPackageCatalog(roots));
-    assert.deepEqual(await transactionEntries(roots), []);
-    await applyLocalApplicationPack({ ...roots, operationId: "resumed_install_001", packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { [id]: current.source_digest } });
-    child = spawn(process.execPath, [__filename, "--child", "hold-read", root], { stdio: ["ignore", "pipe", "pipe"] });
-    const readExited = once(child, "exit");
-    assert.equal(await Promise.race([once(child.stdout, "data").then(([data]) => data.toString()),
-      readExited.then(() => { throw new Error("package reader exited before acquiring its snapshot"); })]), "paused\n");
-    const receiptFile = path.join(roots.stateRoot, "receipts", `${id}.json`), receiptBytes = await fs.readFile(receiptFile);
-    assert.equal(packageRecord(await readLocalPackageCatalog(roots)).receipt_state, "valid");
-    assert.equal((await readLocalPackageInstallation({ ...roots, packageId: id })).receipt_state, "valid");
-    await assert.rejects(adoptLocalPackageUpdates(roots), error => error.code === "package_maintenance_busy");
-    assert.deepEqual(await fs.readFile(receiptFile), receiptBytes);
-    assert.deepEqual(await transactionEntries(roots), []);
-    child.kill("SIGKILL"); await readExited; child = null;
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
-    await fs.rm(source, { recursive: true }); await fs.writeFile(source, "replacement file\n");
-    await fs.mkdir(path.join(active, "local-empty"));
-    await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping file\/directory ownership/);
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(active, "item.json"))), { original: true });
-    await fs.rmdir(path.join(active, "local-empty"));
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
-    assert.equal(await fs.readFile(active, "utf8"), "replacement file\n");
-    await fs.rm(source); await writeJson(path.join(source, "next.json"), { next: true });
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(active, "next.json"))), { next: true });
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
-  } finally { if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } await fs.rm(root, { recursive: true, force: true }); }
 }
 
 async function run() {
@@ -794,177 +733,6 @@ async function run() {
   }
 }
 
-async function updateBaselineFixture() {
-  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-update-baseline-")));
-  try {
-    const roots = await createFixture(root), id = "application.test_provider";
-    const sourceOwner = path.join(roots.sourceRegistryRoot, "interface", "world_test_provider");
-    const activeOwner = path.join(roots.activeRegistryRoot, "interface", "world_test_provider");
-    const kind = path.join("worker_environment_kind", "system_room"), script = path.join("packages", "interval_union", "interval_union.py");
-    const sourceKind = path.join(roots.sourceRegistryRoot, kind), activeKind = path.join(roots.activeRegistryRoot, kind);
-    const manifestPath = path.join(roots.libraryRoot, "packages", `${id}.json`), manifest = JSON.parse(await fs.readFile(manifestPath));
-    manifest.members.push({ registry_kind: "worker_environment_kind", owner: "system_room" });
-    await writeJson(manifestPath, manifest);
-    await writeJson(path.join(sourceKind, "worker_environment_kind.json"), { worker_environment_kind_id: "system_room", tool_process_bins: ["sh"] });
-    await fs.writeFile(path.join(sourceOwner, "driver"), "source binary\n", { mode: 0o755 });
-    const initial = packageRecord(await readLocalPackageCatalog(roots));
-    await applyLocalApplicationPack({ ...roots, operationId: "baseline_install_001", packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { [id]: initial.source_digest } });
-    const receiptPath = path.join(roots.stateRoot, "receipts", `${id}.json`);
-    const legacy = JSON.parse(await fs.readFile(receiptPath));
-    legacy.schema_version = 1;
-    for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; delete member.configuration; }
-    await writeJson(receiptPath, legacy);
-    await writeJson(path.join(activeOwner, "interface.json"), { id: "world_test_provider", local_authoring: true });
-    await fs.mkdir(path.join(activeOwner, "packages"));
-    await fs.writeFile(path.join(activeOwner, "packages", "local.py"), "authored code\n");
-    await writeJson(path.join(activeKind, "worker_environment_kind.json"), { worker_environment_kind_id: "system_room", tool_process_bins: ["sh", "python3"] });
-    await fs.mkdir(path.dirname(path.join(activeKind, script)), { recursive: true });
-    await fs.writeFile(path.join(activeKind, script), "print('interval_union')\n", { mode: 0o750 });
-    const authoredKind = await fs.readFile(path.join(activeKind, "worker_environment_kind.json"));
-    const excluded = path.join(activeOwner, "node_modules", "local.json"), runPath = path.join(roots.octopusHomeRoot, "state", "runs", "run_local.json");
-    await writeJson(excluded, { authored: true }); await writeJson(runPath, { pending: "untouched" });
-    const excludedBytes = await fs.readFile(excluded), runBytes = await fs.readFile(runPath);
-    const local = await fs.readFile(path.join(activeOwner, "interface.json")), before = await fs.readFile(receiptPath);
-    const record = await inspectLocalPackageInstallation({ ...roots, packageId: id });
-    const request = { ...roots, operationId: "baseline_capture_001", packageIds: [id],
-      expectedSourceDigests: { [id]: record.source_digest }, expectedReceiptDigests: { [id]: record.receipt_digest }, assertMutable: async () => {} };
-    await assert.rejects(prepareLocalPackageUpdateBaselines({ ...request, assertMutable: async () => { throw new Error("runtime is running"); } }), /runtime is running/);
-    let guards = 0;
-    await assert.rejects(prepareLocalPackageUpdateBaselines({ ...request, assertMutable: async () => { if (++guards === 2) throw new Error("runtime became live"); } }), /runtime became live/);
-    assert.deepEqual(await fs.readFile(receiptPath), before);
-    assert.deepEqual(await transactionEntries(roots), []);
-    await fs.chmod(path.join(sourceOwner, "driver"), 0o700);
-    const changed = await inspectLocalPackageInstallation({ ...roots, packageId: id });
-    await assert.rejects(prepareLocalPackageUpdateBaselines({ ...request, expectedSourceDigests: { [id]: changed.source_digest } }), /exact previously receipted source/);
-    await fs.chmod(path.join(sourceOwner, "driver"), 0o755);
-    await fs.writeFile(path.join(sourceOwner, "driver"), "incoming without baseline\n");
-    await assert.rejects(adoptLocalPackageUpdates(roots), /without a per-file source baseline/);
-    assert.deepEqual(await fs.readFile(receiptPath), before);
-    await fs.writeFile(path.join(sourceOwner, "driver"), "source binary\n");
-    runCrashChild("baseline-receipting", root);
-    assert.equal((await transactionEntries(roots)).length, 1);
-    await readLocalPackageCatalog(roots);
-    assert.deepEqual(await transactionEntries(roots), []);
-    assert.equal((await prepareLocalPackageUpdateBaselines(request)).changed, false);
-    const prepared = JSON.parse(await fs.readFile(receiptPath)), owner = prepared.members.find(member => member.owner === "world_test_provider");
-    assert.equal(prepared.schema_version, 2);
-    assert.equal(owner.source_files.find(file => file.path === "driver").mode, 0o755);
-    assert.equal(owner.source_files.some(file => file.path === "packages/local.py"), false);
-    assert.notEqual(owner.source_files.find(file => file.path === "interface.json").sha256, owner.json_files[0].sha256);
-    assert.deepEqual(await fs.readFile(path.join(activeOwner, "interface.json")), local);
-    assert.equal(await fs.readFile(path.join(activeOwner, "packages", "local.py"), "utf8"), "authored code\n");
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
-    await fs.writeFile(path.join(sourceOwner, "driver"), "blocked update\n");
-    const excludedReceipt = await fs.readFile(receiptPath);
-    await assert.rejects(adoptLocalPackageUpdates(roots), /excluded active entries.*node_modules/);
-    assert.deepEqual(await fs.readFile(receiptPath), excludedReceipt);
-    assert.deepEqual(await fs.readFile(excluded), excludedBytes); assert.deepEqual(await fs.readFile(runPath), runBytes);
-    assert.equal(await fs.readFile(path.join(activeOwner, "driver"), "utf8"), "source binary\n");
-    await fs.rm(path.dirname(excluded), { recursive: true });
-    for (const phase of ["materializing", "receipting"]) {
-      await fs.writeFile(path.join(sourceOwner, "driver"), `updated ${phase}\n`);
-      await fs.chmod(path.join(sourceOwner, "driver"), 0o750);
-      runCrashChild(`update-${phase}`, root);
-      await adoptLocalPackageUpdates(roots);
-      assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
-      assert.deepEqual(await transactionEntries(roots), []);
-      assert.equal(await fs.readFile(path.join(activeOwner, "driver"), "utf8"), `updated ${phase}\n`);
-      assert.equal((await fs.stat(path.join(activeOwner, "driver"))).mode & 0o777, 0o750);
-      assert.deepEqual(await fs.readFile(path.join(activeOwner, "interface.json")), local);
-      assert.deepEqual(await fs.readFile(path.join(activeKind, "worker_environment_kind.json")), authoredKind);
-      assert.equal(await fs.readFile(path.join(activeKind, script), "utf8"), "print('interval_union')\n");
-      assert.equal((await fs.stat(path.join(activeKind, script))).mode & 0o777, 0o750);
-    }
-    const adopted = await inspectLocalPackageInstallation({ ...roots, packageId: id });
-    assert.equal(adopted.receipt_state, "valid");
-    assert.equal(adopted.locally_modified, true);
-    assert.equal(adopted.local_changes.find(file => file.path === "packages/interval_union/interval_union.py").change, "added");
-    const latest = JSON.parse(await fs.readFile(receiptPath)).members.find(member => member.owner === "system_room");
-    assert.equal(latest.source_files.some(file => file.path === "packages/interval_union/interval_union.py"), false);
-    assert.notEqual(latest.source_files[0].sha256, latest.json_files[0].sha256);
-    await assert.rejects(removeLocalPackages({ ...roots, operationId: "local_remove_001", packageIds: [id], expectedInstalledDigests: { [id]: adopted.installed_digest } }), /local changes.*removal cannot delete/);
-    const rejectUpdate = async pattern => {
-      const snapshot = await inspectLocalPackageInstallation({ ...roots, packageId: id, includeFileSnapshot: true }), receiptBytes = await fs.readFile(receiptPath);
-      await assert.rejects(adoptLocalPackageUpdates(roots), pattern);
-      assert.deepEqual((await inspectLocalPackageInstallation({ ...roots, packageId: id, includeFileSnapshot: true })).file_snapshot, snapshot.file_snapshot);
-      assert.deepEqual(await fs.readFile(receiptPath), receiptBytes);
-      assert.deepEqual(await transactionEntries(roots), []);
-    };
-    await fs.writeFile(path.join(activeOwner, "driver"), "local code change\n");
-    await fs.chmod(path.join(activeOwner, "driver"), 0o700);
-    await fs.writeFile(path.join(sourceOwner, "new-module"), "incoming independent file\n");
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
-    assert.equal(await fs.readFile(path.join(activeOwner, "driver"), "utf8"), "local code change\n");
-    assert.equal((await fs.stat(path.join(activeOwner, "driver"))).mode & 0o777, 0o700);
-    await fs.chmod(path.join(activeOwner, "driver"), 0o750);
-    await fs.writeFile(path.join(sourceOwner, "driver"), "incoming code change\n");
-    const damaged = await inspectLocalPackageInstallation({ ...roots, packageId: id });
-    await assert.rejects(repairLocalPackages({ ...roots, operationId: "local_repair_001", packageIds: [id], expectedRepairs: { [id]: repairExpectation(damaged) } }), /preserved local changes.*repair cannot discard/);
-    await rejectUpdate(/overlapping source-owned changes.*driver/);
-    for (const ownerPath of [activeOwner, sourceOwner]) await fs.writeFile(path.join(ownerPath, "driver"), "updated receipting\n");
-    await fs.chmod(path.join(activeOwner, "driver"), 0o700);
-    await fs.chmod(path.join(sourceOwner, "driver"), 0o744);
-    await rejectUpdate(/overlapping source-owned changes.*driver/);
-    for (const ownerPath of [activeOwner, sourceOwner]) await fs.chmod(path.join(ownerPath, "driver"), 0o750);
-    await fs.mkdir(path.dirname(path.join(sourceKind, script)), { recursive: true });
-    await fs.writeFile(path.join(sourceKind, script), "incoming collision\n");
-    await rejectUpdate(/overlapping source-owned changes.*interval_union.py/);
-
-    const clean = await createFixture(path.join(root, "clean-legacy"));
-    const cleanSource = packageRecord(await readLocalPackageCatalog(clean));
-    await applyLocalApplicationPack({ ...clean, operationId: "clean_install_001", packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { [id]: cleanSource.source_digest } });
-    const cleanReceiptPath = path.join(clean.stateRoot, "receipts", `${id}.json`), cleanReceipt = JSON.parse(await fs.readFile(cleanReceiptPath));
-    cleanReceipt.schema_version = 1;
-    for (const member of cleanReceipt.members) { delete member.source_files; delete member.materialized_files; delete member.configuration; }
-    await writeJson(cleanReceiptPath, cleanReceipt);
-    await fs.writeFile(path.join(clean.sourceRegistryRoot, "interface", "world_test_provider", "new-driver"), "new release\n");
-    assert.equal((await adoptLocalPackageUpdates(clean)).changed, true);
-    assert.equal(JSON.parse(await fs.readFile(cleanReceiptPath)).schema_version, 2);
-    const cleanCurrent = packageRecord(await readLocalPackageCatalog(clean)), cleanExcluded = path.join(clean.activeRegistryRoot, "interface", "world_test_provider", "target", "local.json");
-    assert.equal(cleanCurrent.receipt_state, "valid");
-    await writeJson(cleanExcluded, { authored: true });
-    await assert.rejects(removeLocalPackages({ ...clean, operationId: "excluded_remove_001", packageIds: [id], expectedInstalledDigests: { [id]: cleanCurrent.installed_digest } }), /excluded active entries.*target/);
-    await fs.writeFile(path.join(clean.sourceRegistryRoot, "interface", "world_test_provider", "new-driver"), "later release\n");
-    await assert.rejects(repairLocalPackages({ ...clean, operationId: "excluded_repair_001", packageIds: [id], expectedRepairs: { [id]: repairExpectation(packageRecord(await readLocalPackageCatalog(clean))) } }), /excluded active entries.*target/);
-    assert.deepEqual(JSON.parse(await fs.readFile(cleanExcluded)), { authored: true });
-    await fs.writeFile(path.join(clean.sourceRegistryRoot, "interface", "world_test_provider", "new-driver"), "new release\n");
-    const legacyReceipt = async () => {
-      const value = JSON.parse(await fs.readFile(cleanReceiptPath)); value.schema_version = 1;
-      for (const member of value.members) { delete member.source_files; delete member.materialized_files; delete member.configuration; }
-      await writeJson(cleanReceiptPath, value); return value;
-    };
-    const migration = await legacyReceipt(), unproved = structuredClone(migration);
-    unproved.members[0].digest = "f".repeat(64); await writeJson(cleanReceiptPath, unproved);
-    const unchangedReceipt = await fs.readFile(cleanReceiptPath), unprovedResult = await adoptLocalPackageUpdates(clean);
-    assert.equal(unprovedResult.changed, false); assert.deepEqual(unprovedResult.receiptUpgrades, []);
-    assert.equal(packageRecord(await readLocalPackageCatalog(clean)).receipt_state, "valid"); assert.deepEqual(await fs.readFile(cleanReceiptPath), unchangedReceipt);
-    await writeJson(cleanReceiptPath, migration);
-    const reviewedReceipt = await fs.readFile(cleanReceiptPath);
-    await assert.rejects(adoptLocalPackageUpdates({ ...clean, assertMutable: async () => { throw new Error("runtime is running"); } }), /runtime is running/);
-    assert.deepEqual(await fs.readFile(cleanReceiptPath), reviewedReceipt);
-    const cleanBefore = await inspectLocalPackageInstallation({ ...clean, packageId: id, includeFileSnapshot: true });
-    let metadataMoves;
-    const upgraded = await adoptLocalPackageUpdates({ ...clean, onProgress(progress) {
-      if (progress.phase === "finalizing") metadataMoves = JSON.parse(require("node:fs").readFileSync(path.join(clean.stateRoot, "transactions", progress.operationId, "journal.json"))).moves;
-    } });
-    assert.equal(upgraded.changed, true); assert.deepEqual(upgraded.receiptUpgrades, [id]); assert.deepEqual(metadataMoves, []);
-    assert.equal(JSON.parse(await fs.readFile(cleanReceiptPath)).schema_version, 2);
-    assert.deepEqual((await inspectLocalPackageInstallation({ ...clean, packageId: id, includeFileSnapshot: true })).file_snapshot, cleanBefore.file_snapshot);
-    assert.equal((await adoptLocalPackageUpdates(clean)).changed, false);
-    await legacyReceipt();
-    const localPolicy = path.join(clean.activeRegistryRoot, "interface", "world_test_provider", "interface.json");
-    await writeJson(localPolicy, { id: "world_test_provider", authored: true }); await fs.chmod(localPolicy, 0o640);
-    const authoredBefore = await inspectLocalPackageInstallation({ ...clean, packageId: id, includeFileSnapshot: true });
-    runCrashChild("update-receipting", path.join(root, "clean-legacy"));
-    const pending = await transactionEntries(clean); assert.equal(pending.length, 1);
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(clean.stateRoot, "transactions", pending[0], "journal.json"))).moves, []);
-    assert.equal((await adoptLocalPackageUpdates(clean)).changed, false); assert.deepEqual(await transactionEntries(clean), []);
-    assert.equal(JSON.parse(await fs.readFile(cleanReceiptPath)).schema_version, 2);
-    assert.deepEqual((await inspectLocalPackageInstallation({ ...clean, packageId: id, includeFileSnapshot: true })).file_snapshot, authoredBefore.file_snapshot);
-    assert.deepEqual(JSON.parse(await fs.readFile(cleanExcluded)), { authored: true });
-  } finally { await fs.rm(root, { recursive: true, force: true }); }
-}
-
 async function editableInstalledOwnerFixture() {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-editable-owner-")));
   try {
@@ -992,21 +760,13 @@ async function editableInstalledOwnerFixture() {
     const changed = packageRecord(await readLocalPackageCatalog(roots));
     assert.equal(changed.installed, true); assert.equal(changed.locally_modified, true);
     assert.deepEqual(await relevantFindings(), []);
-    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
     assert.deepEqual(await fs.readFile(receiptPath), receipt, "local edits do not require a new installation receipt");
     await writeJson(sourceRole, { id: localRole.id, payload: { text: "test context" }, release_note: "new release" });
     assert.equal(packageRecord(await readLocalPackageCatalog(roots)).update_available, true);
     assert.deepEqual(await relevantFindings(), [], "an available update does not invalidate installed code");
-    await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping source-owned changes/);
     assert.deepEqual(JSON.parse(await fs.readFile(rolePath)), localRole);
     await writeJson(sourceRole, { id: localRole.id, payload: { text: "test context" } });
-    await fs.writeFile(path.join(roots.sourceRegistryRoot, "interface/world_test_provider/release.txt"), "new release\n");
-    await adoptLocalPackageUpdates(roots);
-    const merged = JSON.parse(await fs.readFile(rolePath));
-    assert.deepEqual(merged, localRole);
-    assert.equal(await fs.readFile(path.join(roots.activeRegistryRoot, "interface/world_test_provider/release.txt"), "utf8"), "new release\n");
-    assert.equal(packageRecord(await readLocalPackageCatalog(roots)).update_available, false);
-    await writeJson(rolePath, { ...merged, id: "wrong-owner" });
+    await writeJson(rolePath, { ...localRole, id: "wrong-owner" });
     assert.ok((await relevantFindings()).some(finding => finding.code === "context.bound_artifact_invalid"));
     await fs.unlink(rolePath);
     assert.ok((await relevantFindings()).some(finding => finding.code === "context.bound_artifact_active_missing"));
@@ -1020,10 +780,8 @@ if (process.argv[2] === "--child") {
     process.exitCode = 1;
   });
 } else {
-  (process.argv[2] === "--concurrent-update" ? concurrentUpdateFixture() : process.argv[2] === "--update-baselines" ? updateBaselineFixture() : process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : process.argv[2] === "--clone-isolation" ? cloneIsolationFixture() : run()).then(async () => {
+  (process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : process.argv[2] === "--clone-isolation" ? cloneIsolationFixture() : run()).then(async () => {
     if (!process.argv[2]) await editableInstalledOwnerFixture();
-    if (!process.argv[2]) await concurrentUpdateFixture();
-    if (!process.argv[2]) await updateBaselineFixture();
     if (!process.argv[2]) await cloneIsolationFixture();
     if (!process.argv[2]) await require("./test-package-ownership.cjs").runPackageOwnership();
     if (!process.argv[2]) await require("./test-configuration-diagnostics.cjs").runConfigurationDiagnostics();

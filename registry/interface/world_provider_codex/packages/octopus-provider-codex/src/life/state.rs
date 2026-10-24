@@ -211,20 +211,6 @@ pub(crate) struct DeferredProviderTurnJournal {
     pub(crate) release: Option<DeferredProviderTurnRelease>,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DeferredProviderTurnJournalV2 {
-    pub(crate) schema_version: u32,
-    pub(crate) source_movement_seq: u64,
-    pub(crate) run_id: String,
-    pub(crate) artifact: ArtifactRef,
-    pub(crate) manifest_path: PathBuf,
-    pub(crate) manifest_bytes: Vec<u8>,
-    pub(crate) payload_bytes: Vec<u8>,
-    pub(crate) artifact_binding_payloads: Vec<DeferredArtifactBindingPayloadV2>,
-    pub(crate) metadata: octopus_ledger::InvocationMetadata,
-    pub(crate) release: Option<DeferredProviderTurnRelease>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -264,12 +250,4 @@ pub(crate) struct DeferredArtifactBindingRef {
     pub(crate) artifact: ArtifactRef,
     pub(crate) bytes_content: ContentHash,
     pub(crate) byte_count: u64,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct DeferredArtifactBindingPayloadV2 {
-    pub(crate) artifact: ArtifactRef,
-    pub(crate) bytes_content: ContentHash,
-    pub(crate) bytes: Vec<u8>,
 }

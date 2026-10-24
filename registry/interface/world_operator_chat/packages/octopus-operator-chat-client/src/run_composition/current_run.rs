@@ -529,12 +529,18 @@ fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &Ru
     let publication_index = dependency_writes.len() + 1;
     let mut baseline_roots = None;
     let target_topology: BoundRunAuthoringTopology = parse(&amendment.after["interface_state"][provider.as_str()]["run_authoring_binding"])?;
+    let prospective = octopus_run_authoring::capability_amendment::prospective_capability_record(&amendment)?;
     let target_tools = target_topology.checkpoints.iter().filter(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput)
         .flat_map(|cp|cp.required_verified_artifacts.iter()).map(|requirement| {
             requirement.params.get("tools").and_then(Value::as_array).ok_or("future tool contract has no exact tools")?
                 .iter().map(|id|id.as_str().map(str::to_string).ok_or("future tool id is malformed")).collect::<Result<Vec<_>,_>>()
         }).collect::<Result<Vec<_>,_>>()?.into_iter().flatten().collect::<BTreeSet<_>>();
     let mut validation = octopus_app_server::validate_registry_candidate_with_inspector(&validation_roots(roots), &writes, |index, view| {
+        if index == writes.len() {
+            for checkpoint in &prospective.active_checkpoints {
+                view.run_grant(&prospective, checkpoint)?;
+            }
+        }
         let selected = if index < publication_index {current} else {&future};
         for ((tool, _), (current_inputs, future_inputs)) in retained_tools.iter().zip(&bridge_inputs) {
             let (inputs, result) = if index < publication_index {current_inputs} else {future_inputs};

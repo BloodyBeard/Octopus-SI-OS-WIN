@@ -116,7 +116,9 @@ async function verifyDirectoryPublicationRecovery(temporary) {
         else { journal.retirement.schema_version = 1; delete journal.retirement.directory_inventory;
           journal.retirement.proof.schema_version = 1; delete journal.retirement.proof.directory_inventory_digest; }
         await fs.writeFile(journalFile, JSON.stringify(journal));
-        await assert.rejects(recoverWorkspaceTransactions(retirementFixtureOptions(home)), error => error.code === "workspace_directory_publication_uncertain");
+        await assert.rejects(recoverWorkspaceTransactions(retirementFixtureOptions(home)), fault === "legacy"
+          ? /Client authoring transaction journal has an unsupported schema/
+          : /Task retirement journal is missing fields: directory_inventory/);
         assert.ok(await fs.lstat(tombstone));
       }
       continue;
@@ -884,9 +886,14 @@ async function verifyPublicationRecovery(temporary) {
   const legacy = structuredClone(journal); legacy.schema_version = 1; delete legacy.writes[0].publication;
   await fs.writeFile(journalPath, JSON.stringify(legacy));
   await assert.rejects(recoverWorkspaceTransactions({ ...options, publishFiles: () => assert.fail("legacy postimage invoked publication") }),
-    error => error.code === "workspace_publication_uncertain");
+    /unsupported schema/);
   assert.equal(await fs.readFile(target, "utf8"), after);
+  const advanced = '{"current":"next run checkpoint"}\n';
+  await fs.writeFile(target, advanced);
   await fs.writeFile(journalPath, retained); await recoverWorkspaceTransactions({ ...options, publishFiles: publisher });
+  assert.equal(await fs.readFile(target, "utf8"), advanced);
+  await commitClientAuthoringTransaction({ ...options, publishFiles: () => assert.fail("completed operation was republished") });
+  assert.equal(await fs.readFile(target, "utf8"), advanced);
   const receipt = JSON.parse(await fs.readFile(path.join(home, "client-state/workspace/client-authoring-receipts", options.plan.operationId + ".json")));
   assert.equal(receipt.publication_evidence.writes[0].publication.receipt.operation_id, operations[0]);
   assert.equal(receipt.publication_evidence.writes[0].publication.receipt.outcome, "applied");
@@ -896,8 +903,8 @@ async function verifyPublicationRecovery(temporary) {
     await fs.mkdir(path.dirname(path.join(legacyRoot, file)), { recursive: true }); await fs.writeFile(path.join(legacyRoot, file), snapshots[index]);
   }
   await fs.writeFile(path.join(legacyRoot, "journal.json"), JSON.stringify(legacy));
-  await recoverWorkspaceTransactions({ ...options, publishFiles: () => assert.fail("durable legacy applied write invoked publication") });
-  assert.equal(await fs.readFile(target, "utf8"), after);
+  await assert.rejects(recoverWorkspaceTransactions({ ...options, publishFiles: () => assert.fail("legacy applied write invoked publication") }), /unsupported schema/);
+  assert.equal(await fs.readFile(target, "utf8"), advanced);
 
   const rollbackFixture = path.join(temporary, "publication-rollback");
   await createFixture(rollbackFixture, path.join(rollbackFixture, "registry"));
@@ -918,7 +925,7 @@ async function verifyPublicationRecovery(temporary) {
   const rollback = JSON.parse(await fs.readFile(path.join(rollbackHome, "client-state/workspace", rollbackFile)));
   assert.equal(rollback.writes[0].publication.rollback_receipt.operation_id, calls[2].operationId);
   assert.equal(rollback.writes[0].publication.rollback_receipt.outcome, "applied");
-  console.log("workspace publication: mandatory lazy publisher, exact retained recovery, legacy uncertainty/applied contract and checked rollback passed");
+  console.log("workspace publication: retained recovery preserves later changes, obsolete journals refuse, checked rollback passed");
 }
 
 async function verifyConditionedPublicationRecovery(temporary) {
@@ -1398,6 +1405,19 @@ async function verifyTaskArchive(temporary) {
       { action: "set_task_archived", ...archiveIdentity, runId: plan.runId, expectedDigest: await digest(), archived, ...overrides }, hooks);
   };
   try {
+    const peer = structuredClone(original), checkpoint = structuredClone(original.checkpoints[0]);
+    checkpoint.id = "peer_home_result";
+    checkpoint.interface_binding.interface = workspace.homeInterfaceId;
+    peer.checkpoints.push(checkpoint); peer.active_checkpoints.push(checkpoint.id);
+    peer.interface_state[workspace.homeInterfaceId] = {};
+    await writeRun(peer); store.invalidate();
+    const connected = await read("projection.operator.os.scope");
+    assert.equal(connected.status, "ready", connected.errors.join("; "));
+    assert.equal(connected.client_runs.find(row => row.run_id === plan.runId).interface_id, plan.chatInterfaceId);
+    peer.interface_state[workspace.homeInterfaceId].client_surface_role = "home";
+    await writeRun(peer); store.invalidate();
+    assert.ok((await read("projection.operator.os.scope")).errors.some(error => error.includes("more than one exact")));
+    await writeRun(original); store.invalidate();
     await assert.rejects(mutate(true, { runId: workspace.homeRunId }), /not an archivable/);
     await assert.rejects(mutate(true, { home: `${home}-other` }), /does not match the current Home/);
     await assert.rejects(mutate(true, { expectedDigest: "0".repeat(64) }), /changed before/);
@@ -2670,6 +2690,11 @@ async function verifyProjectPolicies() {
 
 const execution = process.argv[2] === "conditioned-recover"
   ? recoverWorkspaceTransactions({ octopusHomeRoot: process.argv[3], registryRoot: path.join(process.argv[3], "registry") })
+  : process.argv[2] === "publication-recovery"
+  ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-publication-test-")).then(async temporary => {
+    try { await verifyPublicationRecovery(await fs.realpath(temporary)); }
+    finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  })
   : process.argv[2] === "home-recipe"
   ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-home-recipe-test-")).then(async temporary => {
     try { await verifyRootFirstSetup(await fs.realpath(temporary)); } finally { await fs.rm(temporary, { recursive: true, force: true }); }

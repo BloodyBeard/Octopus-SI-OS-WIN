@@ -11,7 +11,7 @@ const { normalizedEndpoint } = require("../electron/interfaceTransport.cjs");
 const { createChatgptSignIn } = require("../electron/chatgptSignIn.cjs");
 const { createProjectionStore } = require("../electron/projection.cjs");
 const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
-const { adoptLocalPackageUpdates, recoverLocalPackageTransactions, registerLocalPackageMutationGuard } = require("../electron/localPackages.cjs");
+const { recoverLocalPackageTransactions, registerLocalPackageMutationGuard } = require("../electron/localPackages.cjs");
 const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
@@ -219,53 +219,15 @@ async function launchRuntime(environment, options) {
         assertNotAborted(options.signal);
         const current = await host.probe();
         if (current.phase !== "unmanaged" || current.ready || current.ownership !== "none" || current.pid !== null || current.error) {
-          throw runtimeError("Close the running Octopus runtime before updating its installed packages. Your Home and tasks are preserved.", environment);
+          throw runtimeError("Close the running Octopus runtime before recovering its interrupted workspace transactions.", environment);
         }
       };
     const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: environment.packageRoots.stateRoot, guard: assertStopped });
     try {
       await recoverLocalPackageTransactions(environment.packageRoots);
-      const reportedPhases = new Set();
-      await adoptLocalPackageUpdates({ ...environment.packageRoots,
-        onProgress: (progress) => {
-          const phase = progress.phase === "preserving_local_changes" ? "preserving_local_package_changes" : "updating_packages";
-          if (reportedPhases.has(phase)) return;
-          reportedPhases.add(phase);
-          options.onProgress({ phase, home: environment.home });
-        },
-      });
       await assertStopped();
       await recoverWorkspaceTransactions({ octopusHomeRoot: environment.home, registryRoot: environment.packageRoots.activeRegistryRoot,
         publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) });
-      const interfaceRoot = fs.lstatSync(path.join(environment.packageRoots.activeRegistryRoot, "interface"), { throwIfNoEntry: false });
-      if (interfaceRoot) {
-        if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
-        const store = projectionStore(environment);
-        try {
-          const scope = await store.read(projectionReadRequest("projection.operator.os.scope"));
-          if (scope.status === "invalid") throw new Error(`Native package adoption scope is invalid: ${scope.errors.join("; ")}`);
-          if (scope.client_runs.length) {
-            const loader = createOperatorChatClientLoader({ packageRoots: () => environment.packageRoots,
-              clientPath: () => path.join(environment.packageRoots.activeRegistryRoot, "interface", "world_operator_chat", "client.cjs") });
-            const client = await loader.load();
-            await client.adoptOperatorChatPackageUpdates({ octopusHome: () => environment.home,
-              registryRoot: () => environment.packageRoots.activeRegistryRoot, installationRoot: () => environment.installationRoot,
-              assertStopped, commitClientAuthoring: (request) => commitProjectionClientAuthoring(environment.home, environment.packageRoots.activeRegistryRoot, request,
-                { publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) }),
-              onResult: (result) => options.onProgress({ phase: `client_package_${result.status}`, home: environment.home, ...result }),
-            }, { clientRuns: scope.client_runs });
-          }
-        } finally { store.close(); }
-      } else {
-        for (const relative of ["state/runs", "client-state/workspace/receipts"]) {
-          const ownerPath = path.join(environment.home, relative);
-          const owner = fs.lstatSync(ownerPath, { throwIfNoEntry: false });
-          if (owner && (!owner.isDirectory() || owner.isSymbolicLink() || fs.readdirSync(ownerPath).length)) {
-            throw new Error(`Installed interface Registry is absent for existing workspace state '${ownerPath}'.`);
-          }
-        }
-        options.onProgress({ phase: "client_package_unbound", home: environment.home, reason: "No installed interface Registry or existing workspace." });
-      }
     } finally { releaseGuard(); }
     assertNotAborted(options.signal);
     await fsp.mkdir(path.dirname(environment.logPath), { recursive: true, mode: 0o700 });

@@ -142,6 +142,7 @@ pub(crate) async fn hand_control_result(
                     let context = handoff.current_session_context_artifacts().await;
                     let continuity = terminal_output_continuity(
                         descriptor, envelope, &context, run, &handoff.current_run_record_bytes().await,
+                        handoff.deferred_context_generations().await,
                     ).map_err(|error| error.to_string())?;
                     if let Some(pending) = continuity.as_ref().filter(|state| codex_continuity_waits_for_result(state)) {
                         let original = interrupted_effects.durable_continuity(run).await?

@@ -333,6 +333,17 @@ impl ProviderOutputHandoff {
         {
             return Err("failed source cannot supersede this pending handoff".into());
         }
+        if !self.pending_source_fully_refused(record, pending)? {
+            return Err("failed source pending handoff has no exact refusal for every artifact".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn pending_source_fully_refused(
+        &self,
+        record: &RunRecord,
+        pending: &PendingHandoff,
+    ) -> Result<bool, String> {
         validate_pending_items_are_active(record, &self.config.provider_interface, pending)?;
         let references = pending.items.iter().map(|item| {
             load_pending_artifact(&self.var_dir, item).map(|(_, reference)| reference)
@@ -355,7 +366,7 @@ impl ProviderOutputHandoff {
             let Some(index) = references.iter().position(|reference| movement.artifact.as_ref() == Some(reference)) else { continue; };
             if movement.from != Endpoint::Interface(self.config.provider_interface.clone()) { continue; }
             if matches!(movement.kind, MovementKind::InterfaceArrival | MovementKind::InterfaceOutbound) {
-                return Err("failed source pending artifact already has admitted movement evidence".into());
+                return Ok(false);
             }
             if movement.kind != MovementKind::DeliveryRefused { continue; }
             let runtime = movement.runtime().ok_or("pending refusal has no exact runtime coordinate")?;
@@ -367,6 +378,9 @@ impl ProviderOutputHandoff {
             {
                 return Err("pending refusal changed its exact interface or run scope".into());
             }
+            if movement.invocation_metadata.as_ref().and_then(|metadata| metadata.delivery_verdict())
+                .is_some_and(DeliveryVerdict::awaits_current_source)
+            { continue; }
             let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
                 .ok_or("pending refusal has no pinned run snapshot")?;
             let bytes = reader.snapshot(&hash)?;
@@ -380,10 +394,7 @@ impl ProviderOutputHandoff {
             validate_pending_items_are_active(&snapshot, &self.config.provider_interface, pending)?;
             refused.insert(index);
         }
-        if refused.len() != pending.items.len() {
-            return Err("failed source pending handoff has no exact refusal for every artifact".into());
-        }
-        Ok(())
+        Ok(!pending.items.is_empty() && refused.len() == pending.items.len())
     }
 
     pub async fn hand_failed_source(

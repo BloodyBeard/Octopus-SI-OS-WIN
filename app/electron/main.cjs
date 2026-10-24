@@ -100,7 +100,6 @@ const {
   isOperatorChatClientInterfaceCandidate,
 } = require("./operatorChatClientContract.cjs");
 const {
-  adoptLocalPackageUpdates,
   applyLocalApplicationPack,
   readLocalPackageCatalog,
   recoverLocalPackageTransactions,
@@ -2665,10 +2664,10 @@ async function initializeRuntimeHost() {
       const octopusHome = resolveOctopusHome();
       const packageRoots = clientSetupPackageRoots();
       const assertStopped = async () => {
-          if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during package release adoption.");
+          if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during workspace recovery.");
           const state = await host.probe();
           if (state.phase !== "unmanaged" || state.ready || state.ownership !== "none" || state.pid !== null || state.error) {
-            throw new Error("Close the running Octopus runtime before updating its installed packages. Your Home and tasks are preserved.");
+            throw new Error("Close the running Octopus runtime before recovering its interrupted workspace transactions.");
           }
         };
       const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: packageRoots.stateRoot, guard: assertStopped });
@@ -2677,7 +2676,6 @@ async function initializeRuntimeHost() {
         if (state.pid === null) {
           await assertStopped();
           await recoverLocalPackageTransactions(packageRoots);
-          await adoptLocalPackageUpdates(packageRoots);
           await assertStopped();
           const registryRoot = path.join(octopusHome, "registry");
           await recoverWorkspaceTransactions({ octopusHomeRoot: octopusHome, registryRoot,
@@ -2687,36 +2685,6 @@ async function initializeRuntimeHost() {
               withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
             },
           });
-          const interfaceRoot = fs.lstatSync(path.join(registryRoot, "interface"), { throwIfNoEntry: false });
-          if (interfaceRoot) {
-            if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
-            const store = createClientProjectionStore("live", { resolveRepoRoot, sourceRegistry: resolveSourceRegistry,
-              localPackageRegistry: resolveLocalPackageRegistry, localPackageLibrary: resolveLocalPackageLibrary,
-              octopusHome: () => octopusHome, projectEePolicies, inspectWorkspaceSetupState });
-            try {
-              const scope = await store.read(projectionReadRequest("projection.operator.os.scope"));
-              if (scope.status === "invalid") throw new Error(`Native package adoption scope is invalid: ${scope.errors.join("; ")}`);
-              if (scope.client_runs.length) {
-                const client = await getOperatorChatClientLoader().load();
-                await client.adoptOperatorChatPackageUpdates({ octopusHome: () => octopusHome,
-                  registryRoot: () => registryRoot, installationRoot: resolveInstallationRoot, assertStopped,
-                  commitClientAuthoring: (request) => commitProjectionClientAuthoring(octopusHome, registryRoot, request),
-                  onResult: (result) => appendClientLog(result.status === "deferred" ? "warn" : "info", "client.package_adoption", result),
-                }, { clientRuns: scope.client_runs });
-              }
-            } finally { store.close(); }
-          } else {
-            for (const relative of ["state/runs", "client-state/workspace/receipts"]) {
-              const ownerPath = path.join(octopusHome, relative);
-              const owner = fs.lstatSync(ownerPath, { throwIfNoEntry: false });
-              if (owner && (!owner.isDirectory() || owner.isSymbolicLink() || fs.readdirSync(ownerPath).length)) {
-                throw new Error(`Installed interface Registry is absent for existing workspace state '${ownerPath}'.`);
-              }
-            }
-            await appendClientLog("info", "client.package_adoption.unbound", { reason: "No installed interface Registry or existing workspace." });
-          }
-        } else {
-          await appendClientLog("info", "client.package_adoption.deferred", { reason: "runtime is already running" });
         }
       } finally {
         releaseGuard();
@@ -3753,7 +3721,7 @@ ipcMain.handle("octopus:projection-read", async (_event, token, request) => {
 
 ipcMain.handle("octopus:workspace-setup-state", async (_event, token) => {
   getClientAccessController().requireSession(token, ["live"]);
-  const state = await readWorkspaceSetupState({
+  const state = await inspectWorkspaceSetupState({
     octopusHomeRoot: resolveOctopusHome(),
     registryRoot: path.join(resolveOctopusHome(), "registry"),
   });
@@ -4432,7 +4400,7 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
           ...input,
           blobsRoot: path.join(octopusHome, "ledger", "blobs"),
         }),
-        readProjection: (method) => getProjectionStore("live").read(projectionReadRequest(method)),
+        readProjection: (method, params) => getProjectionStore("live").read(projectionReadRequest(method, params)),
         preparePayloadArtifactBindings: ({ payloadArtifactBindings: selectedBase }) => prepareContentAddressedPayloadBindings({
           blobsRoot: path.join(octopusHome, "ledger", "blobs"),
           attachments: stagedAttachments,
@@ -4445,6 +4413,7 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
         timeoutMs: request?.timeoutMs,
         messageId: request?.messageId,
         recoverPreparedMessage: request?.recoverPreparedMessage,
+        replacesMessage: request?.replacesMessage,
         runId: request?.runId,
         providerInterfaceId: request?.providerInterfaceId,
         providerModel: request?.providerModel,

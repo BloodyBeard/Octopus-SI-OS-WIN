@@ -234,59 +234,6 @@ pub(crate) fn read_pinned_provider_artifact(
     Ok((manifest, payload))
 }
 
-pub(crate) fn validate_provider_source_artifact(
-    ctx: &InterfaceLiftContext,
-    run: &RunId,
-    source_movement_seq: u64,
-    artifact: &ArtifactRef,
-    metadata: &octopus_ledger::InvocationMetadata,
-) -> Result<(), String> {
-    let (mut file, snapshot_len, max_row_bytes) = open_arbitration_snapshot(ctx)?;
-    let decoder = DurableMovementDecoder::for_log(&ctx.movements_path);
-    let (start_offset, expected_seq) = authoritative_source_scan_start(
-        ctx,
-        &mut file,
-        snapshot_len,
-        max_row_bytes,
-        &decoder,
-        source_movement_seq,
-    );
-    let scan = scan_authoritative_snapshot(
-        ctx,
-        &mut file,
-        snapshot_len,
-        max_row_bytes,
-        &decoder,
-        start_offset,
-        expected_seq,
-        None,
-        |movement| Ok((movement.seq.0 == source_movement_seq).then_some(movement)),
-    )?;
-    ensure_arbitration_snapshot_length(ctx, &file, snapshot_len)?;
-    let Some(source) = scan.found else {
-        return Err(format!(
-            "deferred provider source movement {source_movement_seq} is absent from the authoritative ledger"
-        ));
-    };
-    if movement_is_provider_source(ctx, run, &source)
-        && source.artifact.as_ref() == Some(artifact)
-        && source
-            .invocation_metadata
-            .as_ref()
-            .and_then(octopus_ledger::MovementMetadata::invocation)
-            == Some(metadata)
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "deferred provider source movement {source_movement_seq} does not match interface '{}' run '{}' artifact '{}'",
-            ctx.interface.as_str(),
-            run.as_str(),
-            artifact.id
-        ))
-    }
-}
-
 pub(crate) fn validate_artifact_admission(
     ctx: &InterfaceLiftContext,
     run: &RunId,

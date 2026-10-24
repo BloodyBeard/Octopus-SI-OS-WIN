@@ -635,6 +635,13 @@ pub(crate) fn decode_inflight_turn_control(
             Some(message) => message.control_id.clone(),
             None => operator_message_control_id(&bytes),
         };
+        if manifest.label == OPERATOR_MESSAGE_LABEL && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?.get("replaces_message").is_some() {
+            return Ok(Some(CodexTurnControl::Unsupported {
+                control_id: control_id.unwrap_or_else(|| input.artifact.id.to_string()),
+                action: "edit_message".into(),
+            }));
+        }
         let provider_input = match declared {
             Some(message) => ProviderInput::Turn(prepend_context_block_to_turn_input(Some(selected_files.text.clone()), message.input)),
             None => decode_provider_input(

@@ -3,8 +3,9 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
     use octopus_appserver_proto::{
         ApprovalsReviewer, AskForApproval, SandboxPolicy, SessionSource, Thread, ThreadStatus,
     };
-    for (interface_result, native_effect, quarantined_successor) in [
-        (false, false, false), (true, false, false), (false, true, false), (false, false, true),
+    for (interface_result, native_effect, quarantined_successor, late_successor) in [
+        (false, false, false, false), (true, false, false, false), (false, true, false, false),
+        (false, false, true, false), (false, false, false, true),
     ] {
         let effect_tool = if native_effect { "artifact.send" } else { "file.write" };
         let temp = tempfile::tempdir().unwrap();
@@ -124,6 +125,17 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                         turn.id = "new-turn".into();
                         send_test_result(&mut socket, request.id, serde_json::json!({"turn":turn}))
                             .await;
+                        if late_successor {
+                            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({
+                                "id":"late-retired-request","method":"item/tool/call","params":{
+                                    "threadId":"old-thread","turnId":"old-turn","callId":"late-retired-call",
+                                    "namespace":"formed_interfaces","tool":"new-dcall","arguments":{}}
+                            }).to_string().into())).await.unwrap();
+                            let response = socket.next().await.unwrap().unwrap();
+                            let response: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+                            assert_eq!(response["id"], "late-retired-request");
+                            assert_eq!(response["error"]["data"]["external_effect_dispatched"], false);
+                        }
                         socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({
                         "id":"new-call-request","method":"item/tool/call","params":{
                             "threadId":"new-thread","turnId":"new-turn","callId":"new-call-id",
@@ -332,22 +344,16 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                 .is_err()
         );
         let admitted_result = result("write-call");
-        let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
         let receive = async {
-            let result = driver
+            driver
                 .refresh_native_context(context, &admitted_result, Some(&original), 7, current())
-                .await;
-            let _ = finished_tx.send(());
-            result
+                .await
         };
         let collect = async {
             let mut phases = Vec::new();
             let mut prepared: Option<CodexContinuityState> = None;
             loop {
-                let emission = tokio::select! {
-                    emission = rx.recv() => emission.unwrap(),
-                    _ = &mut finished_rx, if quarantined_successor => return phases,
-                };
+                let emission = rx.recv().await.unwrap();
                 match emission {
                     ProviderStreamEmission::ContextBoundary {
                         emissions,
@@ -368,11 +374,15 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                             "run-a",
                         )
                         .unwrap();
-                        assert!(
-                            !codex_continuity_successor_is_settled(Some(&original), Some(&marker))
-                                .unwrap()
-                        );
                         let phase = value["context_refresh_phase"].as_str().unwrap().to_string();
+                        assert_eq!(
+                            codex_continuity_successor_is_settled(Some(&original), Some(&marker)).unwrap(),
+                            late_successor && phase == "retired_request_rejected",
+                        );
+                        if phase == "retired_request_rejected" {
+                            assert_eq!(value["rejected_native_request"]["params"]["threadId"], "old-thread");
+                            assert_eq!(value["rejection"]["data"]["external_effect_dispatched"], false);
+                        }
                         if phase == "prepared" {
                             assert_eq!(serde_json::to_value(marker.context_refresh.as_ref().unwrap()).unwrap()["completed_output"]["call_id"],
                                 if native_effect { "native-create-call" } else { "write-call" });
@@ -462,18 +472,12 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
         })
         .await
         .unwrap();
-        if quarantined_successor {
-            assert!(matches!(finished, Err(InterfaceDriverError::FailedClosed(message))
-                if message == "retired provider emitted an unadmitted successor effect"));
-            assert_eq!(phases, ["prepared"]);
-            assert_eq!(serde_json::to_value(sink.continuity_snapshot().unwrap().context_refresh.unwrap()).unwrap()["retired"], false);
-            assert!(driver.pending_request(&scope, "tool:write-call").await.unwrap().is_some());
-            driver.shutdown().await.unwrap();
-            assert!(!server.await.unwrap().iter().any(|method| matches!(method.as_str(), "thread/start" | "turn/start")));
-            continue;
-        }
         assert!(finished.expect("context refresh"));
-        assert_eq!(phases, ["prepared", "retired", "ready"]);
+        let mut expected = vec!["prepared", "retired"];
+        if quarantined_successor { expected.push("retired_request_rejected"); }
+        expected.push("ready");
+        if late_successor { expected.push("retired_request_rejected"); }
+        assert_eq!(phases, expected);
         assert!(
             !driver
                 .pending_server_requests
@@ -488,6 +492,14 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                 .unwrap()
                 .is_some()
         );
+        for (thread, turn) in [("other-thread", "old-turn"), ("old-thread", "other-turn")] {
+            let request: ServerRequest = serde_json::from_value(serde_json::json!({
+                "id":"unproven-request","method":"item/tool/call","params":{
+                    "threadId":thread,"turnId":turn,"callId":"unproven-call",
+                    "namespace":"formed_interfaces","tool":"new-dcall","arguments":{}}
+            })).unwrap();
+            assert!(!driver.reject_retired_context_request(&sink, &*driver.client.lock().await, &request).await.unwrap());
+        }
         driver.shutdown().await.unwrap();
         assert_eq!(
             server.await.unwrap(),

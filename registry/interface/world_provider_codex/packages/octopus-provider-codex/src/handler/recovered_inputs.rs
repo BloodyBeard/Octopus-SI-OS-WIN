@@ -137,6 +137,32 @@ pub(crate) fn pending_turn_id(pending: &CodexPendingContinuity) -> &str {
     }
 }
 
+pub(crate) fn exact_pending_question(
+    session: &[SessionContextArtifact],
+    state: &CodexContinuityState,
+    response: &OperatorResponseArtifact,
+) -> Result<ArtifactRef, InterfaceDriverError> {
+    let Some(pending @ CodexPendingContinuity::Operator { method, .. }) = state.pending.as_ref() else {
+        return Err(InterfaceDriverError::FailedClosed("question response has no pending operator request".into()));
+    };
+    if method != "item/tool/requestUserInput" || !matches!(response, OperatorResponseArtifact::UserInput { .. }) {
+        return Err(InterfaceDriverError::FailedClosed("interrupted question recovery cannot resolve another operator operation".into()));
+    }
+    validate_recovered_operator_response(response, pending)?;
+    let request_id = response.request_id()?;
+    let mut exact = None;
+    for entry in session.iter().filter(|entry| entry.label == OPERATOR_USER_INPUT_REQUEST_LABEL
+        && entry.payload.get("request_id").and_then(serde_json::Value::as_str) == Some(request_id.as_str())) {
+        let Some(raw) = entry.payload.get(CODEX_CONTINUITY_FIELD) else { continue; };
+        let request = parse_codex_continuity(raw, &state.provider_interface, &state.run)?;
+        if request.thread_id != state.thread_id || request.pending.as_ref() != Some(pending) { continue; }
+        if entry.source_movement_seq.is_none() || exact.replace(entry.source_artifact.clone()).is_some() {
+            return Err(InterfaceDriverError::FailedClosed("interrupted question has ambiguous or unadmitted request evidence".into()));
+        }
+    }
+    exact.ok_or_else(|| InterfaceDriverError::FailedClosed("interrupted question has no exact admitted request artifact".into()))
+}
+
 pub(crate) fn interrupted_transport_output(
     last_artifact_label: &str,
     pending: Option<&CodexPendingContinuity>,

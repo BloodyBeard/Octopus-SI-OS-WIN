@@ -226,7 +226,8 @@ fn publication_snapshot_is_planned_bound_readable_and_keeps_provenance_non_autho
     let body: Value = serde_json::from_str(&resolved.artifact_writes[0].content).unwrap();
     assert_eq!(body["text"], PROCEDURE);
     assert_eq!(body["evidence"][0]["id"], "private-proof");
-    assert_eq!(body["sources"], json!([]));
+    assert!(body.get("sources").is_none());
+    assert_eq!(body["publication_selection"]["context_sources"], json!([]));
     let plan = plan_operator_chat_topology(&request).unwrap();
     assert_eq!(plan.publication_evidence, resolved.evidence);
     assert_eq!(
@@ -306,6 +307,27 @@ fn publication_snapshot_is_planned_bound_readable_and_keeps_provenance_non_autho
             .unwrap_err()
             .contains("conflicting content")
     );
+}
+
+#[test]
+fn publication_keeps_selected_instruction_provenance_out_of_nested_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (mut request, mut pin, mut entry) = fixture(&root);
+    let instruction = json!({"id":"selected-instruction","label":"context.reference","text":"Use the declared publication route."});
+    composition::write(&root, "registry/artifact/selected-instruction/artifact.json", instruction.clone());
+    entry["selection"]["context_artifact_bindings"] = json!([{"id":"selected-instruction"}]);
+    composition::write(&root, "registry/artifact/library/entries/procedure.json", entry.clone());
+    pin.revision = ContentHash::of_canonical_json(&entry);
+    request.publications = vec![pin.clone()];
+    let resolved = resolve(&request, &[pin], Default::default()).unwrap();
+    let body: Value = serde_json::from_str(&resolved.artifact_writes[0].content).unwrap();
+    assert!(body.get("sources").is_none());
+    assert_eq!(body["publication_selection"]["context_sources"], json!([{
+        "id":"selected-instruction","content":ContentHash::of_canonical_json(&instruction)
+    }]));
+    assert!(resolved.selection.context_artifact_bindings.iter().any(|binding| binding.id == "selected-instruction"));
+    plan_operator_chat_topology(&request).unwrap();
 }
 
 #[test]

@@ -235,7 +235,6 @@ function overrides(world) {
     "./localPackages.cjs": (real) => ({
       ...real,
       recoverLocalPackageTransactions: async () => { world.events.push(["recover-packages"]); await world.recoveryGate; },
-      adoptLocalPackageUpdates: async () => { world.events.push(["adopt-packages"]); },
       registerLocalPackageMutationGuard: () => () => {},
       withLocalPackageInstallation: async (roots) => { throw new Error(`${roots.packageId} is not installed in this fixture`); },
     }),

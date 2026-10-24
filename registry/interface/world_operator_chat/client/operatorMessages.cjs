@@ -38,9 +38,13 @@ function operatorMessageEnvelopeFromBytes(input) {
 }
 
 function assertOperatorMessageRequestMatchesEnvelope(input, payload) {
+  if (canonicalJson(input.replacesMessage ?? null) !== canonicalJson(payload.replaces_message ?? null)) {
+    throw new Error("Message revision differs from its prepared envelope");
+  }
   if (payload.text !== input.requestedText) {
     throw new Error(`operator message '${input.messageId}' conflicts with its durable prepared envelope`);
   }
+  if (input.replacesMessage) return;
   if (input.recoverPreparedMessage) {
     if (input.attachmentInputs.length !== 0 || payload.attachments.length === 0) {
       throw new Error(`operator message '${input.messageId}' is not an attachment-backed prepared message`);
@@ -115,7 +119,7 @@ function operatorClientContext(value) {
 function operatorMessagePayload(value, messageId, attachmentRoot) {
   const payload = requiredObject(value, "operator message payload");
   const fields = ["text", "message_id", "attachments"];
-  const optionalFields = ["client_context"];
+  const optionalFields = ["client_context", "replaces_message"];
   if (
     fields.some((field) => !Object.hasOwn(payload, field))
     || Object.keys(payload).some((field) => !fields.includes(field) && !optionalFields.includes(field))
@@ -192,6 +196,7 @@ function operatorMessagePayload(value, messageId, attachmentRoot) {
     text: payload.text,
     message_id: messageId,
     attachments,
+    ...(payload.replaces_message ? { replaces_message: require("./messageRevision.cjs").messageRevision(payload.replaces_message) } : {}),
     ...(clientContext ? { client_context: clientContext } : {}),
   };
 }

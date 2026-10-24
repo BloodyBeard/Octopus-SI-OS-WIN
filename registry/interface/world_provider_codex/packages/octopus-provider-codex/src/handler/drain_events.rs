@@ -264,6 +264,12 @@ impl CodexAppServerInterfaceDriver {
             ServerNotification::ThreadTokenUsageUpdated(usage) if usage.thread_id == thread_id => {
                 let (context_window_usage, provider_token_usage) =
                     terminal_usage_evidence(&usage.token_usage)?;
+                sink.send_progress(CodexTurnOutput::client(TURN_TOKEN_USAGE_LABEL, serde_json::json!({
+                    "thread_id": thread_id,
+                    "turn_id": usage.turn_id,
+                    "context_window_usage": context_window_usage,
+                    "provider_token_usage": provider_token_usage,
+                })))?;
                 *latest_context_window_usage = Some(context_window_usage);
                 *latest_provider_token_usage = Some(provider_token_usage);
             }
@@ -595,6 +601,9 @@ impl CodexAppServerInterfaceDriver {
             ..
         } = drain;
         flush_pending_delta(sink, pending_delta, delta_seq)?;
+        if self.reject_retired_context_request(sink, client, &request).await? {
+            return Ok(DrainStep::Next);
+        }
         let _effect_guard = context.effect_gate.clone().lock_owned().await;
         if context
             .turn_interrupted

@@ -772,6 +772,8 @@ function proveCompletedClientSetup(
 }
 
 function completedSetupMatrix(snapshot: GateSnapshot, draft: WorkspaceSetupDraft | null): GateMatrix {
+  const failure = workspaceFailure(snapshot);
+  if (failure) return failure;
   const setup = snapshot.clientSetup!;
   const receipt = snapshot.workspace.receipt;
   if (
@@ -808,26 +810,32 @@ function completedSetupMatrix(snapshot: GateSnapshot, draft: WorkspaceSetupDraft
   return { mode: "shell", title: "", detail: "" };
 }
 
-function resolveGateMatrix(
-  snapshot: GateSnapshot,
-  draft: WorkspaceSetupDraft | null,
-  catalogResult: CatalogResult,
-  extensions: ClientExtensionRegistryState,
-): GateMatrix {
+function workspaceFailure(snapshot: GateSnapshot): GateMatrix | null {
   if (snapshot.workspace.status === "degraded") {
     return {
       mode: "blocked",
       title: "Workspace setup needs repair",
-      detail: "The durable setup receipt could not be verified. Octopus did not guess or replace it.",
+      detail: snapshot.workspace.errors.join("\n") || "The saved workspace setup could not be verified.",
     };
   }
   if (snapshot.scope.status === "invalid") {
     return {
       mode: "blocked",
       title: "Home and projects need attention",
-      detail: "The current workspace does not form one valid Octopus OS scope.",
+      detail: snapshot.scope.errors.join("\n") || "The current workspace does not form one valid Octopus OS scope.",
     };
   }
+  return null;
+}
+
+function resolveGateMatrix(
+  snapshot: GateSnapshot,
+  draft: WorkspaceSetupDraft | null,
+  catalogResult: CatalogResult,
+  extensions: ClientExtensionRegistryState,
+): GateMatrix {
+  const failure = workspaceFailure(snapshot);
+  if (failure) return failure;
   const setup = snapshot.clientSetup;
   if (setup?.status === "in_progress") {
     if (draft && draft.operationId !== setup.operationId) {

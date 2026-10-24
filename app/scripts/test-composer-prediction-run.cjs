@@ -26,6 +26,8 @@ test("client maintenance uses isolated ports, preserves results and rearms only 
     readArtifacts: async ({ interface_id }) => rows.filter((row) => row.interface_id === interface_id),
     commit: async ({ writes, publishBarrierPath }) => {
       commits++; recordPath = publishBarrierPath;
+      assert.ok(writes.every(row => row.file !== sourcePath));
+      await write(sourcePath, { ...source, status: "running", active_checkpoints: ["next"] });
       const record = writes.find((row) => row.file === recordPath).next;
       assert.equal(valid(record), true, JSON.stringify(valid.errors));
       assert.equal(record.checkpoints.length, 2);
@@ -60,7 +62,7 @@ test("client maintenance uses isolated ports, preserves results and rearms only 
     const eeFile = path.join(home, "state/ee_instances", `${initial.ee}.json`);
     const ee = JSON.parse(await fs.readFile(eeFile));
     assert.equal(ee.parent_ee_id, null);
-    await write(eeFile, { ...ee, parent_ee_id: "root", config: { custom: true }, policy_narrowing: { allowed_tools: [] } });
+    await write(eeFile, { ...ee, parent_ee_id: null, config: { custom: true }, policy_narrowing: { allowed_tools: [] } });
     const owned = await topology();
     assert.equal(owned.records.get(initial.id).role, "prediction");
     assert.equal(owned.interfaces.size, 3);
@@ -73,10 +75,10 @@ test("client maintenance uses isolated ports, preserves results and rearms only 
     await assert.rejects(requestComposerPrediction(options, { runId: "chat" }), /provider unavailable/);
     sequence = 20; failed = false;
     await requestComposerPrediction(options, { runId: "chat" });
-    const migrated = JSON.parse(await fs.readFile(eeFile));
-    assert.equal(migrated.parent_ee_id, null);
-    assert.deepEqual(migrated.config, { custom: true });
-    assert.deepEqual(migrated.policy_narrowing, { allowed_tools: [] });
+    const retained = JSON.parse(await fs.readFile(eeFile));
+    assert.equal(retained.parent_ee_id, null);
+    assert.deepEqual(retained.config, { custom: true });
+    assert.deepEqual(retained.policy_narrowing, { allowed_tools: [] });
     assert.equal(commits, 3);
     const record = JSON.parse(await fs.readFile(recordPath));
     assert.equal(record.checkpoints[0].epoch, 2);

@@ -93,7 +93,7 @@ impl RunAuthoringConfig {
                 for value in [writer.owner.as_str(),writer.source.as_str(),writer.door.as_str(),&writer.tool,&writer.call_label,&writer.result_label] { non_empty_string(value,"external owner writer")?; }
             }
             if !checkpoint.static_artifact_bindings.is_empty() {
-                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ResultInput | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ResultInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
+                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ResultInput | RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ResultInput | RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
                     return Err(format!("run_authoring {owner} static artifacts require a declared input or tool/interface output"));
                 }
                 let mut ids = BTreeSet::new();
@@ -489,6 +489,7 @@ impl RunAuthoringConfig {
         &self,
         route: &ProviderHandoffRoute,
         output_checkpoint: &RunAuthoringCheckpoint,
+        static_artifact_bindings: &[ArtifactId],
         granted_mark_outcomes: &BTreeSet<String>,
         granted_tools: &BTreeSet<String>,
         granted_interfaces: &BTreeSet<InterfaceId>,
@@ -590,7 +591,7 @@ impl RunAuthoringConfig {
                 interface_binding,
                 outbound_interface_bindings,
                 include_context: true,
-                static_artifact_bindings: Vec::new(),
+                static_artifact_bindings: static_artifact_bindings.to_vec(),
         owner_authoring: None,
                 required_verified_artifacts,
             });

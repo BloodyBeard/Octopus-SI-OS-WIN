@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { ClientTurnQueue, indexedQueuePersistence, queueHead, queueNamespace, type QueuedChatTurn } from "./clientTurnQueue";
-import { legacyChatQueueNotice } from "./storage";
 export type { QueuedChatTurn } from "./clientTurnQueue";
 
 const queues = new Map<string, ClientTurnQueue>();
@@ -20,7 +19,7 @@ function sharedQueue(profile: string, home: string): ClientTurnQueue {
   return queue;
 }
 
-export function useChatTurnQueue(accessProfile: OctopusClientAccessProfile, runtimeHome: string, legacyStorageScope: string) {
+export function useChatTurnQueue(accessProfile: OctopusClientAccessProfile, runtimeHome: string) {
   const queueStore = useMemo(() => sharedQueue(accessProfile, runtimeHome), [accessProfile, runtimeHome]);
   const snapshot = useSyncExternalStore(queueStore.subscribe, queueStore.getSnapshot);
   const queueOwner = useMemo(() => ({ id: crypto.randomUUID(), active: false, ready: false }), [queueStore]);
@@ -89,7 +88,6 @@ export function useChatTurnQueue(accessProfile: OctopusClientAccessProfile, runt
     return { replaceQueuedTurns, replacePausedQueueRunKeys, nextQueuedTurn };
   }, [queueStore]);
   return {
-    queueNotice: legacyChatQueueNotice(accessProfile, legacyStorageScope),
     ...refs, ...methods, queueStore, queueOwner, queueReady: snapshot.ready && queueOwner.ready,
     queueError: snapshot.error || (!globalThis.navigator?.locks ? "This client cannot coordinate message delivery across windows." : ""),
     queuedTurns: snapshot.turns, pausedQueueRunKeys: snapshot.pausedRunKeys,

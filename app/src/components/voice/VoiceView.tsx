@@ -1018,7 +1018,6 @@ function HomeCommandDock({ awaitingClientResult, callActive, commandsActive, onV
       <div hidden={callActive} inert={callActive}>
         <QueuedMessageList
           messages={workspace.queuedTurns}
-          notice={workspace.queueNotice}
           paused={workspace.queuePaused}
           sendNowAvailable={workspace.canSendQueued}
           onDelete={workspace.deleteQueuedTurn}
@@ -1033,6 +1032,8 @@ function HomeCommandDock({ awaitingClientResult, callActive, commandsActive, onV
           activeProvider={workspace.activeProvider}
           attachments={workspace.attachments}
           canSubmit={workspace.canSubmit}
+          contextUsage={workspace.contextUsage}
+          hasQueuedMessages={workspace.queuedTurns.length > 0}
           fileInputRef={workspace.fileInputRef}
           interruptPending={workspace.turnControlPending || Boolean(deferredStopAtMs)}
           listenToGlobalCommands={commandsActive && !callActive}
@@ -1056,6 +1057,7 @@ function HomeCommandDock({ awaitingClientResult, callActive, commandsActive, onV
           providerInterfaces={workspace.providerInterfaces}
           providerInterfacesLoaded={workspace.providerInterfacesLoaded}
           providerInterfacesRefreshing={workspace.providerInterfacesRefreshing}
+          modelSelectionLoading={workspace.modelSelectionLoading}
           projectedFileSources={projectedFileSources}
           pausedQueueSubmissionCount={workspace.pausedQueueSubmissionCount}
           reasoningEffort={workspace.reasoningEffort}
@@ -1063,6 +1065,7 @@ function HomeCommandDock({ awaitingClientResult, callActive, commandsActive, onV
           resumeAvailable={workspace.resumeAvailable}
           runId={workspace.activeRunId}
           suggestionSourceSequence={workspace.activeRun?.lastTerminalMessage?.movementSeq}
+          runtimeHome={workspace.runtimeHome}
           isSubmitting={workspace.submitting}
           submissionMode={workspace.busy ? "queue" : "send"}
           canSteer={workspace.canSteer}

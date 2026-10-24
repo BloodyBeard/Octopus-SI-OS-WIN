@@ -12,6 +12,7 @@ export type ChatAttachment = {
 export type ChatAttachmentView = Omit<ChatAttachment, "file" | "stage">;
 
 export type ChatRenderMessage = {
+  contentHash?: string;
   id: string;
   runId?: string;
   role: "user" | "assistant" | "system";
@@ -28,6 +29,7 @@ export type ChatRenderMessage = {
   pending?: boolean;
   error?: boolean;
   terminal?: boolean;
+  relatedRuns?: Array<{ runId: string; title: string }>;
 };
 
 export type ChatToolPresentationDescriptor = {

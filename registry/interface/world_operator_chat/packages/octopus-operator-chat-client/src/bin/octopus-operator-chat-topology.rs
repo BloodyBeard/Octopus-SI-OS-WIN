@@ -6,23 +6,14 @@ mod file_publication;
 use octopus_operator_chat_client::{
     plan_operator_chat_topology, plan_operator_writer_runs, OperatorChatPlanRequest,
     OperatorWriterRunPlanRequest,
-    plan_operator_writer_schema, OperatorWriterSchemaPlanRequest,
 };
 use octopus_operator_chat_client::run_revision::{
     InputPayloadInspection, RunRevisionRequest, RunRevisionVerification,
     inspect_input_payloads, prepare_run_revision, verify_run_revision,
 };
-use octopus_operator_chat_client::native_run_authoring::{NativeRunAdoptionRequest, plan_existing_adoption};
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if arguments.len() == 1 && arguments[0] == "--plan-native-adoption-batch" {
-        if let Err(error) = octopus_operator_chat_client::native_run_authoring::serve_native_adoption_batch() {
-            eprintln!("operator native adoption batch failed closed: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
     if arguments.len() == 1 && arguments[0] == "--publish-files" {
         match read_publication_request().and_then(file_publication::publish_files) {
             Ok(result) => match serde_json::to_string(&result) {
@@ -58,12 +49,10 @@ fn main() {
     }
     let retirement_preflight = arguments.len() == 1 && arguments[0] == "--verify-task-retirement";
     let writers_only = arguments.len() == 1 && arguments[0] == "--writer-runs";
-    let writer_schema = arguments.len() == 1 && arguments[0] == "--writer-schema";
     let prepare_revision = arguments.len() == 1 && arguments[0] == "--prepare-input-revision";
     let verify_revision = arguments.len() == 1 && arguments[0] == "--verify-input-revision";
     let inspect_payloads = arguments.len() == 1 && arguments[0] == "--inspect-input-payloads";
-    let native_adoption = arguments.len() == 1 && arguments[0] == "--plan-native-adoption";
-    if !arguments.is_empty() && !writers_only && !writer_schema && !prepare_revision && !verify_revision && !inspect_payloads && !native_adoption && !retirement_preflight {
+    if !arguments.is_empty() && !writers_only && !prepare_revision && !verify_revision && !inspect_payloads && !retirement_preflight {
         eprintln!("operator chat topology received an unknown planning operation");
         std::process::exit(1);
     }
@@ -78,15 +67,6 @@ fn main() {
         match result {
             Ok(()) => println!("{{\"ready\":true}}"),
             Err(error) => { eprintln!("operator task retirement preflight failed closed: {error}"); std::process::exit(1); }
-        }
-        return;
-    }
-    if native_adoption {
-        match serde_json::from_str::<NativeRunAdoptionRequest>(&input).map_err(|error|error.to_string())
-            .and_then(|request| plan_existing_adoption(&request))
-            .and_then(|plan| serde_json::to_string(&plan).map_err(|error|error.to_string())) {
-            Ok(encoded) => println!("{encoded}"),
-            Err(error) => { eprintln!("operator native adoption failed closed: {error}"); std::process::exit(1); }
         }
         return;
     }
@@ -107,13 +87,10 @@ fn main() {
         }
         return;
     }
-    if writers_only || writer_schema {
-        let result = if writer_schema {
-            serde_json::from_str::<OperatorWriterSchemaPlanRequest>(&input)
-                .map_err(|error| error.to_string()).and_then(|request| plan_operator_writer_schema(&request))
-        } else { serde_json::from_str::<OperatorWriterRunPlanRequest>(&input)
+    if writers_only {
+        let result = serde_json::from_str::<OperatorWriterRunPlanRequest>(&input)
             .map_err(|error| error.to_string())
-            .and_then(|request| plan_operator_writer_runs(&request)) }
+            .and_then(|request| plan_operator_writer_runs(&request))
             .and_then(|writes| serde_json::to_string(&writes).map_err(|error| error.to_string()));
         match result {
             Ok(encoded) => println!("{encoded}"),

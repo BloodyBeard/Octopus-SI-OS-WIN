@@ -63,13 +63,12 @@ function callback(name, environment) {
   return Function(...Object.keys(environment), code)(...Object.values(environment));
 }
 
-test("message branches navigate to the task draft and retain the source pane history", () => {
+test("message edits stay in the source pane while branches navigate to the task draft", () => {
   const { taskDraftActions } = load("src/components/shell/taskDraftActions.ts");
   const calls = [];
   let accepted = true;
   const target = {
     continueInNewTask: message => { calls.push(["continue", message]); return accepted; },
-    editUserMessageInNewTask: (...args) => { calls.push(["edit", ...args]); return accepted; },
   };
   const wrap = callback("workspaceWithTaskDraftActions", {
     taskDraftActions, chatWorkspace: target,
@@ -78,12 +77,13 @@ test("message branches navigate to the task draft and retain the source pane his
     setSecondaryPaneFocused: focused => calls.push(["focus", focused]),
     selectSurface: (surface, run) => calls.push(["navigate", surface, run]),
   });
-  const source = { activeRunId: "home", renderedMessages: [{ id: "old" }, { id: "edited" }] };
+  const source = { activeRunId: "home", renderedMessages: [{ id: "old" }, { id: "edited" }],
+    editUserMessage: (...args) => { calls.push(["edit", ...args]); return accepted; } };
   const actions = wrap(source);
-  assert.equal(actions.editUserMessageInNewTask(source.renderedMessages[1], "correction"), true);
-  assert.deepEqual(calls[0], ["edit", source.renderedMessages[1], "correction", source.renderedMessages]);
-  assert.deepEqual(calls.at(-1), ["navigate", "chat", ""]);
-  assert.equal(source.activeRunId, "home", "Home keeps its identity while the task pane opens the branch");
+  assert.equal(actions.editUserMessage(source.renderedMessages[1], "correction"), true);
+  assert.deepEqual(calls[0], ["edit", source.renderedMessages[1], "correction"]);
+  assert.equal(calls.length, 1);
+  assert.equal(source.activeRunId, "home", "editing keeps the source pane and task");
   calls.length = 0;
   assert.equal(actions.continueInNewTask({ id: "reply" }), true);
   assert.deepEqual(calls.at(-1), ["navigate", "chat", ""]);

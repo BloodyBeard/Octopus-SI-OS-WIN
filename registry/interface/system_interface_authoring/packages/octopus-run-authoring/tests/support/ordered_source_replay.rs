@@ -398,6 +398,14 @@ async fn exercise_interrupted_source_order(
     seed["status"] = serde_json::json!("idle");
     let mut topology: BoundRunAuthoringTopology = serde_json::from_value(seed["interface_state"][h.ctx.interface.as_str()][RUN_AUTHORING_BINDING].clone()).unwrap();
     topology.payload_artifact_bindings = vec![a.clone()];
+    for template in topology.checkpoints.iter_mut().filter(|cp| cp.role == RunAuthoringCheckpointRole::ProviderToolOutput) {
+        for tool in checkpoint_tool_ids(template).unwrap() {
+            template.result_receiving.insert(tool.clone(), serde_json::from_value(serde_json::json!({
+                "artifact_label":format!("{tool}.result"), "mark":"tool.result.corresponds",
+                "verifier":"tool_result_correspondence", "params":{}
+            })).unwrap());
+        }
+    }
     topology.checkpoints.iter_mut().find(|cp| cp.name == "owner_result").unwrap().static_artifact_bindings.push(a.id.clone());
     seed["interface_state"][h.ctx.interface.as_str()][RUN_AUTHORING_BINDING] = serde_json::to_value(topology).unwrap();
     for cp in seed["checkpoints"].as_array_mut().unwrap() {
@@ -445,6 +453,13 @@ async fn exercise_interrupted_source_order(
     let before = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
     let next = prepare_provider_input_payloads(payload.run_path.clone(), authored.content.as_bytes(), &writer, source.clone(), vec![b.clone()]).unwrap();
     let after = RunRecord::from_bytes(next.content.as_bytes()).unwrap();
+    let after_topology: BoundRunAuthoringTopology = serde_json::from_value(after.interface_state[&payload.ctx.interface][RUN_AUTHORING_BINDING].clone()).unwrap();
+    for template in after_topology.checkpoints.iter().filter(|cp| cp.role == RunAuthoringCheckpointRole::ProviderToolOutput) {
+        let retained = after.checkpoints.iter().find(|cp| after.active_checkpoints.contains(&cp.id)
+            && checkpoint_record_matches_template(cp, template, &after.id)).unwrap();
+        assert!(retained.artifact_bindings.iter().any(|bound| bound.id == b.id));
+        assert!(!retained.artifact_bindings.iter().any(|bound| bound.id == a.id));
+    }
     let owner = CheckpointId::new("owner_result");
     assert_eq!(after.checkpoint(&owner), before.checkpoint(&owner));
     assert!(after.checkpoint(&owner).unwrap().artifact_bindings.iter().any(|bound| bound.id == a.id));

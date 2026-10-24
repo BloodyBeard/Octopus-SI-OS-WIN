@@ -8,7 +8,7 @@ async fn main() {
         Box::pin(async move {
             if ctx.resolved_interface_descriptor()?.interface_driver_config.as_ref()
                 .is_some_and(|config| config.private_config.contains_key("application_consent_authority")) {
-                return Err("selected Home consent authority requires explicit migration before ordinary activation".into());
+                return Err("selected Home consent authority uses an unsupported contract; initialize a fresh Home".into());
             }
             octopus_world_pyecho_life_runtime::run_descriptor_activation_life(
                 ctx,

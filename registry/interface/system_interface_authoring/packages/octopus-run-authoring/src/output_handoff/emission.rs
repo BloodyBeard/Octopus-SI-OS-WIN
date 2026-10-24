@@ -385,6 +385,7 @@ impl ProviderOutputHandoff {
             let verified_inputs = active.config.verified_input_checkpoints(
                 &route,
                 &output_checkpoint,
+                &next_static_context,
                 &active.granted_mark_outcomes,
                 &active.granted_tools,
                 &active.granted_interfaces,

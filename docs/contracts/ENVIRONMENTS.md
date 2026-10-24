@@ -139,11 +139,9 @@ execution and do not inherit the executor's signal authority. Command control
 accepts an opaque process identity belonging to the formed WorkerEnvironment,
 never an arbitrary host PID supplied by the model.
 
-Existing private tool copies receive a changed authority only through their
-owning package's explicit predecessor declaration and after accepted tool work
-has settled. Adoption compares the complete prior descriptor and forms the next
-grant against the updated original; locally authored differences defer the
-transition. No already accepted invocation gains new rights.
+Private tool copies retain their authored authority. A distribution release with an incompatible contract
+requires fresh composition in a fresh Home, without rewriting existing copies or
+accepted invocations. No already accepted invocation gains new rights.
 
 A failed stop retains the process handle and reports the actual error. Closure
 requires observed exit, stream closure and termination of the owned process group

@@ -309,7 +309,19 @@ pub(crate) async fn restore_completed_provider_sources(
             continue;
         }
         if source >= committed_before { continue; }
-        let (recovery, outcomes) = handoff.recover_completed_source_with_outcomes().await?;
+        let (recovery, outcomes) = match handoff.recover_completed_source_with_outcomes().await {
+            Ok(recovered) => recovered,
+            Err(error) if ctx.cancel.is_cancelled() => return Err(error),
+            Err(error) => {
+                let message = format!("completed provider output could not be recovered (movement seq {source}): {error}");
+                if let Err(unreported) = record_invalid_provider_context(ctx, descriptor, session, &run, &turn, message.clone()).await {
+                    if ctx.cancel.is_cancelled() { return Err(unreported); }
+                    tracing::warn!(interface = ctx.interface.as_str(), run = run.as_str(), seq = source,
+                        error = %message, unreported = %unreported, "completed provider source remains failed");
+                }
+                continue;
+            }
+        };
         if matches!(recovery, ProviderSourceRecovery::Bridged { .. }) { continue; }
         if try_settle_completed_interrupted_result(ctx, descriptor, &run, &turn, &handoff, interrupted).await? { continue; }
         if recovery != ProviderSourceRecovery::Completed { continue; }

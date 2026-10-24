@@ -153,7 +153,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         return;
       }
       const next = normalizeScope(raw);
-      const merged = mergeProjectedProjects(next, legacyProjectPresentation(next));
+      const merged = mergeProjectedProjects(next, projectPresentationRows(next));
       saveClientChatProjects(merged, profile);
       projectsRef.current = merged;
       setProjects(merged);
@@ -591,7 +591,7 @@ function mergeProjectedProjects(
   });
 }
 
-function legacyProjectPresentation(scope: ScopeSnapshot): ClientChatProject[] {
+function projectPresentationRows(scope: ScopeSnapshot): ClientChatProject[] {
   return scope.projectPresentations.map((project) => ({
     id: project.eeId,
     name: project.name,

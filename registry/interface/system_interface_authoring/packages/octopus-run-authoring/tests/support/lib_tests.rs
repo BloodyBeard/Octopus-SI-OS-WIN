@@ -2553,12 +2553,14 @@
             "operator.approval".to_string(),
             "operator.input.provided".to_string(),
         ]);
+        let static_context = vec![ArtifactId::new("artifact-static-reference")];
         let verified = config
-            .verified_input_checkpoints(&route, output, &marks, &BTreeSet::new(), &BTreeSet::new())
+            .verified_input_checkpoints(&route, output, &static_context, &marks, &BTreeSet::new(), &BTreeSet::new())
             .unwrap();
         assert_eq!(verified.len(), 2);
         assert!(verified.iter().all(|checkpoint| {
             checkpoint.role == RunAuthoringCheckpointRole::VerifiedInput
+                && checkpoint.static_artifact_bindings == static_context
                 && checkpoint.include_context
                 && binding_admits_exact_name(
                     &checkpoint.interface_binding,
@@ -2602,6 +2604,7 @@
             .verified_input_checkpoints(
                 &route,
                 output,
+                &static_context,
                 &BTreeSet::from(["operator.approval".to_string()]),
                 &BTreeSet::new(),
                 &BTreeSet::new(),
@@ -2940,6 +2943,13 @@
                 rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
             save(&rows);
             assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
+            let mut intent_handoff = recovery.clone();
+            let mut intent_state = state.clone();
+            intent_state.run_record_bytes = tool.content.as_bytes().to_vec();
+            intent_handoff.state = Arc::new(tokio::sync::Mutex::new(intent_state));
+            intent_handoff.failed_source = false;
+            let intent_runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            assert!(intent_runtime.block_on(intent_handoff.pending_source_intent()).unwrap().is_some());
             let mut refusal = ledger_row(24);
             refusal.kind = MovementKind::DeliveryRefused;
             refusal.from = Endpoint::Interface(provider.clone());
@@ -2953,8 +2963,16 @@
                     epoch: tool.pending_handoff.items[0].checkpoint.epoch, run_record_hash: Some(hash.to_hex()),
                 }), source_movement_seq: None, delivery_scope_seq: None,
             }));
-            rows.push(refusal.clone()); save(&rows);
+            let mut transient = refusal.clone();
+            if let Some(octopus_ledger::MovementMetadata::Delivery(metadata)) = transient.invocation_metadata.as_mut() {
+                metadata.delivery_verdict = DeliveryVerdict::refused(octopus_ledger::RefusedReason::RegistryUnstable, serde_json::json!({}));
+            }
+            rows.push(transient); save(&rows);
+            assert!(intent_runtime.block_on(intent_handoff.pending_source_intent()).unwrap().is_some());
+            assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
+            rows.pop(); rows.push(refusal.clone()); save(&rows);
             recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).unwrap();
+            assert!(intent_runtime.block_on(intent_handoff.pending_source_intent()).unwrap().is_none());
             let error_projection = recovery.author_run_with_bindings(tool.content.as_bytes(), &state.context_artifacts,
                 &[PreparedHandoff {
                     identity: artifact_identity(&error_file, &var_dir).unwrap(),
@@ -2970,6 +2988,7 @@
             let mut admitted = refusal.clone(); admitted.seq = Seq(25); admitted.kind = MovementKind::InterfaceArrival;
             rows.push(admitted); save(&rows);
             assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
+            assert!(!recovery.pending_source_fully_refused(&tool_record, &tool.pending_handoff).unwrap());
             rows.pop(); rows[24].artifact.as_mut().unwrap().content = ContentHash::of_bytes(b"other"); save(&rows);
             assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
         }
@@ -3594,7 +3613,7 @@
         let tools = BTreeSet::from(["coder.exec".into()]);
         let verified = handoff
             .config
-            .verified_input_checkpoints(&route, &output, &marks, &tools, &interfaces)
+            .verified_input_checkpoints(&route, &output, &[], &marks, &tools, &interfaces)
             .unwrap();
         assert!(
             verified
@@ -3604,7 +3623,7 @@
         assert!(
             handoff
                 .config
-                .verified_input_checkpoints(&route, &output, &marks, &BTreeSet::new(), &interfaces)
+                .verified_input_checkpoints(&route, &output, &[], &marks, &BTreeSet::new(), &interfaces)
                 .is_err()
         );
         let request = InterfaceArtifactFile::write(
@@ -3629,6 +3648,15 @@
             )
             .unwrap();
         let request_record = RunRecord::from_bytes(authored_request.content.as_bytes()).unwrap();
+        let request_identity = artifact_identity(&request, &handoff.var_dir).unwrap();
+        let question_context = handoff.author_run(&initial, &[request_identity.artifact.id.clone()],
+            &[PreparedHandoff { identity: request_identity.clone(), output_checkpoint: output.clone(), verified_inputs: verified.clone() }],
+            true, None, false, true).unwrap();
+        let question_record = RunRecord::from_bytes(question_context.content.as_bytes()).unwrap();
+        assert!(question_record.checkpoints.iter().filter(|checkpoint| checkpoint.id.as_str().contains("_verified_input_"))
+            .all(|checkpoint| checkpoint.artifact_bindings.iter().any(|binding|
+                binding.id == request_identity.artifact.id && binding.access.read)));
+        assert!(question_context.pending_handoff.context_publication.as_ref().unwrap().contains(&request_identity.artifact.id));
         let request_config =
             config_from_persisted_profile(&request_record, &provider, profile).unwrap();
         let request_topology: BoundRunAuthoringTopology = serde_json::from_value(

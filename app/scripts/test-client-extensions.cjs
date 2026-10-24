@@ -270,10 +270,9 @@ async function main() {
       crashRecoveredId,
       `${crashRecoveredOperationId}.json`,
     );
-    await fs.unlink(crashHistoryPath);
+    await fs.unlink(path.join(root, "lifecycle-receipts", `${crashRecoveredId}.json`));
     store = createClientExtensionStore({ root });
     snapshot = await store.snapshot();
-    assert.equal(snapshot.lifecycle[crashRecoveredId].desiredState, "installed");
     assert.equal(
       JSON.parse(await fs.readFile(crashHistoryPath, "utf8")).request_digest,
       crashCommitted.receipt.requestDigest,
@@ -285,7 +284,8 @@ async function main() {
       expectedGeneration: snapshot.generation,
       expectedRevision: store.builtinRevision(crashRecoveredId),
     });
-    assert.equal(crashReplay.changed, false);
+    assert.equal(crashReplay.changed, true);
+    assert.equal(crashReplay.snapshot.lifecycle[crashRecoveredId].desiredState, "installed");
     await assert.rejects(store.applyLifecycle({
       action: "remove",
       id: crashRecoveredId,

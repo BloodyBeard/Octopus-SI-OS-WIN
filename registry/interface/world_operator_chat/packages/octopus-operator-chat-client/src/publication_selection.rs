@@ -660,7 +660,7 @@ fn snapshot_descriptor(
             .to_hex()
     );
     json!({"id":id,"label":"context.reference","description":description,"text":content.text,"evidence":content.evidence,
-        "publication_selection":{"pin":pin,"entry":entry},"sources":context_sources})
+        "publication_selection":{"pin":pin,"entry":entry,"context_sources":context_sources}})
 }
 
 pub fn declared_publications(

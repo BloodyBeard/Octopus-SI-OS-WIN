@@ -855,6 +855,42 @@ fn completed_effect(
 }
 
 impl CodexAppServerInterfaceDriver {
+    pub(crate) async fn reject_retired_context_request(
+        &self,
+        sink: &TurnSink<'_>,
+        client: &AppServerClient,
+        request: &ServerRequest,
+    ) -> Result<bool, InterfaceDriverError> {
+        let Some(state) = sink.continuity_snapshot() else { return Ok(false); };
+        let Some(refresh) = state.context_refresh.as_ref().filter(|refresh| refresh.retired) else {
+            return Ok(false);
+        };
+        refresh.validate(&state)?;
+        let frame = serde_json::to_value(request)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        if !native_frame_matches_turn(&frame, &refresh.source_thread, pending_turn_id(&refresh.pending)) {
+            return Ok(false);
+        }
+        let request_id = serde_json::from_value(frame["id"].clone())
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        let rejection = octopus_appserver_proto::JSONRPCErrorError {
+            code: -32000,
+            message: "The source turn has been retired; this request was not dispatched.".into(),
+            data: Some(serde_json::json!({"external_effect_dispatched": false})),
+        };
+        let mut output = CodexTurnOutput::client(INTERFACE_CONTEXT_UPDATED_LABEL, serde_json::json!({
+            "context_refresh_phase": "retired_request_rejected",
+            "source_movement_seq": sink.source_movement_seq,
+            "rejected_native_request": frame,
+            "rejection": rejection,
+        }));
+        sink.normalize_output_label(&mut output)?;
+        sink.admit_context_emissions(vec![sink.materialize_normalized(output, false)?]).await?;
+        client.reject_server_request(request_id, rejection).await
+            .map_err(|error| InterfaceDriverError::Transport(error.to_string()))?;
+        Ok(true)
+    }
+
     pub(super) async fn settled_native_history_proof(
         &self,
         scope: &TransportStateScope,
@@ -1133,14 +1169,10 @@ impl CodexAppServerInterfaceDriver {
                 &refresh.source_thread,
                 turn_id,
             )?);
-            if events
-                .iter()
-                .any(|event| event.get("quarantined_server_request").is_some())
-            {
-                return Err(InterfaceDriverError::FailedClosed(
-                    "retired provider emitted an unadmitted successor effect".into(),
-                ));
-            }
+            let requests = events.iter().filter_map(|event| event.get("quarantined_server_request"))
+                .map(|frame| serde_json::from_value::<ServerRequest>(frame.clone())
+                    .map_err(|error| InterfaceDriverError::Protocol(error.to_string())))
+                .collect::<Result<Vec<_>, _>>()?;
             if let Some(pending) = &pending {
                 self.remove_pending_request(context.scope, pending).await?;
             }
@@ -1156,6 +1188,13 @@ impl CodexAppServerInterfaceDriver {
                 .sink
                 .admit_context_boundary("retired", true, Some(activity))
                 .await?;
+            for request in requests {
+                if !self.reject_retired_context_request(context.sink, &*self.client.lock().await, &request).await? {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "quarantined request does not belong to the proven retired turn".into(),
+                    ));
+                }
+            }
             refresh = context
                 .sink
                 .continuity_snapshot()

@@ -266,7 +266,6 @@ async fn selected_home_deferred_continuity_preserves_exact_evidence() {
     let staged = deferred_provider_turn_path(&ctx, seq);
     std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
     std::fs::write(&staged, &journal_bytes).unwrap();
-    upgrade_deferred_provider_turn_journals(&ctx, &descriptor).await.unwrap();
     let turn = load_deferred_provider_turns(&ctx, &descriptor).unwrap().remove(&seq).unwrap().turn;
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
     let snapshot = bound_operator_session_snapshot(&ctx, &descriptor, &turn).unwrap();
@@ -370,4 +369,38 @@ fn selected_home_sealed_interruption_preserves_exact_evidence() {
     assert_eq!(emissions[0].artifact.read_payload_bytes().unwrap(), body);
     assert_eq!(std::fs::read(path).unwrap(), journal_bytes);
     eprintln!("verified sealed source {seq}: {} rows, events {labels:?}, terminal {}", rows.len(), emissions[1].artifact.read_manifest().unwrap().payload_content_hash.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly selected read-only terminal-source evidence"]
+async fn selected_home_terminal_source_retains_exact_context() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source: u64 = std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let dir = home.join("registry/interface").join(provider.as_str());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(dir.join("interface.json")).unwrap()).unwrap();
+    let life: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("life.json")).unwrap()).unwrap();
+    let (arrivals, receiver) = tokio::sync::mpsc::channel(1);
+    drop(receiver);
+    let ctx = InterfaceLiftContext::unprivileged(provider.clone(), dir, Some(descriptor.clone()),
+        home.join("interfaces").join(provider.as_str()), home.join("ledger/movements.jsonl"),
+        home.join("ledger/blobs"), home.join("ledger/ledger-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(), home.join("state/runs")),
+            ("interface_hand_in_root".into(), home.join("interface-hand-in"))]), arrivals, Default::default())
+        .with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let path = home.join("state/runs").join(format!("{run}.json"));
+    let before = std::fs::read(&path).unwrap();
+    let turn = replay_provider_source(&ctx, &run, source).unwrap().unwrap();
+    let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
+    let handoff = ProviderHandoffSession::new(&ctx).unwrap()
+        .from_invocation(&ctx, &descriptor, &run, &turn.envelope, source, &pinned).unwrap();
+    let current = handoff.current_session_context_artifacts().await;
+    let record = handoff.current_run_record_bytes().await;
+    let deferred = handoff.deferred_context_generations().await;
+    let continuity = terminal_output_continuity(&descriptor, &turn.envelope, &current, &run, &record, deferred)
+        .unwrap().expect("retained source has exact continuity");
+    eprintln!("source {source}: {} context artifacts, {deferred} standing generations, terminal generation {}",
+        current.len(), continuity.context_generation);
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }

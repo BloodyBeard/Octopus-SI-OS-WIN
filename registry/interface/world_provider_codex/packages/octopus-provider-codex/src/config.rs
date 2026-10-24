@@ -97,7 +97,8 @@ pub const SPAWN_ISOLATION_CONFIG_OVERRIDES: &[&str] = &[
     "features.request_permissions_tool=false",
     "features.sleep_tool=false",
     "features.current_time_reminder=false",
-    "tools.experimental_request_user_input.enabled=false",
+    "tools.experimental_request_user_input.enabled=true",
+    "features.default_mode_request_user_input=true",
 ];
 
 const RESIDUAL_AMBIENT_SPAWN_KEY: &str = "spawn";
@@ -357,12 +358,13 @@ search_tool = false
 request_permissions_tool = false
 sleep_tool = false
 current_time_reminder = false
+default_mode_request_user_input = true
 
 [skills]
 include_instructions = false
 
 [tools.experimental_request_user_input]
-enabled = false
+enabled = true
 ";
 
 #[derive(Debug, Clone)]
@@ -1435,10 +1437,8 @@ mod tests {
             !cfg.contains("[plugins."),
             "curated config must carry NO plugin tables: {cfg}"
         );
-        assert!(
-            !cfg.contains("enabled = true"),
-            "curated config must enable NO plugins: {cfg}"
-        );
+        assert!(isolated.get("plugins").is_none(), "curated config must enable no plugins");
+        assert_eq!(isolated["tools"]["experimental_request_user_input"]["enabled"].as_bool(), Some(true));
         assert!(
             !cfg.contains("friendly"),
             "curated config must carry NO friendly personality: {cfg}"

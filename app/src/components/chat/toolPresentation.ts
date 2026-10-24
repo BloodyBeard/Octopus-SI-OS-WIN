@@ -146,6 +146,33 @@ export function nativeRunOperationPresentation(message: ChatRenderMessage | unde
     text(record(data.error).message) || text(data.error),
     text(record(body.error).message) || text(body.error),
   ].filter(Boolean))].join("\n");
+  const peers = message?.relatedRuns?.map((run) => run.title).join(", ") || "";
+  if (data.tool === "create_run") {
+    const created = record(body.created);
+    return { label: active ? "Creating task" : failed ? "Task creation failed" : "Created task",
+      target: peers || text(created.run_id),
+      details: [["Task", peers || text(created.run_id)], ["Message", text(argumentsValue.text)], ["Error", error]] };
+  }
+  if (data.tool === "list_runs") {
+    return { label: active ? "Checking connected tasks" : failed ? "Task lookup failed" : "Checked connected tasks",
+      target: peers,
+      details: [["Tasks", peers], ["Interfaces", stringArray(body.declared_peer_interfaces).join("\n")], ["Error", error]] };
+  }
+  if (["followup_task", "send_message", "interrupt_run"].includes(text(data.tool))) {
+    const target = text(argumentsValue.interface) || text(body.interface);
+    const interrupt = data.tool === "interrupt_run";
+    return { label: active ? (interrupt ? "Requesting stop" : "Sending message")
+      : failed ? (interrupt ? "Stop request failed" : "Message failed")
+      : body.admitted === true ? (interrupt ? "Requested stop" : "Sent message") : "Message delivery unconfirmed",
+      target: peers || target,
+      details: [["To", peers || target], ["Interface", target], ["Message", text(argumentsValue.text)],
+        ["Delivery", body.admitted === true ? "Accepted" : body.admitted === false ? "Refused" : "Unconfirmed"], ["Error", error]] };
+  }
+  if (data.tool === "wait_for_runs") {
+    return { label: active ? "Waiting for replies" : failed ? "Wait failed" : "Waited for replies", target: peers,
+      details: [["From", peers], ["Result", body.timed_out === true ? "No replies before timeout"
+        : Array.isArray(body.notifications) ? `${body.notifications.length} replies received` : ""], ["Error", error]] };
+  }
   if (data.tool === "run_list") {
     const run = record(body.source_run);
     const target = text(run.run_id);

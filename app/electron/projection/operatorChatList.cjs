@@ -117,6 +117,9 @@ function operatorChatListProjection(store) {
         title_source: titleInput ? { artifact_id: ledgerArtifactId(titleInput),
           content_hash: contentHashHex(titleInput.artifact?.content), movement_seq: titleInput.seq } : null,
         chat_interface_id: chatInterfaceId,
+        input_interface_ids: [...new Set(arrayValue(record?.checkpoints)
+          .filter((checkpoint) => checkpoint.status === "projected")
+          .map((checkpoint) => stringValue(checkpoint.interface)).filter(Boolean))],
         client_surface_role: entry.surfaceRole,
         writable: entry.writable && !archived,
         archived,

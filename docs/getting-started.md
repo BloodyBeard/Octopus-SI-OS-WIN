@@ -51,11 +51,11 @@ with `curl`, so nothing it installs is quarantined. Do not run Octopus from the
 mounted disk image.
 
 To update, quit Octopus and its runtime, then install the new release the same
-way. Your Home and sign-in are kept. On the next start, with the runtime
-stopped, the app adopts the new bundled version of each installed package you
-have not changed; a package with local edits stays as it was, and the error
-names its files. To uninstall, delete `Octopus.app`; your Home (`~/.octopus` by
-default) and the Codex sign-in in `~/.codex` stay until you remove them.
+way. Octopus is a research preview: releases with incompatible persisted formats
+require a fresh Home through setup. Existing Homes are never migrated or repaired
+on startup; keep your sign-in credentials when resetting a disposable Home.
+To uninstall, delete `Octopus.app`; your Home (`~/.octopus` by default) and the
+Codex sign-in in `~/.codex` stay until you remove them.
 
 ## Build from source
 

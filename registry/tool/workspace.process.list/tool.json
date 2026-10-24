@@ -19,7 +19,7 @@
     }
   },
   "supported_worker_environment_kinds": ["filesystem_workspace"],
-  "description": "List every still-addressable persistent process owned by this formed direct workspace without consuming its ordered output.",
+  "description": "List every still-addressable persistent process owned by this formed direct workspace without consuming its ordered output. Closed or exited entries with continuation_available=true still hold unread output and count toward the process limit. Drain them with workspace.write_stdin and empty chars to release slots without restarting or terminating commands.",
   "args_schema": {"type": "object", "properties": {}, "additionalProperties": false},
   "is_world_effect": false
 }

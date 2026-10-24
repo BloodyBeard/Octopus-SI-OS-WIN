@@ -104,8 +104,8 @@ test("suggestions survive temporary composer modes and refresh only for a new co
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let calls = 0, finish, visible;
   window.octopusTransport = { requestComposerPrediction: () => { calls++; return new Promise(resolve => { finish = resolve; }); } };
-  function Probe({ source, enabled = true, text = "" }) {
-    visible = useComposerSuggestion("home", source, enabled);
+  function Probe({ source, enabled = true, text = "", home = "/home-a" }) {
+    visible = useComposerSuggestion("home", source, enabled, home);
     return React.createElement(RichComposerEditor, { text, suggestion: visible, placeholder: "Message Home", onTextChange() {}, onKeyDown() {}, onFilesPicked() {} });
   }
   const root = createRoot(document.getElementById("root"));
@@ -140,5 +140,18 @@ test("suggestions survive temporary composer modes and refresh only for a new co
     await React.act(async () => finish({ id: "second", text: "Explain the next step" }));
     assert.equal(visible.text, "Explain the next step");
     assert.equal(calls, 2);
+    await React.act(async () => root.render(null));
+    await render({ source: 20 });
+    assert.equal(visible.text, "Explain the next step");
+    assert.equal(calls, 2, "returning uses the completed suggestion before any timer");
+    await render({ source: 20, home: "/home-b" });
+    assert.equal(visible, null);
+    await tick();
+    await React.act(async () => root.render(null));
+    await render({ source: 20, home: "/home-b" }); await tick();
+    assert.equal(calls, 3, "remount reuses the pending request for this Home");
+    await React.act(async () => finish({ id: "other", text: "Another Home" }));
+    await render({ source: 20 });
+    assert.equal(visible.text, "Explain the next step");
   } finally { await React.act(async () => root.unmount()); dom.window.close(); }
 });

@@ -145,7 +145,7 @@ function fakeHost() {
         case "projection.operator.chat.messages":
           if (host.holdMessages) await host.holdMessages;
           return { messages: structuredClone(host.messages[request.params.run_id] ?? []) };
-        case "projection.operator.chat.contexts": return { contexts: [{ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1",
+        case "projection.operator.chat.contexts": return { contexts: [{ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1", source_folders: host.sourceFolders ?? [],
           workers: host.workers.map((worker) => ({ label: worker.id, provider_interface_ids: [provider.id], interface_policy: { [provider.id]: { models: ["model-a"] } }, ...worker })) }] };
         case "projection.worker_environments.list": return { worker_environments: [] };
         case "projection.tools.list": return { tools: [] };
@@ -166,6 +166,7 @@ function fakeHost() {
       return new Promise((resolve) => host.waiters.add(() => { const next = batch(); if (next) resolve(next); return Boolean(next); }));
     },
     submitChatTurn: async (request) => {
+      if (request.clientContext !== undefined) require('../../registry/interface/world_operator_chat/client/operatorMessages.cjs').operatorClientContext(request.clientContext);
       if (host.holdTurn) await host.holdTurn;
       host.turns.push(structuredClone(request));
       const runId = request.runId || "run-new";
@@ -204,7 +205,7 @@ async function mount(host, profile = "lab", home = `/home/${Math.random().toStri
   const { useChatWorkspace, ClientPreferencesProvider } = await compiled;
   currentHost = host;
   const view = { current: null };
-  function Harness() { view.current = useChatWorkspace(profile, true, true, "fixture", "task", home); return null; }
+  function Harness() { view.current = useChatWorkspace(profile, true, true, "fixture", "task", home, host.clientContext); return null; }
   root.render(React.createElement(ClientPreferencesProvider, { profile }, React.createElement(Harness)));
   await settle(12);
   return view;
@@ -268,25 +269,50 @@ test("refreshing the task list preserves the selected model and a ready new-task
   release(); await refreshing;
 });
 
-test("editing a message from another pane carries only its preceding reply into the task draft", { timeout: 15_000 }, async () => {
+test("model selection stays loading until the task capabilities arrive", { timeout: 15_000 }, async () => {
   const host = fakeHost();
   host.workers = [{ id: "worker.test", ...writerAgent }];
-  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }), runRow("source"));
-  const view = await openTask(host, "live");
-  const history = [
-    { id: "before", runId: "source", role: "assistant", eventKind: "message", terminal: true, artifactId: "source-prefix", text: "Earlier answer" },
-    { id: "foreign", runId: "run-1", role: "assistant", eventKind: "message", terminal: true, artifactId: "unrelated", text: "Other pane" },
-    { id: "edit", runId: "source", role: "user", eventKind: "message", artifactId: "original-input", text: "Original" },
-  ];
-  assert.equal(view.current.editUserMessageInNewTask(history[2], "Corrected", history), true);
-  await until(() => view.current.activeRunId === "" && view.current.text === "Corrected", "the edited task draft did not open");
-  assert.deepEqual(view.current.continuation, { sourceRunId: "source", sourceArtifactId: "source-prefix" });
+  host.runs.push(runRow("home", { client_surface_role: "home", os_root_ee_id: "ee.root" }));
+  const read = host.transport.projectionRead;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  host.transport.projectionRead = async request => {
+    if (request.method === "projection.operator.chat.contexts") await held;
+    return read(request);
+  };
+  const view = await mount(host, "live");
+  await until(() => view.current.providerInterfacesLoaded && !view.current.providerInterfacesRefreshing, "catalog did not load");
+  assert.equal(view.current.activeProvider, undefined);
+  assert.equal(view.current.modelSelectionLoading, true);
+  release();
+  await until(() => view.current.activeProvider && !view.current.modelSelectionLoading, "model selection never became ready");
   assert.equal(view.current.providerModel, "model-a");
-  await until(() => view.current.canSubmit, () => view.current.submitBlockReason);
+});
+
+test("editing the latest message keeps the task and provider without selecting an Agent", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.messages["run-1"][0].content_hash = "a".repeat(64);
+  const view = await openTask(host, "live");
+  const message = view.current.renderedMessages.find(message => message.role === "user");
+  view.current.setText("Unsent composer text");
+  await until(() => view.current.text === "Unsent composer text", "composer draft missing");
+  const pending = view.current.editUserMessage(message, "Corrected");
+  await until(() => host.turns.length === 1, "edited message never submitted");
+  assert.equal(host.turns[0].runId, "run-1");
+  assert.deepEqual(host.turns[0].replacesMessage, { id: message.artifactId, content: "a".repeat(64) });
+  assert.equal(host.turns[0].providerModel, "model-a");
+  assert.equal(view.current.activeRunId, "run-1");
+  assert.equal(view.current.text, "Unsent composer text");
+  host.append("run-1", "assistant", "Revised answer");
+  Object.assign(host.run("run-1"), { turn_open: false, turn_state: "completed" });
+  host.changed("ledger");
+  await pending;
 });
 
 test("a new task adopts the one Agent matching the Home defaults, starts as submitting and moves to the run the host creates", { timeout: 15_000 }, async () => {
   const host = fakeHost();
+  host.sourceFolders = ["/workspace/primary", "/workspace/secondary"];
+  host.clientContext = [{ name: "client_observation", text: "{}" }];
   host.workers = [{ id: "worker.test", ...writerAgent }];
   host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
   let admit;
@@ -303,6 +329,8 @@ test("a new task adopts the one Agent matching the Home defaults, starts as subm
   await until(() => host.turns.length === 1 && view.current.activeRunId === "run-new", () => `the new run was not adopted: ${view.current.activeRunId}`);
   assert.deepEqual([host.turns[0].runId, host.turns[0].eeId, host.turns[0].workerInterfaceId, host.turns[0].providerModel, host.turns[0].text],
     [undefined, "ee.root", "worker.test", "model-a", "Draft the plan"]);
+  assert.deepEqual(host.turns[0].clientContext.map(entry => entry.name), ["client_observation", "project_source_folders"]);
+  assert.deepEqual(JSON.parse(host.turns[0].clientContext[1].text), { primary: host.sourceFolders[0], folders: host.sourceFolders });
   host.reply("run-new", "Plan drafted.");
   await until(() => !view.current.busy && view.current.runs.some((run) => run.runId === "run-new"), "the new task never settled");
 });
@@ -645,6 +673,27 @@ test("attached files alone keep a task from moving to another pane", { timeout: 
   assert.equal(view.current.paneTransferBlockReason("run-1"), "");
 });
 
+test("sending after a terminal receipt cannot regress to an older working status", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "live");
+  await type(view, "Add totals");
+  void view.current.submit();
+  await until(() => host.turns.length === 1 && view.current.turnOpen, "turn never opened");
+  const stale = structuredClone(host.run("run-1"));
+  host.append("run-1", "assistant", "Provider stopped", { event_kind: "error", error: true });
+  Object.assign(host.run("run-1"), { turn_open: false, turn_state: "failed" });
+  await until(() => !view.current.busy && !view.current.turnOpen, "terminal receipt never closed the turn");
+  const read = host.transport.projectionRead;
+  host.transport.projectionRead = (request) => request.method === "projection.operator.chats.status"
+    ? Promise.resolve({ chats: [stale] }) : read(request);
+  await type(view, "Continue with the remaining work");
+  void view.current.submit();
+  await until(() => host.turns.length === 2, () => `follow-up rejected: ${view.current.error}`);
+  assert.equal(host.turns[1].text, "Continue with the remaining work");
+  host.reply("run-1", "Continued.");
+  await until(() => !view.current.busy, "follow-up did not finish");
+});
+
 test("a live provider failure with a failure code is reported once as an incident of the task's provider", { timeout: 15_000 }, async () => {
   const { clientExtensionIncidentSnapshot } = await compiled;
   const host = fakeHost();
@@ -723,7 +772,7 @@ test("stopping the first turn of a new task reaches the run the host created bef
   assert.deepEqual(host.controls.map((request) => [request.runId, request.interfaceId, request.action]), [["run-new", "chat.run-new", "stop"]]);
 });
 
-test("returning to a task shows its loaded history at once, and reselecting the open task keeps its view", { timeout: 15_000 }, async () => {
+test("returning to a task awaits current history, and reselecting the open task keeps its view", { timeout: 15_000 }, async () => {
   const host = fakeHost();
   host.runs.push(runRow("run-2"));
   host.messages["run-2"] = [messageRow("run-2", 1, "user", "Plan the trip"), messageRow("run-2", 2, "assistant", "Trip planned.")];
@@ -735,11 +784,32 @@ test("returning to a task shows its loaded history at once, and reselecting the 
   assert.equal(view.current.messageQuery, "report");
   view.current.selectRun("run-2");
   await until(() => !view.current.loadingMessages && view.current.renderedMessages.some((message) => message.text === "Trip planned."), "the second task never loaded");
-  host.holdMessages = new Promise(() => {});
+  let release;
+  host.holdMessages = new Promise(resolve => { release = resolve; });
+  host.messages["run-1"].push(messageRow("run-1", 20, "assistant", "Updated report."));
   view.current.selectRun("run-1");
   await until(() => view.current.activeRunId === "run-1", "the first task was not selected again");
-  assert.equal(view.current.loadingMessages, false);
-  assert.ok(view.current.renderedMessages.some((message) => message.text === "Here is the report."));
+  assert.equal(view.current.loadingMessages, true);
+  release();
+  await until(() => !view.current.loadingMessages, "current history never loaded");
+  assert.ok(view.current.renderedMessages.some((message) => message.text === "Updated report."));
+});
+
+test("a partial live stream is not treated as a loaded chat snapshot on navigation", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.runs.push(runRow("run-partial", { turn_open: true, turn_state: "working" }));
+  host.messages["run-partial"] = [messageRow("run-partial", 5, "assistant", "Latest live event", { terminal: false })];
+  const view = await openTask(host, "live");
+  let release;
+  host.holdMessages = new Promise(resolve => { release = resolve; });
+  view.current.selectRun("run-partial");
+  await until(() => view.current.renderedMessages.some(message => message.text === "Latest live event"), "the live stream did not arrive");
+  assert.equal(view.current.loadingMessages, true);
+  view.current.selectRun("run-1"); await settle(2);
+  view.current.selectRun("run-partial"); await settle(2);
+  assert.equal(view.current.loadingMessages, true);
+  release();
+  await until(() => !view.current.loadingMessages, "snapshot did not finish");
 });
 
 test("a projection change re-reads the Agent catalog without dropping the current one and never reads the interface list", { timeout: 15_000 }, async () => {

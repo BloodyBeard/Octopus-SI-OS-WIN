@@ -33,6 +33,7 @@ export function toRender(message: ChatRunMessage): ChatRenderMessage {
     label: message.label,
     direction: message.direction,
     artifactId: message.artifactId,
+    contentHash: message.contentHash,
     interfaceId: message.interfaceId,
     eventKind: message.eventKind,
     eventData: message.eventData,
@@ -218,11 +219,23 @@ export function liveArtifactMessage(
   };
 }
 
+function artifactReferenceHash(content: unknown): string {
+  return Array.isArray(content) && content.length === 32 && content.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+    ? content.map((byte: number) => byte.toString(16).padStart(2, "0")).join("") : "";
+}
+
 export function mergeChatRunMessages(
   current: ChatRunMessage[],
   incoming: ChatRunMessage[],
   mode: "incremental" | "snapshot" = "incremental",
 ): ChatRunMessage[] {
+  const textEdits = new Map<string, Record<string, unknown>>();
+  for (const message of mode === "snapshot" ? incoming : [...current, ...incoming]) {
+    const edit = message.eventData?._client_text_edit;
+    if (edit && message.role === "assistant" && message.eventKind === "message") {
+      textEdits.set(streamIdentity(message, "assistant_message"), eventRecord(edit));
+    }
+  }
   const snapshotStreams = new Map<string, ChatRunMessage>();
   if (mode === "snapshot") {
     for (const message of incoming) {
@@ -243,7 +256,7 @@ export function mergeChatRunMessages(
   const byId = new Map<string, number>();
   for (const message of [...retained, ...incoming]) {
     const existing = byId.get(message.id);
-    if (existing !== undefined && mode === "snapshot" && chatRunMessageFollows(rows[existing], message)) continue;
+    if (existing !== undefined && chatRunMessageFollows(rows[existing], message)) continue;
     const index = existing ?? rows.length;
     rows[index] = message;
     byId.set(message.id, index);
@@ -252,7 +265,36 @@ export function mergeChatRunMessages(
     left.createdAtMs - right.createdAtMs
     || left.movementSeq - right.movementSeq
   ));
-  return sorted;
+  for (const receipt of sorted.filter((message) => message.label === "interface.context.updated"
+    && eventRecord(message.eventData?._activity_origin).interface_role === "provider"
+    && message.eventData?.phase === "message_revised")) {
+    const revised = eventRecord(receipt.eventData?.source_artifact);
+    const original = eventRecord(receipt.eventData?.replaces_message);
+    const next = sorted.find((message) => message.role === "user" && message.artifactId === revised.id && message.contentHash === artifactReferenceHash(revised.content));
+    const previous = sorted.find((message) => message.role === "user" && message.artifactId === original.id && message.contentHash === artifactReferenceHash(original.content));
+    if (next && previous && previous.movementSeq < next.movementSeq) {
+      sorted[sorted.indexOf(next)] = { ...next, eventData: { ...next.eventData, message_revision_receipt: { ...receipt.eventData,
+        from_movement_seq: eventRecord(previous.eventData?.message_revision_receipt).from_movement_seq ?? previous.movementSeq } } };
+    }
+  }
+  const revisions = sorted.filter((message) => message.role === "user" && message.eventData?.message_revision_receipt);
+  return sorted.filter((message) => !revisions.some((replacement) => {
+    const start = eventRecord(replacement.eventData?.message_revision_receipt).from_movement_seq;
+    return message.runId === replacement.runId && typeof start === "number"
+      && message.movementSeq >= start && message.movementSeq < replacement.movementSeq;
+  })).map(message => {
+    const edit = textEdits.get(streamIdentity(message, "assistant_message"));
+    const previousEdit = eventRecord(message.eventData?._client_text_edit);
+    if (!edit && mode === "snapshot" && typeof previousEdit.original_text === "string") {
+      const data = { ...message.eventData };
+      delete data._client_text_edit;
+      return { ...message, text: previousEdit.original_text, eventData: data };
+    }
+    if (!edit || message.role !== "assistant" || message.eventKind !== "message"
+      || typeof edit.text !== "string" || typeof edit.original_text !== "string") return message;
+    if (message.text !== edit.original_text && message.text !== edit.text) return message;
+    return { ...message, text: edit.text, eventData: { ...message.eventData, _client_text_edit: edit } };
+  });
 }
 
 function chatRunMessageStreamKey(message: ChatRunMessage): string {
@@ -268,8 +310,8 @@ function chatRunMessageStreamKey(message: ChatRunMessage): string {
 function chatRunMessageFollows(left: ChatRunMessage, right: ChatRunMessage): boolean {
   const leftStream = eventRecord(left.eventData?._stream);
   const rightStream = eventRecord(right.eventData?._stream);
-  if (leftStream.stream_id || rightStream.stream_id) {
-    if (!leftStream.stream_id || leftStream.stream_id !== rightStream.stream_id) return false;
+  if (leftStream.stream_id && rightStream.stream_id) {
+    if (leftStream.stream_id !== rightStream.stream_id) return false;
     return eventNumber(leftStream.stream_seq) > eventNumber(rightStream.stream_seq)
       || eventNumber(leftStream.stream_seq) === eventNumber(rightStream.stream_seq)
         && eventNumber(leftStream.byte_end_offset) > eventNumber(rightStream.byte_end_offset);
@@ -435,6 +477,7 @@ function coalesceRenderedStreams(messages: ChatRenderMessage[]): ChatRenderMessa
     }
     const previous = result[position];
     if (completedAssistantItem) {
+      if (assistantItemCompleted(previous) && previous.terminal === true && message.terminal !== true) continue;
       textPartsByPosition.set(position, [message.text]);
       result[position] = { ...message, id: previous.id, createdAtMs: previous.createdAtMs };
       continue;

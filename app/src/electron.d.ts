@@ -1844,6 +1844,7 @@ export type OctopusClientSetupProgress = {
 export type OctopusClientContext = readonly Readonly<{ name: string; text: string }>[];
 
 export type OctopusChatTurnRequest = {
+  replacesMessage?: { id: string; content: string };
   endpoint?: string;
   timeoutMs?: number;
   messageId?: string;

@@ -560,7 +560,7 @@ test("completed Home uses checked local receipts offline and cancels proof acros
   }
   let releaseInitialAccount;
   let home = "/home", accountResult = new Promise(resolve => { releaseInitialAccount = resolve; }), accountChanged;
-  let currentSetup = () => store.readCurrent(), configured = true, scopeHome = "home_run", catalogReads = 0, setupWrites = 0;
+  let currentSetup = () => store.readCurrent(), configured = true, scopeHome = "home_run", catalogReads = 0, setupWrites = 0, workspaceError = "";
   window.octopusTransport = {
     chatgptAccount: async () => { const result = await accountResult; if (result instanceof Error) throw result; return result; },
     onChatgptAccountChanged: callback => { accountChanged = callback; return () => { accountChanged = null; }; },
@@ -586,7 +586,7 @@ test("completed Home uses checked local receipts offline and cancels proof acros
     "../../onboarding/workspaceSetup": { readWorkspaceSetupDraft: () => null },
     "../../projectionClient": {
       readCurrentClientSetup: () => currentSetup(),
-      readWorkspaceSetupState: async () => ({ status: configured ? "configured" : "not_configured", errors: [], receipt: !configured ? null : {
+      readWorkspaceSetupState: async () => ({ status: workspaceError ? "degraded" : configured ? "configured" : "not_configured", errors: workspaceError ? [workspaceError] : [], receipt: !configured ? null : {
         operationId, requestDigest, rootEeId: "root_ee", homeRunId: "home_run", homeInterfaceId: "home_interface", projects: [],
       } }),
       readProjection: async method => {
@@ -638,6 +638,10 @@ test("completed Home uses checked local receipts offline and cancels proof acros
     await fsp.writeFile(receiptFile, receiptBytes); scopeHome = "another_run"; home = "/mismatch"; await show();
     await waitFor(() => document.body.textContent.includes("Completed setup does not match Home")); assert.equal(shell(), null);
     scopeHome = "home_run";
+    workspaceError = "Workspace Home run identity is no longer valid"; home = "/degraded"; await show();
+    await waitFor(() => document.body.textContent.includes(workspaceError)); assert.equal(shell(), null);
+    assert.doesNotMatch(document.body.textContent, /Completed setup does not match Home/);
+    workspaceError = "";
     let releaseOld, releaseNew;
     currentSetup = () => new Promise(resolve => { releaseOld = resolve; }); home = "/old-pending"; await show();
     assert.equal(shell(), null);

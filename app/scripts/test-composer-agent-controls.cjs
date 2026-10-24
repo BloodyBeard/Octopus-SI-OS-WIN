@@ -85,6 +85,22 @@ async function utilityBar(overrides = {}) {
 }
 const close = async () => { w.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Escape" })); await settle(); };
 
+test("project selection keeps each project's configured logo and color", async () => {
+  const { projectChatExecutionContexts } = await compiled;
+  const contexts = projectChatExecutionContexts({ contexts: contextRows }, new Map(),
+    new Map([["ee.alpha", "green"], ["ee.beta", "blue"]]),
+    new Map([["ee.alpha", "code"], ["ee.beta", "rocket"]]));
+  const bar = await utilityBar({ contexts, agentPresetId: "" });
+  const selected = bar.trigger("workspace-project").querySelector('[data-project-icon="code"]');
+  assert.ok(selected);
+  await press(bar.trigger("workspace-project"));
+  const icons = menuRows().map(row => row.querySelector('[data-project-icon]'));
+  assert.deepEqual(icons.map(icon => icon?.dataset.projectIcon), [undefined, "code", "rocket"]);
+  assert.equal(icons[1].style.color, selected.style.color);
+  assert.notEqual(icons[1].style.color, icons[2].style.color);
+  await close();
+});
+
 test("the Agent control lists Agents with the access each would run under, and the chosen Agent fixes the project", async () => {
   const bar = await utilityBar();
   assert.match(document.querySelector(".composer-utility-bar").getAttribute("style"), /--color-token-composer-utility-background/);

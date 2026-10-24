@@ -32,14 +32,6 @@ struct InstallManifest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LegacyInstallManifest {
-    schema_version: u32,
-    source_registry: PathBuf,
-    files: BTreeMap<String, InstalledFile>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SourceIdentity {
     schema_version: u32,
     id: String,
@@ -49,9 +41,6 @@ struct SourceIdentity {
 pub struct InstalledRegistry {
     pub root: PathBuf,
     pub copied: usize,
-    pub updated: usize,
-    pub removed: usize,
-    pub preserved_local: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,10 +125,6 @@ pub enum RegistryInstallError {
         actual_mode: Option<u32>,
     },
     WriteFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    RemoveFile {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -268,11 +253,6 @@ impl std::fmt::Display for RegistryInstallError {
                 "registry installer cannot write '{}': {source}",
                 path.display()
             ),
-            Self::RemoveFile { path, source } => write!(
-                f,
-                "registry installer cannot remove '{}': {source}",
-                path.display()
-            ),
             Self::Publication { receipt } => write!(
                 f,
                 "registry publication '{}' for '{}' is {:?}: {}",
@@ -298,32 +278,6 @@ enum TargetEntry {
     File(InstalledFile),
     Directory,
     Unsupported,
-}
-
-#[derive(Debug)]
-enum InstallOperation {
-    Copy {
-        relative: String,
-        previous: Option<InstalledFile>,
-    },
-    Remove {
-        relative: String,
-        previous: InstalledFile,
-    },
-}
-
-#[derive(Debug)]
-enum PreparedInstallOperation {
-    Copy {
-        relative: String,
-        previous: Option<InstalledFile>,
-        copy: PreparedCopy,
-    },
-    Remove {
-        relative: String,
-        previous: InstalledFile,
-        operation_id: String,
-    },
 }
 
 #[derive(Debug)]
@@ -397,210 +351,53 @@ pub fn install_registry_with_progress(
 
     validate_tree_entries(&active_registry, &active_registry, true)?;
     let source_id = load_source_identity(&source_registry)?;
-    let source_files = collect_source_files(&source_registry)?;
-    let source_kind_roots = collect_source_kind_roots(&source_registry)?;
-    progress(RegistrySyncProgress::Scanned {
-        files: source_files.len(),
-    });
     let manifest_path = active_registry.join(INSTALL_MANIFEST_FILE);
-    let previous = load_manifest(&manifest_path)?;
-    if let Some((previous, _)) = &previous {
-        if !previous.source_id.is_empty() && previous.source_id != source_id {
+    if let Some((installed, _)) = load_manifest(&manifest_path)? {
+        if installed.source_id != source_id {
             return Err(RegistryInstallError::SourceChanged {
                 manifest: manifest_path,
-                expected: previous.source_id.clone(),
+                expected: installed.source_id,
                 actual: source_id,
             });
         }
+        return Ok(InstalledRegistry { root: active_registry, copied: 0 });
     }
 
-    let previous_files = previous
-        .as_ref()
-        .map(|(manifest, _)| &manifest.files)
-        .cloned()
-        .unwrap_or_default();
-    for relative in previous_files.keys() {
-        safe_relative_path(relative)?;
-    }
-    let mut operations = Vec::new();
-    let mut preserved_local = 0usize;
-
+    let source_files = collect_source_files(&source_registry)?;
+    let source_kind_roots = collect_source_kind_roots(&source_registry)?;
+    progress(RegistrySyncProgress::Scanned { files: source_files.len() });
+    let mut pending = Vec::new();
     for (relative, source_file) in &source_files {
         let target = active_registry.join(safe_relative_path(relative)?);
-        let target_entry = inspect_target(&target)?;
-        match previous_files.get(relative) {
-            None => match target_entry {
-                TargetEntry::Missing => operations.push(InstallOperation::Copy {
-                    relative: relative.clone(),
-                    previous: None,
-                }),
-                TargetEntry::File(existing) if existing == *source_file => {}
-                TargetEntry::File(_) => {
-                    return Err(RegistryInstallError::Conflict {
-                        path: target,
-                        reason: "a source file is new, but an unrelated active-local file already owns the same identity".to_string(),
-                    });
-                }
-                TargetEntry::Directory | TargetEntry::Unsupported => {
-                    return Err(RegistryInstallError::Conflict {
-                        path: target,
-                        reason: "a source file collides with a non-file active entry".to_string(),
-                    });
-                }
-            },
-            Some(previous_file) if previous_file == source_file => match target_entry {
-                TargetEntry::Missing => preserved_local += 1,
-                TargetEntry::File(existing) if existing == *source_file => {}
-                TargetEntry::File(_) => preserved_local += 1,
-                TargetEntry::Directory | TargetEntry::Unsupported => {
-                    return Err(RegistryInstallError::Conflict {
-                        path: target,
-                        reason: "a source-owned file was replaced by a non-file active entry"
-                            .to_string(),
-                    });
-                }
-            },
-            Some(previous_file) => {
-                match target_entry {
-                    TargetEntry::File(existing) if existing == *previous_file => {
-                        operations.push(InstallOperation::Copy {
-                            relative: relative.clone(),
-                            previous: Some(existing),
-                        });
-                    }
-                    TargetEntry::File(existing) if existing == *source_file => {}
-                    TargetEntry::Missing => {
-                        return Err(RegistryInstallError::Conflict {
-                            path: target,
-                            reason: "the source changed after the active copy was locally deleted"
-                                .to_string(),
-                        });
-                    }
-                    TargetEntry::File(_) => {
-                        return Err(RegistryInstallError::Conflict {
-                        path: target,
-                        reason: "both the source catalog and active copy changed since the last install".to_string(),
-                    });
-                    }
-                    TargetEntry::Directory | TargetEntry::Unsupported => {
-                        return Err(RegistryInstallError::Conflict {
-                            path: target,
-                            reason: "a changed source file collides with a non-file active entry"
-                                .to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    for (relative, previous_file) in &previous_files {
-        if source_files.contains_key(relative) {
-            continue;
-        }
-        let target = active_registry.join(safe_relative_path(relative)?);
         match inspect_target(&target)? {
-            TargetEntry::Missing => {}
-            TargetEntry::File(existing) if existing == *previous_file => {
-                operations.push(InstallOperation::Remove {
-                    relative: relative.clone(),
-                    previous: existing,
-                });
-            }
-            TargetEntry::File(_) => {
-                return Err(RegistryInstallError::Conflict {
-                    path: target,
-                    reason:
-                        "the source removed this file after the active copy was locally changed"
-                            .to_string(),
-                });
-            }
-            TargetEntry::Directory | TargetEntry::Unsupported => {
-                return Err(RegistryInstallError::Conflict {
-                    path: target,
-                    reason: "a removed source file was replaced by a non-file active entry"
-                        .to_string(),
-                });
-            }
+            TargetEntry::Missing => pending.push(relative),
+            TargetEntry::File(existing) if existing == *source_file => {}
+            _ => return Err(RegistryInstallError::Conflict {
+                path: target,
+                reason: "initial installation conflicts with an existing active entry".into(),
+            }),
         }
     }
-
-    let mut prepared = Vec::with_capacity(operations.len());
-    for operation in operations {
-        let result = match operation {
-            InstallOperation::Copy { relative, previous } => {
-                let relative_path = safe_relative_path(&relative)?;
-                let expected =
-                    source_files
-                        .get(&relative)
-                        .ok_or_else(|| RegistryInstallError::Conflict {
-                            path: source_registry.join(&relative_path),
-                            reason: "a planned source copy disappeared from the source snapshot"
-                                .to_string(),
-                        })?;
-                prepare_copy(
-                    &source_registry.join(&relative_path),
-                    &active_registry.join(&relative_path),
-                    expected,
-                )
-                .map(|copy| PreparedInstallOperation::Copy {
-                    relative,
-                    previous,
-                    copy,
-                })
-            }
-            InstallOperation::Remove { relative, previous } => {
-                Ok(PreparedInstallOperation::Remove {
-                    relative,
-                    previous,
-                    operation_id: format!("registry-install:{}", uuid::Uuid::new_v4().simple()),
-                })
-            }
-        };
-        match result {
-            Ok(operation) => prepared.push(operation),
-            Err(error) => return Err(error),
-        }
+    let mut prepared = Vec::with_capacity(pending.len());
+    for relative in pending {
+        let relative_path = safe_relative_path(relative)?;
+        let copy = prepare_copy(
+            &source_registry.join(&relative_path),
+            &active_registry.join(&relative_path),
+            &source_files[relative],
+        )?;
+        prepared.push((relative, copy));
     }
-
-    let mut copied = 0usize;
-    let mut updated = 0usize;
-    let mut removed = 0usize;
     materialize_source_kind_roots(&active_registry, &source_kind_roots)?;
-    let total_operations = prepared.len();
-    for (index, operation) in prepared.iter().enumerate() {
-        let relative = match operation {
-            PreparedInstallOperation::Copy {
-                relative,
-                previous,
-                copy,
-            } => {
-                let target = active_registry.join(safe_relative_path(relative)?);
-                commit_prepared_copy(copy, &target, previous.as_ref())?;
-                if previous.is_some() {
-                    updated += 1;
-                } else {
-                    copied += 1;
-                }
-                relative
-            }
-            PreparedInstallOperation::Remove {
-                relative,
-                previous,
-                operation_id,
-            } => {
-                let target = active_registry.join(safe_relative_path(relative)?);
-                remove_installed_file(&target, previous, operation_id)?;
-                removed += 1;
-                relative
-            }
-        };
+    for (index, (relative, copy)) in prepared.iter().enumerate() {
+        let target = active_registry.join(safe_relative_path(relative)?);
+        commit_prepared_copy(copy, &target, None)?;
         progress(RegistrySyncProgress::Applying {
-            done: index + 1,
-            total: total_operations,
-            relative,
+            done: index + 1, total: prepared.len(), relative,
         });
     }
+    let copied = prepared.len();
+    drop(prepared);
 
     let manifest = InstallManifest {
         schema_version: INSTALL_MANIFEST_VERSION,
@@ -608,17 +405,10 @@ pub fn install_registry_with_progress(
         source_registry,
         files: source_files,
     };
-    write_manifest(
-        &manifest_path,
-        &manifest,
-        previous.as_ref().map(|(_, file)| file),
-    )?;
+    write_manifest(&manifest_path, &manifest, None)?;
     Ok(InstalledRegistry {
         root: active_registry,
         copied,
-        updated,
-        removed,
-        preserved_local,
     })
 }
 
@@ -939,24 +729,6 @@ fn load_manifest(
                 path: path.to_path_buf(),
                 source,
             }),
-        1 => {
-            let legacy: LegacyInstallManifest =
-                serde_json::from_value(value).map_err(|source| {
-                    RegistryInstallError::ManifestParse {
-                        path: path.to_path_buf(),
-                        source,
-                    }
-                })?;
-            Ok(Some((
-                InstallManifest {
-                    schema_version: INSTALL_MANIFEST_VERSION,
-                    source_id: String::new(),
-                    source_registry: legacy.source_registry,
-                    files: legacy.files,
-                },
-                previous,
-            )))
-        }
         version => Err(RegistryInstallError::ManifestVersion {
             path: path.to_path_buf(),
             version,
@@ -1206,25 +978,6 @@ fn commit_prepared_copy(
     )
 }
 
-fn remove_installed_file(
-    target: &Path,
-    previous: &InstalledFile,
-    operation_id: &str,
-) -> Result<PublicationReceipt, RegistryInstallError> {
-    let (guard, historical) =
-        guard_prepared_publication(target, operation_id, Some(previous), true)?;
-    let receipt = match historical {
-        Some(receipt) => receipt,
-        None => guard
-            .remove(operation_id, &previous.sha256, DigestAlgorithm::Sha256)
-            .map_err(|source| RegistryInstallError::RemoveFile {
-                path: target.to_path_buf(),
-                source,
-            })?,
-    };
-    check_publication(receipt, target, operation_id, Some(previous), None, 0)
-}
-
 fn guard_prepared_publication(
     target: &Path,
     operation_id: &str,
@@ -1343,164 +1096,36 @@ mod tests {
     }
 
     #[test]
-    fn install_updates_source_owned_files_and_preserves_private_additions() {
+    fn installed_home_is_not_updated_from_a_changed_distribution() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let active = temp.path().join("home/registry");
-        let relative = Path::new("interface/base/interface.json");
         prepare_source(&source, "test-baseline");
-        write(&source.join(relative), "source-v1");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                source.join(relative),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
-        }
-
-        let first = install_registry(&source, &active).unwrap();
-        assert_eq!(first.copied, 1);
-        assert_eq!(
-            digest_file(&active.join(relative)).unwrap(),
-            digest_file(&source.join(relative)).unwrap()
-        );
-        write(&active.join("interface/private/interface.json"), "private");
-        let before = digest_file(&source.join(relative)).unwrap();
-        publication::publish(
-            &source.join(relative),
-            "source-update",
-            Some(&before.sha256),
-            b"source-v2",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                source.join(relative),
-                std::fs::Permissions::from_mode(0o640),
-            )
-            .unwrap();
-        }
-
-        let second = install_registry(&source, &active).unwrap();
-        assert_eq!(second.updated, 1);
-        assert_eq!(
-            digest_file(&active.join(relative)).unwrap(),
-            digest_file(&source.join(relative)).unwrap()
-        );
-        assert_eq!(
-            std::fs::read_to_string(active.join("interface/base/interface.json")).unwrap(),
-            "source-v2"
-        );
-        assert_eq!(
-            std::fs::read_to_string(active.join("interface/private/interface.json")).unwrap(),
-            "private"
-        );
-        let before = digest_file(&source.join(relative)).unwrap();
-        publication::remove(&source.join(relative), "source-delete", &before.sha256).unwrap();
-        assert_eq!(install_registry(&source, &active).unwrap().removed, 1);
-        assert!(!active.join(relative).exists());
-        assert_eq!(
-            std::fs::read_to_string(active.join("interface/private/interface.json")).unwrap(),
-            "private"
-        );
+        let relative = "interface/base/interface.json";
+        write(&source.join(relative), "initial");
+        assert_eq!(install_registry(&source, &active).unwrap().copied, 1);
+        write(&active.join(relative), "local");
+        let manifest = std::fs::read(active.join(INSTALL_MANIFEST_FILE)).unwrap();
+        write(&source.join(relative), "new release");
+        write(&source.join("tool/new/tool.json"), "new owner");
+        assert_eq!(install_registry(&source, &active).unwrap().copied, 0);
+        assert_eq!(std::fs::read_to_string(active.join(relative)).unwrap(), "local");
+        assert!(!active.join("tool/new/tool.json").exists());
+        assert_eq!(std::fs::read(active.join(INSTALL_MANIFEST_FILE)).unwrap(), manifest);
     }
 
     #[test]
-    fn install_preserves_local_override_until_source_changes_then_refuses() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source");
-        let active = temp.path().join("home/registry");
-        let relative = Path::new("interface/base/interface.json");
-        prepare_source(&source, "test-baseline");
-        write(&source.join(relative), "source-v1");
-        install_registry(&source, &active).unwrap();
-        write(&active.join(relative), "active-local");
-
-        let preserved = install_registry(&source, &active).unwrap();
-        assert_eq!(preserved.preserved_local, 1);
-        assert_eq!(
-            std::fs::read_to_string(active.join(relative)).unwrap(),
-            "active-local"
-        );
-
-        write(&source.join(relative), "source-v2");
-        let error = install_registry(&source, &active).unwrap_err();
-        assert!(matches!(error, RegistryInstallError::Conflict { .. }));
-        assert_eq!(
-            std::fs::read_to_string(active.join(relative)).unwrap(),
-            "active-local"
-        );
-    }
-
-    #[test]
-    fn install_preflights_all_conflicts_before_mutating_any_file() {
+    fn initial_installation_preflights_conflicts_before_copying() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let active = temp.path().join("home/registry");
         prepare_source(&source, "test-baseline");
-        write(&source.join("tool/a/tool.json"), "a1");
-        write(&source.join("tool/z/tool.json"), "z1");
-        install_registry(&source, &active).unwrap();
-        write(&active.join("tool/z/tool.json"), "z-local");
-        write(&source.join("tool/a/tool.json"), "a2");
-        write(&source.join("tool/z/tool.json"), "z2");
-
-        let error = install_registry(&source, &active).unwrap_err();
-        assert!(matches!(error, RegistryInstallError::Conflict { .. }));
-        assert_eq!(
-            std::fs::read_to_string(active.join("tool/a/tool.json")).unwrap(),
-            "a1"
-        );
-
-        write(&active.join("tool/z/tool.json"), "z1");
-        let target = active.canonicalize().unwrap().join("tool/z/tool.json");
-        let before = digest_file(&target).unwrap();
-        let manifest = active.canonicalize().unwrap().join(INSTALL_MANIFEST_FILE);
-        let manifest_bytes = std::fs::read(&manifest).unwrap();
-        let error = install_registry_with_progress(&source, &active, &mut |event| {
-            if matches!(
-                event,
-                RegistrySyncProgress::Applying {
-                    relative: "tool/a/tool.json",
-                    ..
-                }
-            ) {
-                publication::publish(
-                    &target,
-                    "preflight-race",
-                    Some(&before.sha256),
-                    b"concurrent-edit",
-                )
-                .unwrap();
-            }
-        })
-        .unwrap_err();
-        assert!(matches!(error, RegistryInstallError::Conflict { path, .. } if path == target));
-        assert_eq!(std::fs::read(&target).unwrap(), b"concurrent-edit");
-        assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
-
-        write(&target, "z1");
-        let before = digest_file(&manifest).unwrap();
-        let mut edited_manifest = manifest_bytes;
-        edited_manifest.push(b'\n');
-        let error = install_registry_with_progress(&source, &active, &mut |event| {
-            if matches!(event, RegistrySyncProgress::Applying { .. }) {
-                publication::publish(
-                    &manifest,
-                    "manifest-race",
-                    Some(&before.sha256),
-                    &edited_manifest,
-                )
-                .unwrap();
-            }
-        })
-        .unwrap_err();
-        assert!(matches!(error, RegistryInstallError::Conflict { path, .. } if path == manifest));
-        assert_eq!(std::fs::read(&manifest).unwrap(), edited_manifest);
+        write(&source.join("tool/a/tool.json"), "a");
+        write(&source.join("tool/z/tool.json"), "z");
+        write(&active.join("tool/z/tool.json"), "local");
+        assert!(matches!(install_registry(&source, &active), Err(RegistryInstallError::Conflict { .. })));
+        assert!(!active.join("tool/a/tool.json").exists());
+        assert_eq!(std::fs::read_to_string(active.join("tool/z/tool.json")).unwrap(), "local");
     }
 
     #[test]
@@ -1584,10 +1209,6 @@ mod tests {
                 commit_prepared_copy(&copy, &target, Some(&previous)),
                 Err(RegistryInstallError::Conflict { .. })
             ));
-            assert!(matches!(
-                remove_installed_file(&target, &previous, "stale-mode-delete"),
-                Err(RegistryInstallError::Conflict { .. })
-            ));
         }
         let previous = digest_file(&target).unwrap();
         let previous_attempt = copy.operation_id.clone();
@@ -1615,14 +1236,6 @@ mod tests {
             first
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"later");
-        let previous = digest_file(&target).unwrap();
-        let removed = remove_installed_file(&target, &previous, "retained-delete").unwrap();
-        publication::publish(&target, "recreate", None, b"replacement").unwrap();
-        assert_eq!(
-            remove_installed_file(&target, &previous, "retained-delete").unwrap(),
-            removed
-        );
-        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
         assert_eq!(
             publication::read_receipt(&target, &copy.operation_id).unwrap(),
             Some(first)
@@ -1643,10 +1256,10 @@ mod tests {
         install_registry(&first, &active).unwrap();
         let installed = install_registry(&second, &active).unwrap();
 
-        assert_eq!(installed.updated, 1);
+        assert_eq!(installed.copied, 0);
         assert_eq!(
             std::fs::read_to_string(active.join("interface/base/interface.json")).unwrap(),
-            "v2"
+            "v1"
         );
     }
 

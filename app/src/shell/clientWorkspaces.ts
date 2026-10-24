@@ -61,9 +61,6 @@ export const PROJECT_FILTER_STORAGE_KEY = "octopus.shell.selectedProject.v2";
 export const TASK_ORGANIZATION_STORAGE_KEY = "octopus.shell.taskOrganization.v2";
 export const DASHBOARD_PINNED_SURFACES_STORAGE_KEY = "octopus.dashboard.pinnedSurfaces.v1";
 const PROJECTS_STORAGE_KEY = "octopus.shell.projects.v4";
-const LEGACY_LAB_PROJECTS_STORAGE_KEY = "octopus.shell.labProjects.v3";
-const LEGACY_CHAT_PROJECTS_STORAGE_KEY = "octopus.shell.chatProjects.v2";
-const SHELL_MIGRATION_STORAGE_KEY = "octopus.shell.migration.v5";
 
 const TASK_ORGANIZATION_CHANGED_EVENT = "octopus:task-organization-changed";
 const CHAT_PROJECTS_CHANGED_EVENT = "octopus:chat-projects-changed";
@@ -104,58 +101,6 @@ export function profileStorageKey(
   profile: OctopusClientAccessProfile,
 ): string {
   return profile === "live" ? storageKey : `${storageKey}.test`;
-}
-
-export function migrateClientShellState(profile: OctopusClientAccessProfile): void {
-  if (typeof window === "undefined") return;
-  const legacyProjectKeys = [
-    profileStorageKey("octopus.clientWorkspace.agent-1.chatProjects.v1", profile),
-    profileStorageKey(LEGACY_CHAT_PROJECTS_STORAGE_KEY, profile),
-    profileStorageKey(LEGACY_LAB_PROJECTS_STORAGE_KEY, profile),
-  ];
-  const marker = profileStorageKey(SHELL_MIGRATION_STORAGE_KEY, profile);
-  if (window.localStorage.getItem(marker)) return;
-  const legacyToCurrent: Array<[string, string]> = [
-    ["octopus.clientWorkspace.agent-1.pinnedChats.v1", PINNED_TASKS_STORAGE_KEY],
-    ["octopus.clientWorkspace.agent-1.chatOrder.v1", TASK_ORDER_STORAGE_KEY],
-    ["octopus.clientWorkspace.agent-1.selectedProject.v1", PROJECT_FILTER_STORAGE_KEY],
-    ["octopus.clientWorkspace.agent-1.taskOrganization.v1", TASK_ORGANIZATION_STORAGE_KEY],
-  ];
-  try {
-    for (const [legacy, current] of legacyToCurrent) {
-      const legacyKey = profileStorageKey(legacy, profile);
-      const currentKey = profileStorageKey(current, profile);
-      const value = window.localStorage.getItem(legacyKey);
-      if (value != null && window.localStorage.getItem(currentKey) == null) window.localStorage.setItem(currentKey, value);
-      window.localStorage.removeItem(legacyKey);
-    }
-    const projectKey = profileStorageKey(PROJECTS_STORAGE_KEY, profile);
-    const projectSource = legacyProjectKeys
-      .map((key) => ({ key, value: window.localStorage.getItem(key) }))
-      .find((candidate) => candidate.value != null);
-    if (projectSource?.value != null && window.localStorage.getItem(projectKey) == null) {
-      const decoded = JSON.parse(projectSource.value);
-      if (!Array.isArray(decoded)) return;
-      window.localStorage.setItem(
-        projectKey,
-        JSON.stringify(normalizeClientChatProjects(decoded, [])),
-      );
-    }
-    if (window.localStorage.getItem(projectKey) != null) {
-      for (const key of legacyProjectKeys) window.localStorage.removeItem(key);
-    }
-    const legacyDashboardPinnedKey = profileStorageKey("octopus.clientWorkspace.os.pinnedSurfaces.v1", profile);
-    const dashboardPinnedKey = profileStorageKey(DASHBOARD_PINNED_SURFACES_STORAGE_KEY, profile);
-    const legacyDashboardPinned = window.localStorage.getItem(legacyDashboardPinnedKey);
-    if (legacyDashboardPinned != null && window.localStorage.getItem(dashboardPinnedKey) == null) {
-      window.localStorage.setItem(dashboardPinnedKey, legacyDashboardPinned);
-    }
-    window.localStorage.removeItem(profileStorageKey("octopus.workspaceSplit.workspace.v1", profile));
-    window.localStorage.removeItem(profileStorageKey("octopus.workspaceSplit.surface.v1", profile));
-    window.localStorage.setItem(marker, "1");
-  } catch {
-    return;
-  }
 }
 
 export function parseClientWorkspaceKey(value: string | null | undefined): ClientWorkspaceKey | null {

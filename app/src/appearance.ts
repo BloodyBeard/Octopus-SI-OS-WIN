@@ -239,14 +239,9 @@ let current = load();
 function load(): AppearanceSettings {
   try {
     if (typeof window === "undefined") return { ...defaultAppearance };
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-      ?? window.localStorage.getItem("octopus.appearance.v2")
-      ?? window.localStorage.getItem("octopus.appearance.v1");
+    const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...defaultAppearance };
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const legacyReduced = parsed.reduceMotion === true ? "reduce" : defaultAppearance.motionMode;
-    const legacyUiFont = stringValue(parsed.uiFont);
-    const legacyCodeFont = stringValue(parsed.codeFont);
     return {
       themeMode: choice(parsed.themeMode, ["system", "light", "dark"], defaultAppearance.themeMode),
       lightAccent: color(parsed.lightAccent, defaultAppearance.lightAccent),
@@ -258,8 +253,8 @@ function load(): AppearanceSettings {
       lightSkill: color(parsed.lightSkill, defaultAppearance.lightSkill),
       lightTranslucentSidebar: booleanValue(parsed.lightTranslucentSidebar, defaultAppearance.lightTranslucentSidebar),
       lightContrast: numberValue(parsed.lightContrast, defaultAppearance.lightContrast, 0, 100),
-      lightUiFont: stringValue(parsed.lightUiFont) || legacyUiFont,
-      lightCodeFont: stringValue(parsed.lightCodeFont) || legacyCodeFont,
+      lightUiFont: stringValue(parsed.lightUiFont),
+      lightCodeFont: stringValue(parsed.lightCodeFont),
       darkAccent: color(parsed.darkAccent, defaultAppearance.darkAccent),
       darkAccentSource: readAccentSource(parsed, "dark"),
       darkBackground: color(parsed.darkBackground, defaultAppearance.darkBackground),
@@ -269,14 +264,14 @@ function load(): AppearanceSettings {
       darkSkill: color(parsed.darkSkill, defaultAppearance.darkSkill),
       darkTranslucentSidebar: booleanValue(parsed.darkTranslucentSidebar, defaultAppearance.darkTranslucentSidebar),
       darkContrast: numberValue(parsed.darkContrast, defaultAppearance.darkContrast, 0, 100),
-      darkUiFont: stringValue(parsed.darkUiFont) || legacyUiFont,
-      darkCodeFont: stringValue(parsed.darkCodeFont) || legacyCodeFont,
+      darkUiFont: stringValue(parsed.darkUiFont),
+      darkCodeFont: stringValue(parsed.darkCodeFont),
       lightCodeTheme: choice(parsed.lightCodeTheme, lightCodeThemeIds, defaultAppearance.lightCodeTheme),
       darkCodeTheme: choice(parsed.darkCodeTheme, darkCodeThemeIds, defaultAppearance.darkCodeTheme),
       uiFontSize: numberValue(parsed.uiFontSize, defaultAppearance.uiFontSize, 11, 20),
       codeFontSize: numberValue(parsed.codeFontSize, defaultAppearance.codeFontSize, 10, 20),
       pointerCursors: booleanValue(parsed.pointerCursors, defaultAppearance.pointerCursors),
-      motionMode: choice(parsed.motionMode, ["system", "reduce", "full"], legacyReduced),
+      motionMode: choice(parsed.motionMode, ["system", "reduce", "full"], defaultAppearance.motionMode),
       diffMarkerStyle: choice(parsed.diffMarkerStyle, ["color", "symbols"], defaultAppearance.diffMarkerStyle),
       fontSmoothing: booleanValue(parsed.fontSmoothing, defaultAppearance.fontSmoothing),
       density: choice(parsed.density, ["compact", "default", "comfortable"], defaultAppearance.density),

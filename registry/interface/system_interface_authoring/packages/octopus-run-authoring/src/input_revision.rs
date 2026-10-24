@@ -1076,10 +1076,12 @@ fn payload_value(
                 RunAuthoringCheckpointRole::AuthoringCall
                     | RunAuthoringCheckpointRole::AuthoringResult
             );
-        // Pending output rows and all foreign-owned rows retain their exact bindings.
-        let initial_tool =
-            pending.is_none() && template.role == RunAuthoringCheckpointRole::ProviderToolOutput;
-        if !stable && !authoring && !initial_tool {
+        let future_tool = template.role == RunAuthoringCheckpointRole::ProviderToolOutput
+            && pending.as_ref().is_none_or(|handoff| {
+                retains_future_output(template)
+                    && !handoff.items.iter().any(|item| pending_output_matches_template(item, template))
+            });
+        if !stable && !authoring && !future_tool {
             continue;
         }
         let rows = record
@@ -1101,7 +1103,7 @@ fn payload_value(
             return Err("payload selection reused a checkpoint generation".into());
         }
         rename_checkpoint(&mut value, &writer.owner, &row.id, &id, true)?;
-        if stable || initial_tool {
+        if stable || future_tool {
             let bindings = if stable {
                 context.clone()
             } else {

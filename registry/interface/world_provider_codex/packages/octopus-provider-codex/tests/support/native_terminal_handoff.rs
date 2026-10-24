@@ -90,6 +90,7 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
     ) -> Vec<(String,ArtifactRef,u64)> {
             let mut delivered=Vec::new(); let mut writes=0;
             let mut transient_scope = None;
+            let mut before_scope_refused = false;
             loop { tokio::select! {
                 accepted=listener.accept()=> {
                     let mut ws=tokio_tungstenite::accept_async(accepted.unwrap().0).await.unwrap();
@@ -163,6 +164,13 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
                         }
                     };
                     let mut row=edge(&gate_ctx,&current,cp,&incoming.artifact,MovementKind::InterfaceArrival,current_record.worker.clone());
+                    if phase == 26 && !before_scope_refused {
+                        before_scope_refused = true;
+                        incoming.retained.unwrap().reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete {
+                            verdict: DeliveryVerdict::refused(octopus_ledger::RefusedReason::RegistryUnstable, json!({"attempts":4})),
+                        })).unwrap();
+                        continue;
+                    }
                     let scope=retain(gate_ctx,&incoming,&row);
                     if (phase==2 && label==TURN_INTERRUPTED_RESULT_LABEL) || (!ack_bootstrap && with_answer && phase==0 && label=="turn.completed") {
                         incoming.retained.unwrap().reply.send(Err("fixture transport closed after retaining scope".into())).unwrap();break;

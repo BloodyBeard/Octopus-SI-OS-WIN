@@ -183,9 +183,10 @@ export function useChatCapabilityCatalog(
     const projectPresentations = readClientChatProjects(accessProfile);
     const projectDisplayNames = new Map(projectPresentations.map((project) => [project.id, project.name]));
     const projectColors = new Map(projectPresentations.map((project) => [project.id, project.color]));
+    const projectIcons = new Map(projectPresentations.map((project) => [project.id, project.icon]));
     void capabilityReads.request(async () => {
       const [contexts, rooms] = await Promise.all([
-        loadChatExecutionContexts(projectDisplayNames, projectColors),
+        loadChatExecutionContexts(projectDisplayNames, projectColors, projectIcons),
         loadChatWorkerEnvironmentRooms(),
       ]);
       return { contexts, rooms };

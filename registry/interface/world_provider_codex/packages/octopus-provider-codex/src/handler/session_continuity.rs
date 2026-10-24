@@ -477,6 +477,7 @@ pub(crate) fn terminal_output_continuity(
     current_session_context: &[SessionContextArtifact],
     expected_run: &octopus_descriptors::RunId,
     current_run_record: &[u8],
+    deferred_context_generations: u64,
 ) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
     let runtime = invocation_runtime_metadata(input)?;
     if &runtime.run != expected_run || runtime.interface != descriptor.id {
@@ -524,7 +525,11 @@ pub(crate) fn terminal_output_continuity(
             "terminal Codex settlement lost its current run record".into(),
         ));
     }
-    let generation = read_codex_context_generation(&record, &runtime.interface)?;
+    let generation = read_codex_context_generation(&record, &runtime.interface)?
+        .checked_add(deferred_context_generations)
+        .ok_or_else(|| InterfaceDriverError::FailedClosed(
+            "terminal Codex continuity context generation overflowed".into(),
+        ))?;
     if continuity.context_generation > generation {
         return Err(InterfaceDriverError::FailedClosed(
             "terminal Codex continuity is ahead of its authored context".into(),

@@ -2490,6 +2490,7 @@
             "turn.review.entered",
             "turn.review.exited",
             "turn.context.compaction",
+            "turn.token_usage",
             "turn.started",
             "turn.completed",
             "turn.model.rerouted",
@@ -3092,7 +3093,8 @@
         ],
         "active_turn_stream_labels": [
           "provider.account.rate_limits.updated",
-          "account.rate_limits"
+          "account.rate_limits",
+          "turn.token_usage"
         ],
         "phase_rules": [
           {
@@ -3117,6 +3119,7 @@
         "turn.error",
         "operator.approval.request",
         "operator.elicitation.request",
+        "operator.user_input.request",
         "turn.agent_message",
         "turn.reasoning",
         "turn.plan.update"
@@ -3179,6 +3182,7 @@
         "turn.review.entered",
         "turn.review.exited",
         "turn.context.compaction",
+        "turn.token_usage",
         "turn.started",
         "turn.completed",
         "turn.model.rerouted",
@@ -3889,7 +3893,8 @@
           "features.request_permissions_tool=false",
           "features.sleep_tool=false",
           "features.current_time_reminder=false",
-          "tools.experimental_request_user_input.enabled=false",
+          "tools.experimental_request_user_input.enabled=true",
+          "features.default_mode_request_user_input=true",
           "web_search=disabled"
         ],
         "home_env": "CODEX_HOME",

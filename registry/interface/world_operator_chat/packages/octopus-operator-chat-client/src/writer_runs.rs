@@ -4,8 +4,6 @@ use octopus_run_authoring::{
     CheckedRunWriter, WriterRunBinding, separate_owner_writer_run, separate_writer_run,
 };
 
-mod schema;
-pub use schema::{OperatorWriterSchemaPlanRequest, plan_operator_writer_schema};
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

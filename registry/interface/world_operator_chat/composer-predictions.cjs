@@ -14,8 +14,7 @@ async function requestComposerPrediction(options, input) {
     const source = await options.readSource(runId);
     if (!source) return null;
     const sourcePath = path.join(home, "state", "runs", `${runId}.json`);
-    const sourceBytes = await readOptional(sourcePath);
-    if (sourceBytes === null) return null;
+    if (await readOptional(sourcePath) === null) return null;
     const { chat, terminal } = source;
     const registry = path.join(home, "registry");
     const provider = segment(chat.provider_bound_interface_id);
@@ -60,21 +59,24 @@ async function requestComposerPrediction(options, input) {
       const result = await readResult(request);
       if (result) return present(result);
     } else {
-      await options.withTopologyLock(home, async () => {
-      const writes = [{ file: sourcePath, content: sourceBytes, beforeDigest: crypto.createHash("sha256").update(sourceBytes).digest("hex") }];
+      const prepared = await options.withTopologyLock(home, async () => {
+      if (await readOptional(sourcePath) === null) return false;
+      const writes = [];
       const stage = async (file, next) => {
         const existing = await readOptional(file);
         if (existing !== null) {
           if (!equal(JSON.parse(existing), next)) throw new Error(`Client maintenance configuration changed: ${path.basename(file)}`);
         } else writes.push({ file, next, beforeDigest: null });
       };
-      writes.push(...await planClientMaintenanceEe(home, ee, config.ee_template, chat.os_root_ee_id));
+      writes.push(...await planClientMaintenanceEe(home, ee, config.ee_template));
       for (const [file, value] of await predictionDescriptors(registry, config, identity)) await stage(file, value);
       const epoch = (prior?.epoch ?? -1) + 1;
       const record = recordFor(request, epoch);
       writes.push({ file: runPath, next: record, beforeDigest: previousBytes === null ? null : crypto.createHash("sha256").update(previousBytes).digest("hex") });
       await options.commit({ label: "Prepare client suggestion", writes, removals: [], publishBarrierPath: runPath });
+      return true;
       });
+      if (!prepared) return null;
     }
     const payloadRoot = path.join(home, "interface-hand-in", service, "client", "predictions");
     await fs.mkdir(payloadRoot, { recursive: true });

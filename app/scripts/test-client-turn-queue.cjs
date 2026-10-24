@@ -405,9 +405,8 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
       "./clientTurnQueue": { ClientTurnQueue: class extends ClientTurnQueue { constructor(key) {
         super(key, { ...ownerStorage, update: async (key, change) => { if (failRecovery) { failRecovery = false; throw new Error("storage interrupted"); } return ownerStorage.update(key, change); } }); ownerQueue = this;
       } }, queueNamespace, queueHead, indexedQueuePersistence: () => ({}) },
-      "./storage": { legacyChatQueueNotice: () => "" },
     });
-    function QueueProbe() { queueView = queueApi.useChatTurnQueue("live", "/queue-recovery-fixture", "fixture"); return null; }
+    function QueueProbe() { queueView = queueApi.useChatTurnQueue("live", "/queue-recovery-fixture"); return null; }
     try {
       await act(async () => host.render(React.createElement(QueueProbe)));
       const owner = queueView.queueOwner.id;
@@ -598,6 +597,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     "../../design-system/OcDropdown": dropdown,
     "../../clientActions": commands,
     "../../clientPreferences": { useClientPreferences: () => ({ sendShortcut }) },
+    "./ContextUsageIndicator": { ContextUsageIndicator: empty },
     "./ProjectedFilePicker": { ProjectedFilePicker: empty }, "./ComposerUtilityBar": { ComposerUtilityBar: empty },
     "../shell/ShellTooltip": shellTooltip,
     "./RichComposerEditor": { RichComposerEditor: ({ onKeyDown }) => React.createElement("textarea", { onKeyDown: (event) => onKeyDown(event.nativeEvent, event.currentTarget) }) },
@@ -694,13 +694,6 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.equal(queued, 2, "focus also prevents dispatch to a different composer");
   await act(async () => host.unmount());
   const storageApi = load("src/components/chat/storage.ts", { "./constants": { CHAT_SETTINGS_KEY: "settings" }, "./taskAccess": load("src/components/chat/taskAccess.ts") });
-  localStorage.setItem("octopus.client.chatQueue.v1.main.test", "[]");
-  const legacyKey = "octopus.client.chatQueue.v1.test";
-  const legacyValue = JSON.stringify([{ ...item("legacy"), status: "sending" }]);
-  localStorage.setItem(legacyKey, legacyValue);
-  assert.match(storageApi.legacyChatQueueNotice("lab", "main"), /not been migrated or sent/);
-  assert.equal(localStorage.getItem(legacyKey), legacyValue);
-  assert.equal(storageApi.loadQueuedChatTurns("lab", "main")[0].status, "unknown");
   const useDraft = load("src/components/chat/useChatDraftState.ts", {
     "./storage": storageApi, "./artifacts": { attachmentLabel: () => "operator.file" },
     "./attachmentDrop": {}, "./constants": { MAX_ATTACHMENT_BYTES: 1024 },

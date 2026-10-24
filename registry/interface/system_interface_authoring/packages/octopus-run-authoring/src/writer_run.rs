@@ -4,6 +4,10 @@ use serde_json::{Value, json};
 
 const DECLARATION: &str = "file_writer_target";
 
+#[cfg(test)]
+#[path = "../tests/support/writer_indeterminate.rs"]
+mod indeterminate_tests;
+
 #[derive(Default)]
 pub(super) struct WriterCallIndex {
     generations: BTreeMap<PathBuf, Option<u64>>,
@@ -635,7 +639,7 @@ impl OwnerWriterEdit {
             .ok_or("writer edit target has no parent")?
             .join(format!("{}.json", binding.run));
         let current = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let next = next_writer(&current, &config, JsonFormat::Compact)?;
+        let next = next_writer(&current, &config, JsonFormat::Compact, 0)?;
         let arguments = OrderedArguments {
             ordered: true,
             writes: vec![
@@ -830,7 +834,7 @@ struct OrderedResult {
     writes: Vec<OrderedReceipt>,
 }
 
-fn next_writer(before: &[u8], config: &RunAuthoringConfig, format: JsonFormat) -> Result<Vec<u8>, String> {
+fn next_writer(before: &[u8], config: &RunAuthoringConfig, format: JsonFormat, minimum_generation: u64) -> Result<Vec<u8>, String> {
     let record = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
     let declaration = target(&record, &config.provider_interface)?;
     let binding = config
@@ -848,7 +852,8 @@ fn next_writer(before: &[u8], config: &RunAuthoringConfig, format: JsonFormat) -
     let generation = declaration
         .generation
         .checked_add(1)
-        .ok_or("writer generation overflow")?;
+        .ok_or("writer generation overflow")?
+        .max(minimum_generation);
     let initial =
         RunRecord::from_bytes(&binding.initial_bytes()?).map_err(|e| e.to_string())?;
     if record.ee != initial.ee || record.trace != initial.trace || record.status != initial.status {
@@ -935,10 +940,15 @@ impl OrderedArguments {
             .as_ref()
             .ok_or("ordered call target has no declared writer Run")?;
         bound.roles(&record, &writer.owner, &config.checkpoints)?;
+        let advanced = RunRecord::from_bytes(advance_content.as_bytes()).map_err(|e| e.to_string())?;
+        let generation = target(&advanced, &writer.owner)?.generation;
+        if generation <= target(&RunRecord::from_bytes(snapshot).map_err(|e| e.to_string())?, &writer.owner)?.generation {
+            return Err("ordered writer generation did not advance".into());
+        }
         if advance.path().file_name().and_then(|s| s.to_str()) != Some(&format!("{}.json", bound.run))
             || edit.path().file_name().and_then(|s| s.to_str())
                 != Some(&format!("{}.json", record.id))
-            || next_writer(snapshot, &config, advance.json_format().unwrap_or_default())? != advance_content.as_bytes()
+            || next_writer(snapshot, &config, advance.json_format().unwrap_or_default(), generation)? != advance_content.as_bytes()
         {
             return Err("ordered call does not author exactly the next writer generation".into());
         }
@@ -977,6 +987,7 @@ impl OrderedArguments {
         snapshot: &[u8],
         result: &ToolResultArtifact,
         max_payload_bytes: u64,
+        call_seq: u64,
     ) -> Result<OrderedTargetEffect, String> {
         let [advance, edit] = self.writes.as_slice() else {
             return Err("ordered result lost its two exact writes".into());
@@ -995,7 +1006,17 @@ impl OrderedArguments {
             .ok_or("ordered result inbound absent")?;
         let mut budget = DecodeBudget::new(max_payload_bytes)?;
         let decoded = [advance.resolved(&mut budget)?, edit.resolved(&mut budget)?];
-        if snapshot != decoded[0].1.as_bytes()
+        let indeterminate = !result.ok && result.body.is_none() && result.error.as_ref().is_some_and(|error| {
+            error.code == "tool_effect_indeterminate"
+                && error.details.as_ref().is_some_and(|details| {
+                    details["source_movement_seq"].as_u64() == Some(call_seq)
+                        && details["failure_details"]["source_movement_seq"].as_u64() == Some(call_seq)
+                        && details["failure_details"]["tool"].as_str() == Some(writer.tool.as_str())
+                        && details["failure_details"]["effect_state"].as_str() == Some("in_flight_outcome_unknown")
+                })
+        });
+        let writer_unadvanced = snapshot == decoded[0].0.as_bytes();
+        if (snapshot != decoded[0].1.as_bytes() && !(indeterminate && writer_unadvanced))
             || runtime.run != record.id
             || runtime.ee != record.ee
             || runtime.worker != record.worker
@@ -1026,6 +1047,9 @@ impl OrderedArguments {
         }
         if result.tool != writer.tool || result.label != writer.result_label {
             return Err("ordered result changed tool or label".into());
+        }
+        if indeterminate {
+            return Ok(if writer_unadvanced { OrderedTargetEffect::UncertainWriter } else { OrderedTargetEffect::Uncertain });
         }
         let body = if result.ok {
             if result.error.is_some() {
@@ -1091,6 +1115,7 @@ pub(super) enum OrderedTargetEffect {
     Applied,
     Refused,
     Uncertain,
+    UncertainWriter,
 }
 
 #[derive(Clone)]
@@ -1099,6 +1124,7 @@ struct UnresolvedTarget {
     args: OrderedArguments,
     call: Movement,
     result: Movement,
+    writer_advanced: bool,
 }
 
 #[derive(Clone)]
@@ -1252,7 +1278,6 @@ fn history(
             if manifest.label != declared.call_label
                 || call.tool != declared.tool
                 || current.pending.is_some()
-                || snapshot != current.current
             {
                 return Err("writer call changed its declared route, sequential generation or proven preimage".into());
             }
@@ -1261,7 +1286,10 @@ fn history(
             let (before, _) = args.checked_call(&declared, &snapshot, &target_path, limits.max_payload_bytes)?;
             if current.unresolved.is_some() {
                 let observed = ContentHash::of_bytes(&before).to_hex();
-                resolve_target_attempt(&mut current, &mut reader, &declared, &target_path, &config.provider_interface, limits.max_payload_bytes, &observed)?;
+                resolve_target_attempt(&mut current, &mut reader, &declared, &target_path, &config.provider_interface, limits.max_payload_bytes, &observed, Some(&snapshot))?;
+            }
+            if snapshot != current.current {
+                return Err("writer call changed its proven preimage".into());
             }
             let before = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
             if owner_config(&before, &declared)?
@@ -1324,10 +1352,10 @@ fn history(
             {
                 return Err("writer result correlation or label differs".into());
             }
-            let effect = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes)?;
-            current.current = args.writes[0].content(limits.max_payload_bytes)?.into_bytes();
-            let attempt = UnresolvedTarget { seq, args, call, result: movement.clone() };
-            if effect == OrderedTargetEffect::Uncertain {
+            let effect = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes, call.seq.0)?;
+            current.current = snapshot;
+            let attempt = UnresolvedTarget { seq, args, call, result: movement.clone(), writer_advanced: effect != OrderedTargetEffect::UncertainWriter };
+            if matches!(effect, OrderedTargetEffect::Uncertain | OrderedTargetEffect::UncertainWriter) {
                 current.unresolved = Some(attempt);
             } else {
                 settle_target_attempt(&mut current, &mut reader, &declared, &target_path, limits.max_payload_bytes, attempt, effect)?;
@@ -1336,7 +1364,7 @@ fn history(
     }
     if current.unresolved.is_some() {
         let observed = ContentHash::of_bytes(&std::fs::read(&target_path).map_err(|e| e.to_string())?).to_hex();
-        resolve_target_attempt(&mut current, &mut reader, &declared, &target_path, &config.provider_interface, limits.max_payload_bytes, &observed)?;
+        resolve_target_attempt(&mut current, &mut reader, &declared, &target_path, &config.provider_interface, limits.max_payload_bytes, &observed, None)?;
     }
     if let Some(start) = last_start {
         reader
@@ -1367,12 +1395,12 @@ fn settle_target_attempt(
     attempt: UnresolvedTarget,
     effect: OrderedTargetEffect,
 ) -> Result<(), String> {
-    let UnresolvedTarget { seq, args, call, result } = attempt;
+    let UnresolvedTarget { seq, args, call, result, .. } = attempt;
     let call_seq = call.seq.0;
     let applied = match effect {
         OrderedTargetEffect::Applied => true,
         OrderedTargetEffect::Refused => false,
-        OrderedTargetEffect::Uncertain => return Err("ordered target attempt was settled while uncertain".into()),
+        OrderedTargetEffect::Uncertain | OrderedTargetEffect::UncertainWriter => return Err("ordered target attempt was settled while uncertain".into()),
     };
     let hash = args.writes[1].after_hash();
     if applied {
@@ -1405,9 +1433,23 @@ fn resolve_target_attempt(
     provider: &InterfaceId,
     maximum: u64,
     observed: &str,
+    observed_writer: Option<&[u8]>,
 ) -> Result<(), String> {
-    let Some(attempt) = current.unresolved.take() else { return Ok(()) };
+    let Some(mut attempt) = current.unresolved.take() else { return Ok(()) };
     let (before, after) = attempt.args.target_hashes(maximum)?;
+    if !attempt.writer_advanced {
+        let actual = match observed_writer {
+            Some(bytes) => bytes.to_vec(),
+            None => std::fs::read(attempt.args.writes[0].path()).map_err(|e| e.to_string())?,
+        };
+        let writer_after = attempt.args.writes[0].content(maximum)?.into_bytes();
+        if actual == writer_after {
+            current.current = actual;
+            attempt.writer_advanced = true;
+        } else if actual != attempt.args.writes[0].before(maximum)?.as_bytes() || observed != before {
+            return Err("indeterminate ordered write has no exact writer and target readback".into());
+        }
+    }
     if observed == after {
         return settle_target_attempt(current, reader, declared, target_path, maximum, attempt, OrderedTargetEffect::Applied);
     }
@@ -1773,7 +1815,8 @@ impl ProviderOutputHandoff {
                 if ContentHash::of_bytes(&state.run_record_bytes).to_hex() != planned.before_hash {
                     return Err("writer lost its planned target preimage".into());
                 }
-                let next = next_writer(&progress.current, &self.config, JsonFormat::Compact)?;
+                let minimum = progress.voided.values().max().copied().unwrap_or(0).checked_add(1).ok_or("writer attempt generation overflow")?;
+                let next = next_writer(&progress.current, &self.config, JsonFormat::Compact, minimum)?;
                 let next_record = RunRecord::from_bytes(&next).map_err(|e| e.to_string())?;
                 let generation = target(&next_record, &self.config.provider_interface)?.generation;
                 let call = OrderedCall {

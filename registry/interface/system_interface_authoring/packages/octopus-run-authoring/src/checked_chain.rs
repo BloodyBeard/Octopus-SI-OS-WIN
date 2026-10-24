@@ -380,11 +380,11 @@ pub(crate) fn checked_run_file_chain_with_reader(
             let Some(candidate) = calls.remove(&(writer.owner.clone(), correlation)) else { continue; };
             if candidate.writer != *writer { return Err("checked run result came from a different declared writer".into()); }
             if let Some(ordered) = &candidate.ordered {
-                let effect = ordered.checked_result(writer,metadata,&snapshot,&result,reader.max_payload_bytes())?;
+                let effect = ordered.checked_result(writer,metadata,&snapshot,&result,reader.max_payload_bytes(),candidate.call.seq.0)?;
                 if effect == writer_run::OrderedTargetEffect::Refused { continue; }
                 let prospective = apply_run_json_patch(&candidate.before,&candidate.arguments.patch,&candidate.arguments.expected_after_hash, candidate.arguments.json_format)?.into_bytes();
                 let transition = CheckedRunTransition {writer:candidate.writer,before:candidate.before,after:prospective,call:candidate.call,result:movement,placement:false};
-                if effect == writer_run::OrderedTargetEffect::Uncertain {
+                if matches!(effect, writer_run::OrderedTargetEffect::Uncertain | writer_run::OrderedTargetEffect::UncertainWriter) {
                     if uncertain.len() >= 1024 { return Err("checked uncertain transitions exceed their evidence bound".into()); }
                     uncertain.push(transition);
                     continue;

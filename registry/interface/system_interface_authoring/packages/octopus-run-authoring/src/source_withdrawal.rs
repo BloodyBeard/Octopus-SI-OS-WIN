@@ -406,6 +406,9 @@ impl ProviderOutputHandoff {
         let Some(pending) = persisted_pending_handoff(&record, &self.config.provider_interface)? else { return Ok(None); };
         if pending.source_movement_seq != self.source_movement_seq || pending.withdrawal.is_some() { return Ok(None); }
         if self.pending_handoff_evidence(&pending)?.iter().all(Option::is_some) { return Ok(None); }
+        if pending.terminal && !pending.source_without_context
+            && self.pending_source_fully_refused(&record, &pending)?
+        { return Ok(None); }
         let effects = pending.items.iter().filter(|item| self.config.checkpoints.iter().any(|template| {
             let expected = pending_output_checkpoint(template, item.checkpoint.id.as_str(), &item.artifact_label, &[], &[]);
             template.role == RunAuthoringCheckpointRole::ProviderToolOutput

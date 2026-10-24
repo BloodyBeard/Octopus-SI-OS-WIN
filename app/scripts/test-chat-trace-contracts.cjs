@@ -259,11 +259,6 @@ assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{}, {}]), "pane-t
     storage.saveChatDrafts("live", [draft("exact", "msg_exact", true), draft("forged", "not-a-message-id", true)]);
     assert.ok([...saved.keys()].some((key) => key.includes("chatDrafts")));
     assert.deepEqual(storage.loadChatDrafts("live").map(({ key, messageId, messageHadAttachments }) => [key, messageId, messageHadAttachments]), [["exact", "msg_exact", true]]);
-    const turn = (id, messageId) => ({ id, messageId, runKey: "run", text: "queued", eeId: "", workerInterfaceId: "", providerInterfaceId: "", providerModel: "",
-      reasoningEffort: "", endpoint: "", createdAtMs: 1, status: "queued", hadAttachments: false });
-    storage.saveQueuedChatTurns("live", [turn("queued_current", "msg_current"), turn("queued_0123456789abcdef", ""), turn("queued_unknown", "invalid")]);
-    assert.deepEqual(storage.loadQueuedChatTurns("live").map(({ id, messageId }) => [id, messageId]),
-      [["queued_current", "msg_current"], ["queued_0123456789abcdef", "msg_0123456789abcdef"]]);
   } finally {
     globalThis.window = previousWindow;
   }
@@ -645,6 +640,16 @@ for (const extra of [{ client_id: "another" }, { run: "run-b" }, { provider_inte
 assert.equal(chatActivityProjectionModule.mergeChatRunMessages(
   [inputRecorded()], [steerReceipt("acknowledged", 15)], "snapshot",
 ).some((message) => message.eventKind === "input_recorded"), true);
+const displayEdit = { provider_interface: "provider", turn_id: "turn", item_id: "item", original_text: "original", text: "edited", edited_at_ms: 1 };
+const editableReply = { id: "reply", runId: "run", interfaceId: "chat", role: "assistant", text: "edited", eventKind: "message", terminal: true, movementSeq: 10, createdAtMs: 10,
+  eventData: { turn_id: "turn", item_id: "item", _activity_origin: { interface_id: "provider" }, _client_text_edit: displayEdit } };
+const replayedReply = { ...editableReply, id: "replayed", text: "original", movementSeq: 20, eventData: { ...editableReply.eventData } };
+delete replayedReply.eventData._client_text_edit;
+const editedReplay = chatActivityProjectionModule.mergeChatRunMessages([editableReply], [replayedReply]);
+assert(editedReplay.every(row => row.text === "edited"));
+assert.equal(chatActivityProjectionModule.mergeRenderedMessages(editedReplay.map(chatActivityProjectionModule.toRender), [], [], false)[0].text, "edited");
+assert.equal(chatActivityProjectionModule.mergeChatRunMessages(editedReplay, [replayedReply], "snapshot").at(-1).text, "original");
+assert.equal(chatActivityProjectionModule.mergeChatRunMessages([editableReply], [{ ...replayedReply, runId: "other" }]).at(-1).text, "original");
 const coalescedProjection = chatActivityProjectionModule.mergeRenderedMessages([
   {
     id: "delta-1",
@@ -673,6 +678,36 @@ const streamDelta = (seq, text) => ({ id: `${"c".repeat(64)}:${seq}`, runId: "ru
     _stream: { stream_id: "c".repeat(64), stream_seq: seq } } });
 const liveDeltas = [streamDelta(3, "Hello"), streamDelta(4, " there,"), streamDelta(5, " friend.")];
 const sealedFold = { ...liveDeltas[0], text: "Hello there, friend.", eventData: liveDeltas[2].eventData };
+const mergeHistory = chatActivityProjectionModule.mergeChatRunMessages;
+{
+  const old = { id: "old-edit", runId: "edited", role: "user", artifactId: "old", contentHash: "01".repeat(32), createdAtMs: 1, movementSeq: 1 };
+  const answer = { ...old, id: "old-answer", role: "assistant", artifactId: "answer", createdAtMs: 2, movementSeq: 2 };
+  const edited = { ...old, id: "edit", artifactId: "edit", contentHash: "02".repeat(32), createdAtMs: 3, movementSeq: 3 };
+  const receipt = { ...answer, id: "edit-receipt", label: "interface.context.updated", artifactId: "receipt", createdAtMs: 4, movementSeq: 4,
+    eventData: { _activity_origin: { interface_role: "provider" }, phase: "message_revised", replaces_message: { id: "old", content: Array(32).fill(1) }, source_artifact: { id: "edit", content: Array(32).fill(2) } } };
+  const revised = mergeHistory([old, answer, edited], [receipt]);
+  assert.deepEqual(revised.map(row => row.id), ["edit", "edit-receipt"]);
+  assert.deepEqual(mergeHistory(revised, [old, answer], "snapshot").map(row => row.id), ["edit", "edit-receipt"]);
+}
+
+const renderHistory = rows => chatActivityProjectionModule.mergeRenderedMessages(rows, [], [], false);
+const finalSnapshot = { ...sealedFold, eventKind: "message", terminal: true, movementSeq: 20,
+  eventData: { ...sealedFold.eventData, lifecycle: "completed", _stream: undefined } };
+const completedItemReplay = { ...finalSnapshot, id: "durable-item-completed", terminal: false,
+  createdAtMs: 110, movementSeq: 10 };
+assert.equal(renderHistory(mergeHistory([finalSnapshot], [completedItemReplay]))[0].terminal, true,
+  "replaying item completion under another row id must not revoke the final answer");
+for (const snapshot of [sealedFold, { ...sealedFold, eventKind: "message", terminal: true, movementSeq: 20,
+  eventData: { ...sealedFold.eventData, lifecycle: "completed", _stream: undefined } }]) {
+  let replayed = [snapshot];
+  for (const delta of liveDeltas) {
+    replayed = mergeHistory(replayed, [{ ...delta, movementSeq: 10 }]);
+    assert.equal(renderHistory(replayed)[0].text, snapshot.text, "each replay batch must preserve the loaded answer");
+    assert.equal(renderHistory(replayed)[0].terminal, snapshot.terminal, "replay must not reopen a completed answer");
+  }
+}
+assert.equal(renderHistory(mergeHistory([sealedFold], [streamDelta(7, " Bye.")]))[0].text, "Hello there, friend. Bye.");
+
 for (const [projected, pending] of [
   [[sealedFold], liveDeltas],
   [[sealedFold, ...liveDeltas.slice(1)], liveDeltas],
@@ -999,7 +1034,7 @@ async function verifyTranscriptLayout() {
     assert.match(finalGap.getAttribute("style"), /--conversation-item-gap/);
     const artifactId = `docs.guide.md:${"a".repeat(64)}`;
     const artifactMessage = { ...message("artifact", "dynamic_tool", "", { tool: "artifact.read", call_id: "artifact", status: "completed", arguments: { id: artifactId }, _activity_origin: { interface_role: "provider" } }), artifactId: "receipt:exact-read", runId: "run-test", interfaceId: "provider-test" };
-    const readResult = { tool: "artifact.read", call_id: "artifact", ok: true, body: { result: "artifact_read", id: artifactId, text: "Historical content", artifact_size_bytes: 18, offset_bytes: 0, bytes_read: 18, truncated: false } };
+    const readResult = { tool: "artifact.read", correlation_id: "artifact", ok: true, body: { result: "artifact_read", id: artifactId, text: "Historical content", artifact_size_bytes: 18, offset_bytes: 0, bytes_read: 18, truncated: false } };
     artifactResponse = { artifact_id: artifactMessage.artifactId, run_id: artifactMessage.runId, interface_id: artifactMessage.interfaceId, base64: Buffer.from(JSON.stringify(readResult)).toString("base64") };
     await render([artifactMessage], false);
     await click(query(".octopus-agent-activity-toggle"));
@@ -1013,6 +1048,16 @@ async function verifyTranscriptLayout() {
     const artifactPresentation = toolPresentation.dynamicToolPresentation(artifactMessage, {});
     assert.throws(() => events.traceReadArtifactReference(artifactMessage, artifactPresentation, { ...artifactResponse, run_id: "another-run" }), /coordinates/);
     assert.throws(() => events.traceReadArtifactReference(artifactMessage, artifactPresentation, { ...artifactResponse, base64: Buffer.from(JSON.stringify({ ...readResult, body: { ...readResult.body, id: "different-artifact" } })).toString("base64") }), /target/);
+    const entry = { id: "guide", content: { text: "Retained instructions" } }, revision = "b".repeat(64);
+    const contextMessage = { ...artifactMessage, eventData: { ...artifactMessage.eventData, tool: `context.read__${workspaceToolSuffix}`, arguments: { source: "library", entry_id: entry.id, revision } } };
+    const contextPresentation = toolPresentation.dynamicToolPresentation(contextMessage, {});
+    const contextResult = { ...readResult, tool: contextMessage.eventData.tool, body: { entry, pin: { source: { id: "library", content: Array(32).fill(1) }, entry_id: entry.id, revision } } };
+    const contextBytes = value => ({ ...artifactResponse, base64: Buffer.from(JSON.stringify(value)).toString("base64") });
+    assert.deepEqual(JSON.parse(events.traceReadArtifactReference(contextMessage, contextPresentation, contextBytes(contextResult)).inlinePayload), entry);
+    assert.throws(() => events.traceReadArtifactReference(contextMessage, contextPresentation, contextBytes({ ...contextResult, correlation_id: "another-call" })), /target/);
+    for (const changed of [{ revision: "c".repeat(64) }, { source: { id: "another-library" } }, { entry_id: "another-entry" }]) {
+      assert.throws(() => events.traceReadArtifactReference(contextMessage, contextPresentation, contextBytes({ ...contextResult, body: { ...contextResult.body, pin: { ...contextResult.body.pin, ...changed } } })), /source and revision/);
+    }
     const navigation = message("navigate", "dynamic_tool", "", {
       tool: `browser.navigate__${workspaceToolSuffix}`, call_id: "navigate", status: "completed",
       arguments: { url: "https://example.org/path" }, ok: false,

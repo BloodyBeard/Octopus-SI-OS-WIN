@@ -73,8 +73,8 @@ async function generateTaskTitle(options, input) {
   const home = options.octopusHome(), runId = segment(input?.runId), registry = path.join(home, "registry");
   const source = await options.readSource(runId);
   if (!source) return null;
-  const sourcePath = path.join(home, "state", "runs", `${runId}.json`), sourceBytes = await optional(sourcePath);
-  if (sourceBytes === null) return null;
+  const sourcePath = path.join(home, "state", "runs", `${runId}.json`);
+  if (await optional(sourcePath) === null) return null;
   const provider = segment(source.chat.provider_bound_interface_id);
   const selected = await json(path.join(registry, "interface", provider, "interface.json"));
   if (selected.id !== provider || selected.interface_driver_ref !== config.provider_driver
@@ -94,8 +94,9 @@ async function generateTaskTitle(options, input) {
     throw new Error("Client title run has another source or owner");
   }
   if (!record) {
-    await options.withRunLock(`prediction_${runId}`, () => options.withTopologyLock(home, async () => {
-      const writes = [{ file: sourcePath, content: sourceBytes, beforeDigest: digest(sourceBytes) }];
+    const prepared = await options.withRunLock(`prediction_${runId}`, () => options.withTopologyLock(home, async () => {
+      if (await optional(sourcePath) === null) return false;
+      const writes = [];
       const owned = await descriptors(registry, config, identity, selected);
       const files = Object.fromEntries([...owned].map(([file, value]) => [file, digest(JSON.stringify(value))]));
       for (const [file, next] of owned) {
@@ -103,13 +104,15 @@ async function generateTaskTitle(options, input) {
         if (existing !== null && !equal(JSON.parse(existing), next)) throw new Error(`Client title interface has another owner: ${file}`);
         if (existing === null) writes.push({ file: path.join(registry, file), next, beforeDigest: null });
       }
-      writes.push(...await planClientMaintenanceEe(home, identity.ee, config.ee_template, source.chat.os_root_ee_id));
+      writes.push(...await planClientMaintenanceEe(home, identity.ee, config.ee_template));
       record = recordFor(config, identity, request, files);
       writes.push({ file: runPath, next: record, beforeDigest: null });
       options.assertCurrent();
       await options.commit({ label: "Prepare task title", writes, removals: [], publishBarrierPath: runPath });
       recordBytes = await fs.readFile(runPath, "utf8");
+      return true;
     }));
+    if (!prepared) return null;
   }
   const readResult = async () => {
     const rows = await options.readArtifacts({ run_id: identity.run, interface_id: identity.result, labels: [config.result_label], after_seq: request.source_movement_seq });

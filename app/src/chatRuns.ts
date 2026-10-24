@@ -13,6 +13,7 @@ export type ChatRun = {
   title: string;
   titleGenerationNeeded?: boolean;
   chatInterfaceId: string;
+  inputInterfaceIds?: string[];
   clientSurfaceRole: "home" | "task";
   writable: boolean;
   archived: boolean;
@@ -69,6 +70,7 @@ export type ChatExecutionContext = {
   hostRootRefs: Record<string, string>;
   isOsRoot: boolean;
   presentationColor: string;
+  presentationIcon?: string;
   displayName: string;
   goal: string;
   templateName: string;
@@ -311,6 +313,7 @@ type RawChatRunRow = {
   title?: unknown;
   title_generation_needed?: unknown;
   chat_interface_id?: unknown;
+  input_interface_ids?: unknown;
   client_surface_role?: unknown;
   writable?: unknown;
   archived?: unknown;
@@ -409,6 +412,7 @@ export function projectChatRuns(response: { chats?: RawChatRunRow[] }): ChatRun[
       title: asString(row.title) || asString(row.run_id) || "Chat",
       titleGenerationNeeded: row.title_generation_needed === true,
       chatInterfaceId: asString(row.chat_interface_id),
+      inputInterfaceIds: Array.isArray(row.input_interface_ids) ? row.input_interface_ids.map(asString).filter(Boolean) : [],
       clientSurfaceRole: row.client_surface_role === "home" ? ("home" as const) : ("task" as const),
       writable: row.writable === true,
       archived: row.archived === true,
@@ -490,15 +494,17 @@ function asTerminalMessage(value: unknown): ChatTerminalMessage | null {
 export async function loadChatExecutionContexts(
   displayNames: ReadonlyMap<string, string> = new Map(),
   presentationColors: ReadonlyMap<string, string> = new Map(),
+  presentationIcons: ReadonlyMap<string, string> = new Map(),
 ): Promise<ChatExecutionContext[]> {
   const response = await readProjection<{ application_catalog?: unknown[]; contexts?: unknown[] }>("projection.operator.chat.contexts");
-  return projectChatExecutionContexts(response, displayNames, presentationColors);
+  return projectChatExecutionContexts(response, displayNames, presentationColors, presentationIcons);
 }
 
 export function projectChatExecutionContexts(
   response: { application_catalog?: unknown[]; contexts?: unknown[] },
   displayNames: ReadonlyMap<string, string> = new Map(),
   presentationColors: ReadonlyMap<string, string> = new Map(),
+  presentationIcons: ReadonlyMap<string, string> = new Map(),
 ): ChatExecutionContext[] {
   const applicationCatalog = new Map((Array.isArray(response.application_catalog) ? response.application_catalog : []).flatMap((value) => {
     const application = asRecord(value);
@@ -560,6 +566,7 @@ export function projectChatExecutionContexts(
       ))),
       isOsRoot: row.is_os_root === true,
       presentationColor: presentationColors.get(eeId) || "",
+      presentationIcon: presentationIcons.get(eeId) || "",
       displayName: displayNames.get(eeId) || asString(row.display_name),
       goal: asString(row.goal),
       templateName: asString(row.template_name),

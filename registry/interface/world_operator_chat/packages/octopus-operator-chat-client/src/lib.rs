@@ -12,9 +12,11 @@ use octopus_policy::{
 use octopus_runtime::run_record::{ArtifactBinding, RunRecord};
 use octopus_tool_registry::{ToolDescriptor, load_tool_descriptor_from_dir};
 use octopus_world_terminal_client::{
-    CapabilityFormationRequest, CapabilityRegistry, FormedCapabilityTopology, form_capability_topology,
+    CapabilityFormationRequest, CapabilityRegistry, FormedCapabilityTopology,
     resolve_live_ee_policy_chain,
 };
+#[cfg(test)]
+use octopus_world_terminal_client::form_capability_topology;
 use sha2::{Digest, Sha256};
 
 pub mod context_bindings;
@@ -28,7 +30,7 @@ mod home_voice;
 mod home_outputs;
 pub mod native_run_authoring;
 mod writer_runs;
-pub use writer_runs::{OperatorWriterRunPlanRequest, OperatorWriterSchemaPlanRequest, plan_operator_writer_runs, plan_operator_writer_schema};
+pub use writer_runs::{OperatorWriterRunPlanRequest, plan_operator_writer_runs};
 #[cfg(test)]
 #[path = "../tests/support/home_delegation.rs"]
 mod home_delegation;

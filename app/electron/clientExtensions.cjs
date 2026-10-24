@@ -229,15 +229,8 @@ function createClientExtensionStore(options) {
         source_revision: currentRevision,
         completed_at: new Date().toISOString(),
       };
-      await writeLifecycleReceipt(requestedReceipt);
-      let receipt;
-      try {
-        receipt = await writeLifecycleOperationReceipt(requestedReceipt);
-      } catch (error) {
-        changed();
-        throw error;
-      }
-      if (stableJson(receipt) !== stableJson(requestedReceipt)) await writeLifecycleReceipt(receipt);
+      const receipt = await writeLifecycleOperationReceipt(requestedReceipt);
+      await writeLifecycleReceipt(receipt);
       changed();
       return {
         changed: true,
@@ -282,35 +275,13 @@ function createClientExtensionStore(options) {
 
   async function initializeState() {
     const stateResult = await readState();
-    if (stateResult.status === "invalid") return;
-    await backfillLifecycleOperationHistory();
-    if (stateResult.schemaVersion === 2) return;
-    const migrationOperationId = stateResult.schemaVersion === 1
-      ? "extension_state_migration_v2"
-      : "extension_builtin_bootstrap_v1";
+    if (stateResult.status !== "missing") return;
     for (const entry of builtinCatalog.extensions) {
       const existing = await readLifecycleReceipt(entry.manifest.id);
       if (existing.error) throw new Error(existing.error);
       if (existing.receipt) continue;
-      const legacyChoice = stateResult.legacyInstalled[entry.manifest.id];
-      const desiredState = (legacyChoice ?? entry.manifest.default_installed) ? "installed" : "available";
-      await writeMigrationReceipt(entry.manifest.id, migrationOperationId, desiredState, entry.revision);
-    }
-    if (stateResult.schemaVersion === 1) {
-      for (const [id, installed] of Object.entries(stateResult.legacyInstalled)) {
-        if (id.startsWith("builtin.")) continue;
-        const existing = await readLifecycleReceipt(id);
-        if (existing.error || existing.receipt) continue;
-        let revision;
-        try {
-          revision = await readCurrentPackageRevision(id);
-        } catch {
-          continue;
-        }
-        const reviewed = stateResult.state[id]?.reviewed;
-        const desiredState = installed === true && sameRevision(reviewed, revision) ? "installed" : "available";
-        await writeMigrationReceipt(id, migrationOperationId, desiredState, revision);
-      }
+      await writeBootstrapReceipt(entry.manifest.id, "extension_builtin_bootstrap_v1",
+        entry.manifest.default_installed ? "installed" : "available", entry.revision);
     }
     await writeState(stateResult.state);
   }
@@ -347,7 +318,7 @@ function createClientExtensionStore(options) {
     if (changedDirectory) await syncDirectory(directory);
   }
 
-  async function writeMigrationReceipt(id, operationId, desiredState, revision) {
+  async function writeBootstrapReceipt(id, operationId, desiredState, revision) {
     const requestDigest = lifecycleRequestDigest(id, desiredState, revision);
     const receipt = {
       schema: "octopus.client_extension_lifecycle_receipt",
@@ -359,30 +330,8 @@ function createClientExtensionStore(options) {
       source_revision: revision,
       completed_at: new Date().toISOString(),
     };
-    await writeLifecycleReceipt(receipt);
     const durableReceipt = await writeLifecycleOperationReceipt(receipt);
-    if (stableJson(durableReceipt) !== stableJson(receipt)) await writeLifecycleReceipt(durableReceipt);
-  }
-
-  async function backfillLifecycleOperationHistory() {
-    const entries = await fsPromises.readdir(receiptsRoot, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const id = entry.name.slice(0, -5);
-      if (!EXTENSION_ID.test(id)) continue;
-      const active = await readLifecycleReceipt(id);
-      if (active.error || !active.receipt) continue;
-      const historical = await readLifecycleOperationReceipt(id, active.receipt.operation_id);
-      if (historical.error) throw new Error(historical.error);
-      if (historical.receipt) {
-        if (historical.receipt.request_digest !== active.receipt.request_digest) {
-          throw new Error(`client extension '${id}' lifecycle operation history disagrees with its active receipt`);
-        }
-        if (stableJson(historical.receipt) !== stableJson(active.receipt)) await writeLifecycleReceipt(historical.receipt);
-        continue;
-      }
-      await writeLifecycleOperationReceipt(active.receipt);
-    }
+    await writeLifecycleReceipt(durableReceipt);
   }
 
   async function readManifests(errors) {
@@ -442,7 +391,7 @@ function createClientExtensionStore(options) {
       bytes = await stableReadFile(statePath, MAX_STATE_BYTES, "client extension state");
     } catch (error) {
       if (error?.code === "ENOENT") {
-        return { state: {}, error: "", status: "missing", schemaVersion: 0, legacyInstalled: {} };
+        return { state: {}, error: "", status: "missing", schemaVersion: 0 };
       }
       return invalidState(`client extension state: ${formatError(error)}`);
     }
@@ -461,7 +410,7 @@ function createClientExtensionStore(options) {
   }
 
   function invalidState(error) {
-    return { state: {}, error, status: "invalid", schemaVersion: 0, legacyInstalled: {} };
+    return { state: {}, error, status: "invalid", schemaVersion: 0 };
   }
 
   async function readLifecycle(manifests, errors) {
@@ -867,8 +816,8 @@ async function stableReadFile(filePath, maximumBytes, label) {
 }
 
 function normalizeState(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || ![1, 2].includes(value.schema_version)) {
-    throw new Error("expected schema_version 1 or 2");
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.schema_version !== 2) {
+    throw new Error("unsupported extension state; initialize a fresh Home");
   }
   const schemaVersion = value.schema_version;
   if (Object.keys(value).some((key) => key !== "schema_version" && key !== "extensions")) {
@@ -877,26 +826,21 @@ function normalizeState(value) {
   const extensions = value.extensions;
   if (!extensions || typeof extensions !== "object" || Array.isArray(extensions)) throw new Error("extensions must be an object");
   const state = {};
-  const legacyInstalled = {};
   for (const [id, record] of Object.entries(extensions)) {
     requiredExtensionId(id);
     if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error(`${id} state must be an object`);
     const keys = Object.keys(record);
-    if (keys.some((key) => key !== "sources" && key !== "reviewed" && key !== "dismissed" && !(schemaVersion === 1 && key === "installed"))) {
+    if (keys.some((key) => key !== "sources" && key !== "reviewed" && key !== "dismissed")) {
       throw new Error(`${id} state contains unknown fields`);
     }
     const normalized = {};
-    if (Object.prototype.hasOwnProperty.call(record, "installed")) {
-      if (typeof record.installed !== "boolean") throw new Error(`${id}.installed must be boolean`);
-      legacyInstalled[id] = record.installed;
-    }
     if (Object.prototype.hasOwnProperty.call(record, "sources")) normalized.sources = normalizeSources(record.sources);
     if (Object.prototype.hasOwnProperty.call(record, "reviewed")) normalized.reviewed = normalizeRevision(record.reviewed, `${id}.reviewed`);
     if (Object.prototype.hasOwnProperty.call(record, "dismissed")) normalized.dismissed = normalizeRevision(record.dismissed, `${id}.dismissed`);
     if (normalized.reviewed && normalized.dismissed) throw new Error(`${id} state cannot review and dismiss the same extension record`);
     state[id] = normalized;
   }
-  return { state, schemaVersion, legacyInstalled };
+  return { state, schemaVersion };
 }
 
 function normalizeLifecycleRequest(value) {

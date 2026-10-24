@@ -122,6 +122,12 @@ async fn retained_pending_retries_exact_admission_with_declared_timeout_and_canc
                 let retained = arrival.retained.unwrap();
                 if let Some(id) = &retained_id { assert_eq!(&retained.id, id); }
                 else { retained_id = Some(retained.id.clone()); }
+                if attempts == 1 {
+                    retained.reply.send(Ok(ArtifactDelivery::Complete {
+                        verdict: DeliveryVerdict::refused(RefusedReason::RegistryUnstable, json!({"attempts":4})),
+                    })).unwrap();
+                    continue;
+                }
                 let mut edge = edge_template.get_or_insert_with(|| {
                     fixture.edge(authored.content.as_bytes(), &item.checkpoint.id, &arrival.artifact, "worker".into(), MovementKind::InterfaceArrival);
                     fixture.rows.pop().unwrap()
@@ -139,7 +145,7 @@ async fn retained_pending_retries_exact_admission_with_declared_timeout_and_canc
                     seq
                 });
                 edge.seq.0 = fixture.rows.len() as u64; edge.lamport.0 = edge.seq.0;
-                if attempts == 1 {
+                if attempts == 2 {
                     edge.kind = MovementKind::DeliveryRefused;
                     edge.invocation_metadata = Some(MovementMetadata::Delivery(DeliveryMetadata {
                         delivery_verdict: DeliveryVerdict::refused(RefusedReason::RegistryUnstable, json!({"message":"admission registry snapshot changed"})),

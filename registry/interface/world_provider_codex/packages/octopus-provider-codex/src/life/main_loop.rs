@@ -64,7 +64,6 @@ pub(crate) async fn codex_life(
     let active_controls = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
     let control_gates = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
     let interrupted_effects = InterruptedEffectArbiter::new(ctx.clone());
-    upgrade_deferred_provider_turn_journals(&ctx, &descriptor).await?;
     let mut deferred_turns = load_deferred_provider_turns(&ctx, &descriptor)?;
     ctx.signal_ready().await?;
     restore_consumed_provider_inputs(

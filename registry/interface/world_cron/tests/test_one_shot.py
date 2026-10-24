@@ -85,6 +85,17 @@ class OneShotContract(unittest.TestCase):
         self.config["schedule"].update(interval_seconds=None, cron="*/5 * * * *")
         self.assertEqual(self.schedule()["cron"], "*/5 * * * *")
 
+    def test_disabled_activation_waits_without_emitting_and_observes_enable(self):
+        self.document["activations"][0]["enabled"] = False
+        self.assertIsNone(self.schedule())
+        with patch.object(self.module, "signal_ready") as ready, patch.object(self.module.time, "sleep", side_effect=InterruptedError), patch.object(self.module, "run_one_shot") as emit:
+            with self.assertRaises(InterruptedError):
+                self.module.main()
+        ready.assert_called_once()
+        emit.assert_not_called()
+        self.document["activations"][0]["enabled"] = True
+        self.assertIsNotNone(self.schedule())
+
     def test_waits_once_and_restart_does_not_reemit_or_rearm(self):
         self.assertEqual(self.execute(), 7)
         self.assertEqual(self.sleeps, [2.0])

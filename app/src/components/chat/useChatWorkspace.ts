@@ -12,6 +12,8 @@ import {
   type ChatWorkerEnvironmentRoom,
 } from "../../chatRuns";
 import { useClientPreferences } from "../../clientPreferences";
+import { latestContextUsage } from "./contextUsage";
+import { withRunOperationTargets } from "./runOperationTargets";
 import {
   resolveClientAgents,
   visibleClientAgents,
@@ -124,6 +126,7 @@ type ChatTurnSubmission = {
   manual?: boolean;
   messageId: string;
   recoverPreparedMessage: boolean;
+  replacesMessage?: { id: string; content: string };
   runId: string;
   runKey: string;
   text: string;
@@ -191,7 +194,6 @@ export function useChatWorkspace(
     queueOwner,
     queueReady,
     queueError,
-    queueNotice,
     nextQueuedTurn,
     pausedQueueRunKeys,
     pausedQueueRunKeysRef,
@@ -199,7 +201,7 @@ export function useChatWorkspace(
     queuedTurnsRef,
     replacePausedQueueRunKeys,
     replaceQueuedTurns,
-  } = useChatTurnQueue(accessProfile, runtimeHome, storageScope);
+  } = useChatTurnQueue(accessProfile, runtimeHome);
   const activeRunIdRef = useRef("");
   const deliveryContextRef = useRef({ accessProfile, runtimeHome, enabled, runtimeReady });
   deliveryContextRef.current = { accessProfile, runtimeHome, enabled, runtimeReady };
@@ -897,6 +899,11 @@ export function useChatWorkspace(
     : activeRunId
       ? declaredActiveProvider
       : selectableProviderInterfaces.find((provider) => provider.id === providerInterfaceId);
+  const modelSelectionLoading = enabled && (
+    !providerInterfacesLoaded || providerInterfacesRefreshing
+    || !executionContextsLoaded && !executionContextError
+    || !runsLoaded && !runsError
+  );
   const presentedProviderInterfaces = activeRunId && declaredActiveProvider
     && !selectableProviderInterfaces.some((provider) => provider.id === declaredActiveProvider.id)
     ? [declaredActiveProvider, ...selectableProviderInterfaces]
@@ -1046,8 +1053,8 @@ export function useChatWorkspace(
       .map((entry) => entry.message);
     const visibleSteering = [...new Map([...rememberedSteering, ...pendingQueueSteering(queuedTurns, activeRunKey)]
       .map((message) => [message.id, message])).values()];
-    return mergeRenderedMessages(projected, visiblePending, visibleSteering, showPending);
-  }, [activeRunInFlight, activeRunKey, messages, pendingByRunKey, pendingSteeringMessages, queuedTurns]);
+    return withRunOperationTargets(mergeRenderedMessages(projected, visiblePending, visibleSteering, showPending), runs);
+  }, [activeRunInFlight, activeRunKey, messages, pendingByRunKey, pendingSteeringMessages, queuedTurns, runs]);
 
   const activeMessageCount = renderedMessages.length;
   const submitting = renderedMessages.some((message) => (
@@ -1251,10 +1258,11 @@ export function useChatWorkspace(
       ? inferredAgent?.id ?? ""
       : storedAgentPresetId;
     const cachedMessages = messageCacheRef.current.get(runId);
+    messageReadGenerationRef.current.set(runId, (messageReadGenerationRef.current.get(runId) ?? 0) + 1);
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
     setMessages(cachedMessages ?? []);
-    setLoadingMessages(cachedMessages == null);
+    setLoadingMessages(Boolean(runId));
     applyDraft({
       messageId: nextDraft?.messageId ?? "",
       messageHadAttachments: nextDraft?.messageHadAttachments ?? false,
@@ -1510,74 +1518,33 @@ export function useChatWorkspace(
       editedMessageId: message.id, runKey: chatDraftKey(message.runId), text: nextText });
   }
 
-  function editUserMessageInNewTask(message: ChatRenderMessage, editedText?: string, sourceMessages: readonly ChatRenderMessage[] = renderedMessages): boolean {
-    if (submitLockRef.current.has(chatDraftKey(""))) {
-      setError("A new task is still being authored. Wait for its run identity before branching again.");
-      return false;
-    }
+  async function editUserMessage(message: ChatRenderMessage, editedText?: string): Promise<boolean> {
     const nextText = (editedText ?? message.text).trim();
-    if (message.role !== "user" || message.eventKind === "steering" || !nextText) {
-      setError("Only a completed operator message can be edited into a new task.");
+    const run = runs.find((candidate) => candidate.runId === message.runId);
+    const latest = renderedMessages.filter((candidate) => candidate.role === "user").at(-1);
+    if (!nextText || !run?.writable || run.archived || run.turnOpen || replyOpen
+      || message.runId !== activeRunIdRef.current || latest?.id !== message.id
+      || message.eventKind !== "message" || !message.artifactId || !message.contentHash
+      || !runtimeReady || !queueReady || queuedTurnsRef.current.some((item) => item.runKey === chatDraftKey(run.runId))) {
+      setError("Only the most recent message in an idle task can be edited. Your text has been kept.");
       return false;
     }
-    const sourceIndex = sourceMessages.findIndex((candidate) => candidate.id === message.id && candidate.runId === message.runId);
-    if (sourceIndex < 0) {
-      setError("The operator message is no longer present in the projected run.");
-      return false;
-    }
-    const previous = [...sourceMessages.slice(0, sourceIndex)].reverse().find((candidate) => (
-      candidate.runId === message.runId
-      && candidate.role === "assistant"
-      && candidate.terminal
-      && candidate.eventKind === "message"
-      && candidate.artifactId
-    ));
-    const nextContinuation = previous?.runId && previous.artifactId
-      ? { sourceRunId: previous.runId, sourceArtifactId: previous.artifactId }
-      : null;
-    saveCurrentDraft(activeRunId);
-    const sourceRunId = message.runId || activeRunIdRef.current;
-    const sourceRun = runs.find((run) => run.runId === sourceRunId);
-    const nextEeId = sourceRun?.eeId ?? eeId;
-    const sourceAgent = sourceRun
-      ? clientAgentForRun(allAgentPresets, sourceRun)
-      : null;
-    const nextDraft = {
-      messageId: "",
-      messageHadAttachments: false,
-      text: nextText,
-      attachments: [],
-      agentPresetId: sourceAgent?.id ?? "",
-      eeId: nextEeId,
-      workerInterfaceId: sourceAgent?.workerInterfaceId ?? "",
-      providerInterfaceId: sourceAgent ? sourceRun?.providerInterfaceId || providerInterfaceId : "",
-      providerModel: sourceAgent ? sourceRun?.providerModel || providerModel : "",
-      reasoningEffort: sourceAgent ? sourceRun?.reasoningEffort || reasoningEffort : "", serviceTier: sourceAgent ? sourceRun?.serviceTier ?? serviceTier : "",
-      applicationIds: sourceAgent ? [...sourceAgent.applicationIds] : [],
-      driverNames: sourceAgent ? [...sourceAgent.driverNames] : [],
-      accessMode: sourceRun
-        ? taskAccessModeFromDoorHostSlots(sourceRun.doorHostSlots)
-        : "project_access",
-      continuation: nextContinuation,
-    };
-    writeDraft("", nextDraft);
-    activeRunIdRef.current = "";
-    pendingNewTaskTargetRef.current = null;
-    setNewTaskTargetResolutionBlocked(!sourceAgent);
-    setActiveRunId("");
-    setMessages([]);
-    setLoadingMessages(false);
-    applyDraft(nextDraft);
-    setMessageQuery("");
-    resetInputHistory();
-    const attachmentWarning = message.attachments?.length
-      ? "The original attachment bytes are not exposed by the projection. Reattach those files before sending the edited task."
-      : "";
-    const agentWarning = sourceAgent
-      ? ""
-      : "The source task does not identify one current Agent. Choose an Agent before sending the edited task.";
-    setError([agentWarning, attachmentWarning].filter(Boolean).join(" "));
-    return true;
+    const replacesMessage = { id: message.artifactId, content: message.contentHash };
+    const messageId = `msg_${randomId()}`;
+    return new Promise<boolean>((resolve) => {
+      void beginSubmission({
+      messageId, recoverPreparedMessage: false, runId: run.runId, runKey: chatDraftKey(run.runId),
+      replacesMessage,
+      text: nextText, attachments: [], eeId: run.eeId, workerInterfaceId: run.workerInterfaceId,
+      providerInterfaceId: run.providerInterfaceId, providerModel: run.providerModel,
+      reasoningEffort: run.reasoningEffort, serviceTier: run.serviceTier,
+      applicationIds: [], driverNames: [], accessMode: "project_access", endpoint,
+      continuation: null, clientSurfaceRole: run.clientSurfaceRole, agentPresetId: "",
+      }, undefined, () => resolve(true)).then(() => resolve(false), (error) => {
+        setError(formatProjectionError(error));
+        resolve(false);
+      });
+    });
   }
 
   async function togglePinnedMessage(message: ChatRenderMessage) {
@@ -1938,6 +1905,7 @@ export function useChatWorkspace(
     if (!item.clientSurfaceRole) throw new Error("The saved message has no exact client surface identity.");
     return {
       queueId: item.id,
+      replacesMessage: item.replacesMessage,
       messageId: item.messageId,
       recoverPreparedMessage: item.hadAttachments && item.attachments.length === 0,
       runId: item.runKey === chatDraftKey("") ? "" : item.runKey,
@@ -1992,7 +1960,7 @@ export function useChatWorkspace(
     setError("");
   }
 
-  async function executeTurnSequence(initial: ChatTurnSubmission) {
+  async function executeTurnSequence(initial: ChatTurnSubmission, onAdmitted?: () => void) {
     const owner = queueOwner.id;
     if (!queueOwner.active || !queueReady || !enabled || !runtimeReady) return;
     if (!acquireSubmission(initial.runKey)) {
@@ -2121,8 +2089,12 @@ export function useChatWorkspace(
           }
           if (turn.runId) {
             const history = !turn.manual ? await loadChatRunMessages(turn.runId) : null;
-            const status = (await loadChatRunStatuses([turn.runId])).find((item) => item.runId === turn.runId);
+            const readStatus = (await loadChatRunStatuses([turn.runId])).find((item) => item.runId === turn.runId);
             const projected = projectedRunsRef.current.find((run) => run.runId === turn.runId);
+            const status = readStatus && projected && projected.lastMovementSeq > readStatus.lastMovementSeq
+              ? { ...readStatus, turnOpen: projected.turnOpen, turnState: projected.turnState,
+                  lastMovementSeq: projected.lastMovementSeq, updatedAtMs: projected.updatedAtMs }
+              : readStatus;
             if (!status || status.archived || !projected?.writable || status.turnOpen || (!turn.manual && (!history || !queueTurnReady(claimed, status, history)))) {
               await queueStore.settle(queueId, owner, turn.manual ? "failed" : "queued", turn.manual ? "The sending view or task state changed before submission. This message was not sent." : undefined);
               replaceRunPending(turn.runKey, []);
@@ -2133,11 +2105,17 @@ export function useChatWorkspace(
             await queueStore.settle(queueId, owner, turn.manual ? "failed" : "queued", turn.manual ? "The sending view or task state changed before submission. This message was not sent." : undefined);
             break;
           }
+          const sourceFolders = !turn.runId ? executionContexts.find((context) => context.eeId === turn.eeId)?.sourceFolders : undefined;
+          const clientContext = [
+            ...clientContextRef.current,
+            ...(sourceFolders?.length ? [{ name: "project_source_folders", text: JSON.stringify({ primary: sourceFolders[0], folders: sourceFolders }) }] : []),
+          ];
           bridgeAttempted = true;
           const submitted = await submitOperatorTurn({
             endpoint: turn.endpoint,
             messageId,
             recoverPreparedMessage: turn.recoverPreparedMessage,
+            replacesMessage: turn.replacesMessage,
             runId: turn.runId || undefined,
             providerInterfaceId: turn.providerInterfaceId,
             providerModel: turn.providerModel,
@@ -2153,12 +2131,7 @@ export function useChatWorkspace(
             selectedWorkerEnvironmentKinds: taskCapabilities?.selectedWorkerEnvironmentKinds,
             selectedTools: taskCapabilities?.selectedTools,
             clientSurfaceRole: turn.clientSurfaceRole,
-            clientContext: [
-              ...clientContextRef.current,
-              ...(!turn.runId && executionContexts.find((context) => context.eeId === turn.eeId)?.sourceFolders?.length
-                ? [{ name: "Project source folders", text: JSON.stringify({ primary: executionContexts.find((context) => context.eeId === turn.eeId)!.sourceFolders[0], folders: executionContexts.find((context) => context.eeId === turn.eeId)!.sourceFolders }) }]
-                : []),
-            ],
+            clientContext: clientContext.length ? clientContext : undefined,
             continuation: turn.continuation ?? undefined,
             text: turn.text,
             attachments: bridgeAttachments,
@@ -2169,6 +2142,7 @@ export function useChatWorkspace(
           }
           if (!("admitted" in submitted.messageVerdict) || !Number.isFinite(submitted.messageVerdict.admitted.seq)) throw new Error("Message delivery returned no admission verdict.");
           submittedToRuntime = true;
+          onAdmitted?.();
           await queueStore.settle(queueId, owner, "accepted", undefined,
             "admitted" in submitted.messageVerdict ? submitted.messageVerdict.admitted.seq : undefined, submitted.runId);
           if (!queueOwner.active || queueOwner.id !== owner || !deliveryScopeCurrent()) break;
@@ -2567,7 +2541,7 @@ export function useChatWorkspace(
     await beginSubmission(nextSubmission, releaseComposerAction);
   }
 
-  async function beginSubmission(submission: ChatTurnSubmission, releaseComposerAction?: () => void) {
+  async function beginSubmission(submission: ChatTurnSubmission, releaseComposerAction?: () => void, onAdmitted?: () => void) {
     if (!submission.queueId && submission.clientSurfaceRole === "home") {
       submission = { ...submission, ...await currentHomeProviderSelection(submission.runId) };
     }
@@ -2577,11 +2551,11 @@ export function useChatWorkspace(
       createdAtMs: Date.now(),
     }]);
     submission = { ...submission, queueId, manual: true };
-    consumeDraft(submission.runId, submission.text, submission.attachments);
+    if (!submission.replacesMessage) consumeDraft(submission.runId, submission.text, submission.attachments);
     resetInputHistory();
     // The durable intent is stored; its longer-lived submission lock owns delivery now.
     releaseComposerAction?.();
-    await executeTurnSequence(submission);
+    await executeTurnSequence(submission, onAdmitted);
   }
 
   async function currentHomeProviderSelection(runId: string) {
@@ -3054,6 +3028,7 @@ export function useChatWorkspace(
 
   return {
     accessProfile,
+    runtimeHome,
     accessMode,
     activeRun,
     activeRunId,
@@ -3082,7 +3057,7 @@ export function useChatWorkspace(
     dropFiles,
     deleteQueuedTurn: (...args: Parameters<typeof deleteQueuedTurn>) => deleteQueuedTurn(...args).catch((failure) => setError(formatRuntimeError(failure))),
     editQueuedTurn: (...args: Parameters<typeof editQueuedTurn>) => editQueuedTurn(...args).catch((failure) => setError(formatRuntimeError(failure))),
-    editUserMessageInNewTask,
+    editUserMessage,
     steerUserMessage,
     steerableMessageId,
     endpoint,
@@ -3111,6 +3086,7 @@ export function useChatWorkspace(
     providerInterfacesLoaded,
     providerInterfacesRefreshing,
     declaredProviderInterfaces: agentProviderInterfaces,
+    modelSelectionLoading,
     providerInterfaces: presentedProviderInterfaces,
     reasoningEffort,
     serviceTier,
@@ -3125,6 +3101,7 @@ export function useChatWorkspace(
     removeAttachment,
     reorderQueuedTurns: (...args: Parameters<typeof reorderQueuedTurns>) => reorderQueuedTurns(...args).catch((failure) => setError(formatRuntimeError(failure))),
     renderedMessages,
+    contextUsage: latestContextUsage(messages),
     retryQueuedTurn: (...args: Parameters<typeof retryQueuedTurn>) => retryQueuedTurn(...args).catch((failure) => setError(formatRuntimeError(failure))),
     runs: presentedRuns,
     runsError,
@@ -3147,7 +3124,6 @@ export function useChatWorkspace(
     canQueue,
     editingQueuedTurn: Boolean(editingQueuedTurn),
     cancelQueuedEdit: (...args: Parameters<typeof cancelQueuedEdit>) => cancelQueuedEdit(...args).catch((failure) => setError(formatRuntimeError(failure))),
-    queueNotice,
     queueCurrentTurn: () => submit(undefined, undefined, "queue").catch((failure) => setError(formatRuntimeError(failure))),
     steerCurrentTurn: () => submit(undefined, undefined, "steer").catch((failure) => setError(formatRuntimeError(failure))),
     submitBlockReason,

@@ -305,13 +305,14 @@ impl ProviderOutputHandoff {
         }
         if self.config.checkpoints.iter().filter(|row|row.role == RunAuthoringCheckpointRole::VerifiedInput)
             .ne(next_config.checkpoints.iter().filter(|row|row.role == RunAuthoringCheckpointRole::VerifiedInput)) {
+            let verified_context = bind(&target_context)?;
             replace_verified_input_checkpoints(
                 root,
                 &self.config,
                 &next_config,
                 &record.id,
                 &batch_prefix,
-                &artifact_bindings,
+                &verified_context,
             )?;
         }
         result_inputs::materialize(root, &record, &self.config, &next_config, &batch_prefix, consumed_result_input.as_ref(), result_context.as_deref())?;

@@ -388,66 +388,38 @@
         artifact_ref
     }
 
-    async fn upgrade_deferred_fixture(
+    fn assert_deferred_receipt_round_trip(
         ctx: &InterfaceLiftContext,
         descriptor: &InterfaceDescriptor,
-        run: &RunId,
         turn: &QueuedTurn,
     ) {
         let path = deferred_provider_turn_path(ctx, turn.seq);
-        let expected: DeferredProviderTurnJournal = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let captured = turn.envelope.artifact_file.read_bounded(1_048_576, 1_048_576).unwrap();
-        let old = DeferredProviderTurnJournalV2 {
-            schema_version: 2, source_movement_seq: turn.seq, run_id: run.to_string(),
-            artifact: turn.envelope.artifact.clone(),
-            manifest_path: turn.envelope.artifact_file.manifest_path().to_path_buf(),
-            manifest_bytes: captured.manifest_bytes, payload_bytes: captured.payload_bytes,
-            metadata: turn.envelope.metadata.clone().unwrap(), release: expected.release.clone(),
-            artifact_binding_payloads: turn.envelope.artifact_binding_payloads.iter().map(|bound| {
-                let bytes = bound.read_bytes().unwrap().into_owned();
-                DeferredArtifactBindingPayloadV2 { artifact: bound.artifact.clone(),
-                    bytes_content: ContentHash::of_bytes(&bytes), bytes }
-            }).collect(),
-        };
-        let bytes = serde_json::to_vec_pretty(&old).unwrap();
-        std::fs::write(&path, &bytes).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let expected: DeferredProviderTurnJournal = serde_json::from_slice(&bytes).unwrap();
+        let mut old: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        old["schema_version"] = json!(2);
+        let old = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&path, &old).unwrap();
         assert!(load_deferred_provider_turns(ctx, descriptor).is_err());
-        assert!(publish_deferred_provider_journal_upgrade(&path, b"changed v2 receipt", &expected).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        #[cfg(unix)]
-        let old_allocated = {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::metadata(&path).unwrap().blocks() * 512
-        };
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        std::fs::write(&path, &bytes).unwrap();
+        let captured = turn.envelope.artifact_file.read_bounded(1_048_576, 1_048_576).unwrap();
         let payload = ctx.blobs_dir.join(&expected.payload_content_hash);
         let original = std::fs::read(&payload).unwrap();
         std::fs::write(&payload, b"corrupt canonical input").unwrap();
-        assert!(upgrade_deferred_provider_turn_journals(ctx, descriptor).await.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(load_deferred_provider_turns(ctx, descriptor).is_err());
         std::fs::write(&payload, &original).unwrap();
-        std::fs::remove_file(&old.manifest_path).unwrap();
+        std::fs::remove_file(turn.envelope.artifact_file.manifest_path()).unwrap();
         std::fs::remove_file(&captured.manifest.payload_path).unwrap();
-        upgrade_deferred_provider_turn_journals(ctx, descriptor).await.unwrap();
-        let upgraded = std::fs::read(&path).unwrap();
-        assert_eq!(serde_json::from_slice::<DeferredProviderTurnJournal>(&upgraded).unwrap(), expected);
-        assert!(upgraded.len() < bytes.len());
         let loaded = load_deferred_provider_turns(ctx, descriptor).unwrap();
         assert_eq!(loaded[&turn.seq].turn.envelope.metadata, turn.envelope.metadata);
         assert_eq!(loaded[&turn.seq].turn.envelope.read_artifact_payload_bounded(1_048_576).unwrap(), original);
         for (actual, original) in loaded[&turn.seq].turn.envelope.artifact_binding_payloads.iter()
             .zip(&turn.envelope.artifact_binding_payloads)
         { assert_eq!(actual.artifact, original.artifact); assert_eq!(actual.read_bytes().unwrap().as_ref(), original.read_bytes().unwrap().as_ref()); }
-        upgrade_deferred_provider_turn_journals(ctx, descriptor).await.unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), upgraded);
-        std::fs::write(&old.manifest_path, &old.manifest_bytes).unwrap();
-        std::fs::write(&captured.manifest.payload_path, &old.payload_bytes).unwrap();
-        eprintln!("deferred receipt v2={} v3={} bytes, bindings={}", bytes.len(), upgraded.len(), expected.artifact_bindings.len());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            eprintln!("deferred receipt stat-allocated v2={old_allocated} v3={} bytes",
-                std::fs::metadata(&path).unwrap().blocks() * 512);
-        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::write(turn.envelope.artifact_file.manifest_path(), &captured.manifest_bytes).unwrap();
+        std::fs::write(&captured.manifest.payload_path, &captured.payload_bytes).unwrap();
     }
 
     #[tokio::test]
@@ -1071,13 +1043,24 @@
             )).unwrap()];
             let settled = serde_json::to_value(terminal_output_continuity(&descriptor, &message_envelope, &context, &run,
                 br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":10}}}"#,
+                0,
             ).unwrap().unwrap()).unwrap();
             assert_eq!(settled["thread_id"], "thread-a");
             assert_eq!(settled["context_generation"], 11);
             context[0].payload["codex_continuity"]["context_generation"] = json!(11);
             assert!(terminal_output_continuity(&descriptor, &message_envelope, &context, &run,
                 br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":10}}}"#,
+                0,
             ).unwrap_err().to_string().contains("terminal Codex continuity is ahead of its authored context"));
+            let settled = terminal_output_continuity(&descriptor, &message_envelope, &context, &run,
+                br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":8}}}"#,
+                3,
+            ).unwrap().unwrap();
+            assert_eq!(settled.context_generation, 12);
+            assert!(terminal_output_continuity(&descriptor, &message_envelope, &context, &run,
+                br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":8}}}"#,
+                2,
+            ).is_err());
             assert!(output_rx.recv().await.is_none());
             let activity_ref = materialized_artifact_ref(&legacy_activity).unwrap();
             let closure_ref = materialized_artifact_ref(&closure.artifact).unwrap();
@@ -1730,7 +1713,7 @@
                 panic!("terminal carrierless ownership must release the original envelope")
             };
             assert_eq!(released.envelope.artifact, message_ref);
-            upgrade_deferred_fixture(&ctx, &descriptor, &run, &turn).await;
+            assert_deferred_receipt_round_trip(&ctx, &descriptor, &turn);
             assert_eq!(
                 released.envelope.artifact_binding_payloads.len(),
                 usize::from(with_settled_continuity) + 1
@@ -1857,7 +1840,7 @@
 
         assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn, &[]).unwrap());
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
-        upgrade_deferred_fixture(&ctx, &descriptor, &run, &turn).await;
+        assert_deferred_receipt_round_trip(&ctx, &descriptor, &turn);
         let deferred = DeferredProviderTurn {
             run: run.clone(),
             turn,
@@ -1885,7 +1868,7 @@
                 ..
             }
         )));
-        upgrade_deferred_fixture(&ctx, &descriptor, &run, &deferred.turn).await;
+        assert_deferred_receipt_round_trip(&ctx, &descriptor, &deferred.turn);
     }
 
     #[tokio::test]

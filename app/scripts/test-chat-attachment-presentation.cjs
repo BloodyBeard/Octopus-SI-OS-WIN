@@ -217,15 +217,15 @@ window.octopusTransport = {
   await React.act(async () => finishEdit(false)); assert.equal(container.querySelector('textarea').value, 'My revised request');
   await React.act(async () => editAction().click());
   await React.act(async () => editFailure(new Error('delivery failed'))); assert.equal(container.querySelector('textarea').value, 'My revised request');
-  editProps.steerable = false; await editRender(); assert.equal(editAction().disabled, true);
+  editProps.steerable = false; editProps.editable = true; await editRender(); assert.equal(editAction().disabled, true);
   assert.equal(editAction().textContent, 'Send to current reply'); assert.match(container.querySelector('[role="alert"]').textContent, /no longer accepting/);
   editProps.steerable = true; await editRender(); assert.equal(editAction().disabled, true, 'an expired edit cannot attach to a resumed turn');
   assert.equal(branches, 0); assert.equal(editCount, 2);
   await click('.chat-user-message-editor-actions button:first-child'); await click('button[aria-label="Edit current reply"]');
   await React.act(async () => editAction().click()); await React.act(async () => finishEdit(true));
   assert.ok(container.querySelector('textarea') === null, 'only accepted edits close the editor');
-  editProps.steerable = false; await editRender(); await click('button[aria-label="Edit in new task"]');
-  editProps.steerable = true; await editRender(); assert.equal(editAction().textContent, 'Continue in new task');
+  editProps.steerable = false; editProps.editable = true; await editRender(); await click('button[aria-label="Edit message"]');
+  editProps.steerable = true; await editRender(); assert.equal(editAction().textContent, 'Save and send');
   await React.act(async () => editAction().click()); assert.equal(branches, 1); assert.ok(container.querySelector('textarea') === null);
   await React.act(async () => tree.render(React.createElement(ChatAttachmentStrip, { attachments: [{ ...file, file: local }, { ...pdf.file, file: new Blob([pdf.content], { type: pdf.file.type }) }], onRemove: () => {} })));
   assert.ok(container.querySelector(".is-image.is-compact")); assert.ok(container.querySelector(".is-file-card")); assert.equal(container.querySelectorAll(".chat-attachment-scroll").length, 1);

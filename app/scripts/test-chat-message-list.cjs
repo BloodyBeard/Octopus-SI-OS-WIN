@@ -171,6 +171,8 @@ test("a new task shows the home surface, an empty task its label, a loading task
   await show({ messages: [], emptyState: "new-task", conversationId: "" });
   assert.ok(query(".octopus-chat-home"));
   absent(list());
+  await show({ messages: [], emptyState: "empty-task" });
+  assert.doesNotMatch(list().textContent, /No activity yet/);
   await show({ messages: [], emptyState: "empty-task", emptyLabel: "Nothing here yet" });
   absent(query(".octopus-chat-home"));
   assert.match(list().textContent, /Nothing here yet/);

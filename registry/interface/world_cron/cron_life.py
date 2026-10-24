@@ -626,6 +626,8 @@ def load_schedule():
             raise ValueError(f"activation #{index}.enabled must be a boolean")
         if enabled and activation["activation_driver_ref"] == driver_ref:
             selected.append(activation)
+    if not selected and any(activation["activation_driver_ref"] == driver_ref for activation in activations):
+        return None
     if len(selected) != 1:
         raise ValueError(
             f"interface {INTERFACE_ID!r} requires exactly one enabled {driver_ref!r} activation; found {len(selected)}"
@@ -3258,6 +3260,13 @@ def main():
     private_directory(VAR_DIR)
     private_directory(PAYLOADS_DIR)
     schedule = load_schedule()
+    if schedule is None:
+        sys.stderr.write(f"cron life disabled: interface={INTERFACE_ID}\n")
+        sys.stderr.flush()
+        signal_ready()
+        while schedule is None:
+            time.sleep(5)
+            schedule = load_schedule()
     reminder = resolve_reminder(schedule)
     startup = (
         f"cron life up: interface={INTERFACE_ID} timezone={schedule['timezone_name']!r} "

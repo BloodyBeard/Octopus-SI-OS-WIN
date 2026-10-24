@@ -10,18 +10,17 @@
     "operation_id",
     "phase",
     "receipts",
-    "moves"
+    "moves",
+    "publications",
+    "file_publications",
+    "publication_id"
   ],
   "properties": {
     "schema": {
       "const": "octopus.local_package_transaction"
     },
     "schema_version": {
-      "enum": [
-        1,
-        2,
-        3
-      ]
+      "const": 3
     },
     "operation": {
       "enum": [
@@ -130,15 +129,49 @@
       "maxItems": 4096,
       "items": {
         "type": "object",
-        "required": ["package_id", "registry_kind", "owner", "target", "backup", "previous_digest", "state"],
+        "required": [
+          "package_id",
+          "registry_kind",
+          "owner",
+          "target",
+          "backup",
+          "previous_digest",
+          "state"
+        ],
         "properties": {
-          "package_id": {"$ref": "#/$defs/id"},
-          "registry_kind": {"type": "string", "minLength": 1, "maxLength": 64},
-          "owner": {"$ref": "#/$defs/id"},
-          "target": {"$ref": "#/$defs/relativePath"},
-          "backup": {"$ref": "#/$defs/relativePath"},
-          "previous_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
-          "state": {"enum": ["planned", "retired"]}
+          "package_id": {
+            "$ref": "#/$defs/id"
+          },
+          "registry_kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "owner": {
+            "$ref": "#/$defs/id"
+          },
+          "target": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "backup": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "previous_digest": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "planned",
+              "retired"
+            ]
+          }
         },
         "additionalProperties": false
       }
@@ -203,116 +236,6 @@
     }
   },
   "allOf": [
-    {
-      "if": {
-        "properties": {
-          "schema_version": {
-            "const": 1
-          }
-        },
-        "required": [
-          "schema_version"
-        ]
-      },
-      "then": {
-        "properties": {
-          "operation": {
-            "enum": [
-              "install",
-              "remove"
-            ]
-          },
-          "moves": {
-            "minItems": 1,
-            "items": {
-              "properties": {
-                "previous_digest": {
-                  "$ref": "#/$defs/digest"
-                }
-              }
-            }
-          }
-        },
-        "not": {
-          "required": [
-            "previous_receipts"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "schema_version": {
-            "const": 2
-          }
-        },
-        "required": [
-          "schema_version"
-        ]
-      },
-      "then": {
-        "required": [
-          "previous_receipts"
-        ],
-        "properties": {
-          "operation": {
-            "const": "repair"
-          },
-          "moves": {
-            "items": {
-              "required": [
-                "previous_digest"
-              ]
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "schema_version": {
-            "const": 3
-          }
-        },
-        "required": [
-          "schema_version"
-        ]
-      },
-      "then": {
-        "required": [
-          "publications",
-          "file_publications",
-          "publication_id"
-        ]
-      },
-      "else": {
-        "allOf": [
-          {
-            "not": {
-              "required": [
-                "publications"
-              ]
-            }
-          },
-          {
-            "not": {
-              "required": [
-                "file_publications"
-              ]
-            }
-          },
-          {
-            "not": {
-              "required": [
-                "publication_id"
-              ]
-            }
-          }
-        ]
-      }
-    },
     {
       "if": {
         "properties": {

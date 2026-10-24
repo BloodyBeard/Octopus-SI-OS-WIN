@@ -54,7 +54,7 @@ function parseOctopusOsAuthoringProfile(value, workerChoice, file) {
     [
       "ee_id", "worker_choice_interface", "door_host_slots", "external_inputs", "external_relays",
       "model_outputs", "context_artifact_bindings", "payload_artifact_bindings", "selected_worker_environment_kinds",
-      "selected_tools",
+      "selected_tools", "publication_evidence",
     ],
     ["ee_id", "worker_choice_interface", "door_host_slots"],
     "Octopus OS authoring profile",
@@ -101,6 +101,7 @@ function parseOctopusOsAuthoringProfile(value, workerChoice, file) {
     file,
   );
   const selectedTools = parseOctopusOsSelectedTools(value.selected_tools, file);
+  const publicationEvidence = parsePublicationSelectionEvidence(value.publication_evidence);
   const routeCheckpoints = new Set(externalInputs.map((input) => input.checkpoint_id));
   const routeSources = new Set(externalInputs.map((input) => input.interface_id));
   for (const relay of externalRelays) {
@@ -127,7 +128,27 @@ function parseOctopusOsAuthoringProfile(value, workerChoice, file) {
     ...(selectedPayloads.length ? {payload_artifact_bindings:selectedPayloads} : {}),
     selected_worker_environment_kinds: selectedWorkerEnvironmentKinds,
     selected_tools: selectedTools,
+    ...(publicationEvidence.length ? { publication_evidence: publicationEvidence } : {}),
   };
+}
+
+function parsePublicationSelectionEvidence(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("Publication selection evidence must be an array");
+  const seen = new Set();
+  return value.map((evidence) => {
+    exactObjectKeys(evidence, ["pin", "entry", "snapshot", "context_sources"], ["pin", "entry"], "Publication evidence");
+    exactObjectKeys(evidence.pin, ["source", "entry_id", "revision"], ["source", "entry_id", "revision"], "Publication pin");
+    const source = payloadArtifactBindings([evidence.pin.source])[0];
+    const entryId = requiredContractToken(evidence.pin.entry_id, "Publication entry id");
+    const key = `${source.id}\u0000${entryId}`;
+    if (!/^[0-9a-f]{64}$/.test(evidence.pin.revision) || !isPlainRecord(evidence.entry)
+      || evidence.entry.id !== entryId || seen.has(key)) throw new Error("Invalid publication selection evidence");
+    seen.add(key);
+    if (evidence.snapshot !== undefined) payloadArtifactBindings([evidence.snapshot]);
+    payloadArtifactBindings(evidence.context_sources);
+    return evidence;
+  });
 }
 
 function parseOctopusOsTaskAuthoringProfiles(value, file) {

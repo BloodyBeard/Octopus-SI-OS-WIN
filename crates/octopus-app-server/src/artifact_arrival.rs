@@ -203,7 +203,13 @@ pub async fn admit_retained_interface_artifact_arrival(
     arriving_interface: &InterfaceId,
     identity: &str,
 ) -> Result<octopus_ledger::ArtifactDelivery, InterfaceArtifactArrivalAdmissionError> {
-    let artifact = prepare_interface_artifact_arrival(embedded, log, arrival_artifact_file, arriving_interface)?;
+    let artifact = match prepare_interface_artifact_arrival(embedded, log, arrival_artifact_file, arriving_interface) {
+        Ok(artifact) => artifact,
+        Err(error) if error.verdict().awaits_current_source() => {
+            return Ok(octopus_ledger::ArtifactDelivery::Complete { verdict: error.verdict() });
+        }
+        Err(error) => return Err(error),
+    };
     InterfaceArtifactArrivalFromInterface::new(
         &embedded.runtime, log, blobs_arrival, embedded.arrival_dedup.clone(),
         arrival_trace_id(arriving_interface), arriving_interface.clone(),

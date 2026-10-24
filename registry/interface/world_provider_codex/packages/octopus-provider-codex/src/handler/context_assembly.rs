@@ -6,10 +6,11 @@ pub(crate) fn assemble_current_context(
     provider: &InterfaceId,
     snapshot_labels: &BTreeSet<String>,
     current: &[SessionContextArtifact],
+    retained: &[SessionContextArtifact],
     input: &ArtifactRef,
     projection: ModelResultProjection,
 ) -> Result<AssembledContext, InterfaceDriverError> {
-    let sources = current.iter().map(|entry| continuity_source_key(&entry.source_artifact)).collect::<BTreeSet<_>>();
+    let sources = retained.iter().chain(current).map(|entry| continuity_source_key(&entry.source_artifact)).collect::<BTreeSet<_>>();
     let statics = payloads.iter().filter(|payload| {
         let key = continuity_source_key(&payload.artifact);
         !sources.contains(&key) && (current.is_empty() || !matches!(bound.get(&key), Some(BoundSessionContext::Current(_))))

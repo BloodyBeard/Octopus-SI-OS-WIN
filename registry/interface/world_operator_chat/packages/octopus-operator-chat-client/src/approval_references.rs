@@ -61,7 +61,7 @@ pub(crate) fn planned_browser_history_access(
     if !resume_selected || history.consent_authority.client_interface.as_str() != config.interface {
         return Err("selected history request requires its declared companion and exact source task client".into());
     }
-    Err("selected Home history consent requires explicit migration to the existing permission mechanism".into())
+    Err("selected Home history consent uses an unsupported contract; initialize a fresh Home".into())
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

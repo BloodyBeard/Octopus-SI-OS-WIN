@@ -22,11 +22,17 @@ Installed owners may contain authorized local edits to descriptors, role
 artifacts and executable code. Health checks validate their identities,
 structure, declared imports, client APIs and diagnostic probes; byte equality
 with a distribution or an installation receipt is not a health requirement.
-Receipts retain installation and update provenance. A newer distribution is
-reported as an available update, without invalidating the installed owners.
-Content digests remain appropriate for immutable artifact references, release
-integrity and concurrent-edit protection during publication, update or removal.
-Updates preserve local changes and report conflicting edits before replacement.
+Receipts retain installation provenance. Content digests remain appropriate for
+immutable artifact references, release integrity and concurrent-edit protection
+during publication or removal.
+
+Octopus is a research preview. Incompatible persisted formats require a fresh
+Home through normal setup. There are no schema migrations, predecessor tables,
+automatic package adoption, or startup repairs of missing fields in old state.
+The bundled registry initializes a new Home once; later starts use the installed
+registry. Explicit package installation and recovery of interrupted operations
+in the current format remain supported. Preserve sign-in credentials when
+resetting a disposable Home; do not transplant old runs, checkpoints or ledgers.
 
 ## Interface process lifecycle
 
@@ -91,6 +97,15 @@ from the previous target and validates the new target. This local shell admissio
 does not authorize provider requests: sending and provider-dependent operations
 retain their runtime authentication, bindings, and formed grants.
 
+The client preserves native publication-selection evidence in task authoring
+profiles. Selected instruction artifacts remain independent bindings;
+publication provenance never nests them as instruction text sources.
+Task visibility uses the same sidecar contract as task creation.
+Communication activity resolves recipient names and navigation from the exact
+input interfaces on projected task records. Waiting for replies does not imply
+that those tasks are executing. A live event cache is partial until a complete
+history snapshot has loaded; opening a partial cache retains the loading state.
+
 The desktop reads model descriptors independently of the task list and workspace
 transaction lock. Task projections inspect workspace receipts without recovering
 transactions; startup and the owning mutations perform recovery. A run changing
@@ -114,21 +129,43 @@ data: runtime admission and policy never read them, and removing them changes
 only the cost of reconstructing the same result. Changes to the fold or preview
 semantics require a new cache version.
 
-One package-adoption operation uses one bounded native planner process. It reads
-and validates the ledger prefix once, then plans and commits each run in order.
-Each request keeps its own ownership, formation and pending-work checks. Reuse
-requires the same complete ledger bytes and checked grant contents; changes stop
-the operation. Commit preconditions include those exact grant files. Cancellation
-is checked before publication, and child-process cleanup has a finite deadline.
-The projection exists only for that operation and is discarded with its process.
+Editing the latest idle operator message sends a new `operator.message` artifact
+with `replaces_message` naming the exact admitted input. Its original attachments
+and task bindings remain in place. The provider selects the conversation prefix
+before that input, records `interface.context.updated` with `phase=message_revised`,
+and starts a fresh private model context for the revised history in the same Run.
+That revision participates in the provider's context identity and is replayed on
+later turns and restarts. The client replaces the displayed turn only after the
+provider receipt; older messages remain in the immutable ledger. This does not
+undo tool effects. Concurrent work, an older input, or changed attachments refuses
+the edit. Payload selection updates retained future tool routes together with
+their templates, while pending effects and foreign-owned bindings remain exact.
+
+Assistant display edits are client-owned documents at
+`client-state/workspace/assistant-text-edits/<run-id>.json`. A version-1 document
+contains `run_id` and `edits`; each edit names `provider_interface`, `turn_id`,
+`item_id`, `original_text`, replacement `text`, and `edited_at_ms`. The client
+matches the exact task, provider, turn, item and original text, applies the edit
+after reading history, and retains it across duplicate deliveries. The answer is
+marked Edited, with the original text available on hover. Removing the edit
+restores the original display. These edits do not change model context, artifact
+identity, tool evidence or the ledger. Ledger rows must never be rewritten to
+edit a displayed answer.
+
+Client authoring receipts prove completed file publications, not the continued
+immutability of live runs or descriptors. Recovery checks the retained native
+operation result and never republishes an applied write over later work.
+Preimage checks protect new writes and rollback; read-only source observations
+are not writes. Suggestions and task naming bind their admitted source artifacts
+and leave the source run outside their write set. Shell admission reads the
+workspace identity without replaying unrelated client transactions.
 
 Client suggestions and task naming use a client-maintenance EE that is a
 separate root beside the workspace's initial EE. Its template and worker ceiling
 grant no tools or worker environments. The client projects projects and tasks
 from its workspace subtree, so this service is outside that projection. The
-owning package authors the root when preparing maintenance work; an existing
-maintenance child moves to that root placement in the same guarded transaction,
-retaining its identity, configuration and instance narrowing.
+owning package authors the root when preparing maintenance work and rejects an
+existing maintenance EE with a different placement.
 
 Task naming uses a separate client-maintenance run with private input, result,
 worker and provider interfaces. The provider copy retains the task's selected
@@ -259,14 +296,27 @@ when text is absent, nonempty declared request context carries the request. The
 provider preserves the complete structured payload instead of selecting or
 rewriting a transcript line.
 
-The operator client's package declares `provider_contract_updates` for private
-provider copies it owns. Each entry names a configuration field and its accepted
-predecessors: an absent field or an exact value. The update takes that field from
-the installed source provider, preserving model choices and unrelated settings.
-It applies only after accepted input, output and tool work has settled, through
-the client's existing transaction with pinned dependencies. Locally authored
-values defer the update explicitly. Installing a new input contract therefore
-updates existing chats without rebuilding their runs or losing their history.
+Native user-input requests cross the provider's declared question and answer
+artifacts. The client renders the question and returns the selected or written
+answer with its request identity; ordinary question-shaped prose creates no
+request. The authored answer wait retains the exact request artifact and the
+static context classification from the requesting turn, so responding after a
+restart can recover the same native request. If the native thread reports that the
+question's turn was interrupted by process death, the provider proves its exact
+admitted question and verified answer, then resumes that thread through the existing
+interrupted-turn continuation path with the answer in context. It does not submit a
+reply to a dead RPC or replay an approval, elicitation or world effect. The operator
+application package supplies the verifiers for its answer
+and approval contracts. The bundled provider enables this native tool in default mode. Context
+usage is a provider observation: the client uses the latest reported context size
+and capacity, independently of cumulative billed token usage.
+
+Capability amendments validate both the installed checkpoint frontier and the
+future checkpoints declared by the provider's authoring topology. Candidate
+formation includes the final descriptor updates and mandatory role bindings for
+every reachable worker pin before any dependency or activation is published.
+A future route cannot enter the live topology with an unbound mandatory role and
+thereby invalidate the run's existing input or control checkpoints.
 
 Intermediate provider observations are handed to their client route as soon as
 they are complete. Their delivery does not close the source. The provider keeps
@@ -275,6 +325,12 @@ progress neither waits for another model item nor releases a pending effect.
 The client projects admitted message items immediately, including final-answer
 items received before turn completion. A later sealed stream or terminal output
 folds into the same provider, turn and item identity without repeating its text.
+
+An indeterminate ordered write may have stopped before advancing its writer.
+Recovery retains that failure, checks both exact file states, and never treats
+the error as a successful receipt. A spent writer call needs an independently
+authorized edit to its recorded next generation. A fresh attempt skips voided
+generations; historical replay uses the next admitted preimage, not today's file.
 
 For the desktop picker, declare `private_config.model_catalog` in
 `interface_driver_config`. Each entry names its `model`, `display_name`,
@@ -309,6 +365,13 @@ result timeout, retrying only that retained delivery identity and scope. Pending
 admission does not end the native turn. Cancellation, an expired timeout, a
 changed scope or a definitive refusal remains an explicit failure; completed
 edges are never executed again.
+
+A terminal pending provider handoff with exact refusal evidence for every
+artifact is a failed source, not an unresolved native effect. Recovery uses the
+same refusal proof as failed-source settlement; an admitted edge, an unconfirmed
+outcome or a temporary admission refusal cannot take this path. The provider
+publishes the failure through its declared route and continues processing
+operator controls without repeating the rejected operation.
 
 A deterministic projection package may explicitly replace a final artifact that
 its verifier rejected. The checked writer proves the exact predecessor record,
@@ -348,6 +411,15 @@ current formed policy, while the original native history remains untouched.
 This mode makes no claim that old native wrappers completed or that code after
 an await ran. When recovering damaged native history, that uncertainty belongs
 in the admitted continuation input and remains part of the session context.
+
+A provider context transition retains the exact terminal proof for its retired
+native turn. A late request with those same thread and turn coordinates is
+recorded and explicitly rejected without dispatching an effect; it cannot be
+executed under the replacement context. Requests without that exact proof still
+fail closed. Terminal error and control receipts count ledger-admitted standing
+context generations as well as the last authored record. A protocol failure
+closes its private transport before returning control, so an abandoned model
+turn cannot keep issuing requests after its task has failed.
 
 An explicit Resume on a context-free control route recovers its native thread
 from the provider's delivered stopping receipt. Its run, provider and context

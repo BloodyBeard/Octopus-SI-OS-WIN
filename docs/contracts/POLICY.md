@@ -238,10 +238,9 @@ original's, and an interface copy keeps every original policy variable and its
 reducer. Its defaults and values may narrow the original; dropping a variable
 or changing its reduction rule refuses formation. Worker and EE overrides for
 both identities apply together. A tool copy counts as its original only while
-its executable, handler and schema match and its authority stays within the original's. When an update
-changes an original, a copy still on the previous contract is outside that
-admission until the client's package adoption rewrites it; the adoption forms
-its grant over the contracts it writes.
+its executable, handler and schema match and its authority stays within the original's. A copy with a contract incompatible with its original is refused; no automatic
+adoption rewrites it. Research-preview contract changes require a fresh Home.
+
 
 Who *initiated* the run is not an input. A narrow initiator may legitimately
 create a run more capable than itself - a run with few tools can open a coding environment, and a capable coder

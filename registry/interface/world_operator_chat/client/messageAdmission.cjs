@@ -209,6 +209,7 @@ function operatorMessageRequestDigest(config, request, resolved) {
       ? { payload_artifact_bindings: operatorPayloadArtifactBindings(request.payloadArtifactBindings) }
       : {}),
     continuation,
+    ...(request?.replacesMessage ? { replaces_message: require("./messageRevision.cjs").messageRevision(request.replacesMessage) } : {}),
     door_host_slots: operatorDoorHostSlots(request?.doorHostSlots),
     ee_id: stringValue(request?.eeId) || requiredString(config.run.ee, "client.run.ee"),
     external_inputs: operatorExternalInputs(request?.externalInputs),

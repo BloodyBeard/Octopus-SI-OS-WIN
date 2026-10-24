@@ -413,6 +413,10 @@ impl ProviderOutputHandoff {
                     .ctx
                     .hand_arrival_retained(artifact.clone(), Vec::new(), &delivery_id)
                     .await?;
+                if matches!(&delivery, ArtifactDelivery::Complete { verdict } if verdict.awaits_current_source()) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
                 let scope = self
                     .session
                     .index()?

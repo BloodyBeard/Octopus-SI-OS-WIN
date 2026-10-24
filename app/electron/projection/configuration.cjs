@@ -41,7 +41,7 @@ function configurationProjection(store) {
         const catalog = await build.promise;
         if (scope !== store.fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during package read");
         packageOwners = new Set(arrayValue(catalog.packages).flatMap((entry) => (
-          [...arrayValue(entry.members), ...arrayValue(entry.retired_members)]
+          arrayValue(entry.members)
             .map((member) => `${member.registry_kind}/${member.owner}`)
         )));
         packageOwnerScope = scope;

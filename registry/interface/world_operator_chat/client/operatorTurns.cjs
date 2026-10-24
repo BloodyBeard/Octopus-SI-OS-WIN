@@ -3,6 +3,7 @@ module.exports = { applyOperatorInputRevision, assertPayloadInputCycleReady, ass
 const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { readMessageRevision } = require("./messageRevision.cjs");
 const { activeOperatorMessageCheckpoint, chatIdentityFromRunRecord, existingRunSubmission, existingRunTopology, readConversationState, resolveContinuationState } = require("./conversation.cjs");
 const { watchLedgerChange } = require("./liveCursors.cjs");
 const { admitOperatorMessage, operatorMessageRequestDigest, prepareOperatorMessageAdmission, readExistingOperatorMessageEnvelope, readOrCreateOperatorMessageIntent, withOperatorMessageAdmissionLock } = require("./messageAdmission.cjs");
@@ -38,6 +39,10 @@ async function submitOperatorTurn(options, request) {
   const octopusHome = absolutePath(options.octopusHome(), "octopusHome");
   const runPrefix = requiredString(config.run.run_prefix, "client.run.run_prefix");
   const requestedRunId = stringValue(request?.runId);
+  const edit = await readMessageRevision(options, request, config.artifact_labels.message).catch(error => {
+    error.deliveryState = "not_sent";
+    throw error;
+  });
   const continuation = requestedRunId
     ? await resolveContinuationState({
       config,
@@ -121,6 +126,7 @@ async function submitOperatorTurn(options, request) {
       octopusHome,
       recoverPreparedMessage,
       requestedText: text,
+      replacesMessage: edit?.revision,
       runDocumentPresent: Boolean(existingRunDocument),
       runId,
       workerInterfaceId: stableExistingSubmission?.workerInterfaceId
@@ -132,12 +138,13 @@ async function submitOperatorTurn(options, request) {
       throw new Error(`operator message '${messageId}' has no durable envelope; reattach its files before retrying`);
     } else {
       pendingAttachmentPlans = await planOperatorAttachments(attachmentRoot, attachmentInputs);
-      const attachments = pendingAttachmentPlans.map((plan) => plan.attachment);
+      const attachments = edit ? edit.payload.attachments : pendingAttachmentPlans.map((plan) => plan.attachment);
       const clientContext = await operatorTurnClientContext(options, clientSurfaceRole, request?.clientContext);
       const messageBytes = Buffer.from(JSON.stringify({
         text,
         message_id: messageId,
         attachments,
+        ...(edit ? { replaces_message: edit.revision } : {}),
         ...(clientContext.length ? { client_context: clientContext } : {}),
       }));
       const messagePath = operatorMessagePayloadPath(payloadRoot, messageId);
@@ -244,6 +251,7 @@ async function submitOperatorTurn(options, request) {
   }
 
   const authorSubmission = () => withRunAuthoringLock(runId, async () => {
+    if (edit) await readMessageRevision(options, request, config.artifact_labels.message);
     const currentRunDocument = await readJsonDocumentIfPresent(chatRunPath);
     if (preparedPayloadSelection) {
       await assertPreparedOperatorPayloadSelection(preparedPayloadSelection, currentRunDocument);

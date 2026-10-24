@@ -1,4 +1,6 @@
 module.exports = { operatorChatMessagesProjection };
+const { applyMessageRevision } = require("./messageRevision.cjs");
+const { readAssistantTextEdits } = require("./assistantTextEdits.cjs");
 const { isHomeVoiceInput } = require("./operatorChatVoiceInput.cjs");
 
 const { compareMovementOrder, movementBoundaryInterface } = require("./movementRows.cjs");
@@ -9,7 +11,7 @@ const { arrayValue, contentHashHex, ledgerArtifactId, ledgerArtifactLabel, numbe
 function operatorChatMessagesProjection(store) {
   async function operatorChatMessages(projection, runId) {
     const cached = projection.operatorChatMessagesCache.get(runId);
-    if (cached?.generation === store.projectionGeneration) return cached.promise;
+    if (cached?.generation === store.projectionGeneration) return readAssistantTextEdits(store.octopusHome(), runId, await cached.promise);
     const promise = buildOperatorChatMessages(projection, runId);
     projection.operatorChatMessagesCache.set(runId, { generation: store.projectionGeneration, promise });
     promise.catch(() => {
@@ -17,7 +19,7 @@ function operatorChatMessagesProjection(store) {
         projection.operatorChatMessagesCache.delete(runId);
       }
     });
-    return promise;
+    return readAssistantTextEdits(store.octopusHome(), runId, await promise);
   }
 
   async function buildOperatorChatMessages(projection, runId) {
@@ -185,6 +187,12 @@ function operatorChatMessagesProjection(store) {
         continue;
       }
       const label = ledgerArtifactLabel(row) || protocol.terminalOutputLabel;
+      if (label === "interface.context.updated" && movementBoundaryInterface(row, "from") === runtimeProvider
+          && applyMessageRevision(messages, payload)) {
+        assistantMessages.clear();
+        incrementalMessages.clear();
+        continue;
+      }
       if (arrayValue(protocol.hiddenActivityLabels).includes(label)) continue;
       const providerFailure = operatorChatProviderFailureActivity(entry, row, payload);
       const eventKind = row.__stream?.event_kind ?? providerFailure?.eventKind ?? operatorChatEventKind(label, protocol, payload);
@@ -323,8 +331,14 @@ function operatorChatMessagesProjection(store) {
       const artifactId = ledgerArtifactId(row);
       const contentHash = contentHashHex(row?.artifact?.content);
       const label = ledgerArtifactLabel(row);
-      if (arrayValue(protocol.hiddenActivityLabels).includes(label)) continue;
       const payload = payloads.get(row);
+      if (label === "interface.context.updated" && movementBoundaryInterface(row, "from") === operatorChatRuntimeProviderId(entry)
+          && applyMessageRevision(messages, payload)) {
+        assistantMessages.clear();
+        incrementalMessages.clear();
+        continue;
+      }
+      if (arrayValue(protocol.hiddenActivityLabels).includes(label)) continue;
       const createdAtMs = rowTimeMs(row);
       const sourceInterfaceId = movementBoundaryInterface(row, "from");
       const input = label === protocol.inputLabel && sourceInterfaceId === entry.chatInterfaceId;

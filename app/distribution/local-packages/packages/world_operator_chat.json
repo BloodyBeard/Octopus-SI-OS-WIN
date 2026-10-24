@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "world_operator_chat",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "product_kind": "application",
   "product_id": "world_operator_chat",
   "release_status": "optional",
@@ -18,13 +18,108 @@
       "registry_kind": "interface",
       "owner": "world_operator_chat",
       "primary": true,
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]},{"path":"client.json","fields":[{"pointer":"/run/ee","schema":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},{"pointer":"/run/worker","schema":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},{"pointer":"/run/context_artifact_bindings","schema":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string","minLength":1,"pattern":"^[^/\\\\\\u0000]+$"}},"additionalProperties":false},"uniqueItems":true}},{"pointer":"/run/maintenance_observer","schema":{"type":["object","null"],"required":["template_interface_id","config_file"],"properties":{"template_interface_id":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"},"config_file":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},"additionalProperties":false}}]}],
-      "configuration_predecessors": [{"path":"client.json","fields":[{"pointer":"/run/ee","schema":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},{"pointer":"/run/worker","schema":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},{"pointer":"/run/context_artifact_bindings","schema":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string","minLength":1,"pattern":"^[^/\\\\\\u0000]+$"}},"additionalProperties":false},"uniqueItems":true}}]}]
+      "configuration": [
+        {
+          "path": "life.json",
+          "fields": [
+            {
+              "pointer": "/processes/0/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "path": "client.json",
+          "fields": [
+            {
+              "pointer": "/run/ee",
+              "schema": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              }
+            },
+            {
+              "pointer": "/run/worker",
+              "schema": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+              }
+            },
+            {
+              "pointer": "/run/context_artifact_bindings",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "^[^/\\\\\\u0000]+$"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "uniqueItems": true
+              }
+            },
+            {
+              "pointer": "/run/maintenance_observer",
+              "schema": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "required": [
+                  "template_interface_id",
+                  "config_file"
+                ],
+                "properties": {
+                  "template_interface_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  },
+                  "config_file": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "interface",
       "owner": "system_interface_authoring",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "life.json",
+          "fields": [
+            {
+              "pointer": "/processes/0/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "interface",
@@ -45,27 +140,178 @@
     {
       "registry_kind": "verifier",
       "owner": "tool_result_correspondence",
-      "configuration": [{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "verifier.json",
+          "fields": [
+            {
+              "pointer": "/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "registry_kind": "verifier",
       "owner": "tool_call_allowed",
-      "configuration": [{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+      "configuration": [
+        {
+          "path": "verifier.json",
+          "fields": [
+            {
+              "pointer": "/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     },
-    {"registry_kind":"interface","owner":"system_worker_memory_observer"},
-    {"registry_kind":"interface","owner":"system_context_memory_projection","configuration":[{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"artifact","owner":"artifact-role-memory-observer"},
-    {"registry_kind":"mark","owner":"memory.capture.completed"},
-    {"registry_kind":"mark","owner":"memory.experience.admitted"},
-    {"registry_kind":"verifier","owner":"memory_capture_outcome","configuration":[{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"verifier","owner":"memory_experience","configuration":[{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"ee_template","owner":"client_maintenance"},
-    {"registry_kind":"interface","owner":"system_worker_client_maintenance"},
-    {"registry_kind":"interface","owner":"system_client_maintenance"}
-  ],
-  "retired_members": [
-    {"registry_kind":"interface","owner":"system_context_memory_publication"},
-    {"registry_kind":"tool","owner":"file.write.memory_publication"}
+    {
+      "registry_kind": "verifier",
+      "owner": "operator_approval",
+      "configuration": [
+        {
+          "path": "verifier.json",
+          "fields": [
+            {
+              "pointer": "/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "verifier",
+      "owner": "operator_input",
+      "configuration": [
+        {
+          "path": "verifier.json",
+          "fields": [
+            {
+              "pointer": "/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_worker_memory_observer"
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_context_memory_projection",
+      "configuration": [
+        {
+          "path": "life.json",
+          "fields": [
+            {
+              "pointer": "/processes/0/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-role-memory-observer"
+    },
+    {
+      "registry_kind": "mark",
+      "owner": "memory.capture.completed"
+    },
+    {
+      "registry_kind": "mark",
+      "owner": "memory.experience.admitted"
+    },
+    {
+      "registry_kind": "verifier",
+      "owner": "memory_capture_outcome",
+      "configuration": [
+        {
+          "path": "verifier.json",
+          "fields": [
+            {
+              "pointer": "/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "verifier",
+      "owner": "memory_experience",
+      "configuration": [
+        {
+          "path": "verifier.json",
+          "fields": [
+            {
+              "pointer": "/authority/sandbox_mode",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "enforced",
+                  "disabled"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "registry_kind": "ee_template",
+      "owner": "client_maintenance"
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_worker_client_maintenance"
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_client_maintenance"
+    }
   ],
   "required_packages": [
     "driver.browser_session",

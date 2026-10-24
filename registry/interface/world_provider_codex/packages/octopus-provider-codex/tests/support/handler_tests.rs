@@ -1580,6 +1580,7 @@
             std::slice::from_ref(&old_artifact),
             &octopus_descriptors::RunId::new("run-a"),
             br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":7}}}"#,
+            0,
         )
         .unwrap()
         .unwrap();
@@ -1649,6 +1650,7 @@
             &[old_artifact, newest_artifact],
             &octopus_descriptors::RunId::new("run-a"),
             br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":9}}}"#,
+            0,
         )
         .unwrap()
         .unwrap();
@@ -5323,6 +5325,26 @@ while IFS= read -r _; do :; done
                 .is_none(),
             "an out-of-band request is not surfaced to the operator; the caller fails it closed"
         );
+    }
+
+    #[test]
+    fn interrupted_question_requires_its_exact_admitted_request() {
+        let pending = CodexPendingContinuity::Operator { turn_id: "turn-1".into(), request_key: "operator:9".into(), method: "item/tool/requestUserInput".into() };
+        let state = continuity("world_provider_test", "run-1", "thread-1", 2, Some(pending));
+        let response = OperatorResponseArtifact::UserInput { request_id: "9".into(), answers: serde_json::json!({"q1":["Verified"]}) };
+        let reference = ArtifactRef { id: octopus_descriptors::ArtifactId::new("question-1"), content: octopus_ledger::ContentHash::of_bytes(b"question") };
+        let question = SessionContextArtifact { label: OPERATOR_USER_INPUT_REQUEST_LABEL.into(),
+            payload: serde_json::json!({"request_id":"9","questions":[{"id":"q1","question":"Verify?"}], "codex_continuity":state}),
+            source_artifact: reference.clone(), source_movement_seq: Some(10) };
+        assert_eq!(exact_pending_question(&[question.clone()], &state, &response).unwrap(), reference);
+        assert!(exact_pending_question(&[], &state, &response).is_err());
+        assert!(exact_pending_question(&[question.clone(), question.clone()], &state, &response).is_err());
+        let mut unadmitted = question.clone(); unadmitted.source_movement_seq = None;
+        assert!(exact_pending_question(&[unadmitted], &state, &response).is_err());
+        let mut wrong = question.clone(); wrong.payload["codex_continuity"]["pending"]["turn_id"] = "other".into();
+        assert!(exact_pending_question(&[wrong], &state, &response).is_err());
+        let approval = OperatorResponseArtifact::Approval { request_id: "9".into(), decision: serde_json::json!("accept") };
+        assert!(exact_pending_question(&[question], &state, &approval).is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import type { ClientAgentDefinition } from "../../agentPresets";
 import type { ChatApplicationChoice, ChatExecutionContext, ChatWorkerEnvironmentRoom } from "../../chatRuns";
 import { AgentPresetLogo } from "../agent/AgentPresetLogo";
+import { ProjectLogo } from "../project/ProjectLogo";
 import { Glyph } from "../IconGlyphs";
 import type { TaskAccessMode } from "./taskAccess";
 import { ShellTooltip } from "../shell/ShellTooltip";
@@ -132,7 +133,9 @@ export function ComposerUtilityBar({
           <UtilityBarDropdown
             collapse="xs"
             disabled={locked || Boolean(selectedAgent) || !contexts.length}
-            icon={<ProjectIcon />}
+            icon={projectSelected && selectedContext
+              ? <ProjectLogo color={selectedContext.presentationColor} icon={selectedContext.presentationIcon || ""} size={16} />
+              : <ProjectIcon />}
             iconMarked={projectSelected && rootContext != null}
             indicator="none"
             navigationTarget="workspace-project"
@@ -167,7 +170,7 @@ export function ComposerUtilityBar({
                       .filter((context) => matches(`${context.displayName} ${context.goal} ${context.templateName} ${context.eeId}`, query))
                       .map((context) => (
                         <UtilityBarItem
-                          icon={<ProjectIcon />}
+                          icon={<ProjectLogo color={context.presentationColor} icon={context.presentationIcon || ""} size={16} />}
                           key={context.eeId}
                           label={context.displayName || context.goal || context.templateName || context.eeId}
                           selected={context.eeId === eeId}

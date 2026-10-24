@@ -85,23 +85,17 @@ the renderer preview is the shorter loop described below. An edit in the
 checkout does not automatically update a packaged app or an already-installed
 package in a Home.
 
-Startup reconciles the bundled baseline against its recorded installation
-manifest. Optional packages use their own manifests and receipts. Both need
-to distinguish the shipped files from local changes: replacing the entire
-Home registry would erase the configuration the system is designed to evolve.
-Authorized local changes to descriptors, role artifacts and package code do
-not invalidate an installed package. Doctor validates the active contracts and
-runs the declared probes; it does not compare installed bytes with the bundle.
-Receipts record installation and update provenance, and a newer source appears
-as an available update. Updates preserve local edits and refuse overlapping
-file changes until they are resolved explicitly. Package manifests additionally
-declare JSON configuration fields that updates must carry across releases.
+Octopus is a research preview. Incompatible persisted formats require a fresh
+Home through normal setup. There are no schema migrations, predecessor tables,
+automatic package adoption, or startup repairs of missing fields in old state.
+The bundled registry initializes a new Home once; later starts use the installed
+registry. Explicit package installation and recovery of interrupted operations
+in the current format remain supported. Preserve sign-in credentials when
+resetting a disposable Home; do not transplant old runs, checkpoints or ledgers.
 
-An update never drops an installed owner silently. A package that stops
-shipping one lists it under `retired_members`; the update removes it in the same
-transaction as the rest of the release, and only while its files are still
-what the package installed (declared configuration aside). An owner with local
-changes keeps the whole installation as it was, with an error naming the files.
+Authorized local changes to descriptors, role artifacts and package code do
+not invalidate an installed package. Doctor validates active contracts and
+runs declared probes; it does not compare installed bytes with the bundle.
 
 A reusable fix belongs in the source package and its checks. A user's token,
 machine path, run, or personal context belongs in private state. Reproduce a
@@ -231,10 +225,9 @@ matches `app/package.json` builds the assets and creates a **draft** GitHub
 release; it becomes public only when a maintainer publishes the draft. Asset
 digests reported by GitHub are checked against `checksums.txt`.
 
-Installing a new release keeps the user's Home. With the runtime stopped, the
-client adopts the new bundled version of package owners that are unchanged
-locally (see [Source and Home](#source-and-home)); a release that changes a
-persisted contract ships its transition in the owning package.
+Quit the client and runtime before replacing the release. If the release changes
+persisted contracts, initialize a fresh Home and retain only sign-in credentials.
+Existing runs and ledgers are not upgraded.
 
 ## Client iteration and acceptance
 

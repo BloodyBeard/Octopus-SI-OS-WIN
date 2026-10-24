@@ -20,7 +20,7 @@ import { ActivityDisclosure, TerminalErrorActivity, TurnActivity } from "./TurnA
 import { McpResourceSurface } from "./McpResourceSurface";
 import { ArtifactEndResources, artifactEndResourceFromMessage } from "../artifacts/ArtifactEndResources";
 import { OctopusLoadingState } from "../OctopusLoadingLogo";
-import { dynamicToolGlyph, dynamicToolOperationLabel, dynamicToolPresentation, dynamicToolReadLabel, dynamicToolSummary, webSearchActivityDetail, webSearchActivityLabel, type DynamicToolPresentation } from "./toolPresentation";
+import { baseDynamicToolId, dynamicToolGlyph, dynamicToolOperationLabel, dynamicToolPresentation, dynamicToolReadLabel, dynamicToolSummary, webSearchActivityDetail, webSearchActivityLabel, type DynamicToolPresentation } from "./toolPresentation";
 import { conversationTraceAdmission, isFinalAssistantResponse } from "./conversationTrace";
 import { commandActivityModel, commandOutcomeLabel, commandResultBody } from "./commandActivityModel";
 import { readProjection } from "../../projectionClient";
@@ -340,7 +340,7 @@ export function ChatMessageList({
       const current = readThreadRestoreState(conversationId);
       writeThreadRestoreState(conversationId, {
         ...current,
-        distanceFromBottomPx: reverseScrollDistance(list),
+        distanceFromBottomPx: lastScrollDistanceRef.current,
       });
     };
   }, [conversationId, updateHeaderEdgeScroll]);
@@ -393,7 +393,7 @@ export function ChatMessageList({
 
   function onScroll() {
     const list = listRef.current;
-    if (!list) return;
+    if (!list || emptyState === "loading-task") return;
     updateHeaderEdgeScroll();
     const distanceFromLatest = reverseScrollDistance(list);
     setScrollbarAwayFromLatest(!programmaticLatestScrollRef.current && distanceFromLatest > 1);
@@ -785,7 +785,7 @@ export function ChatMessageList({
         >
           <div className="relative mx-auto flex w-full max-w-(--thread-content-max-width) flex-1 shrink-0 flex-col px-toolbar pb-8">
             <div className="relative flex flex-1 flex-col gap-3 electron:[--color-token-description-foreground:color-mix(in_srgb,var(--color-token-foreground)_70%,transparent)]">
-              <VirtualizedTurns
+              {emptyState !== "loading-task" ? <VirtualizedTurns
                 initialDistanceFromBottomPx={initialThreadRestoreState.distanceFromBottomPx}
                 initialRestoreState={initialVirtualizerRestoreState}
                 key={conversationId || "new-task"}
@@ -839,17 +839,17 @@ export function ChatMessageList({
                     />
                   </ChatRenderBoundary>
                 )}
-              />
+              /> : null}
               {presentationMessageCount === 0 && emptyState === "loading-task" ? (
                 <OctopusLoadingState
                   className="flex min-h-28 flex-1 items-center justify-center"
                   label="Loading task"
                 />
               ) : null}
-              {presentationMessageCount === 0 && emptyState !== "loading-task" ? (
+              {presentationMessageCount === 0 && emptyState !== "loading-task" && emptyLabel ? (
                 <div className="flex min-h-28 flex-1 flex-col items-center justify-center gap-3 text-token-text-secondary">
                   <Glyph className="text-token-text-tertiary" name="chat" size={22} />
-                  <span>{emptyLabel || "No activity yet"}</span>
+                  <span>{emptyLabel}</span>
                 </div>
               ) : null}
             </div>
@@ -1550,6 +1550,7 @@ function ChatTurn({
       onEditUserMessage={onEditUserMessage}
       onSteerUserMessage={onSteerUserMessage}
       steerable={message.id === steerableMessageId}
+      editable={isLatestTurn}
       pinned={Boolean(message.artifactId && pinnedArtifactIds.includes(message.artifactId))}
       pinning={Boolean(message.artifactId && pinningArtifactIds.includes(message.artifactId))}
       taskActionsEnabled={taskActionsEnabled}
@@ -1592,6 +1593,7 @@ function ChatTurn({
               onEditUserMessage={onEditUserMessage}
               onSteerUserMessage={onSteerUserMessage}
               steerable={visibleUser.id === steerableMessageId}
+              editable={isLatestTurn}
               pinned={Boolean(visibleUser.artifactId && pinnedArtifactIds.includes(visibleUser.artifactId))}
               pinning={Boolean(visibleUser.artifactId && pinningArtifactIds.includes(visibleUser.artifactId))}
               taskActionsEnabled={taskActionsEnabled}
@@ -1714,19 +1716,20 @@ const MemoizedChatTurn = memo(ChatTurn, chatTurnPropsEqual);
 
 type MessageFind = { query: string; offset: number; activeIndex: number };
 
-function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, steerable = false, onPinMessageExcerpt, onTogglePinnedMessage, pinned, pinning, taskActionsEnabled }: {
+function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, steerable = false, editable = false, onPinMessageExcerpt, onTogglePinnedMessage, pinned, pinning, taskActionsEnabled }: {
   find?: MessageFind;
   message: ChatRenderMessage;
   onEditUserMessage: Props["onEditUserMessage"];
   onSteerUserMessage: Props["onSteerUserMessage"];
   steerable?: boolean;
+  editable?: boolean;
   onTogglePinnedMessage: (message: ChatRenderMessage) => Promise<void>;
   onPinMessageExcerpt: Props["onPinMessageExcerpt"];
   pinned: boolean;
   pinning: boolean;
   taskActionsEnabled: boolean;
 }) {
-  const [editIntent, setEditIntent] = useState<"steer" | "new-task" | null>(null);
+  const [editIntent, setEditIntent] = useState<"steer" | "edit" | null>(null);
   const [editText, setEditText] = useState(message.text);
   const [editPending, setEditPending] = useState(false);
   const [editError, setEditError] = useState("");
@@ -1796,9 +1799,6 @@ function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, ste
             }}
             value={editText}
           />
-          {editIntent === "new-task" && message.attachments?.length ? (
-            <div className="chat-user-message-editor-note">Original attachment bytes are not projected. Reattach them in the new task before sending.</div>
-          ) : null}
           {unavailable || editError ? <div className="chat-user-message-editor-note" role="alert">
             {unavailable ? "This reply is no longer accepting edits. Your text has been kept." : editError}
           </div> : null}
@@ -1808,7 +1808,7 @@ function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, ste
               setEditText(message.text);
             }} size="xs" variant="ghost">Cancel</OcButton>
             <OcButton disabled={!editText.trim() || editPending || unavailable} onClick={() => void submitEdit()} size="xs" variant="primary">
-              {editPending ? "Sending…" : editIntent === "steer" ? "Send to current reply" : "Continue in new task"}
+              {editPending ? "Sending…" : editIntent === "steer" ? "Send to current reply" : "Save and send"}
             </OcButton>
           </div>
         </div>
@@ -1848,13 +1848,13 @@ function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, ste
       ) : null}
       <MessageActions
         message={message}
-        editLabel={steerable ? "Edit current reply" : "Edit in new task"}
-        onEditUserMessage={() => {
-          setEditIntent(steerable ? "steer" : "new-task");
+        editLabel={steerable ? "Edit current reply" : "Edit message"}
+        onEditUserMessage={editable || steerable ? () => {
+          setEditIntent(steerable ? "steer" : "edit");
           setEditText(message.text);
           setEditError("");
           setEditExpired(false);
-        }}
+        } : undefined}
         onTogglePinnedMessage={onTogglePinnedMessage}
         pinned={pinned}
         pinning={pinning}
@@ -2192,6 +2192,7 @@ function AssistantEventContent({ find, message, onOpenAssistantReview, onOpenAss
         label={label || "Tool"}
         status={lifecycle === "active" ? "running" : lifecycle}
         danger={lifecycle === "error"}
+        relatedRuns={message.relatedRuns}
         details={presentation.operation ? [
           ...presentation.operation.details,
           ["Details", eventRecord(data._payload_projection).truncated === true
@@ -2371,7 +2372,25 @@ function traceReadArtifactReference(message: ChatRenderMessage, presentation: Dy
   const data = eventRecord(decodeJsonArtifactPayload(response.base64));
   const body = eventRecord(data.body);
   const callId = eventString(message.eventData?.call_id);
-  if (!callId || data.call_id !== callId || data.tool !== presentation.exactToolId || data.ok !== true
+  if (!callId || data.correlation_id !== callId || data.tool !== presentation.exactToolId || data.ok !== true) {
+    throw new Error("The admitted read result does not match this artifact target.");
+  }
+  if (baseDynamicToolId(presentation.exactToolId) === "context.read") {
+    const args = eventRecord(message.eventData?.arguments);
+    const pin = eventRecord(body.pin);
+    const source = eventRecord(pin.source);
+    const entry = eventRecord(body.entry);
+    if (!eventString(args.source) || source.id !== args.source || pin.entry_id !== presentation.target
+      || entry.id !== presentation.target || !/^[a-f0-9]{64}$/.test(eventString(pin.revision))
+      || pin.revision !== args.revision) {
+      throw new Error("The admitted context entry does not match the selected source and revision.");
+    }
+    return {
+      artifactId, runId: message.runId, interfaceId,
+      label: presentation.pathLabel, source: "message", inlinePayload: JSON.stringify(body.entry, null, 2),
+    };
+  }
+  if (baseDynamicToolId(presentation.exactToolId) !== "artifact.read"
     || body.result !== "artifact_read" || body.id !== presentation.target || typeof body.text !== "string") {
     throw new Error("The admitted read result does not match this artifact target.");
   }
@@ -3222,12 +3241,13 @@ function CollaborationActivity({ message }: { message: ChatRenderMessage }) {
   );
 }
 
-function StructuredActivity({ glyph, label, status, details, danger = false }: {
+function StructuredActivity({ glyph, label, status, details, danger = false, relatedRuns }: {
   glyph: Parameters<typeof Glyph>[0]["name"] | null;
   label: string;
   status: string;
   details: Array<[string, string]>;
   danger?: boolean;
+  relatedRuns?: ChatRenderMessage["relatedRuns"];
 }) {
   const visible = details.filter((entry) => entry[1]);
   const lifecycle = activityLifecycleFromStatus(status, danger);
@@ -3242,6 +3262,8 @@ function StructuredActivity({ glyph, label, status, details, danger = false }: {
       tone={danger ? "danger" : "default"}
     >
       {() => <div className="structured-activity-body">
+        {relatedRuns?.map((run) => <button className="text-token-text-link cursor-interaction" key={run.runId}
+          onClick={() => void window.octopusTransport?.openRunInMain(run.runId)} type="button">{run.title}</button>)}
         <dl>
           {visible.map(([name, value], index) => <div key={`${name}:${index}`}><dt>{name}</dt><dd>{value}</dd></div>)}
         </dl>
@@ -3414,7 +3436,7 @@ function MessageActions({
   isLatestTurn = true,
   onContinueInNewTask,
   onEditUserMessage,
-  editLabel = "Edit in new task",
+  editLabel = "Edit message",
   onTogglePinnedMessage,
   pinned,
   pinning,
@@ -3443,7 +3465,7 @@ function MessageActions({
       {message.text ? (
         <CopyActionButton label={user ? "Copy message" : "Copy"} value={message.text} />
       ) : null}
-      {taskActionsEnabled && user && message.eventKind !== "steering" && !message.pending ? (
+      {taskActionsEnabled && user && onEditUserMessage && message.eventKind !== "steering" && !message.pending ? (
         <MessageActionButton
           glyph="edit"
           label={editLabel}
@@ -3490,6 +3512,9 @@ function MessageActions({
       <div className="flex h-full items-center gap-0.5">
         {buttons}
       </div>
+      {typeof message.eventData?._client_text_edit === "object" && message.eventData._client_text_edit ? (
+        <span className="ml-1.5 text-xs text-tertiary" title={`Edited display text. Original: ${String((message.eventData._client_text_edit as Record<string, unknown>).original_text ?? "")}`}>Edited</span>
+      ) : null}
       <span className="ml-1.5 flex h-full items-center opacity-0 group-focus-within:opacity-100 group-hover:opacity-100" data-assistant-message-sent-time="true">
         <time className="text-xs text-tertiary" dateTime={new Date(message.createdAtMs).toISOString()}>
           {formatMessageTime(message.createdAtMs)}
@@ -3514,7 +3539,7 @@ function ContinueTaskAction({ isLatestTurn, message, onContinue }: {
     <>
       <MessageActionButton
         glyph="worktree"
-        label="Continue in new task"
+        label="Save and send"
         onClick={() => isLatestTurn ? continueTask() : setConfirmOpen(true)}
       />
       <OcDialog

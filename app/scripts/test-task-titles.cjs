@@ -22,6 +22,8 @@ test("a task title uses an isolated tool-free run, preserves its model and a con
       input: { artifact_id: "operator.message:original", content_hash: "01".repeat(32), movement_seq: 4 } }),
     commit: async ({ writes, publishBarrierPath }) => {
       assert.ok(writes.some(row => row.file === publishBarrierPath), "every transaction has its publication barrier");
+      assert.ok(writes.every(row => row.file !== sourceFile));
+      await write(sourceFile, { ...sourceRecord, status: "running", active_checkpoints: ["next"] });
       for (const row of writes) {
         if (row.next?.id?.startsWith("run_client_title_")) { assert.ok(schema(row.next), JSON.stringify(schema.errors)); recordFile = row.file; }
         if (row.content !== undefined) assert.equal(await fs.readFile(row.file, "utf8"), row.content);

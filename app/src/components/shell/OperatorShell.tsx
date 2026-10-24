@@ -88,7 +88,6 @@ import {
   clientTaskTitle,
   clientProjectScopeIds,
   ensureLabSidebarSeeds,
-  migrateClientShellState,
   profileStorageKey,
   readClientProjectFilterEeId,
   readStoredStringList,
@@ -192,7 +191,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   onLogOut: () => void;
   runtimeHost: RuntimeHostView;
 }) {
-  if (clientWindow.primary) migrateClientShellState(accessProfile);
   ensureLabSidebarSeeds(accessProfile);
   const windowStateStorage = clientWindowStateStorage(clientWindow.scope);
   const initialTargetConsumptionKey = clientWindowStateKey(

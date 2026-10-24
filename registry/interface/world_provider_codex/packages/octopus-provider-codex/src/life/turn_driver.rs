@@ -72,7 +72,15 @@ pub(crate) async fn drive_turn_with_retries_inner(
         }
     };
     validate_saved_source_withdrawal(ctx, descriptor, run, &turn, &handoff).await?;
-    let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
+    let (source_recovery, recovered_outcomes) = match handoff.recover_source_with_outcomes().await {
+        Ok(recovered) => recovered,
+        Err(error) if ctx.cancel.is_cancelled() => return Err(error),
+        Err(error) => {
+            record_invalid_provider_context(ctx, descriptor, handoff_session, run, &turn, error).await?;
+            control.finish();
+            return Ok(());
+        }
+    };
     if matches!(source_recovery, ProviderSourceRecovery::Bridged { .. }) {
         control.finish();
         return Ok(());
@@ -439,6 +447,10 @@ pub(crate) async fn drive_turn_with_retries_inner(
             Err(InterfaceBoundaryError::Protocol(error))
             | Err(InterfaceBoundaryError::FailedClosed(error)) => {
                 control.finish();
+                let error = match shutdown_driver(ctx, driver).await {
+                    Ok(()) => error,
+                    Err(shutdown_error) => format!("{error}; {shutdown_error}"),
+                };
                 return emit_terminal_turn_error(
                     ctx, descriptor, handoff_session, run, &turn, &handoff, attempt, &error,
                 )

@@ -186,6 +186,7 @@ fn exercise_peer_verified_input_lifecycle(
         .verified_input_checkpoints(
             &route,
             &output,
+            &[],
             &BTreeSet::from(["operator.input.provided".into()]),
             &BTreeSet::new(),
             &BTreeSet::new(),

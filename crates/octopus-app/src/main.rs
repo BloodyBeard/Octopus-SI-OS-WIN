@@ -15,7 +15,6 @@ mod boot_report;
 mod bootstrap_ees;
 mod daemon;
 mod doctor;
-mod ee_state_migration;
 mod ledger_writer;
 mod registry_install;
 mod runtime_control;
@@ -151,7 +150,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("down") => down(),
         Some("restart") => restart(),
         Some("doctor") => block_on(doctor())?,
-        Some("migrate-ee-instance-schema") => migrate_ee_instance_schema(),
         Some("project-ee-policies") => project_ee_policies(),
         _ => usage(),
     }
@@ -265,7 +263,6 @@ fn usage() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  down    stop the running instance cleanly through its control socket");
     eprintln!("  restart stop the running instance cleanly and start it again from its own executable");
     eprintln!("  doctor  scan the active registry and declared life probes without booting");
-    eprintln!("  migrate-ee-instance-schema");
     eprintln!("  project-ee-policies");
     std::process::exit(2);
 }
@@ -285,23 +282,6 @@ fn project_ee_policies() -> Result<(), Box<dyn std::error::Error>> {
         &octopus_home.join("state").join("ee_instances"),
     )?;
     println!("{}", serde_json::to_string(&projection)?);
-    Ok(())
-}
-
-fn migrate_ee_instance_schema() -> Result<(), Box<dyn std::error::Error>> {
-    let octopus_home = octopus_home_dir();
-    if let Some(record) = runtime_instance::observe(&octopus_home)? {
-        return Err(format!(
-            "octopus pid {} is running; stop it before migrating EE instance records",
-            record.pid
-        )
-        .into());
-    }
-    let outcome = ee_state_migration::migrate(&octopus_home)?;
-    println!(
-        "EE instance schema: migrated {}, already current {}",
-        outcome.migrated, outcome.current
-    );
     Ok(())
 }
 
@@ -417,7 +397,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
     let source_registry_root = installed_source_registry_root(&runtime_installation_root)?;
     boot.stage(
         "registry",
-        format_args!("synchronizing from {}", source_registry_root.display()),
+        format_args!("opening Home registry with source {}", source_registry_root.display()),
     );
     let registry_install = registry_install::install_registry_with_progress(
         &source_registry_root,
@@ -443,12 +423,9 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
     boot.stage(
         "registry",
         format_args!(
-            "ready at {} · copied {} · updated {} · removed {} · kept local {}",
+            "ready at {} · installed {} files",
             registry_root_path.display(),
-            registry_install.copied,
-            registry_install.updated,
-            registry_install.removed,
-            registry_install.preserved_local
+            registry_install.copied
         ),
     );
     let durable_root = spine_durable_root();
