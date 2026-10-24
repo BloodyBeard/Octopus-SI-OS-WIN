@@ -237,6 +237,35 @@ class InactivityContract(unittest.TestCase):
         existing = dict(schedule, target={"mode": "existing_run"})
         self.assertEqual(self.module.prepare_time_artifact(existing, moment, "", "inactivity", 1)[0], "cron.current_time")
 
+    def test_direct_inputs_in_excluded_runs_rearm_once_without_background_loops(self):
+        folder = self.interfaces / "world_other_trigger"
+        folder.mkdir()
+        (folder / "interface.json").write_text(json.dumps({"id": "world_other_trigger", "interface_type": "world", "role": "sensor", "interface_driver_ref": "cron_life"}))
+        self.config["schedule"]["inactivity"]["exclude_interface_match"] = {"interface_driver_ref": "cron_life"}
+        for run, bindings in (("run_bound", ["world_user", "world_other_trigger"]), ("run_retired", ["world_user"])):
+            (self.runs / f"{run}.json").write_text(json.dumps({"id": run, "checkpoints": [{"interface_binding": {"interface": item}} for item in bindings]}))
+        self.movement("run_retired", kind="InterfaceArrival", source="world_other_trigger")
+        for index, run in enumerate(("run_review", "run_bound", "run_retired"), 1):
+            with self.subTest(run=run):
+                self.advance(7200)
+                source = self.movement(run, "arbitrary.input:123", "InterfaceArrival", "world_user")
+                trigger = self.trigger()
+                due = trigger.tick()
+                self.assertEqual(due, self.clock // 1_000_000 + 3600000)
+                self.advance(3599)
+                self.movement(run)
+                self.movement(run, kind="InterfaceArrival", source="world_background")
+                self.assertEqual(trigger.tick(), due)
+                trigger = self.trigger()
+                self.assertEqual(trigger.tick(), due)
+                self.advance(1)
+                trigger.tick()
+                self.assertEqual(len(self.emissions), index)
+                self.assertEqual(self.emissions[-1]["last_activity"]["seq"], source)
+                self.advance(7200)
+                self.trigger().tick()
+                self.assertEqual(len(self.emissions), index)
+
 
 if __name__ == "__main__":
     unittest.main()

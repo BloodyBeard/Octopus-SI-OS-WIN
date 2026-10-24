@@ -34,18 +34,21 @@ An inactivity condition for user-facing tasks is:
 }
 ```
 
-Every artifact movement with typed run provenance counts, regardless of label.
-A run qualifies when one of its checkpoint bindings names an interface whose
-descriptor matches every selector field. The optional `exclude_interface_match`
-removes a run that binds a matching interface or has received an arrival from
-one; the arrival keeps it removed after the binding is retired. With the
-`cron_life` driver ref it keeps time triggers from counting each other's runs as
-the user's work, so two quiet-period triggers cannot wake each other forever.
-The optional `within_ee` narrows the scope to runs whose EE chain contains that
-EE. The controller, all runs binding this trigger and every run it created are
-excluded. Other sensors and passive background runs therefore do not postpone a
-user-task quiet period. An
-unreadable run record contributes no activity and is named on stderr.
+For ordinary qualifying runs, every artifact movement with typed run provenance
+counts, regardless of label. A run qualifies when one of its checkpoint bindings
+names an interface whose descriptor matches every selector field. The optional
+`within_ee` narrows this scope to runs whose EE chain contains that EE.
+
+The optional `exclude_interface_match` excludes autonomous activity in a run
+that binds a matching interface or has received an arrival from one; the arrival
+preserves that exclusion after the binding is retired. The controller, runs
+binding this trigger and every run it created have the same exclusion.
+In these runs, only `InterfaceArrival` movements from a source interface
+matching `interface_match` count. Thus a user's reply inside a review task
+starts a new quiet period, but the review's output and tool traffic do not.
+With the `cron_life` exclusion, time triggers cannot wake each other forever.
+Other sensors and passive background runs do not postpone a user-task quiet
+period. An unreadable run record contributes no activity and is named on stderr.
 
 The driver folds `movements.jsonl` once at startup, then reads new complete rows
 and reparses run/interface descriptors only when their file metadata changes.

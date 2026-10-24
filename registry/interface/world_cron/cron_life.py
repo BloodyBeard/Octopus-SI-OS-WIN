@@ -3001,6 +3001,8 @@ class RunActivity:
         self.sequence = -1
         self.ledger_identity = None
         self.latest_by_run = {}
+        self.latest_inputs_by_run = {}
+        self.input_sources = {}
         self.reported = set()
         self.excluded_runs = set()
         self.excluded_sources = {}
@@ -3040,6 +3042,7 @@ class RunActivity:
     def selected_runs(self):
         slots = root_slots()
         selected = set()
+        autonomous_excluded = set()
         seen = set()
         selector = self.schedule["inactivity"]["interface_match"]
         exclusion = self.schedule["inactivity"].get("exclude_interface_match")
@@ -3068,11 +3071,10 @@ class RunActivity:
                     for binding in [checkpoint.get("interface_binding"), *checkpoint.get("outbound_interface_bindings", [])]:
                         if isinstance(binding, dict) and isinstance(binding.get("interface"), str):
                             interfaces.add(binding["interface"])
-                if INTERFACE_ID in interfaces or run["id"] in owned_runs:
-                    continue
+                excluded = INTERFACE_ID in interfaces or run["id"] in owned_runs
                 if within_ee is not None and within_ee not in self.ee_chain(run.get("ee"), seen):
                     continue
-                matched = excluded = False
+                matched = False
                 for interface_id in sorted(interfaces):
                     if REGISTRY_ID.fullmatch(interface_id) is None:
                         raise ValueError(f"invalid interface id '{interface_id}'")
@@ -3086,15 +3088,17 @@ class RunActivity:
                         raise ValueError(f"interface '{interface_id}' does not match its folder")
                     matched = matched or all(descriptor.get(key) == value for key, value in selector.items())
                     excluded = excluded or (exclusion is not None and all(descriptor.get(key) == value for key, value in exclusion.items()))
-                if matched and not excluded:
+                if matched:
                     selected.add(run["id"])
+                    if excluded:
+                        autonomous_excluded.add(run["id"])
             except (OSError, ValueError) as error:
                 self.report(entry.path, error)
         self.documents = {path: cached for path, cached in self.documents.items() if path in seen}
-        return selected
+        return selected, autonomous_excluded
 
     def latest(self):
-        selected = self.selected_runs()
+        selected, autonomous_excluded = self.selected_runs()
         path = _ledger_path()
         try:
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -3130,20 +3134,27 @@ class RunActivity:
                 recorded = movement.get("recorded_at_unix_ms")
                 if not isinstance(run_id, str) or type(recorded) is not int or recorded < 0:
                     raise RuntimeError("inactivity movement has invalid run or time provenance")
-                if movement.get("kind") == "InterfaceArrival" and self.excluded_source(movement.get("from")):
-                    self.excluded_runs.add(run_id)
-                self.latest_by_run[run_id] = {"run": run_id, "seq": self.sequence, "recorded_at_unix_ms": recorded}
+                activity = {"run": run_id, "seq": self.sequence, "recorded_at_unix_ms": recorded}
+                if movement.get("kind") == "InterfaceArrival":
+                    source = movement.get("from")
+                    condition = self.schedule["inactivity"]
+                    if self.source_matches(source, condition.get("exclude_interface_match"), self.excluded_sources):
+                        self.excluded_runs.add(run_id)
+                    if self.source_matches(source, condition["interface_match"], self.input_sources):
+                        self.latest_inputs_by_run[run_id] = activity
+                self.latest_by_run[run_id] = activity
             after = os.stat(path, follow_symlinks=False)
             if (after.st_dev, after.st_ino) != identity or after.st_size < info.st_size:
                 raise RuntimeError("inactivity ledger changed during read")
-        return max((row for run_id, row in self.latest_by_run.items() if run_id in selected and run_id not in self.excluded_runs), key=lambda row: row["seq"], default=None)
+        excluded = autonomous_excluded | self.excluded_runs
+        candidates = ((self.latest_inputs_by_run if run_id in excluded else self.latest_by_run).get(run_id) for run_id in selected)
+        return max((row for row in candidates if row is not None), key=lambda row: row["seq"], default=None)
 
-    def excluded_source(self, endpoint):
-        exclusion = self.schedule["inactivity"].get("exclude_interface_match")
+    def source_matches(self, endpoint, selector, cache):
         interface_id = endpoint.get("Interface") if isinstance(endpoint, dict) else None
-        if exclusion is None or not isinstance(interface_id, str) or REGISTRY_ID.fullmatch(interface_id) is None:
+        if selector is None or not isinstance(interface_id, str) or REGISTRY_ID.fullmatch(interface_id) is None:
             return False
-        if interface_id not in self.excluded_sources:
+        if interface_id not in cache:
             path = os.path.join(root_slots()["registry_interface_root"], interface_id, "interface.json")
             try:
                 descriptor = load_json_object(path, "inactivity source", MAX_RUN_RECORD_BYTES)
@@ -3152,10 +3163,10 @@ class RunActivity:
             except (OSError, ValueError) as error:
                 self.report(path, error)
                 return False
-            self.excluded_sources[interface_id] = descriptor.get("id") == interface_id and all(
-                descriptor.get(key) == value for key, value in exclusion.items()
+            cache[interface_id] = descriptor.get("id") == interface_id and all(
+                descriptor.get(key) == value for key, value in selector.items()
             )
-        return self.excluded_sources[interface_id]
+        return cache[interface_id]
 
 
 class InactivityTrigger:
