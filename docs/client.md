@@ -47,6 +47,9 @@ work concretely. It is not shown in the conversation.
 Open **Activity** for the conversation and the detailed trace of its work.
 Widgets can show task progress, upcoming work, or other configured sources;
 their visibility and positions are client presentation choices.
+Home also uses compact widgets for pictures, small tables and short visual
+answers. Larger results can use several widgets. For longer text, Home can save
+a text or Markdown document and open it in the right Files pane.
 
 ![Home conversation beside a Files pane showing a local client configuration](images/client/home-files.png)
 

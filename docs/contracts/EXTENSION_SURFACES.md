@@ -524,6 +524,14 @@ same clone, each with its own interface id and quiet period, only when its
 package was selected; a retried setup finds the armed trigger and creates
 nothing.
 
+Home uses compact widgets as its ordinary visual presentation, including during
+voice calls. Longer results may span several focused widgets; long text belongs
+in a saved document. The correlated `open_file` client control reads a text file
+through the existing admitted Files roots and requests its tab in the right
+pane. Its result identifies the readable target and opening request, not rendered
+pixels. Missing, unreadable, binary and oversized files fail explicitly. It
+executes no file and starts no external application.
+
 Home binds a compact client-delivery artifact separately from its full authoring
 coordinates. The compact delivery contract is included in the provider's
 declared instruction selection. Client controls use it directly; configuration
