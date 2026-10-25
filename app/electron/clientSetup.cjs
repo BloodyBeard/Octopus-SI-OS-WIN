@@ -117,7 +117,7 @@ function createClientSetupStore(options) {
         if (step === stopBefore) {
           return projectOperation(operation);
         }
-        reportProgress(onProgress, operationId, step, "verifying", Math.round(index * 100 / STEPS.length));
+        reportProgress(onProgress, operationId, step, "verifying", Math.round(index * 90 / STEPS.length));
         let proof;
         const previousProof = operation.steps.find((entry) => entry.step === step)?.proof ?? null;
         try {
@@ -127,7 +127,7 @@ function createClientSetupStore(options) {
           throw error;
         }
         if (!proof) {
-          reportProgress(onProgress, operationId, step, "applying", Math.round((index + 0.35) * 100 / STEPS.length));
+          reportProgress(onProgress, operationId, step, "applying", Math.round((index + 0.35) * 90 / STEPS.length));
           let candidateEvidence;
           try {
             candidateEvidence = await owners[step].apply(operation.plan, { operationId, step });
@@ -136,6 +136,7 @@ function createClientSetupStore(options) {
             throw error;
           }
           try {
+            reportProgress(onProgress, operationId, step, "verifying", Math.round((index + 0.7) * 90 / STEPS.length));
             proof = await probeStep(owners[step], step, operation.plan, operationId, { candidateEvidence });
           } catch (error) {
             operation = await recordFailure(operation, step, error);
@@ -148,11 +149,12 @@ function createClientSetupStore(options) {
           }
         }
         operation = await checkpoint(operation, step, proof);
-        reportProgress(onProgress, operationId, step, "complete", Math.round((index + 1) * 100 / STEPS.length));
+        reportProgress(onProgress, operationId, step, "complete", Math.round((index + 1) * 90 / STEPS.length));
       }
 
       const finalProofs = [];
-      for (const step of STEPS) {
+      for (const [index, step] of STEPS.entries()) {
+        reportProgress(onProgress, operationId, step, "verifying", 90 + index * 2);
         let proof;
         const previousProof = operation.steps.find((entry) => entry.step === step)?.proof ?? null;
         try {

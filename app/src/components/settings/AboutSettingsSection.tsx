@@ -4,7 +4,6 @@ import { OcButton, OcCard, OcGroup, OcSettingsRow, OcStatus } from "../../design
 import type { OctopusAppInfo, OctopusClientDoctorReport, OctopusTransportDefaults } from "../../electron";
 import { useProjectionGeneration } from "../../projectionLive";
 import { useAppErrorToast } from "../../toasts";
-import { copyText } from "../../runtimeFormat";
 import { resetOnboardingState } from "../../onboarding/onboardingStorage";
 import { SettingsHeading } from "./SettingsHeading";
 import { OpenSourceLicensesDialog } from "./OpenSourceLicensesDialog";
@@ -15,7 +14,7 @@ export function AboutSection() {
   const generation = useProjectionGeneration();
   const [info, setInfo] = useState<OctopusAppInfo | null>(null);
   const [defaults, setDefaults] = useState<OctopusTransportDefaults | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [reportError, setReportError] = useState("");
   const [licensesOpen, setLicensesOpen] = useState(false);
   const [logsState, setLogsState] = useState<"idle" | "opening" | "opened" | "error">("idle");
   const [doctorReport, setDoctorReport] = useState<OctopusClientDoctorReport | null>(null);
@@ -24,6 +23,7 @@ export function AboutSection() {
   useAppErrorToast(welcomeState === "error" ? "Could not reset the welcome screen." : "");
   useAppErrorToast(logsState === "error" ? "Could not open the client logs directory." : "");
   useAppErrorToast(doctorState === "error" ? "Doctor could not inspect the current Octopus Home." : "");
+  useAppErrorToast(reportError);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,19 +42,12 @@ export function AboutSection() {
     };
   }, []);
 
-  async function copyDiagnostics() {
-    const report = {
-      application: info,
-      defaults,
-      projectionGeneration: generation,
-      providerInterfaces: providerState.providers.map((provider) => provider.id),
-      registryRoot: defaults?.registryRoot || providerState.registryRoot || null,
-      repoRoot: defaults?.repoRoot || providerState.repoRoot || null,
-      doctor: doctorReport,
-    };
-    const copiedNow = await copyText(JSON.stringify(report, null, 2));
-    setCopied(copiedNow);
-    if (copiedNow) window.setTimeout(() => setCopied(false), 1_500);
+  async function openReport() {
+    setReportError("");
+    try {
+      if (!window.octopusTransport?.openProblemReport) throw new Error("Problem reports are available in the desktop app.");
+      await window.octopusTransport.openProblemReport();
+    } catch (error) { setReportError(error instanceof Error ? error.message : String(error)); }
   }
 
   async function runDoctor() {
@@ -122,13 +115,8 @@ export function AboutSection() {
       <OcGroup title="Diagnostics" description="Snapshot facts for support and debugging.">
         <OcCard>
           <OcSettingsRow {...settingsTargetProps("about.diagnostics")}
-            control={(
-              <div className="settings-inline-actions">
-                {copied ? <OcStatus label="Copied" tone="success" /> : null}
-                <OcButton onClick={() => void copyDiagnostics()}>Copy diagnostics</OcButton>
-              </div>
-            )}
-            description="Copies application facts and projection state as JSON."
+            control={<OcButton onClick={() => void openReport()}>Report a problem…</OcButton>}
+            description="Review, save or copy diagnostics, then open a GitHub issue draft."
             label="Diagnostics report"
           />
           <OcSettingsRow

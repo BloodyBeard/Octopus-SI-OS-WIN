@@ -250,8 +250,13 @@ async function checkpointEphemeralOwnerCandidate(root) {
   const operationId = "workspace_owner_candidate_001";
   const store = createClientSetupStore({ root: path.join(root, "setup-state"), owners: ownerSet });
   await store.begin({ operationId, plan: setupPlan(operationId) });
-  const completed = await store.resume(operationId);
+  const progress = [];
+  const completed = await store.resume(operationId, { onProgress: (value) => progress.push(value) });
   assert.equal(completed.status, "complete");
+  assert.ok(progress.slice(0, -1).every((value) => value.percent < 100));
+  assert.deepEqual(progress.slice(-5, -1).map((value) => [value.step, value.phase]), [["packages", "verifying"], ["extensions", "verifying"], ["workspace", "verifying"], ["provider", "verifying"]]);
+  assert.equal(progress.at(-1).phase, "sealed");
+  assert.equal(progress.at(-1).percent, 100);
   assert.equal(applyCount, 1);
   assert.equal(candidateProbeCount, 1);
   assert.equal(persistedProbeCount, 1);

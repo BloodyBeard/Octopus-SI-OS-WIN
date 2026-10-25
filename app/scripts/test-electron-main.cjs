@@ -132,8 +132,8 @@ function fakeElectron(world) {
     module: {
       app,
       BrowserWindow,
-      clipboard: { writeText: () => {} },
-      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+      clipboard: { writeText: (text) => { world.clipboard = text; } },
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showSaveDialog: async () => world.saveResult ?? ({ canceled: true }), showMessageBox: async () => ({ response: 0 }) },
       globalShortcut: {
         register: (accelerator, callback) => { shortcuts.set(accelerator, callback); return true; },
         unregister: (accelerator) => { shortcuts.delete(accelerator); },
@@ -157,7 +157,7 @@ function fakeElectron(world) {
         getCursorScreenPoint: () => ({ x: 0, y: 0 }),
       },
       session: { defaultSession: { setPermissionRequestHandler: () => {}, setPermissionCheckHandler: () => {} } },
-      shell: { openExternal: async () => {}, openPath: async () => "", showItemInFolder: () => {} },
+      shell: { openExternal: async (url) => { world.events.push(["external", url]); }, openPath: async () => "", showItemInFolder: () => {} },
       systemPreferences: world.touchId === false ? {} : {
         promptTouchID: async (reason) => {
           world.events.push(["touch-id", reason]);
@@ -363,6 +363,47 @@ async function launchMain(options = {}) {
 }
 
 const surface = { kind: "surface", runId: "run-1", surfaceId: "chat", workspaceKey: "octopus-os" };
+
+test("Help reports work independently of the main renderer and export the reviewed snapshot", async () => {
+  const main = await launchMain();
+  const [primary] = main.windows();
+  const help = main.world.menu.template.find((item) => item.role === "help");
+  const reportItem = help.submenu.find((item) => item.label === "Report a Problem…");
+  primary.focus();
+  reportItem.click();
+  const locked = main.windows().at(-1);
+  assert.match(locked.options.webPreferences.preload, /supportPreload\.cjs$/);
+  assert.equal(locked.options.webPreferences.sandbox, true);
+  const basic = await main.invoke("octopus:support-collect", locked, { includeDetails: false });
+  assert.equal(basic.access, "locked");
+  assert.equal(basic.client_logs, undefined);
+  await assert.rejects(main.invoke("octopus:support-collect", locked, { includeDetails: true }), /Unlock/);
+  await assert.rejects(main.invoke("octopus:support-collect", primary, { includeDetails: false }), /report window/);
+  locked.destroy();
+  await main.unlock(primary);
+  primary.focus();
+  reportItem.click();
+  const support = main.windows().at(-1);
+  primary.webContents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 1 });
+  await until(() => main.log().some((item) => item.event === "client.renderer.gone"), "renderer crash was recorded");
+  const report = await main.invoke("octopus:support-collect", support, { includeDetails: true });
+  assert.equal(report.access, "live");
+  assert.ok(report.client_logs.events.some((item) => item.message?.includes("Renderer exited: crashed")));
+  const request = { reportId: report.report_id, description: "Setup is waiting" };
+  await main.invoke("octopus:support-copy", support, request);
+  assert.match(main.world.clipboard, /Setup is waiting/);
+  assert.deepEqual(await main.invoke("octopus:support-save", support, request), { saved: false });
+  const destination = path.join(main.world.root, "report.txt");
+  main.world.saveResult = { canceled: false, filePath: destination };
+  assert.deepEqual(await main.invoke("octopus:support-save", support, request), { saved: true });
+  assert.equal(fs.readFileSync(destination, "utf8"), main.world.clipboard);
+  assert.equal(fs.statSync(destination).mode & 0o777, 0o600);
+  await main.invoke("octopus:support-issue", support, request);
+  assert.match(main.eventsOf("external").at(-1)[1], /^https:\/\/github.com\/miuuyy\/Octopus-SI-OS\/issues\/new\?/);
+  await main.invoke("octopus:support-collect", support, { includeDetails: false });
+  await assert.rejects(main.invoke("octopus:support-copy", support, request), /Refresh/);
+  assert.equal(main.eventsOf("runtime-start").length, 0);
+});
 const names = (main, wanted) => main.world.events.map(([name]) => name).filter((name) => wanted.includes(name));
 const claimOf = (win) => win.options.webPreferences.additionalArguments?.[0]?.slice("--octopus-access-claim=".length);
 
@@ -537,6 +578,8 @@ test("logging out locks the session, tells every window of that owner, closes it
   const { peer } = await openPeer(main, primary, token);
   await main.invoke("octopus:quick-task-open", primary, token);
   const quickTask = main.windows().at(-1);
+  await main.invoke("octopus:support-open", primary, token);
+  const support = main.windows().at(-1);
   await main.invoke("octopus:global-dictation-shortcut", primary, token, { enabled: true, shortcut: "Mod+Shift+KeyD" });
   assert.equal(main.electron.shortcuts.size, 1);
   await assert.rejects(main.invoke("octopus:access-lock", peer, "another-token"), /belongs to its authenticated full client window/);
@@ -547,6 +590,7 @@ test("logging out locks the session, tells every window of that owner, closes it
   assert.equal(peer.webContents.sentOn("octopus:client-access-locked").length, 1);
   assert.equal(peer.isDestroyed(), true);
   assert.equal(quickTask.isDestroyed(), true);
+  assert.equal(support.isDestroyed(), true);
   assert.equal(primary.isDestroyed(), false);
   assert.equal(main.electron.shortcuts.size, 0, "the owner's global dictation shortcut is released");
   main.world.expiredTokens.delete(token);

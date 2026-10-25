@@ -57,6 +57,8 @@ for (const asset of [
 ]) {
   if (!fs.existsSync(asset)) throw new Error(`packaging asset is missing: ${asset}`);
 }
+const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" });
+const sourceStatus = spawnSync("git", ["status", "--porcelain", "--untracked-files=normal"], { cwd: repoRoot, encoding: "utf8" });
 run("npm", ["run", "build"], appRoot);
 buildOpenCodexBridge();
 const desktopNativeRoot = path.join(registryRoot, "worker_environment_kind", "desktop_session", "packages", "octopus-system-gui-env", "native");
@@ -99,6 +101,11 @@ publishClientPresentation({ sourceRoot: path.join(desktopNativeRoot, "pip"), bui
 for (const item of ["dist", "electron", "package.json", "schemas", "distribution"]) {
   copyTree(path.join(appRoot, item), path.join(bundledAppRoot, item), { recursive: true });
 }
+fs.writeFileSync(path.join(bundledAppRoot, "build-info.json"), JSON.stringify({
+  revision: revision.status === 0 ? revision.stdout.trim() : null,
+  modifiedSource: sourceStatus.status === 0 ? Boolean(sourceStatus.stdout.trim()) : null,
+  builtAt: new Date().toISOString(),
+}, null, 2) + "\n");
 fs.mkdirSync(path.join(bundledAppRoot, "native", "build"), { recursive: true });
 copyFile(clientFilesystem, path.join(bundledAppRoot, "native", "build", path.basename(clientFilesystem)));
 copyTree(path.join(repoRoot, "schemas"), path.join(resourcesRoot, "schemas"), { recursive: true });

@@ -506,6 +506,13 @@ function ApplyingStep({ applyState, draft }: { applyState: WorkspaceSetupApplySt
   const failed = applyState.state === "failed";
   const running = applyState.state === "running";
   const shown = useShownPercent(running, applyState.percent);
+  const [waiting, setWaiting] = useState(false);
+  useEffect(() => {
+    setWaiting(false);
+    if (!running) return;
+    const timer = window.setTimeout(() => setWaiting(true), 45_000);
+    return () => window.clearTimeout(timer);
+  }, [running, applyState.label, applyState.percent]);
   return (
     <section className="welcome-centered">
       {running ? (
@@ -525,6 +532,7 @@ function ApplyingStep({ applyState, draft }: { applyState: WorkspaceSetupApplySt
           <span className="setup-progress-value">{Math.round(shown)}%</span>
         </div>
       ) : null}
+      {waiting && running ? <p className="mt-4 text-sm text-token-description-foreground">Still waiting for this step. You can collect diagnostics from Help → Report a Problem.</p> : null}
     </section>
   );
 }

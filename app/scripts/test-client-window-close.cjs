@@ -39,6 +39,7 @@ function fixture() {
     createClientWindowCloseHost, app, console: { error() {} }, ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     clientWindows: { entryForWebContents: (id) => entries.get(id), entries: () => [...entries.values()].filter((entry) => !entry.win.dead), clearAccessToken: (token) => { for (const entry of entries.values()) if (entry.accessToken === token) entry.accessToken = ""; } },
     getClientAccessController: () => controller,
+    clientSupportHost: { closeOwner: (token) => effects.push(`support.close:${token}`) },
     runtimeEventSubscriptions: subscriptions, sendClientWindowEvent: (win, channel, payload) => win.webContents.send(channel, payload),
     globalDictationAccessToken: "foreign", clearGlobalDictationShortcut: () => effects.push("dictation.clear"),
     cdpViewerManager: { closeOwner: (token) => effects.push(`cdp.close:${token}`) }, processViewerManager: { closeOwner: (token) => effects.push(`process.close:${token}`) },
@@ -201,6 +202,7 @@ test("actual logout IPC settles token peers before revoke, preserves cancellatio
   assert.equal(b.dead, true); assert.equal(a.dead, false); assert.equal(foreign.dead, false); assert.equal(f.subscriptions.has(3), true);
   assert.equal((await a.bridge.accessStatus()).authenticated, false); assert.equal(a.invocations.at(-1).token, ""); assert.equal((await foreign.bridge.accessStatus()).authenticated, true);
   assert.ok(f.aux.quick.dead && f.aux.ownedEnvironment.dead && f.aux.ownedMonitor.dead); assert.ok(!f.aux.foreignEnvironment.dead && !f.aux.foreignMonitor.dead);
+  assert.deepEqual(f.effects.filter((effect) => effect.startsWith("support.close:")), ["support.close:shared"]);
   assert.ok(!f.effects.includes("dictation.clear")); assert.equal(f.state().quitCleanupStarted, false);
   await a.bridge.unregisterClientWindowCloseGuard(a.guard); assert.equal(a.close().defaultPrevented, false); assert.equal(a.dead, true);
   const drift = fixture(), first = drift.add(1, true, "shared"), second = drift.add(2, true, "shared"), changed = drift.add(3, true, "foreign");

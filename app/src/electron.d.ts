@@ -57,6 +57,7 @@ declare global {
       cancelClientContextMenu(request: { requestId: string }): Promise<{ cancelled: boolean }>;
       windowZoomFactor(): number;
       appInfo(): Promise<OctopusAppInfo>;
+      openProblemReport(): Promise<void>;
       runClientDoctor(): Promise<OctopusClientDoctorReport>;
       copyText(value: string): Promise<{ copied: true }>;
       logClientEvent(request: OctopusClientLogRequest): Promise<{ written: true }>;

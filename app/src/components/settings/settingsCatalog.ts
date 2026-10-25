@@ -143,7 +143,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
 
   destination("about.update-channel", "about", "Update channel", "Review whether this client is a packaged or development build.", "destination", ["version", "release"]),
   destination("about.licenses", "about", "Open-source licenses", "Open production dependency licenses and notices.", "action", ["dependencies", "notices"]),
-  destination("about.diagnostics", "about", "Diagnostics report", "Copy application and projection facts as JSON.", "action", ["support", "debug"]),
+  destination("about.diagnostics", "about", "Diagnostics report", "Review and save diagnostics or report a problem on GitHub.", "action", ["support", "debug", "help"]),
   destination("about.logs", "about", "Logs", "Open the local rotating client log directory.", "action", ["debug", "jsonl"]),
   destination("about.welcome", "about", "Welcome window", "Show the welcome flow again on the next launch.", "action", ["onboarding", "reset"]),
 

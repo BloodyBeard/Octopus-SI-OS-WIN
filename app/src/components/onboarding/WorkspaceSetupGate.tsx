@@ -268,9 +268,9 @@ function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHom
     if (!activeOperationId.current || progress.operationId !== activeOperationId.current) return;
     setApplyState({
       state: "running",
-      label: clientSetupProgressLabel(progress.step, progress.phase),
-      detail: clientSetupProgressDetail(progress.step),
-      percent: progress.percent,
+      label: progress.phase === "sealed" ? "Opening Home" : clientSetupProgressLabel(progress.step, progress.phase),
+      detail: progress.phase === "sealed" ? "Checking that the prepared workspace is ready to open." : clientSetupProgressDetail(progress.step),
+      percent: Math.min(progress.percent, 99),
       error: "",
     });
   }), []);

@@ -79,6 +79,7 @@ const { createClientSetupStore } = require("./clientSetup.cjs");
 const { createChatgptSignIn } = require("./chatgptSignIn.cjs");
 const { createClientProviderMetadata, validateProviderModelSelection } = require("./clientProviderMetadata.cjs");
 const { runClientDoctor } = require("./clientDoctor.cjs");
+const { createClientSupportHost } = require("./clientSupport.cjs");
 const {
   clientExtensionActionFailure,
   clientExtensionActionSuccess,
@@ -252,6 +253,35 @@ let nativeCommandShortcuts = {};
 const accessInheritanceClaims = new Map();
 const terminalSenderIds = new Set();
 const MAX_CLIENT_LOG_BYTES = 4 * 1024 * 1024;
+let latestSetupProgress = null;
+let clientSupportHost = null;
+
+function clientApplicationInfo() {
+  let build = null;
+  try { build = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "build-info.json"), "utf8")); }
+  catch (error) { if (error.code !== "ENOENT") build = { invalid: true }; }
+  return {
+    name: app.getName(), version: app.getVersion(), platform: process.platform, arch: process.arch,
+    osVersion: os.release(), electron: process.versions.electron, node: process.versions.node,
+    isPackaged: app.isPackaged,
+    revision: typeof build?.revision === "string" && /^[a-f0-9]{40}$/.test(build.revision) ? build.revision : null,
+    builtAt: typeof build?.builtAt === "string" ? build.builtAt : null,
+    modifiedSource: typeof build?.modifiedSource === "boolean" ? build.modifiedSource : null,
+    buildMetadata: build?.invalid ? "invalid" : build ? "recorded" : "not_recorded",
+  };
+}
+
+function getClientSupportHost() {
+  if (!clientSupportHost) clientSupportHost = createClientSupportHost({
+    app, BrowserWindow, ipcMain, dialog, clipboard, shell,
+    clientRoot: clientProfileRoot, application: clientApplicationInfo,
+    accessStatus: (token) => getClientAccessController().status(token),
+    runtime: () => runtimeHost?.snapshot() ?? null,
+    progress: () => latestSetupProgress,
+    devUrl: process.env.VITE_DEV_SERVER_URL,
+  });
+  return clientSupportHost;
+}
 const MAX_POLICY_PROJECTION_BYTES = 16 * 1024 * 1024;
 const WORKER_ENVIRONMENT_PANEL_KINDS = new Set([
   "browser",
@@ -1911,6 +1941,12 @@ function createWindow(inheritedAccessToken = "", options = {}) {
   bindAppZoomShortcuts(win);
   if (primary) primaryWindow = win;
   const clientWebContentsId = win.webContents.id;
+  for (const [name, event] of [["unresponsive", "client.renderer.unresponsive"], ["responsive", "client.renderer.responsive"]]) {
+    win.on(name, () => { void appendClientLog("warn", event).catch(() => {}); });
+  }
+  win.webContents.on("render-process-gone", (_event, details) => {
+    void appendClientLog("error", "client.renderer.gone", { message: `Renderer exited: ${details.reason}; exit code ${details.exitCode}` }).catch(() => {});
+  });
   win.on("closed", () => {
     paneWindowDrag.removeOwner(clientWebContentsId);
     if (clientWindows.entries().length === 0 && paneDragPreviewHost && !paneDragPreviewHost.win.isDestroyed()) paneDragPreviewHost.win.destroy();
@@ -2844,12 +2880,13 @@ ipcMain.handle("octopus:transport-defaults", async (_event, token) => {
     };
 });
 
-ipcMain.handle("octopus:app-info", async () => ({
-  name: app.getName(),
-  version: app.getVersion(),
-  platform: process.platform,
-  isPackaged: app.isPackaged,
-}));
+ipcMain.handle("octopus:app-info", async () => clientApplicationInfo());
+
+ipcMain.handle("octopus:support-open", async (event, token) => {
+  if (!clientWindows.entryForWebContents(event.sender.id) || event.senderFrame !== event.sender.mainFrame) throw new Error("Problem reports must be opened from the Octopus client.");
+  getClientAccessController().requireSession(token);
+  getClientSupportHost().open(token);
+});
 
 ipcMain.handle("octopus:client-doctor", async (_event, token) => {
   getClientAccessController().requireSession(token, ["live"]);
@@ -3390,6 +3427,7 @@ ipcMain.handle("octopus:access-lock", async (event, token) => {
   if (!sender) throw new Error("Logout requires the current main client frame.");
   const settlement = await clientWindowClose.requestLogout(sender, token, () => {
     const result = getClientAccessController().lock(token);
+    clientSupportHost?.closeOwner(token);
     return Promise.resolve().then(async () => {
       const targets = clientWindows.entries().filter((entry) => entry.accessToken === token);
       const desktopOwners = new Set(targets.map((entry) => entry.webContentsId));
@@ -3762,11 +3800,21 @@ ipcMain.handle("octopus:client-setup-begin", async (_event, token, request) => {
 
 ipcMain.handle("octopus:client-setup-resume", async (event, token, request) => {
   getClientAccessController().requireSession(token, ["live"]);
-  return getClientSetupStore().resume(request, {
-    onProgress: (progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send("octopus:client-setup-progress", progress);
-    },
-  });
+  try {
+    const result = await getClientSetupStore().resume(request, {
+      onProgress: (progress) => {
+        latestSetupProgress = { ...progress, state: "running", at: new Date().toISOString() };
+        void appendClientLog("info", "setup.progress", progress).catch(() => {});
+        if (!event.sender.isDestroyed()) event.sender.send("octopus:client-setup-progress", progress);
+      },
+    });
+    if (latestSetupProgress) latestSetupProgress = { ...latestSetupProgress, state: result.status === "complete" ? "complete" : "paused" };
+    return result;
+  } catch (error) {
+    if (latestSetupProgress) latestSetupProgress = { ...latestSetupProgress, state: "failed", phase: "failed", at: new Date().toISOString() };
+    void appendClientLog("error", "setup.failed", { message: error instanceof Error ? error.message : String(error) }).catch(() => {});
+    throw error;
+  }
 });
 
 ipcMain.handle("octopus:scheduled-interface-mutate", async (_event, token, request) => {
@@ -4726,7 +4774,24 @@ function setApplicationMenu() {
       ],
     },
     { role: "windowMenu" },
+    {
+      label: "Help", role: "help",
+      submenu: [
+        { label: "Documentation", click: () => openHelpLink("https://github.com/miuuyy/Octopus-SI-OS/blob/main/docs/client.md") },
+        { label: "Troubleshooting", click: () => openHelpLink("https://github.com/miuuyy/Octopus-SI-OS/blob/main/TROUBLESHOOTING.md") },
+        { type: "separator" },
+        { label: "Report a Problem…", click: () => {
+          const win = BrowserWindow.getFocusedWindow();
+          const token = win ? clientWindows.entryForWebContents(win.webContents.id)?.accessToken ?? "" : "";
+          getClientSupportHost().open(token);
+        } },
+      ],
+    },
   ]));
+}
+
+function openHelpLink(url) {
+  void shell.openExternal(url).catch(() => dialog.showMessageBox({ type: "error", message: "Could not open your browser.", detail: url }));
 }
 
 function sendNativeClientCommand(command) {

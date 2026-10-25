@@ -5,6 +5,28 @@ quiet fallback. This page says where to look.
 
 ## The first five minutes
 
+In the desktop app, start with **Help → Report a Problem…**. Describe what
+you expected and what happened, review the diagnostic preview, then save the
+report. **Open GitHub draft** opens an issue containing your description
+and build details; review it, attach the saved report if appropriate, and
+submit it yourself. The app does not upload the report or post the issue.
+
+This window is independent of the main renderer and works during setup.
+Unlock as Administrator before opening it to include setup and client logs;
+otherwise it contains application facts only. It observes existing evidence
+without booting, repairing or restarting the runtime. A long-running setup
+step remains pending; 100% is reserved for a sealed setup receipt.
+
+By default, only technical metadata is collected. **Include error text** adds
+recent client errors and the setup journal's last error. Those strings can
+contain paths, request text or secrets: review them before sharing. The
+collector does not read conversations, artifacts, project files, credential
+files or environment variables. Reports are bounded observations, not a health
+verdict or a complete runtime trace. Missing or unreadable sources are named
+in the report. Use **Refresh** to capture a later snapshot.
+
+For a deeper local investigation:
+
 1. Run the doctor against the Home you are using. With the installed app:
 
    ```sh
@@ -81,9 +103,9 @@ and 256 files per package member, prioritizing differences; omitted counts are
 explicit. It is not an atomic snapshot or an edit history. Package inspection
 still hashes the selected owner folders, so a large package can take time.
 
-The ordinary Doctor and **Copy diagnostics** in Settings remain local
-diagnostics and can include private paths or details. They are not this
-redacted export. Inspect the scoped report first; if a maintainer needs a
+The ordinary Doctor and raw client logs remain local diagnostics and can
+include private paths or details. They are not the scoped configuration
+export. Inspect the scoped report first; if a maintainer needs a
 specific setting afterward, share only the relevant sanitized value.
 
 ## macOS will not open Octopus, or blocks its tools

@@ -515,8 +515,16 @@ function formatError(error: unknown) {
 
 export default defineConfig({
   base: "./",
-  plugins: [tailwindcss(), react(), octopusClientServer()],
+  plugins: [tailwindcss(), react(), octopusClientServer(), {
+    name: "support-development-csp",
+    transformIndexHtml(html, context) {
+      return context.server && context.filename === path.resolve(APP_DIR, "support.html")
+        ? html.replace("script-src 'self';", "script-src 'self' 'unsafe-inline';")
+        : html;
+    },
+  }],
   worker: { format: "es" },
+  build: { rollupOptions: { input: { main: path.resolve(APP_DIR, "index.html"), support: path.resolve(APP_DIR, "support.html") } } },
   server: { host: "127.0.0.1", port: 5174, fs: { strict: true, allow: [APP_DIR] } },
   preview: { host: "127.0.0.1", port: 4174 },
 });

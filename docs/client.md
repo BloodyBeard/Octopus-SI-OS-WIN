@@ -358,7 +358,17 @@ Extensions in that Home's `client/` directory. The launch selection and
 provider authentication live elsewhere, such as Codex credentials under
 `~/.codex`, so changing `OCTOPUS_HOME` alone does not isolate provider accounts.
 
-Use **Settings → About & Diagnostics** for build facts, Doctor, and client logs.
+Use **Help → Report a Problem…** to describe a failure, preview diagnostics,
+save or copy a report, and open a GitHub issue draft. The report has its own
+window, so it remains accessible during setup or a failure of the main
+renderer. Nothing is submitted automatically. The default report includes
+build facts, setup observations and recent client event metadata; error text
+is a separate opt-in because it may contain private data. A locked client or
+Test profile exposes application facts only. Reports do not include chat
+history, project files, credentials files or environment variables.
+
+**Settings → About & Diagnostics** opens the same report window and also
+provides Doctor and the local logs folder.
 See [Troubleshooting](../TROUBLESHOOTING.md) before sharing a report or changing
 an installation that fails. Read the [security model](security-model.md) when
 granting new capabilities.

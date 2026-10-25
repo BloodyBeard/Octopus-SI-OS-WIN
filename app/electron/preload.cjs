@@ -115,6 +115,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   appInfo() {
     return ipcRenderer.invoke("octopus:app-info");
   },
+  openProblemReport() {
+    return invokeAccess("octopus:support-open");
+  },
   runClientDoctor() {
     return invokeAccess("octopus:client-doctor");
   },

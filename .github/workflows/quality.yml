@@ -69,6 +69,8 @@ jobs:
           node scripts/test-subagent-activity.cjs
           node scripts/test-task-summary.cjs
           node scripts/test-electron-main.cjs
+          node --test scripts/test-client-support.cjs
+          node scripts/test-client-support-dom.mjs
           node scripts/test-dev-server.cjs
           node scripts/test-client-boot.cjs
           node scripts/test-chat-view.cjs
