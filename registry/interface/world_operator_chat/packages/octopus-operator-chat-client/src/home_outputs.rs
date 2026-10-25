@@ -175,7 +175,7 @@ pub(super) fn plan(
     Ok(vec![authoring, ArtifactBindingSeed { id }])
 }
 
-const AUTHORING_COORDINATE_GUIDANCE: &str = "These coordinates are authored context, not an additional grant. The current invocation metadata, worker-environment boundary and exact tool process declarations determine access. tools maps source descriptor ids to the exact tool ids configured for this run; use the model's advertised callable name. tool_scopes describes only declared path and execution rules. An exact interface override supplies a concrete path; host_binding_not_supplied means this context has no resolved machine binding for that slot. Do not guess it from the provider cwd, registry directory, project name or installation bundle. Registry roots locate installed capability records and their owned packages; they do not establish a checkout for editing the framework's source. Read a bound workspace/source artifact or inspect permitted door declarations to obtain that distinct coordinate. A missing source workspace, unresolved root or unavailable execution tool is a specific capability/configuration gap to address through authorized tools or an exact bound return interface. Read the current tool descriptor at tool_descriptor for its full argument schema, process declaration and supported kind. Obtain the current run schema from a readable bound authoring artifact or an explicitly granted schema path. When capability declarations change, read the new invocation's exact tools, bindings and bound coordinates before using them; retained context does not confer new access.";
+const AUTHORING_COORDINATE_GUIDANCE: &str = "Read authoring for this run's record paths, exact tool identities and declared scopes. Use the current callable tools and their schemas. Coordinates describe the authored installation; the current formed grant determines authority. A host_binding_not_supplied slot has no resolved path here. Inspect the relevant door when a path or execution capability is needed. Registry roots are installed state, not a source checkout. Follow the affected owner's current contract and related inputs and outputs before changing its records.";
 
 pub(super) fn plan_task_coordinates(
     registry_root: &Path,
@@ -191,7 +191,7 @@ pub(super) fn plan_task_coordinates(
         pretty_json(&json!({
             "id":id,"label":"context.reference",
             "description":"Exact run, registry, tool ids and declared filesystem scopes; read before authoring configuration or choosing a source path.",
-            "text":format!("Authoring coordinates for this run:\n{}\n\n{}", pretty_json(&authoring)?, AUTHORING_COORDINATE_GUIDANCE),
+            "text":AUTHORING_COORDINATE_GUIDANCE,
             "authoring":authoring,
         }))?,
         format!("artifact:{id}"),

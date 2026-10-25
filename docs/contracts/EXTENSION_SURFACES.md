@@ -318,6 +318,14 @@ every reachable worker pin before any dependency or activation is published.
 A future route cannot enter the live topology with an unbound mandatory role and
 thereby invalidate the run's existing input or control checkpoints.
 
+Authored run previews and publication plans also validate the complete candidate
+against each bound provider's declared authoring profile. They use the provider
+owner's topology validator, including its frontier and future checkpoint
+templates, before publishing any files. The model receives the validation
+verdict, regressions and remaining issues without repeated registry snapshots.
+This checks declarations and formation; it does not establish that a trigger
+has fired or a result reached its consumer.
+
 Intermediate provider observations are handed to their client route as soon as
 they are complete. Their delivery does not close the source. The provider keeps
 source completion on its final output or suspended external call, so reporting
