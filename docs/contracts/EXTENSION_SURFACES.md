@@ -367,6 +367,10 @@ and account paths its life may use. The bridge supplies its interface-private
 temporary directory to the CLI explicitly; the client does not copy tokens or
 choose a replacement provider.
 
+A replayed intermediate output does not establish that earlier context has been
+restored. Snapshot recovery proves inserted history entries through the checked
+source and output publications, preserving their content and order.
+
 A retained output whose original edges are still pending remains the same
 hand-in. The provider captures its artifact once and waits within its declared
 result timeout, retrying only that retained delivery identity and scope. Pending

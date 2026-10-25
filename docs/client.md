@@ -101,6 +101,10 @@ use that Primary folder and can work in the other selected folders within their
 configured access. **Full access** keeps those folders as working context and
 uses its separately selected filesystem permissions.
 
+Filesystem tools require a working folder from the selected project, Agent or
+host configuration. When none is configured, the composer explains the missing
+folder before submission; changing access settings remains available.
+
 If a manual message cannot be sent, its text returns to the composer and the
 usual error notification explains the failure. Delivery with a lost confirmation
 is checked against task history; retrying explicitly uses the same message
