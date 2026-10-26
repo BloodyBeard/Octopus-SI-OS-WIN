@@ -3913,6 +3913,9 @@ async fn actual_provider_authoring_socket(
     mut listener: octopus_local_socket::UnixListener,
 ) -> Result<(),String> {
     use futures::{SinkExt,StreamExt};
+    // A failure here drops the connection, and the client only sees a reset
+    // websocket; print the cause so the failing test shows it.
+    let served = async {
     loop {
         let stream = listener.accept().await.map_err(|e| e.to_string())?;
         let mut socket = tokio_tungstenite::accept_async(stream).await.map_err(|e| e.to_string())?;
@@ -3925,4 +3928,8 @@ async fn actual_provider_authoring_socket(
         socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&DeliveryVerdict::Admitted{seq}).unwrap().into())).await.map_err(|e| e.to_string())?;
         let _=socket.close(None).await;
     }
+    };
+    let result: Result<(),String> = served.await;
+    if let Err(error) = &result { eprintln!("provider authoring socket stopped: {error}"); }
+    result
 }
