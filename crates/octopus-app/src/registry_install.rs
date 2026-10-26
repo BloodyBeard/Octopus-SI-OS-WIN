@@ -1016,7 +1016,7 @@ fn check_publication(
     installed: Option<&InstalledFile>,
     bytes: u64,
 ) -> Result<PublicationReceipt, RegistryInstallError> {
-    if receipt.path != target
+    if !octopus_file_storage::publication::same_path(&receipt.path, target)
         || receipt.operation_id != operation_id
         || receipt.digest_algorithm != DigestAlgorithm::Sha256
         || receipt.before_hash.as_deref() != previous.map(|file| file.sha256.as_str())

@@ -59,6 +59,14 @@ pub struct PublicationReceipt {
     pub error: Option<String>,
 }
 
+/// Whether a path in a receipt names the same location as a caller's path.
+/// Receipts record one spelling; on Windows a caller may hold the same path
+/// as `\\?\C:\…` (from `canonicalize`), `C:/…` or `C:\…`. Unix compares
+/// exactly. Use this, not `==`, to match a receipt to a request.
+pub fn same_path(first: &Path, second: &Path) -> bool {
+    namespace::same_path(first, second)
+}
+
 pub fn read_receipt(path: &Path, operation_id: &str) -> io::Result<Option<PublicationReceipt>> {
     let path = &namespace::entry(path);
     namespace::validate_absolute(path)?;

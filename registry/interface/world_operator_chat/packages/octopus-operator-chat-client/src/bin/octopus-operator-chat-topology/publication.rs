@@ -57,7 +57,7 @@ fn normal_absolute(path: &Path) -> bool {
 fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 
 fn same_request(receipt: &PublicationReceipt, write: &FilePublicationWrite) -> bool {
-    receipt.digest_algorithm == DigestAlgorithm::Sha256 && receipt.path == write.path
+    receipt.digest_algorithm == DigestAlgorithm::Sha256 && octopus_file_storage::publication::same_path(&receipt.path, &write.path)
         && receipt.operation_id == write.operation_id && receipt.before_hash.as_deref() == write.expected_before_hash.as_str()
         && receipt.after_hash == write.content.as_str().map(|content| hash(content.as_bytes()))
         && receipt.bytes == write.content.as_str().map_or(0, |content| content.len() as u64)

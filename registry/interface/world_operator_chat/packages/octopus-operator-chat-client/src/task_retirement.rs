@@ -1004,7 +1004,9 @@ impl RetirementDirectoryScope {
             self.preimage(&movement.source, &movement.expected)?;
             return Ok(());
         }
-        if movement.source == self.transaction && movement.destination == self.cleanup {
+        if octopus_file_storage::publication::same_path(&movement.source, &self.transaction)
+            && octopus_file_storage::publication::same_path(&movement.destination, &self.cleanup)
+        {
             if movement.expected.entries.iter().any(|entry| {
                 entry.relative_path.starts_with("removed") && entry.relative_path != Path::new("removed")
             }) {

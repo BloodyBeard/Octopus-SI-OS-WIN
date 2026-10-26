@@ -1512,6 +1512,29 @@ pub(crate) mod test_programs {
         }
     }
 
+    /// Every file under `root` with the start of its contents, for test
+    /// failures that need to show what a life process left behind (its
+    /// captured stderr above all).
+    pub(crate) fn describe_tree(root: &std::path::Path) -> String {
+        let mut out = String::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        pending.push(entry.path());
+                    }
+                }
+                Err(_) => {
+                    let bytes = std::fs::read(&path).unwrap_or_default();
+                    let shown = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).into_owned();
+                    out.push_str(&format!("--- {} ({} bytes)\n{shown}\n", path.display(), bytes.len()));
+                }
+            }
+        }
+        out
+    }
+
     /// An existing program for lives whose executable is only resolved and
     /// checked, never run: `/usr/bin/true`, or `cmd.exe` on Windows.
     pub(crate) fn harmless() -> PathBuf {
@@ -2025,17 +2048,28 @@ mod interface_life_switch_tests {
         let (emissions_tx, mut emissions_rx) = tokio::sync::mpsc::channel(4);
         let mut boot_events = Vec::new();
         let mut report_boot_event = |event| boot_events.push(event);
-        let handle = prepare_interface_activation_reconciler(
-            root.join("registry"),
-            root.to_path_buf(),
-            tx,
-            emissions_tx,
-            cancel.clone(),
-            root.join("home"),
-            Some(durable_root),
-            Some(&mut report_boot_event),
+        // Initial readiness has no deadline of its own; a life that never
+        // reports ready would otherwise hang the test with no evidence.
+        let handle = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            prepare_interface_activation_reconciler(
+                root.join("registry"),
+                root.to_path_buf(),
+                tx,
+                emissions_tx,
+                cancel.clone(),
+                root.join("home"),
+                Some(durable_root),
+                Some(&mut report_boot_event),
+            ),
         )
         .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "interface lives did not report initial readiness within 30s; their private state:\n{}",
+                crate::test_programs::describe_tree(&root.join("home"))
+            )
+        })
         .unwrap();
         drop(report_boot_event);
         assert_eq!(handle.initial_task_count, 1);

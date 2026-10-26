@@ -134,7 +134,7 @@ fn acquire_publication(target: &Path, before_hash: Option<&str>, roots: &[AbsPat
 
 fn check_publication(receipt: &PublicationReceipt, operation: &str, path: &Path, before: Option<&str>, after: &str, bytes: u64) -> Result<(), String> {
     if receipt.digest_algorithm != DigestAlgorithm::Blake3
-        || receipt.operation_id != operation || receipt.path != path
+        || receipt.operation_id != operation || !octopus_file_storage::publication::same_path(&receipt.path, path)
         || receipt.before_hash.as_deref() != before || receipt.after_hash.as_deref() != Some(after)
         || receipt.bytes != bytes || (receipt.outcome == PublicationOutcome::Applied && receipt.error.is_some())
     {

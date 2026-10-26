@@ -1098,7 +1098,7 @@ impl OrderedArguments {
             return Err("ordered result has a different operation or entry count".into());
         }
         for ((entry, receipt), (before, content)) in [advance, edit].into_iter().zip(&body.writes).zip(&decoded) {
-            if receipt.path != entry.path()
+            if !octopus_private_fs::same_path(&receipt.path, entry.path())
                 || receipt.before_hash.as_deref()
                     != Some(
                         &ContentHash::of_bytes(before.as_bytes()).to_hex(),

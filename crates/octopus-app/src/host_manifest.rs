@@ -480,6 +480,17 @@ mod tests {
         .expect("write git wek descriptor");
     }
 
+
+    /// An absolute fixture path that names nothing on disk: `/abs/<name>`,
+    /// or `C:\abs\<name>` on Windows, where `/abs/…` has no drive and is
+    /// not absolute.
+    fn abs(name: &str) -> String {
+        #[cfg(windows)]
+        return format!(r"C:\abs\{name}");
+        #[cfg(not(windows))]
+        format!("/abs/{name}")
+    }
+
     #[test]
     fn worker_environment_slots_are_collected_beside_required_state_slots() {
         let dir = tempfile::tempdir().expect("temp registry");
@@ -672,11 +683,11 @@ mod tests {
             serde_json::to_vec_pretty(&serde_json::json!({
                 "host_manifest_version": HOST_MANIFEST_VERSION,
                 "root_refs": {
-                    "pointer_root": "/abs/pointer",
-                    "source_tree": "/abs/source",
-                    "run_records_root": "/abs/runs",
-                    "ee_instances_root": "/abs/ees",
-                    "timezone_database_root": "/abs/timezone"
+                    "pointer_root": abs("pointer"),
+                    "source_tree": abs("source"),
+                    "run_records_root": abs("runs"),
+                    "ee_instances_root": abs("ees"),
+                    "timezone_database_root": abs("timezone")
                 }
             }))
             .unwrap(),
@@ -688,7 +699,7 @@ mod tests {
         let manifest = read_host_manifest(&host_manifest_path(home)).unwrap();
         assert_eq!(
             manifest.root_refs.get("timezone_database_root"),
-            Some(&PathBuf::from("/abs/timezone"))
+            Some(&PathBuf::from(abs("timezone")))
         );
     }
 
@@ -703,11 +714,11 @@ mod tests {
             serde_json::to_vec_pretty(&serde_json::json!({
                 "host_manifest_version": HOST_MANIFEST_VERSION,
                 "root_refs": {
-                    "pointer_root": "/abs/pointer",
-                    "source_tree": "/abs/source",
-                    "room_root": "/abs/room",
-                    "run_records_root": "/abs/runs",
-                    "ee_instances_root": "/abs/ees"
+                    "pointer_root": abs("pointer"),
+                    "source_tree": abs("source"),
+                    "room_root": abs("room"),
+                    "run_records_root": abs("runs"),
+                    "ee_instances_root": abs("ees")
                 }
             }))
             .unwrap(),
@@ -718,11 +729,11 @@ mod tests {
         let slots = resolved.slots();
         assert_eq!(
             slots.get("source_tree").map(PathBuf::as_path),
-            Some(Path::new("/abs/source"))
+            Some(Path::new(&abs("source")))
         );
         assert_eq!(
             slots.get("room_root").map(PathBuf::as_path),
-            Some(Path::new("/abs/room"))
+            Some(Path::new(&abs("room")))
         );
         assert!(!slots.contains_key("base"));
         assert_eq!(slots.get("protected_metadata"), None);
@@ -739,11 +750,11 @@ mod tests {
             serde_json::to_vec_pretty(&serde_json::json!({
                 "host_manifest_version": HOST_MANIFEST_VERSION,
                 "root_refs": {
-                    "pointer_root": "/abs/pointer",
+                    "pointer_root": abs("pointer"),
                     "source_tree": "relative/source",
-                    "room_root": "/abs/room",
-                    "run_records_root": "/abs/runs",
-                    "protected_metadata": "/abs/protected"
+                    "room_root": abs("room"),
+                    "run_records_root": abs("runs"),
+                    "protected_metadata": abs("protected")
                 }
             }))
             .unwrap(),
