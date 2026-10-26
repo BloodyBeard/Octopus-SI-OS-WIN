@@ -141,9 +141,22 @@ impl ProcessAuthority {
     ) -> Result<PreparedProcess, String> {
         let cwd = normalize_existing_directory(cwd)?;
         let executable = resolve_executable(declared_program, &cwd, search_path)?;
+        // Windows starts a `#!` script through its interpreter.
+        #[cfg(windows)]
+        let (program, args) = match windows_script_launch(&executable, &cwd, search_path)? {
+            Some((interpreter, mut launch)) => {
+                launch.extend(args.iter().cloned());
+                (interpreter, launch)
+            }
+            None => (executable.clone(), args.to_vec()),
+        };
+        #[cfg(windows)]
+        let args = args.as_slice();
+        #[cfg(not(windows))]
+        let program = executable.clone();
         if self.sandbox_mode == octopus_descriptors::ProcessSandboxMode::Disabled {
             return Ok(PreparedProcess {
-                program: executable.clone(),
+                program: program.clone(),
                 args: args.to_vec(),
                 executable,
                 environment: BTreeMap::new(),
@@ -168,7 +181,7 @@ impl ProcessAuthority {
             }
             warn_unsandboxed_once();
             Ok(PreparedProcess {
-                program: executable.clone(),
+                program,
                 args: args.to_vec(),
                 executable,
                 environment: BTreeMap::new(),
@@ -542,6 +555,13 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
         let search_path = environment.get("PATH").map(OsString::as_os_str);
         let mut executable_links = BTreeSet::new();
         for command in &self.executable_commands {
+            // Windows: `#!/usr/bin/env NAME` is carried out by the runner's own
+            // PATH lookup (see `windows_script_launch`), so env names nothing
+            // to run there.
+            #[cfg(windows)]
+            if command.trim() == "/usr/bin/env" {
+                continue;
+            }
             executable.insert(resolve_executable(command, &repository_root, search_path)?);
             executable_links.extend(search_path_links(command, search_path)?);
         }
@@ -952,6 +972,10 @@ pub fn resolve_executable(
     if declared.is_empty() {
         return Err("process executable is empty".to_string());
     }
+    // Windows has no /bin or /usr/bin: a POSIX interpreter path such as
+    // /bin/sh or /usr/bin/python3 names a program found on PATH there.
+    #[cfg(windows)]
+    let declared = windows_posix_program_name(declared).unwrap_or(declared);
     let path = Path::new(declared);
     let candidate = if path.is_absolute() {
         path.to_path_buf()
@@ -971,7 +995,7 @@ pub fn resolve_executable(
             format!("process executable '{declared}' requires declared PATH resolution")
         })?;
         std::env::split_paths(&search_path)
-            .map(|root| root.join(path))
+            .flat_map(|root| search_path_candidates(&root, path))
             .find(|candidate| executable_file(candidate))
             .ok_or_else(|| format!("process executable '{declared}' is absent from PATH"))?
     };
@@ -1051,7 +1075,7 @@ fn search_path_links(
     }
     let Some(mut current) = search_path.and_then(|search_path| {
         std::env::split_paths(search_path)
-            .map(|root| root.join(path))
+            .flat_map(|root| search_path_candidates(&root, path))
             .find(|candidate| executable_file(candidate))
     }) else {
         return Ok(links);
@@ -1111,6 +1135,81 @@ fn executable_file(path: &Path) -> bool {
     {
         true
     }
+}
+
+/// Where `name` may be found in one PATH directory. Windows also tries the
+/// extensions in PATHEXT (`python3` is `python3.exe`), as its own command
+/// lookup does, when the name has none.
+fn search_path_candidates(root: &Path, name: &Path) -> Vec<PathBuf> {
+    let candidates = vec![root.join(name)];
+    #[cfg(windows)]
+    let candidates = {
+        let mut candidates = candidates;
+        if name.extension().is_none() {
+            let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            for extension in extensions.split(';').filter(|extension| extension.starts_with('.')) {
+                let mut file = name.as_os_str().to_os_string();
+                file.push(extension.to_ascii_lowercase());
+                candidates.push(root.join(file));
+            }
+        }
+        candidates
+    };
+    candidates
+}
+
+/// The program name in a POSIX absolute path (`/bin/sh` is `sh`), which on
+/// Windows has no drive and names nothing on disk.
+#[cfg(windows)]
+fn windows_posix_program_name(declared: &str) -> Option<&str> {
+    let rest = declared.strip_prefix('/')?;
+    if rest.starts_with('/') {
+        return None;
+    }
+    rest.rsplit('/').next().filter(|name| !name.is_empty())
+}
+
+/// How to start a `#!` script on Windows, which, unlike a Unix kernel, does
+/// not read the line itself: the interpreter (with its optional argument)
+/// then the script. `#!/usr/bin/env NAME` looks NAME up on PATH, as env
+/// would; a POSIX interpreter path is looked up by its file name. A native
+/// executable needs no interpreter.
+#[cfg(windows)]
+fn windows_script_launch(
+    executable: &Path,
+    cwd: &Path,
+    search_path: Option<&OsStr>,
+) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
+    use std::io::Read;
+    let mut prefix = [0_u8; 4096];
+    let length = std::fs::File::open(executable)
+        .and_then(|mut file| file.read(&mut prefix))
+        .map_err(|error| format!("process executable '{}' cannot be inspected: {error}", executable.display()))?;
+    let prefix = &prefix[..length];
+    if !prefix.starts_with(b"#!") {
+        return Ok(None);
+    }
+    let line = &prefix[2..prefix.iter().position(|byte| *byte == b'\n').unwrap_or(prefix.len())];
+    let line = std::str::from_utf8(line)
+        .map_err(|_| format!("process script '{}' interpreter line is not UTF-8", executable.display()))?
+        .trim();
+    let mut words = line.split_whitespace();
+    let interpreter = words
+        .next()
+        .ok_or_else(|| format!("process script '{}' has an empty interpreter declaration", executable.display()))?;
+    let (program, argument) = if interpreter == "/usr/bin/env" {
+        let command = words
+            .next()
+            .ok_or_else(|| format!("process script '{}' names no command after /usr/bin/env", executable.display()))?;
+        (command, words.next())
+    } else {
+        (interpreter, words.next())
+    };
+    let program = resolve_executable(program, cwd, search_path)?;
+    let mut args = Vec::new();
+    args.extend(argument.map(OsString::from));
+    args.push(executable.as_os_str().to_os_string());
+    Ok(Some((program, args)))
 }
 
 #[cfg(target_os = "macos")]
@@ -2739,5 +2838,34 @@ mod search_path_link_tests {
         };
         assert!(run("octopus-linked-probe"));
         assert!(!run("octopus-neighbour"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_script_tests {
+    use super::*;
+
+    #[test]
+    fn shebang_scripts_start_through_their_interpreter_found_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let search_path = std::env::join_paths([system.clone()]).unwrap();
+        // `#!/usr/bin/env cmd /c`: cmd is found on PATH through PATHEXT.
+        let script = dir.path().join("verify");
+        std::fs::write(&script, "#!/usr/bin/env cmd /c\r\necho ok\r\n").unwrap();
+        let (program, args) = windows_script_launch(&script, dir.path(), Some(&search_path)).unwrap().unwrap();
+        assert!(program.file_name().unwrap().eq_ignore_ascii_case("cmd.exe"), "{program:?}");
+        assert_eq!(args, vec![OsString::from("/c"), script.clone().into_os_string()]);
+        // A POSIX interpreter path is looked up by its file name.
+        std::fs::write(&script, "#!/usr/bin/cmd\n").unwrap();
+        let (program, _) = windows_script_launch(&script, dir.path(), Some(&search_path)).unwrap().unwrap();
+        assert!(program.file_name().unwrap().eq_ignore_ascii_case("cmd.exe"), "{program:?}");
+        // A program that is not on PATH says so.
+        std::fs::write(&script, "#!/usr/bin/env octopus-no-such-program\n").unwrap();
+        assert!(windows_script_launch(&script, dir.path(), Some(&search_path)).unwrap_err().contains("absent from PATH"));
+        // A native executable needs no interpreter.
+        assert!(windows_script_launch(&system.join("cmd.exe"), dir.path(), Some(&search_path)).unwrap().is_none());
+        assert_eq!(windows_posix_program_name("/usr/bin/python3"), Some("python3"));
+        assert_eq!(windows_posix_program_name(r"C:\tools\python.exe"), None);
     }
 }
