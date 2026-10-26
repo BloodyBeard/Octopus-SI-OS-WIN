@@ -134,7 +134,7 @@ impl WorkerEnvDriver for RecordingDriver {
 }
 
 fn ctx_at(root: &str) -> EnvContext {
-    let root = AbsPath::new(Path::new(root)).unwrap();
+    let root = AbsPath::new(&host(root)).unwrap();
     EnvContext {
         additional_root_slots: Default::default(),
         root_slots: BTreeMap::from([("repo_root".to_string(), root)]),
@@ -143,12 +143,12 @@ fn ctx_at(root: &str) -> EnvContext {
 }
 
 fn ctx_with_door_slots(root: &str, door_slots: &[&str]) -> EnvContext {
-    let root_path = AbsPath::new(Path::new(root)).unwrap();
+    let root_path = AbsPath::new(&host(root)).unwrap();
     let mut root_slots = BTreeMap::from([("repo_root".to_string(), root_path)]);
     for (index, slot) in door_slots.iter().enumerate() {
         root_slots.insert(
             (*slot).to_string(),
-            AbsPath::new(Path::new(&format!("{root}/door-{index}"))).unwrap(),
+            AbsPath::new(&host(&format!("{root}/door-{index}"))).unwrap(),
         );
     }
     EnvContext {
@@ -160,28 +160,28 @@ fn ctx_with_door_slots(root: &str, door_slots: &[&str]) -> EnvContext {
 
 #[test]
 fn abs_path_lexical_boundary_holds() {
-    let root = AbsPath::new(Path::new("/srv/work")).unwrap();
-    let inside = AbsPath::new(Path::new("/srv/work/sub/file.txt")).unwrap();
+    let root = AbsPath::new(&host("/srv/work")).unwrap();
+    let inside = AbsPath::new(&host("/srv/work/sub/file.txt")).unwrap();
     assert!(inside.is_within(&root));
 
-    let sibling = AbsPath::new(Path::new("/srv/workshop/x")).unwrap();
+    let sibling = AbsPath::new(&host("/srv/workshop/x")).unwrap();
     assert!(
         !sibling.is_within(&root),
         "sibling-prefix path rejected (the starts_with trap)"
     );
 
-    let escaped = AbsPath::new(Path::new("/srv/work/../../etc/passwd")).unwrap();
-    assert_eq!(escaped.as_str(), "/etc/passwd");
+    let escaped = AbsPath::new(&host("/srv/work/../../etc/passwd")).unwrap();
+    assert_eq!(escaped.as_str(), host_str("/etc/passwd"));
     assert!(!escaped.is_within(&root));
-    assert!(AbsPath::new(Path::new("/../..")).is_err());
-    assert!(AbsPath::new(Path::new("relative")).is_err());
+    assert!(AbsPath::new(&host("/../..")).is_err());
+    assert!(AbsPath::new(&host("relative")).is_err());
 }
 
 #[test]
 fn projected_sandbox_authorize_is_the_enforcement_contract() {
-    let wt = AbsPath::new(Path::new("/srv/wt")).unwrap();
-    let dot_git = AbsPath::new(Path::new("/srv/wt/.git")).unwrap();
-    let repo = AbsPath::new(Path::new("/srv/repo")).unwrap();
+    let wt = AbsPath::new(&host("/srv/wt")).unwrap();
+    let dot_git = AbsPath::new(&host("/srv/wt/.git")).unwrap();
+    let repo = AbsPath::new(&host("/srv/repo")).unwrap();
     let sandbox = ProjectedSandbox::from_parts(
         vec![wt.clone()],
         vec![dot_git.clone()],
@@ -190,21 +190,21 @@ fn projected_sandbox_authorize_is_the_enforcement_contract() {
     );
 
     sandbox
-        .authorize_write(&AbsPath::new(Path::new("/srv/wt/a.txt")).unwrap())
+        .authorize_write(&AbsPath::new(&host("/srv/wt/a.txt")).unwrap())
         .unwrap();
     assert!(matches!(
-        sandbox.authorize_write(&AbsPath::new(Path::new("/srv/wt/.git/config")).unwrap()),
+        sandbox.authorize_write(&AbsPath::new(&host("/srv/wt/.git/config")).unwrap()),
         Err(WorkerEnvError::WriteOutsideRoots(_))
     ));
     assert!(matches!(
-        sandbox.authorize_write(&AbsPath::new(Path::new("/srv/repo/x")).unwrap()),
+        sandbox.authorize_write(&AbsPath::new(&host("/srv/repo/x")).unwrap()),
         Err(WorkerEnvError::WriteOutsideRoots(_))
     ));
     sandbox
-        .authorize_read(&AbsPath::new(Path::new("/srv/repo/x")).unwrap())
+        .authorize_read(&AbsPath::new(&host("/srv/repo/x")).unwrap())
         .unwrap();
     assert!(matches!(
-        sandbox.authorize_read(&AbsPath::new(Path::new("/etc/passwd")).unwrap()),
+        sandbox.authorize_read(&AbsPath::new(&host("/etc/passwd")).unwrap()),
         Err(WorkerEnvError::ReadOutsideRoots(_))
     ));
 }
@@ -336,7 +336,7 @@ fn exact_door_and_worker_are_formed_from_the_concrete_grant_not_the_shared_kind(
             granted_worker_environment_kinds: &kinds,
             granted_tools: &tools,
             door_root_bindings: &root_bindings,
-            door_instance_dir: Path::new("."),
+            door_instance_dir: &host("."),
             ee_root_slot_allowance: None,
         })
     };
@@ -414,7 +414,7 @@ fn assemble_fails_closed_when_kind_requires_release_and_driver_has_no_hook() {
         id,
         WorkerEnvironmentParts {
             sandbox: ProjectedSandbox::from_parts(vec![], vec![], vec![], NetworkCeiling::Denied),
-            cwd: AbsPath::new(Path::new("/srv")).unwrap(),
+            cwd: AbsPath::new(&host("/srv")).unwrap(),
             fs: Arc::new(RefusingFs),
             release: None,
         },
@@ -518,11 +518,11 @@ fn formation_identity_is_room_wide_across_tools() {
     assert_eq!(exec.tool_descriptor_hashes.len(), 3);
     assert_eq!(
         exec.door_root_bindings.get("coder.worktree_path"),
-        Some(&Path::new("/srv/room/door-0").to_path_buf())
+        Some(&host("/srv/room/door-0"))
     );
     assert_ne!(exec.worker_environment_id, moved.worker_environment_id);
     let mut expanded = ctx.clone();
-    expanded.additional_root_slots.insert("coder.worktree_path".into(), vec![AbsPath::new(Path::new("/srv/second-project")).unwrap()]);
+    expanded.additional_root_slots.insert("coder.worktree_path".into(), vec![AbsPath::new(&host("/srv/second-project")).unwrap()]);
     let multiple = worktree_formation(&reg, &expanded, None, "coder.exec");
     multiple.validate().unwrap();
     assert_ne!(multiple.formation_pin, exec.formation_pin);
@@ -717,7 +717,7 @@ fn lease_rejects_a_door_root_coordinate_changed_after_formation() {
     let result = block_on(crate::lease(&spec, &formation, driver, changed_ctx, None));
     assert!(matches!(result, Err(WorkerEnvError::MalformedFormation(_))));
     let mut changed_ctx = formed_ctx.clone();
-    changed_ctx.additional_root_slots.insert("coder.worktree_path".into(), vec![AbsPath::new(Path::new("/srv/unformed")).unwrap()]);
+    changed_ctx.additional_root_slots.insert("coder.worktree_path".into(), vec![AbsPath::new(&host("/srv/unformed")).unwrap()]);
     let result = block_on(crate::lease(&spec, &formation, Arc::new(RecordingDriver {
         family: "process_exec", seen_caps: std::sync::Mutex::new(None), seen_root_bindings: std::sync::Mutex::new(None),
     }), changed_ctx, None));
@@ -864,4 +864,14 @@ fn worker_environment_identity_cannot_escape_the_record_store() {
         serde_json::from_str::<WorkerEnvironmentId>(&serde_json::to_string(&id).unwrap()).unwrap(),
         id
     );
+}
+
+/// The fixtures name POSIX paths. On Windows they live on drive `C:`, the
+/// same paths with a drive root, since `/srv/room` is not absolute there.
+fn host(posix: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(host_str(posix))
+}
+
+fn host_str(posix: &str) -> String {
+    if cfg!(windows) && posix.starts_with('/') { format!("C:{posix}") } else { posix.to_string() }
 }

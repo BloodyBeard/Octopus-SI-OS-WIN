@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::Path;
 
 use octopus_tool_door_runtime::ToolProcessEnvironment;
 use octopus_worker_env::{WorkerEnvKindSpec, WorkerEnvironmentFormation};
@@ -540,25 +540,23 @@ fn normalize_roots(field: &str, values: &[String]) -> Result<Vec<String>, String
 
 pub fn normalize_container_path(value: &str) -> Result<String, String> {
     validate_atom("path", value, 4096)?;
-    let path = Path::new(value);
-    if !path.is_absolute() {
+    // A path inside the Linux container: POSIX on every host, so it is parsed
+    // as text rather than with the host's path rules (Windows would call
+    // `/srv/room` relative).
+    let Some(rest) = value.strip_prefix('/') else {
         return Err("container path must be absolute".to_string());
-    }
+    };
     let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(part) => {
-                let part = part
-                    .to_str()
-                    .ok_or_else(|| "container path must be UTF-8".to_string())?;
-                if part.is_empty() || part == "." || part == ".." {
-                    return Err("container path contains an invalid component".to_string());
-                }
-                parts.push(part);
-            }
-            _ => return Err("container path contains a non-normal component".to_string()),
+    for part in rest.split('/') {
+        // Like `Path::components`: repeated or trailing slashes and `.` are
+        // skipped, `..` is refused.
+        if part.is_empty() || part == "." {
+            continue;
         }
+        if part == ".." {
+            return Err("container path contains a non-normal component".to_string());
+        }
+        parts.push(part);
     }
     if parts.is_empty() {
         return Ok("/".to_string());

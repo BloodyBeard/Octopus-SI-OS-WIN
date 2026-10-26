@@ -48,7 +48,7 @@ fn valid_hash(value: &serde_json::Value) -> bool {
 }
 
 fn normal_absolute(path: &Path) -> bool {
-    path.is_absolute() && path.components().all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+    path.is_absolute() && path.components().all(|part| matches!(part, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
         && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str()
         && !path.as_os_str().as_encoded_bytes().contains(&0)
         && !path.components().any(|part| part.as_os_str() == publication::COORDINATION_DIRECTORY)

@@ -120,12 +120,14 @@ impl AbsPath {
             return Err(WorkerEnvError::NonAbsolutePath(p.display().to_string()));
         }
         let mut stack: Vec<String> = Vec::new();
+        let mut root = String::new();
         for comp in p.components() {
             match comp {
                 Component::RootDir => {}
                 Component::CurDir => {}
-                Component::Prefix(_) => {
-                    return Err(WorkerEnvError::NonAbsolutePath(p.display().to_string()));
+                Component::Prefix(prefix) => {
+                    root = windows_root(prefix.kind())
+                        .ok_or_else(|| WorkerEnvError::NonAbsolutePath(p.display().to_string()))?;
                 }
                 Component::ParentDir => {
                     if stack.pop().is_none() {
@@ -143,7 +145,7 @@ impl AbsPath {
                 }
             }
         }
-        Ok(Self(format!("/{}", stack.join("/"))))
+        Ok(Self(format!("{root}/{}", stack.join("/"))))
     }
     pub fn as_path(&self) -> &Path {
         Path::new(&self.0)
@@ -158,6 +160,25 @@ impl AbsPath {
             return false;
         }
         root_segs.iter().zip(child_segs.iter()).all(|(r, c)| r == c)
+    }
+}
+
+/// The root an absolute Windows path starts from, written with `/`: `C:`
+/// (drive letter upper-cased) or `//server/share`. The `\\?\` forms that
+/// `canonicalize` returns name the same roots. Device paths (`\\.\`) and
+/// other verbatim namespaces are not file-system roots and are refused. Unix
+/// paths have no prefix, so their root stays empty and they keep the `/a/b`
+/// form.
+fn windows_root(prefix: std::path::Prefix<'_>) -> Option<String> {
+    use std::path::Prefix;
+    match prefix {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) if letter.is_ascii_alphabetic() => {
+            Some(format!("{}:", letter.to_ascii_uppercase() as char))
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            Some(format!("//{}/{}", server.to_str()?, share.to_str()?))
+        }
+        _ => None,
     }
 }
 
@@ -255,4 +276,26 @@ pub enum WorkerEnvError {
     ArtifactSurfaceFailed(String),
     #[error("worker-environment record failed at {path}: {reason}")]
     RecordFailed { path: String, reason: String },
+}
+
+#[cfg(all(test, windows))]
+mod windows_abs_path_tests {
+    use super::AbsPath;
+    use std::path::Path;
+
+    #[test]
+    fn drive_and_share_roots_are_kept() {
+        let plain = AbsPath::new(Path::new(r"c:\Users\Me\work")).unwrap();
+        assert_eq!(plain.as_str(), "C:/Users/Me/work");
+        let verbatim = AbsPath::new(Path::new(r"\\?\C:\Users\Me\work")).unwrap();
+        assert_eq!(verbatim, plain);
+        assert!(AbsPath::new(Path::new(r"C:\Users\Me\work\file.txt")).unwrap().is_within(&plain));
+        assert!(!AbsPath::new(Path::new(r"D:\Users\Me\work")).unwrap().is_within(&plain));
+        let share = AbsPath::new(Path::new(r"\\server\share\dir")).unwrap();
+        assert_eq!(share.as_str(), "//server/share/dir");
+        assert_eq!(AbsPath::new(Path::new(r"\\?\UNC\server\share\dir")).unwrap(), share);
+        assert!(AbsPath::new(Path::new(r"\\.\pipe\name")).is_err());
+        assert!(AbsPath::new(Path::new(r"C:\a\..\..\b")).is_err());
+        assert_eq!(AbsPath::new(Path::new(r"C:\a\..\b")).unwrap().as_path(), Path::new("C:/b"));
+    }
 }

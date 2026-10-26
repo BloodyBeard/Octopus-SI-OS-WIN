@@ -771,7 +771,7 @@ fn normal_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute()
         || path
             .components()
-            .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+            .any(|part| !matches!(part, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
     {
         return Err("run revision requires normal absolute paths".into());
     }

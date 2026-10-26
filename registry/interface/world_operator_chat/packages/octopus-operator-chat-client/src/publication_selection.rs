@@ -936,6 +936,12 @@ fn regular_path(path: &Path) -> Result<(), String> {
     for component in path.components() {
         match component {
             Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
+            // A Windows drive or share (`C:`, `\\?\C:`); the root after it is
+            // checked like any other directory.
+            Component::Prefix(_) => {
+                current.push(component.as_os_str());
+                continue;
+            }
             _ => return Err(format!("unsafe publication path '{}'", path.display())),
         }
         match std::fs::symlink_metadata(&current) {

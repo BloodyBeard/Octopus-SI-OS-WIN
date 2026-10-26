@@ -436,7 +436,7 @@ impl ConsentOffer {
 
 #[doc(hidden)]
 pub fn normal_path(path: &Path) -> bool {
-    path.is_absolute() && path.components().all(|p| matches!(p, Component::RootDir | Component::Normal(_)))
+    path.is_absolute() && path.components().all(|p| matches!(p, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
 }
 
 #[doc(hidden)]

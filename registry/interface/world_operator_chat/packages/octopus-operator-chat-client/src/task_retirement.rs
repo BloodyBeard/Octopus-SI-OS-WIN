@@ -960,7 +960,7 @@ impl RetirementDirectoryScope {
 
     fn path(&self, path: &Path) -> Result<(), String> {
         let text = path.to_str().ok_or("retirement directory path must be UTF-8")?;
-        if !path.is_absolute() || path.components().any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+        if !path.is_absolute() || path.components().any(|part| !matches!(part, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
             || text.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
             || text.contains('\\') || text.chars().any(char::is_control)
             || path.components().any(|part| matches!(part.as_os_str().to_str(), Some(".octopus-publication" | ".life-ownership")))
