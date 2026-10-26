@@ -69,6 +69,10 @@ measured yet.
   always passes and `#!` scripts cannot be spawned (`EFTYPE`), so the
   managed Codex CLI path needs `.exe`/`.cmd` resolution. `test-client-provider-metadata.cjs`
   fails on Windows for the same reason: its fixture is a `#!` script.
+- Fixed: `app/vite.config.ts` derived its folder from `new URL(import.meta.url).pathname`,
+  which gives `/C:/...` on Windows and broke `vite build`/`vite dev`. It now uses
+  `fileURLToPath`. With this and the LF fix, `npm --prefix app run build` passes on Windows.
+- Llama 3.1 8B on llama.cpp (`--jinja`) returns valid tool calls (checked on Windows).
 - Fixed: content-hashed files (theme sources, notices, schemas) broke on Windows
   clones with `core.autocrlf=true`. `.gitattributes` now forces LF checkouts.
 - The launcher `./octopus` is a POSIX shell script. Windows needs an

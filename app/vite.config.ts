@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -9,7 +10,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 const require = createRequire(import.meta.url);
 const COOKIE_NAME = "octopus_client_access";
-const APP_DIR = path.dirname(new URL(import.meta.url).pathname);
+const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 function octopusClientServer(): Plugin {
   return {
