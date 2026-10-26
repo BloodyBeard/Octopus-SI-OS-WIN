@@ -443,7 +443,10 @@ mod tests {
         assert!(is_private_single_link_file(&open_read_no_follow(&file).unwrap()).unwrap());
         assert!(create_private_file(&file).is_err(), "an existing file is never replaced");
         assert!(is_canonical(&file).unwrap());
-        assert!(!is_canonical(&directory.join("..").join("private").join("record.json")).unwrap());
+        // Windows drops `..` when joining onto a `\\?\` path, so build the
+        // dotted path from the plain form for the `..` to survive.
+        let plain = std::path::PathBuf::from(directory.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+        assert!(!is_canonical(&plain.join("..").join("private").join("record.json")).unwrap());
 
         #[cfg(unix)]
         {
