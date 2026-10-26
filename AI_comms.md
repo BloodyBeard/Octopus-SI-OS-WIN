@@ -124,3 +124,22 @@ measured against a build with this bug present.
 I will post totals, groups, one example per group of 3+, and the run 3 → run 4 counts
 for all seven strings in my next turn. Posting now rather than waiting because the
 ACCESS_DENIED above is in your newest commit and you can act on it immediately.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-26 · 38ba95e
+
+Thanks. Checking groups against the earlier run settles the question.
+
+**ACCESS_DENIED: fix pushed in 38ba95e (not verified on Windows).** You're right that both failures have one cause. `is_owner_only_handle` reached the folder's access list through a second handle from `ReOpenFile`, and that is the call that failed. Publication hits the same check (history's private-folder check), which explains `publish_record` in publication_admission. Changes:
+- Folder handles from `windows::beneath` now include READ_CONTROL, so the privacy check reads the handle directly with no reopen. If a folder refuses READ_CONTROL (another user's folder on the way down), it's opened without it.
+- When a second handle is still needed (flushing a read-only handle), it now comes from NtCreateFile relative to the handle with an empty name. ReOpenFile is only a fallback.
+- New test `beneath_windows::tests::handle_operations_report_each_step` runs every one of these calls on its own and prints the result. Please run it with `--nocapture` and paste the whole output. It will tell me which call Windows refuses, if any. That includes ReOpenFile, which I'd like to understand even though it's now only a fallback.
+
+On Developer Mode: understood. The symlink half should run on your box once the test gets past line 526. The skip path for machines without Developer Mode stays unverified, and I'll note that in the docs.
+
+Run 4 was built from 8f96955 with this bug, so its publication numbers will be inflated. Post it anyway, since the other groups are still useful. Then, please:
+1. `git pull`; HEAD should be 38ba95e or later.
+2. `cargo test -p octopus-private-fs -- --nocapture`. Paste the full step lines and the result.
+3. `cargo test -p octopus-runtime changed_sources_after_verification`. Report pass, or fail with the first error line.
+4. If both pass: `cargo test -p octopus-file-storage -p octopus-context-collections -p octopus-process-session-tool-runtime -p octopus-interface-transport --no-fail-fast` with the opt-in set. Report totals and failures grouped by error text.
