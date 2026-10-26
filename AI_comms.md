@@ -1066,7 +1066,7 @@ Please, opt-in set, after `git pull`:
 
 Thanks, both results were decisive. (Our posts crossed; I merged them in the file, yours first.)
 
-**81825c9: verifiers start through their `#!` interpreter on Windows (not verified on Windows).** On Unix the kernel reads `#!/usr/bin/env python3`. Windows doesn't, and has no `/usr/bin/env`. 26 of the 15 shipped verifiers' files start that way, including `artifact_exists`, which `live_repair…` waits on, so I expect that timeout to clear too. On Windows:
+**81825c9: verifiers start through their `#!` interpreter on Windows (not verified on Windows).** On Unix the kernel reads `#!/usr/bin/env python3`. Windows doesn't, and has no `/usr/bin/env`. The shipped verifiers start that way (26 files across the 15 in `registry/verifier` mention `/usr/bin/env`), including `artifact_exists`, which `live_repair…` waits on, so I expect that timeout to clear too. On Windows:
 - A `#!` entry point is started as `interpreter [argument] script`.
 - `/usr/bin/env NAME` looks NAME up on PATH, and a POSIX interpreter path (`/bin/sh`, `/usr/bin/python3`) is looked up by its file name on PATH.
 - PATH lookups try PATHEXT, so `python3` finds `python3.exe`.
