@@ -1,15 +1,13 @@
 use std::io;
 use std::path::Path;
 
+use std::fs::File;
 #[cfg(unix)]
-use std::fs::{File, Metadata};
-#[cfg(unix)]
+use std::fs::Metadata;
 use std::path::{Component, PathBuf};
 
 pub struct RuntimeInstanceLock {
-    #[cfg(unix)]
     directories: Vec<(PathBuf, File)>,
-    #[cfg(unix)]
     file: File,
 }
 
@@ -48,10 +46,42 @@ impl RuntimeInstanceLock {
             guard.directories.last().unwrap().1.sync_all()?;
             Ok(guard)
         }
-        #[cfg(not(unix))]
+        // Windows: the same walk from the drive root. Each folder is held
+        // by a handle to the folder itself (never through a symlink or
+        // junction) and checked by volume serial number and file ID.
+        #[cfg(windows)]
         {
-            let _ = home;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "exact runtime ownership requires native file identity"))
+            use fs2::FileExt;
+            use std::os::windows::fs::OpenOptionsExt;
+            if !home.is_absolute()
+                || home.components().any(|part| !matches!(part, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
+            {
+                return Err(invalid("runtime ownership requires an absolute normalized Home"));
+            }
+            let parent = home.join("state");
+            let mut path = PathBuf::new();
+            let mut directories = Vec::new();
+            for part in parent.components() {
+                path.push(part);
+                if matches!(part, Component::Prefix(_)) { continue; }
+                if let Component::Normal(_) = part {
+                    match std::fs::create_dir(&path) {
+                        Ok(()) => sync_parent(&path)?,
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                directories.push((path.clone(), hold_directory(&path)?));
+            }
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path.join("runtime-instance.lock"))?;
+            if !file.metadata()?.is_file() { return Err(invalid("runtime ownership lock is not a regular file")); }
+            FileExt::try_lock_exclusive(&file)?;
+            let guard = Self { directories, file };
+            guard.verify()?;
+            octopus_private_fs::sync_directory(&path)?;
+            Ok(guard)
         }
     }
 
@@ -71,11 +101,44 @@ impl RuntimeInstanceLock {
             }
             Ok(())
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "exact runtime ownership requires native file identity"))
+            for (path, held) in &self.directories {
+                if !std::fs::symlink_metadata(path)?.is_dir()
+                    || octopus_private_fs::identity_of_path_no_follow(path)?.device_and_file()
+                        != octopus_private_fs::identity_of_file(held)?.device_and_file()
+                {
+                    return Err(invalid("runtime ownership parent was replaced while held"));
+                }
+            }
+            let path = self.directories.last().unwrap().0.join("runtime-instance.lock");
+            if !std::fs::symlink_metadata(&path)?.is_file()
+                || octopus_private_fs::identity_of_path_no_follow(&path)?.device_and_file()
+                    != octopus_private_fs::identity_of_file(&self.file)?.device_and_file()
+            {
+                return Err(invalid("runtime ownership lock was replaced while held"));
+            }
+            Ok(())
         }
     }
+}
+
+/// A handle to the directory at `path` itself, refusing symlinks and junctions.
+#[cfg(windows)]
+fn hold_directory(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let held = octopus_private_fs::windows::open_entry_handle(path)?;
+    let metadata = held.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid("runtime ownership path crosses a symlink, junction or non-directory"));
+    }
+    Ok(held)
+}
+
+#[cfg(windows)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    octopus_private_fs::sync_directory(path.parent().ok_or_else(|| invalid("runtime ownership folder has no parent"))?)
 }
 
 #[cfg(unix)]
@@ -110,5 +173,21 @@ fn create_directory(parent: &File, name: &std::ffi::OsStr) -> io::Result<()> {
     parent.sync_all()
 }
 
-#[cfg(unix)]
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeInstanceLock;
+
+    #[test]
+    fn one_runtime_owns_a_home_at_a_time() {
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap().join("home");
+        let first = RuntimeInstanceLock::try_acquire(&home).unwrap();
+        first.verify().unwrap();
+        assert!(home.join("state").join("runtime-instance.lock").is_file());
+        assert!(RuntimeInstanceLock::try_acquire(&home).is_err());
+        drop(first);
+        RuntimeInstanceLock::try_acquire(&home).unwrap().verify().unwrap();
+    }
+}

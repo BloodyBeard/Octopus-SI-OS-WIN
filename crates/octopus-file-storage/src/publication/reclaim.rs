@@ -188,7 +188,7 @@ fn write_progress(path: &Path, progress: &Progress) -> io::Result<()> {
 
 fn validate_frontier(intent: &Intent, progress: &Progress) -> io::Result<bool> {
     let parent = std::fs::symlink_metadata(intent.tombstone.parent().unwrap())?;
-    if !parent.is_dir() || FileIdentity::of(&parent)? != intent.parent_identity {
+    if !parent.is_dir() || FileIdentity::of_path(intent.tombstone.parent().unwrap())? != intent.parent_identity {
         return Err(invalid("reclamation parent changed after the durable intent was prepared"));
     }
     if directory::absent(&intent.tombstone)? {
@@ -277,7 +277,7 @@ pub fn reclaim_directory(tombstone: &Path, proof: &DirectoryMoveReceipt, expecte
         history::export_tree(&tombstone, &expected.identity, &root)?;
         let manifest = directory::capture(&tombstone, expected.digest_algorithm, true, &expected.identity)?;
         let intent = Intent { schema_version: 1, tombstone: tombstone.clone(), publication: proof.clone(),
-            parent_identity: FileIdentity::of(&std::fs::symlink_metadata(tombstone.parent().unwrap())?)?, manifest };
+            parent_identity: FileIdentity::of_path(tombstone.parent().unwrap())?, manifest };
         validate_intent(&intent, &path, false)?;
         write_record_once_bounded(&path, &intent, history::DIRECTORY_LIMIT)?;
         intent

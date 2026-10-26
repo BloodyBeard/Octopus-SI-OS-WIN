@@ -59,7 +59,7 @@ pub(super) fn directory(path: &Path) -> io::Result<File> {
 
 pub(super) fn pinned_directory(path: &Path, identity: &FileIdentity) -> io::Result<File> {
     let directory = directory(path)?;
-    if FileIdentity::of(&directory.metadata()?)? != *identity {
+    if FileIdentity::of_file(&directory)? != *identity {
         return Err(invalid("descriptor-relative directory differs from its held identity"));
     }
     Ok(directory)

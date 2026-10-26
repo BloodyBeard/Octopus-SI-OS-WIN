@@ -76,18 +76,40 @@ pub struct FileIdentity {
     pub inode: u64,
 }
 
+/// Unix: device and inode from the metadata. Windows keeps them only on a
+/// handle (volume serial number and file ID), so identities come from an open
+/// file or from the path itself.
 impl FileIdentity {
-    fn of(metadata: &Metadata) -> io::Result<Self> {
+    fn of_file(file: &File) -> io::Result<Self> {
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Ok(Self { device: metadata.dev(), inode: metadata.ino() })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "file publication requires durable file identity"))
-        }
+        return Ok(Self::of_unix(&file.metadata()?));
+        #[cfg(windows)]
+        return Self::of_windows(octopus_private_fs::identity_of_file(file)?);
+    }
+
+    /// The entry at `path` itself, without following a final symlink.
+    pub fn of_path(path: &Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        return Ok(Self::of_unix(&std::fs::symlink_metadata(path)?));
+        #[cfg(windows)]
+        return Self::of_windows(octopus_private_fs::identity_of_path_no_follow(path)?);
+    }
+
+    #[cfg(unix)]
+    fn of_unix(metadata: &Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self { device: metadata.dev(), inode: metadata.ino() }
+    }
+
+    /// NTFS file IDs fit in 64 bits. ReFS IDs can use all 128, which this
+    /// record format cannot hold exactly, so they are refused rather than
+    /// truncated.
+    #[cfg(windows)]
+    fn of_windows(identity: octopus_private_fs::FileIdentity) -> io::Result<Self> {
+        let inode = u64::try_from(identity.file).map_err(|_| {
+            io::Error::new(io::ErrorKind::Unsupported, "file publication does not yet support 128-bit (ReFS) file IDs")
+        })?;
+        Ok(Self { device: identity.device, inode })
     }
 }
 
@@ -105,25 +127,48 @@ struct HeldFile {
     path: PathBuf,
     directory: bool,
     version: Option<FileVersion>,
+    /// Windows: the identity-keyed lock that stands in for `flock` on `file`
+    /// (see `identity_lock`). Unix locks `file` itself.
+    #[cfg(windows)]
+    _lock: Option<File>,
 }
 
 #[derive(PartialEq, Eq)]
 struct FileVersion {
     length: u64,
     modified: std::time::SystemTime,
-    #[cfg(unix)]
+    // Unix ctime. Windows reads its change time from a handle (`of_file`,
+    // `of_path`); `of` leaves it unset there.
     changed: (i64, i64),
 }
 
 impl FileVersion {
     fn of(metadata: &Metadata) -> io::Result<Self> {
         #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        Ok(Self {
-            length: metadata.len(), modified: metadata.modified()?,
-            #[cfg(unix)]
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-        })
+        let changed = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.ctime(), metadata.ctime_nsec())
+        };
+        #[cfg(not(unix))]
+        let changed = (0, 0);
+        Ok(Self { length: metadata.len(), modified: metadata.modified()?, changed })
+    }
+
+    fn of_file(file: &File) -> io::Result<Self> {
+        #[cfg(unix)]
+        return Self::of(&file.metadata()?);
+        #[cfg(windows)]
+        return Ok(Self { changed: octopus_private_fs::identity_of_file(file)?.changed, ..Self::of(&file.metadata()?)? });
+    }
+
+    fn of_path(path: &Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        return Self::of(&std::fs::symlink_metadata(path)?);
+        #[cfg(windows)]
+        return Ok(Self {
+            changed: octopus_private_fs::identity_of_path_no_follow(path)?.changed,
+            ..Self::of(&std::fs::symlink_metadata(path)?)?
+        });
     }
 }
 
@@ -145,7 +190,11 @@ impl HeldFile {
             };
             match locked {
                 Ok(()) => {
-                    let held = Self { file, path, directory: false, version: None };
+                    let held = Self {
+                        file, path, directory: false, version: None,
+                        #[cfg(windows)]
+                        _lock: None,
+                    };
                     held.verify()?;
                     return Ok(held);
                 }
@@ -161,12 +210,12 @@ impl HeldFile {
     fn verify(&self) -> io::Result<()> {
         let current = std::fs::symlink_metadata(&self.path)?;
         if (if self.directory { !current.is_dir() } else { !current.is_file() })
-            || FileIdentity::of(&current)? != FileIdentity::of(&self.file.metadata()?)?
+            || FileIdentity::of_path(&self.path)? != FileIdentity::of_file(&self.file)?
         {
             return Err(invalid("publication lock was replaced while held"));
         }
         if let Some(version) = &self.version {
-            if FileVersion::of(&current)? != *version {
+            if FileVersion::of_path(&self.path)? != *version {
                 return Err(invalid("admission source changed while its read guard was held"));
             }
         }
@@ -176,12 +225,22 @@ impl HeldFile {
     fn existing(path: PathBuf, exclusive: bool, directory: bool, wait: bool) -> io::Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let file = if directory { File::open(&path)? } else { open_regular(&path)? };
-            let result = if exclusive { file.try_lock_exclusive() } else { FileExt::try_lock_shared(&file) };
+            let file = if directory { open_directory_to_hold(&path)? } else { open_regular(&path)? };
+            #[cfg(unix)]
+            let result = lock_held(&file, exclusive);
+            #[cfg(windows)]
+            let (result, lock) = match identity_lock(&file) {
+                Ok(lock) => (lock_held(&lock, exclusive), Some(lock)),
+                Err(error) => (Err(error), None),
+            };
             match result {
                 Ok(()) => {
-                    let version = if directory || exclusive { None } else { Some(FileVersion::of(&file.metadata()?)?) };
-                    let held = Self { file, path, directory, version };
+                    let version = if directory || exclusive { None } else { Some(FileVersion::of_file(&file)?) };
+                    let held = Self {
+                        file, path, directory, version,
+                        #[cfg(windows)]
+                        _lock: lock,
+                    };
                     held.verify()?;
                     return Ok(held);
                 }
@@ -192,6 +251,58 @@ impl HeldFile {
             }
         }
     }
+}
+
+fn lock_held(file: &File, exclusive: bool) -> io::Result<()> {
+    if exclusive { file.try_lock_exclusive() } else { FileExt::try_lock_shared(file) }
+}
+
+/// A directory opened only to hold its identity and, on Unix, its `flock`.
+fn open_directory_to_hold(path: &Path) -> io::Result<File> {
+    #[cfg(unix)]
+    return File::open(path);
+    // Windows opens a directory only with backup semantics.
+    #[cfg(windows)]
+    return octopus_private_fs::windows::open_entry_handle(path);
+}
+
+/// The Windows stand-in for `flock` on a held file or directory.
+///
+/// Windows cannot lock a directory handle, and its file locks are mandatory:
+/// a held lock would make other processes' reads of the file fail. So the lock
+/// is taken on a separate file named by the held entry's identity (volume
+/// serial number and file ID) in one per-user folder. Like `flock` on an
+/// inode, it follows the entry, not its name, and it never blocks readers.
+#[cfg(windows)]
+fn identity_lock(held: &File) -> io::Result<File> {
+    let identity = FileIdentity::of_file(held)?;
+    let path = identity_lock_root()?.join(format!("{:016x}-{:016x}.lock", identity.device, identity.inode));
+    OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)
+}
+
+/// `%LOCALAPPDATA%\Octopus\file-locks`, private to the current user.
+#[cfg(windows)]
+fn identity_lock_root() -> io::Result<&'static Path> {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(root) = ROOT.get() {
+        return Ok(root);
+    }
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| invalid("file locks need LOCALAPPDATA to name an absolute folder"))?;
+    let parent = local.join("Octopus");
+    std::fs::create_dir_all(&parent)?;
+    let root = parent.join("file-locks");
+    match octopus_private_fs::create_private_dir(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !octopus_private_fs::is_owner_only(&root)? {
+        return Err(invalid("the file-lock folder is not private to its owner"));
+    }
+    Ok(ROOT.get_or_init(|| root))
 }
 
 struct Target {
@@ -251,7 +362,7 @@ impl Target {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error),
         }
-        if FileIdentity::of(&open_regular(&path)?.metadata()?)? != FileIdentity::of(&file.metadata()?)? {
+        if FileIdentity::of_file(&open_regular(&path)?)? != FileIdentity::of_file(&file)? {
             return Err(invalid("publication predecessor has foreign retained identity"));
         }
         crate::sync_ordered(file)?;
@@ -326,7 +437,7 @@ impl Target {
         }
         let stage = self.stage(&expected.operation_id);
         let staged = current_file(&stage)?;
-        let stage_identity = staged.as_ref().map(|file| FileIdentity::of(&file.metadata()?)).transpose()?;
+        let stage_identity = staged.as_ref().map(|file| FileIdentity::of_file(&file)).transpose()?;
         let stage_hash = staged.as_ref().map(|file| digest_file(file, expected.digest_algorithm)).transpose()?;
         if !removing && (stage_identity.as_ref() != Some(&pending.stage_identity)
             || stage_hash != expected.after_hash
@@ -335,7 +446,7 @@ impl Target {
             return Err(invalid("publication intent lost its exact staged bytes"));
         }
         let current = current_file(&self.path)?;
-        let current_identity = current.as_ref().map(|file| FileIdentity::of(&file.metadata()?)).transpose()?;
+        let current_identity = current.as_ref().map(|file| FileIdentity::of_file(&file)).transpose()?;
         let current_hash = current.as_ref().map(|file| digest_file(file, expected.digest_algorithm)).transpose()?;
         let predecessor = if pending.schema_version >= 3 && pending.before_identity.is_some() {
             current_file(&self.predecessor(&expected.operation_id))?
@@ -343,7 +454,7 @@ impl Target {
         let retained_before = match &pending.before_identity {
             None => true,
             Some(identity) => match &predecessor {
-                Some(file) => FileIdentity::of(&file.metadata()?)? == *identity
+                Some(file) => FileIdentity::of_file(&file)? == *identity
                     && Some(digest_file(file, expected.digest_algorithm)?) == expected.before_hash,
                 None => false,
             },
@@ -386,7 +497,7 @@ impl Target {
     fn retire_pending(&self, pending: &PendingPublication) -> io::Result<()> {
         for path in [self.install(), self.stage(&pending.receipt.operation_id)] {
             if let Some(file) = current_file(&path)? {
-                if FileIdentity::of(&file.metadata()?)? != pending.stage_identity {
+                if FileIdentity::of_file(&file)? != pending.stage_identity {
                     return Err(invalid("publication cleanup found foreign file identity"));
                 }
                 std::fs::remove_file(path)?;
@@ -395,7 +506,7 @@ impl Target {
         if pending.schema_version >= 3 {
             let path = self.predecessor(&pending.receipt.operation_id);
             if let Some(file) = current_file(&path)? {
-                if Some(FileIdentity::of(&file.metadata()?)?) != pending.before_identity {
+                if Some(FileIdentity::of_file(&file)?) != pending.before_identity {
                     return Err(invalid("publication cleanup found foreign predecessor identity"));
                 }
                 std::fs::remove_file(path)?;
@@ -582,7 +693,7 @@ impl WriteGuard {
         if current_file(&stage)?.is_some() {
             return Err(invalid("removal tombstone already exists without a settled receipt"));
         }
-        let identity = FileIdentity::of(&current.file.metadata()?)?;
+        let identity = FileIdentity::of_file(&current.file)?;
         target.retain_predecessor(operation_id, &current.file)?;
         let pending = PendingPublication {
             schema_version: 4,
@@ -659,7 +770,7 @@ impl WriteGuard {
         let file = if let Some(retained_path) = retained_stage {
             std::fs::hard_link(retained_path, &stage)?;
             let file = open_regular(&stage)?;
-            if FileIdentity::of(&file.metadata()?)? != FileIdentity::of(&retained.as_ref().unwrap().metadata()?)? {
+            if FileIdentity::of_file(&file)? != FileIdentity::of_file(&retained.as_ref().unwrap())? {
                 return Err(invalid("retained publication stage changed while being imported"));
             }
             file
@@ -679,9 +790,9 @@ impl WriteGuard {
             schema_version: 3,
             receipt: expected.clone(),
             before_identity: if observed.as_deref() == expected_before {
-                current.as_ref().map(|file| FileIdentity::of(&file.metadata()?)).transpose()?
+                current.as_ref().map(|file| FileIdentity::of_file(&file)).transpose()?
             } else { None },
-            stage_identity: FileIdentity::of(&file.metadata()?)?,
+            stage_identity: FileIdentity::of_file(&file)?,
         };
         write_record_once(&pending_path, &pending)?;
         file
@@ -704,7 +815,7 @@ impl WriteGuard {
         match std::fs::hard_link(&stage, &link) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if FileIdentity::of(&open_regular(&link)?.metadata()?)? != FileIdentity::of(&prepared.metadata()?)? {
+                if FileIdentity::of_file(&open_regular(&link)?)? != FileIdentity::of_file(&prepared)? {
                     return Err(invalid("publication install link has foreign file identity"));
                 }
             }
@@ -772,7 +883,7 @@ impl ReadGuard {
                 }
                 drop(recovery);
                 if let Some(lock) = lock.as_mut() {
-                    lock.version = Some(FileVersion::of(&lock.file.metadata()?)?);
+                    lock.version = Some(FileVersion::of_file(&lock.file)?);
                 }
                 if target.pending().try_exists()? {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, "publication changed during recovery"));

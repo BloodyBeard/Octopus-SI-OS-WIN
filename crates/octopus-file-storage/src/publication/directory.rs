@@ -201,7 +201,7 @@ fn parents_match(plan: &Plan) -> io::Result<bool> {
             Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(false),
             Err(error) => return Err(error),
         };
-        if FileIdentity::of(&parent.metadata()?)? != *identity { return Ok(false); }
+        if FileIdentity::of_file(&parent)? != *identity { return Ok(false); }
     }
     Ok(true)
 }
@@ -224,14 +224,14 @@ fn collect(root: &File, relative: &Path, algorithm: DigestAlgorithm, metadata: b
             let state = native::state(root, &name)?;
             let child = native::child(root, &name, true)?;
             if state.kind != DirectoryEntryKind::Directory || state.mode & 0o077 != 0
-                || FileIdentity::of(&child.metadata()?)? != state.identity
+                || FileIdentity::of_file(&child)? != state.identity
             { return Err(invalid("reserved publication metadata is not an exact private directory")); }
             continue;
         }
         let item = capture_entry_at(root, &name, relative_path.clone(), algorithm)?;
         let child = if item.kind == DirectoryEntryKind::Directory {
             let child = native::child(root, &name, true)?;
-            if FileIdentity::of(&child.metadata()?)? != item.identity { return Err(invalid("manifest directory changed identity")); }
+            if FileIdentity::of_file(&child)? != item.identity { return Err(invalid("manifest directory changed identity")); }
             Some(child)
         } else { None };
         entries.push(item);
@@ -251,7 +251,7 @@ fn capture_entry_at(parent: &File, name: &std::ffi::OsStr, relative_path: PathBu
         DirectoryEntryKind::Directory => (0, None),
         DirectoryEntryKind::File => {
             let file = native::child(parent, name, false)?;
-            if FileIdentity::of(&file.metadata()?)? != before.identity { return Err(invalid("manifest file changed identity")); }
+            if FileIdentity::of_file(&file)? != before.identity { return Err(invalid("manifest file changed identity")); }
             (before.bytes, Some(digest_file(&file, algorithm)?))
         },
         DirectoryEntryKind::Symlink => {
@@ -271,7 +271,7 @@ pub(super) fn capture_entry(path: &Path, relative_path: PathBuf, algorithm: Dige
 pub(super) fn capture(path: &Path, algorithm: DigestAlgorithm, metadata: bool, identity: &FileIdentity) -> io::Result<DirectoryPreimage> {
     let root = native::directory(path)?;
     let before = root.metadata()?;
-    if FileIdentity::of(&before)? != *identity { return Err(invalid("directory publication source changed its held identity")); }
+    if FileIdentity::of_file(&root)? != *identity { return Err(invalid("directory publication source changed its held identity")); }
     let mut entries = Vec::new();
     collect(&root, Path::new(""), algorithm, metadata, &mut entries)?;
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
@@ -323,7 +323,7 @@ fn matches(path: &Path, expected: &DirectoryPreimage) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    if !metadata.is_dir() || FileIdentity::of(&metadata)? != expected.identity { return Ok(false); }
+    if !metadata.is_dir() || FileIdentity::of_path(path)? != expected.identity { return Ok(false); }
     Ok(capture(path, expected.digest_algorithm, false, &expected.identity)? == *expected)
 }
 
@@ -511,7 +511,7 @@ fn sync_preimage(path: &Path, expected: &DirectoryPreimage) -> io::Result<()> {
             let entry_path = path.join(&entry.relative_path);
             let parent = native::directory(entry_path.parent().unwrap())?;
             let file = native::child(&parent, entry_path.file_name().unwrap(), false)?;
-            if FileIdentity::of(&file.metadata()?)? != entry.identity { return Err(invalid("directory member changed before durable preparation")); }
+            if FileIdentity::of_file(&file)? != entry.identity { return Err(invalid("directory member changed before durable preparation")); }
             crate::sync_ordered(&file)?;
         }
     }
@@ -627,7 +627,7 @@ pub fn publish_directory_moves(operation_id: &str, moves: &[DirectoryMove]) -> i
     } else {
         for movement in &plan.moves {
             for parent in [movement.source.parent().unwrap(), movement.destination.parent().unwrap()] {
-                plan.parents.insert(parent.to_path_buf(), FileIdentity::of(&std::fs::symlink_metadata(parent)?)?);
+                plan.parents.insert(parent.to_path_buf(), FileIdentity::of_path(parent)?);
             }
         }
     }

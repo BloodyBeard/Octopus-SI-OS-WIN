@@ -95,6 +95,13 @@ pub struct FileIdentity {
     pub changed: (i64, i64),
 }
 
+impl FileIdentity {
+    /// Which file this is, without its change time.
+    pub fn device_and_file(&self) -> (u64, u128) {
+        (self.device, self.file)
+    }
+}
+
 /// The identity of an open file.
 pub fn identity_of_file(file: &File) -> io::Result<FileIdentity> {
     platform::identity_of_file(file)
@@ -104,6 +111,12 @@ pub fn identity_of_file(file: &File) -> io::Result<FileIdentity> {
 /// `std::fs::metadata`.
 pub fn identity_of_path(path: impl AsRef<Path>) -> io::Result<FileIdentity> {
     platform::identity_of_path(path.as_ref())
+}
+
+/// The identity of the entry at `path` itself: a final symlink (Windows: any
+/// reparse point) is not followed, like `std::fs::symlink_metadata`.
+pub fn identity_of_path_no_follow(path: impl AsRef<Path>) -> io::Result<FileIdentity> {
+    platform::identity_of_path_no_follow(path.as_ref())
 }
 
 /// Whether `path` is already canonical: absolute, without symlinks, `.` or
@@ -183,6 +196,10 @@ mod platform {
 
     pub(super) fn identity_of_path(path: &Path) -> io::Result<FileIdentity> {
         Ok(identity(&std::fs::metadata(path)?))
+    }
+
+    pub(super) fn identity_of_path_no_follow(path: &Path) -> io::Result<FileIdentity> {
+        Ok(identity(&std::fs::symlink_metadata(path)?))
     }
 }
 
@@ -361,6 +378,16 @@ mod platform {
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)?;
         identity_of_file(&file)
+    }
+
+    pub(super) fn identity_of_path_no_follow(path: &Path) -> io::Result<FileIdentity> {
+        identity_of_file(&open_entry(path, 0)?)
+    }
+
+    /// A handle to the file or directory at `path` itself (never through a
+    /// reparse point) with attribute access only, enough to hold its identity.
+    pub fn open_entry_handle(path: &Path) -> io::Result<File> {
+        open_entry(path, 0)
     }
 
     pub(super) fn open_directory_for_sync(path: &Path) -> io::Result<File> {
@@ -648,7 +675,8 @@ mod platform {
 #[cfg(windows)]
 pub mod windows {
     pub use super::platform::{
-        make_dir_owner_only, pipe_server_is_current_user, process_is_current_user, OwnerOnlySecurity,
+        make_dir_owner_only, open_entry_handle, pipe_server_is_current_user, process_is_current_user,
+        OwnerOnlySecurity,
     };
 }
 
@@ -690,6 +718,7 @@ mod tests {
         std::fs::rename(&replacement, &tracked).unwrap();
         assert_ne!(before, identity_of_path(&tracked).unwrap());
         assert_ne!(identity_of_path(&directory).unwrap(), identity_of_path(&tracked).unwrap());
+        assert_eq!(identity_of_path(&tracked).unwrap(), identity_of_path_no_follow(&tracked).unwrap());
         std::fs::remove_file(&tracked).unwrap();
 
         #[cfg(unix)]

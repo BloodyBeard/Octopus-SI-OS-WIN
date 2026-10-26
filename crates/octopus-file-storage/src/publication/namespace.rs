@@ -27,14 +27,14 @@ impl TreeFiles {
                 Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => continue,
                 Err(error) => return Err(error),
             };
-            if metadata.is_file() && FileIdentity::of(&metadata)? == *expected {
+            if metadata.is_file() && FileIdentity::of_path(path)? == *expected {
                 files.entry(expected.clone()).or_insert_with(|| path.clone());
             }
         }
         let mut held = Vec::new();
         for (identity, path) in files {
             let file = HeldFile::existing(path, true, false, wait)?;
-            if FileIdentity::of(&file.file.metadata()?)? != identity { return Err(invalid("directory member changed while its inode lock was acquired")); }
+            if FileIdentity::of_file(&file.file)? != identity { return Err(invalid("directory member changed while its inode lock was acquired")); }
             held.push(file);
         }
         Ok(Self { held })
@@ -106,7 +106,7 @@ impl NamespaceGuard {
             for path in existing.ancestors() {
                 let metadata = std::fs::symlink_metadata(path)?;
                 if !metadata.is_dir() { return Err(invalid("publication ancestor is not a real directory")); }
-                let identity = FileIdentity::of(&metadata)?;
+                let identity = FileIdentity::of_path(path)?;
                 names.insert(path.to_path_buf(), identity.clone());
                 let mode = exclusive && path == existing;
                 let entry = identities.entry(identity).or_insert_with(|| (path.to_path_buf(), false));
@@ -125,7 +125,7 @@ impl NamespaceGuard {
         for held in &self.held { held.verify()?; }
         for (path, identity) in &self.names {
             let metadata = std::fs::symlink_metadata(path)?;
-            if !metadata.is_dir() || FileIdentity::of(&metadata)? != *identity {
+            if !metadata.is_dir() || FileIdentity::of_path(path)? != *identity {
                 return Err(invalid("publication ancestry changed while held"));
             }
         }

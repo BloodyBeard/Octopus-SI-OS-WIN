@@ -128,10 +128,12 @@ fn identity(path: &Path) -> io::Result<Option<(u64, u64)>> {
         use std::os::unix::fs::MetadataExt;
         Ok(Some((metadata.dev(), metadata.ino())))
     }
+    // Windows keeps the identity on a handle (volume serial and file ID).
     #[cfg(not(unix))]
     {
         let _ = metadata;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "conditioned publication requires native file identity"))
+        let identity = octopus_file_storage::publication::FileIdentity::of_path(path)?;
+        Ok(Some((identity.device, identity.inode)))
     }
 }
 

@@ -425,14 +425,19 @@ enum RetirementDirectoryResponse {
     },
 }
 
-fn retirement_identity(metadata: &std::fs::Metadata) -> Result<FileIdentity, String> {
+fn retirement_identity(path: &std::path::Path, metadata: &std::fs::Metadata) -> Result<FileIdentity, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let _ = path;
         Ok(FileIdentity { device: metadata.dev(), inode: metadata.ino() })
     }
+    // Windows keeps the identity on a handle, not in the metadata.
     #[cfg(not(unix))]
-    { let _ = metadata; Err("retirement directory identity requires native filesystem support".into()) }
+    {
+        let _ = metadata;
+        FileIdentity::of_path(path).map_err(|error| format!("retirement directory identity is unavailable: {error}"))
+    }
 }
 
 fn inventory_id(value: &Value) -> Result<&str, String> {
@@ -909,7 +914,7 @@ impl RetirementDirectoryScope {
             self.path(path)?;
             match std::fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
-                    && retirement_identity(&metadata)? == *identity => {}
+                    && retirement_identity(path, &metadata)? == *identity => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound
                     && (self.recovering || self.removed.contains(path)) => {}
                 _ => return Err(format!("retirement directory '{}' changed its exact identity", path.display())),

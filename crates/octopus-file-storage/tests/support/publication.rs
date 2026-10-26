@@ -147,13 +147,13 @@ fn removal_recovery_proves_the_original_inode_and_never_replays_for_another_hold
             let path = root.path().join("record");
             std::fs::write(&path, b"before").unwrap();
             let before = hash(b"before");
-            let inode = FileIdentity::of(&std::fs::metadata(&path).unwrap()).unwrap();
+            let inode = FileIdentity::of_path(&path).unwrap();
             INTERRUPTION.with(|selected| selected.set(Some(boundary)));
             assert!(std::panic::catch_unwind(|| remove(&path, "remove", &before)).is_err());
             let target = Target::open(&path, false).unwrap();
             if boundary == Interruption::Installed {
                 assert!(!path.exists());
-                assert_eq!(FileIdentity::of(&std::fs::metadata(target.stage("remove")).unwrap()).unwrap(), inode);
+                assert_eq!(FileIdentity::of_path(&target.stage("remove")).unwrap(), inode);
             }
             if !resume {
                 drop(ReadGuard::try_acquire(std::slice::from_ref(&path), &[]).unwrap());
@@ -246,17 +246,17 @@ fn original_prepared_publication_resumes_its_exact_stage_and_uncertainty_stays_c
     let before = hash(b"before");
     interrupted(&path, "original", &before, Interruption::Prepared);
     let target = Target::open(&path, false).unwrap();
-    let inode = FileIdentity::of(&std::fs::metadata(target.stage("original")).unwrap()).unwrap();
+    let inode = FileIdentity::of_path(&target.stage("original")).unwrap();
     assert_eq!(publish(&path, "original", Some(&before), b"after").unwrap().outcome, PublicationOutcome::Applied);
-    assert_eq!(FileIdentity::of(&std::fs::metadata(&path).unwrap()).unwrap(), inode);
+    assert_eq!(FileIdentity::of_path(&path).unwrap(), inode);
     assert!(!target.predecessor("original").exists());
 
     interrupted(&path, "unknown", &hash(b"after"), Interruption::Installed);
     let retained = target.predecessor("unknown");
-    assert_eq!(FileIdentity::of(&std::fs::metadata(&retained).unwrap()).unwrap(), inode);
+    assert_eq!(FileIdentity::of_path(&retained).unwrap(), inode);
     let foreign = root.path().join("foreign");
     std::fs::write(&foreign, b"after").unwrap();
-    assert_ne!(FileIdentity::of(&std::fs::metadata(&foreign).unwrap()).unwrap(), inode);
+    assert_ne!(FileIdentity::of_path(&foreign).unwrap(), inode);
     std::fs::rename(foreign, &path).unwrap();
     let uncertain = publish(&path, "unknown", Some(&hash(b"after")), b"after").unwrap();
     assert_eq!(uncertain.outcome, PublicationOutcome::Uncertain);
@@ -285,7 +285,7 @@ fn retained_stage_import_preserves_identity_and_refuses_unknown_old_effects() {
             assert_eq!(receipt.outcome, PublicationOutcome::Uncertain);
         } else {
             assert_eq!(receipt.outcome, PublicationOutcome::Applied);
-            assert_eq!(FileIdentity::of(&std::fs::metadata(&path).unwrap()).unwrap(), FileIdentity::of(&std::fs::metadata(&stage).unwrap()).unwrap());
+            assert_eq!(FileIdentity::of_path(&path).unwrap(), FileIdentity::of_path(&stage).unwrap());
         }
     }
 }
@@ -346,7 +346,7 @@ fn directory_recovery_keeps_original_inode_and_reports_a_partial_repair() {
             let applied = resume || boundary == Interruption::DirectoryInstalled(0);
             assert_eq!(result.receipts[0].outcome, if applied { PublicationOutcome::Applied } else { PublicationOutcome::NotApplied });
             let retained = if applied { &movement.destination } else { &source };
-            assert_eq!(FileIdentity::of(&std::fs::metadata(retained).unwrap()).unwrap(), movement.expected.identity);
+            assert_eq!(FileIdentity::of_path(retained).unwrap(), movement.expected.identity);
             assert_eq!(publish_directory_moves("move", &[movement]).unwrap(), result);
         }
     }
@@ -431,7 +431,7 @@ fn prepared_directory_with_exact_source_refuses_a_replaced_parent() {
     std::fs::create_dir(&parent).unwrap();
     std::fs::rename(old_parent.join("source"), &source).unwrap();
     std::fs::rename(old_parent.join(COORDINATION_DIRECTORY), parent.join(COORDINATION_DIRECTORY)).unwrap();
-    assert_eq!(FileIdentity::of(&std::fs::metadata(&source).unwrap()).unwrap(), movement.expected.identity);
+    assert_eq!(FileIdentity::of_path(&source).unwrap(), movement.expected.identity);
     assert_eq!(publish_directory_moves("move", &[movement]).unwrap().receipts[0].outcome, PublicationOutcome::Uncertain);
     assert!(source.exists() && !parent.join("destination").exists());
 }
@@ -579,7 +579,7 @@ fn directory_endpoints_reject_aliased_ancestors_without_rebasing_selected_effect
     assert!(publish_directory_moves("alias-source", &[aliased]).is_err());
     let destination = DirectoryMove { source: outside.join("foreign"), destination: alias.join("new"), expected: snapshot_directory(&outside.join("foreign"), DigestAlgorithm::Sha256).unwrap() };
     assert!(publish_directory_moves("alias-destination", &[destination]).is_err());
-    let original_parent = FileIdentity::of(&std::fs::metadata(&selected).unwrap()).unwrap();
+    let original_parent = FileIdentity::of_path(&selected).unwrap();
     std::fs::rename(&selected, root.join("held-selection")).unwrap();
     std::os::unix::fs::symlink(&outside, &selected).unwrap();
     assert!(reclaim_directory(&movement.destination, &proof, &movement.expected).is_err());

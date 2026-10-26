@@ -84,7 +84,7 @@ fn private_directory(parent: &File, name: &std::ffi::OsStr) -> io::Result<Option
     }
     let directory = native::child(parent, name, true)?;
     let reopened = native::state(parent, name)?;
-    if FileIdentity::of(&directory.metadata()?)? != state.identity
+    if FileIdentity::of_file(&directory)? != state.identity
         || reopened.identity != state.identity
         || reopened.kind != state.kind
         || reopened.mode != state.mode
@@ -122,7 +122,7 @@ fn roots_with_ancestry(path: &Path, ancestors: &mut Vec<PathBuf>) -> io::Result<
             Err(error) => return Err(error),
         };
         let state = native::state(&current, name)?;
-        if state.kind != DirectoryEntryKind::Directory || FileIdentity::of(&directory.metadata()?)? != state.identity {
+        if state.kind != DirectoryEntryKind::Directory || FileIdentity::of_file(&directory)? != state.identity {
             return Err(invalid("original history ancestor changed identity"));
         }
         current = directory;
