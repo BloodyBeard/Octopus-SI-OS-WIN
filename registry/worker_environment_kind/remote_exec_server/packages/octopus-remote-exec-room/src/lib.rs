@@ -2708,7 +2708,7 @@ fn optional_usize(object: &Map<String, Value>, field: &str) -> Result<Option<usi
         .transpose()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

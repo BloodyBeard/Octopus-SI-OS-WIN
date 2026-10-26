@@ -1376,6 +1376,12 @@ fn open_private_directory_fd(path: &Path) -> Result<std::fs::File, String> {
     Ok(directory)
 }
 
+#[cfg(not(unix))]
+fn open_private_directory_fd(path: &Path) -> Result<std::fs::File, String> {
+    let _ = path;
+    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+}
+
 #[cfg(unix)]
 fn validate_held_directory(directory: &std::fs::File, display: &Path) -> Result<(), String> {
     ensure_owner_only_directory(

@@ -1337,6 +1337,8 @@ mod tests {
             terminator: None,
             writer_handle: None,
             resizer: None,
+            #[cfg(windows)]
+            tty: false,
         })
         .session
     }
@@ -1354,6 +1356,8 @@ mod tests {
             writer_tx, stdout_rx, stderr_rx: None, exit_rx,
             terminator: Some(Box::new(move || signal.notify_one())),
             writer_handle: None, resizer: None,
+            #[cfg(windows)]
+            tty: false,
         }).session;
         if let ProcessEntry::Running(running) = backend.inner.processes.lock().await
             .get_mut(&process.process_id).unwrap() {

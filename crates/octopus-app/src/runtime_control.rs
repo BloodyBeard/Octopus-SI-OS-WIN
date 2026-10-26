@@ -42,6 +42,7 @@ enum ResponseFrame {
     Refused { error: String },
 }
 
+#[cfg(not(windows))]
 pub fn socket_path(octopus_home: &Path) -> PathBuf {
     octopus_home
         .join("state")
@@ -49,13 +50,50 @@ pub fn socket_path(octopus_home: &Path) -> PathBuf {
         .join(SOCKET_FILE)
 }
 
+/// On Windows the control channel is a named pipe. Its name is derived from the
+/// Octopus home so that separate homes never answer for each other.
+#[cfg(windows)]
+pub fn socket_path(octopus_home: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let home = std::path::absolute(octopus_home).unwrap_or_else(|_| octopus_home.to_path_buf());
+    let digest = Sha256::digest(home.to_string_lossy().to_lowercase().as_bytes());
+    let suffix: String = digest[..12].iter().map(|byte| format!("{byte:02x}")).collect();
+    PathBuf::from(format!(r"\\.\pipe\octopus-runtime-control-{suffix}"))
+}
+
 pub struct RuntimeControl {
     path: PathBuf,
+    #[cfg(unix)]
     listener: tokio::net::UnixListener,
+    #[cfg(windows)]
+    listener: tokio::net::windows::named_pipe::NamedPipeServer,
     stopping: Arc<std::sync::Mutex<Option<RuntimeControlRequest>>>,
 }
 
 impl RuntimeControl {
+    #[cfg(windows)]
+    pub fn bind(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = socket_path(octopus_home);
+        // The default pipe DACL grants write access only to the creating owner,
+        // LocalSystem, and administrators, which matches the Unix 0600 socket.
+        let listener = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&path)
+            .map_err(|error| {
+                format!(
+                    "runtime control pipe '{}' cannot be created: {error}",
+                    path.display()
+                )
+            })?;
+        Ok(Self {
+            path,
+            listener,
+            stopping: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    #[cfg(unix)]
     pub fn bind(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let path = socket_path(octopus_home);
         match std::fs::symlink_metadata(&path) {
@@ -85,14 +123,40 @@ impl RuntimeControl {
         &self.path
     }
 
+    #[cfg(unix)]
+    async fn accept(&mut self) -> std::io::Result<Connection> {
+        let (stream, _) = self.listener.accept().await?;
+        let refusal = match stream.peer_cred() {
+            Err(error) => Some(format!("control peer cannot be identified: {error}")),
+            Ok(peer) if peer.uid() != current_uid() => Some(format!(
+                "control peer uid {} is not the runtime owner",
+                peer.uid()
+            )),
+            Ok(_) => None,
+        };
+        Ok(Connection { stream, refusal })
+    }
+
+    #[cfg(windows)]
+    async fn accept(&mut self) -> std::io::Result<Connection> {
+        self.listener.connect().await?;
+        let next = tokio::net::windows::named_pipe::ServerOptions::new()
+            .reject_remote_clients(true)
+            .create(&self.path)?;
+        Ok(Connection {
+            stream: std::mem::replace(&mut self.listener, next),
+            refusal: None,
+        })
+    }
+
     pub async fn serve(
-        self,
+        mut self,
         octopus_home: PathBuf,
         cancel: CancellationToken,
         restart: Arc<AtomicBool>,
     ) {
         loop {
-            let (stream, _) = match self.listener.accept().await {
+            let stream = match self.accept().await {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     eprintln!(
@@ -122,21 +186,27 @@ impl RuntimeControl {
     }
 }
 
+#[cfg(unix)]
+type ControlStream = tokio::net::UnixStream;
+#[cfg(windows)]
+type ControlStream = tokio::net::windows::named_pipe::NamedPipeServer;
+
+struct Connection {
+    stream: ControlStream,
+    refusal: Option<String>,
+}
+
 async fn answer(
-    stream: tokio::net::UnixStream,
+    connection: Connection,
     octopus_home: &Path,
     cancel: &CancellationToken,
     restart: &AtomicBool,
     stopping: &std::sync::Mutex<Option<RuntimeControlRequest>>,
 ) -> Result<(), String> {
-    let peer = stream
-        .peer_cred()
-        .map_err(|error| format!("control peer cannot be identified: {error}"))?;
-    let (reader, mut writer) = stream.into_split();
-    let response = if peer.uid() != current_uid() {
-        ResponseFrame::Refused {
-            error: format!("control peer uid {} is not the runtime owner", peer.uid()),
-        }
+    let Connection { stream, refusal } = connection;
+    let (reader, mut writer) = tokio::io::split(stream);
+    let response = if let Some(error) = refusal {
+        ResponseFrame::Refused { error }
     } else {
         let mut line = String::new();
         tokio::io::BufReader::new(tokio::io::AsyncReadExt::take(reader, MAX_FRAME_BYTES))
@@ -203,15 +273,9 @@ fn read_status(
     })
 }
 
+#[cfg(unix)]
 fn current_uid() -> u32 {
-    #[cfg(unix)]
-    {
-        rustix::process::geteuid().as_raw()
-    }
-    #[cfg(not(unix))]
-    {
-        0
-    }
+    rustix::process::geteuid().as_raw()
 }
 
 pub enum Answer {
@@ -220,50 +284,71 @@ pub enum Answer {
 }
 
 pub fn request(octopus_home: &Path, request: RuntimeControlRequest) -> Result<Answer, String> {
-    #[cfg(unix)]
-    {
-        let path = socket_path(octopus_home);
-        let stream = match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(stream) => stream,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                return Ok(Answer::Unreachable(error));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "runtime control socket '{}' cannot be reached: {error}",
-                    path.display()
-                ));
-            }
-        };
-        stream
-            .set_read_timeout(Some(CONNECTION_TIMEOUT))
-            .and_then(|()| stream.set_write_timeout(Some(CONNECTION_TIMEOUT)))
-            .map_err(|error| error.to_string())?;
-        let mut frame = serde_json::to_vec(&RequestFrame { request }).map_err(|error| error.to_string())?;
-        frame.push(b'\n');
-        (&stream)
-            .write_all(&frame)
-            .map_err(|error| format!("runtime control request cannot be sent: {error}"))?;
-        let mut line = String::new();
-        std::io::Read::take(std::io::BufReader::new(&stream), MAX_FRAME_BYTES)
-            .read_line(&mut line)
-            .map_err(|error| format!("runtime control response cannot be read: {error}"))?;
-        match serde_json::from_str::<ResponseFrame>(&line)
-            .map_err(|error| format!("runtime control response is malformed: {error}"))?
+    let path = socket_path(octopus_home);
+    let stream = match connect(&path) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
         {
-            ResponseFrame::Status(status) => Ok(Answer::Status(status)),
-            ResponseFrame::Refused { error } => Err(format!("runtime refused the control request: {error}")),
+            return Ok(Answer::Unreachable(error));
+        }
+        Err(error) => {
+            return Err(format!(
+                "runtime control socket '{}' cannot be reached: {error}",
+                path.display()
+            ));
+        }
+    };
+    exchange(stream, request)
+}
+
+#[cfg(unix)]
+fn connect(path: &Path) -> std::io::Result<std::os::unix::net::UnixStream> {
+    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
+    Ok(stream)
+}
+
+/// Opens the control pipe. A busy pipe means the runtime is between instances,
+/// so it is retried until the connection timeout. The server bounds every
+/// exchange with the same timeout, so a stalled exchange cannot hang forever.
+#[cfg(windows)]
+fn connect(path: &Path) -> std::io::Result<std::fs::File> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let deadline = Instant::now() + CONNECTION_TIMEOUT;
+    loop {
+        match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
         }
     }
-    #[cfg(not(unix))]
+}
+
+fn exchange<S>(stream: S, request: RuntimeControlRequest) -> Result<Answer, String>
+where
+    S: std::io::Read + Write,
+{
+    let mut stream = stream;
+    let mut frame = serde_json::to_vec(&RequestFrame { request }).map_err(|error| error.to_string())?;
+    frame.push(b'\n');
+    stream
+        .write_all(&frame)
+        .map_err(|error| format!("runtime control request cannot be sent: {error}"))?;
+    let mut line = String::new();
+    std::io::Read::take(std::io::BufReader::new(stream), MAX_FRAME_BYTES)
+        .read_line(&mut line)
+        .map_err(|error| format!("runtime control response cannot be read: {error}"))?;
+    match serde_json::from_str::<ResponseFrame>(&line)
+        .map_err(|error| format!("runtime control response is malformed: {error}"))?
     {
-        let _ = (octopus_home, request);
-        Err("the runtime control socket requires Unix domain sockets".to_string())
+        ResponseFrame::Status(status) => Ok(Answer::Status(status)),
+        ResponseFrame::Refused { error } => Err(format!("runtime refused the control request: {error}")),
     }
 }
 

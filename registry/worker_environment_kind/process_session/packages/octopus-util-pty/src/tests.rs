@@ -589,6 +589,8 @@ async fn driver_backed_process_can_expose_split_stdout_and_stderr() -> anyhow::R
         terminator: None,
         writer_handle: None,
         resizer: None,
+        #[cfg(windows)]
+        tty: false,
     });
 
     let SpawnedProcess {
@@ -648,6 +650,8 @@ async fn driver_backed_process_can_resize_via_resizer_hook() -> anyhow::Result<(
             }
             Ok(())
         })),
+        #[cfg(windows)]
+        tty: false,
     });
 
     spawned.session.resize(TerminalSize {
@@ -686,6 +690,8 @@ async fn driver_backed_process_drains_output_that_arrives_after_exit_signal() ->
         terminator: None,
         writer_handle: None,
         resizer: None,
+        #[cfg(windows)]
+        tty: false,
     });
 
     let SpawnedProcess {
