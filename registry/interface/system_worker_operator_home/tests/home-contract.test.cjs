@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, '../../../..');
 const read = relative => JSON.parse(fs.readFileSync(path.join(root, relative), 'utf8'));
 const artifact = id => read(`registry/artifact/${id}/artifact.json`);
 const policy = read('registry/interface/system_worker_operator_home/policy.json');
-const example = artifact('artifact-home-task-authoring').authoring_examples;
+const example = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/home-task-example.json'), 'utf8'));
 const Ajv = createRequire(path.join(root, 'app/package.json'))('ajv');
 const ajv = new Ajv({ strict: false, formats: { uint64: true } });
 const schema = artifact('artifact-home-task-authoring').run_record_schema;
@@ -30,13 +30,22 @@ test('Home bootstrap exposes declared authoring tools and readable role closure'
   assert.equal(schema.hash_algorithm, 'sha256');
   assert.equal(schema.source_hash, createHash('sha256').update(source).digest('hex'));
   assert.deepEqual(schema.document, JSON.parse(source));
-  const home = read('app/distribution/local-packages/packs/codex.json').workspace_setup.home;
+  const pack = read('app/distribution/local-packages/packs/codex.json');
+  const home = pack.workspace_setup.home;
   assert.equal(home.worker_interface_id, policy.id);
   assert.ok(home.selected_worker_environment_kinds.includes('system_room'));
+  // Home runs pin the worker's role artifacts themselves (chat_run_record.rs),
+  // so the pack only has to install every one of them.
+  const installed = new Set(pack.components.map(component => component.package_id));
+  const packages = fs.readdirSync(path.join(root, 'app/distribution/local-packages/packages'))
+    .map(name => read(`app/distribution/local-packages/packages/${name}`));
   for (const id of policy.role_artifacts) {
     assert.equal(artifact(id).label, 'context.reference');
     assert.ok(artifact(id).text.trim());
-    assert.ok(home.context_artifact_bindings.some(binding => binding.id === id));
+    const owners = packages.filter(entry =>
+      entry.members.some(member => member.registry_kind === 'artifact' && member.owner === id));
+    assert.equal(owners.length, 1, `${id} has exactly one owning package`);
+    assert.ok(installed.has(owners[0].id), `${id} is installed by the setup pack`);
   }
   for (const id of ['file.read', 'file.list', 'file.write', 'artifact.send', 'artifact.read', 'artifact.list', 'artifact.search']) {
     const tool = read(`registry/tool/${id}/tool.json`);
@@ -58,7 +67,7 @@ test('authored example has independent operator, assignment and result edges', (
         assert.ok(worker.ceiling.interfaces.includes(binding.interface));
         assert.ok(example.ee_template.allowed_interfaces.includes(binding.interface));
       }
-      for (const role of policy.role_artifacts) assert.ok(cp.artifact_bindings.some(binding => binding.id === role));
+      for (const role of worker.role_artifacts) assert.ok(cp.artifact_bindings.some(binding => binding.id === role));
     }
   }
   const input = example.home_record.checkpoints.find(cp => cp.id === 'home_input');

@@ -1,0 +1,1073 @@
+{
+  "interfaces": [
+    {
+      "id": "system_worker_example_home",
+      "interface_type": "system",
+      "role": "worker",
+      "direction": "bidirectional",
+      "source_names": [
+        "operator_home"
+      ]
+    },
+    {
+      "id": "system_worker_example_task",
+      "interface_type": "system",
+      "role": "worker",
+      "direction": "bidirectional",
+      "source_names": [
+        "task"
+      ]
+    }
+  ],
+  "worker_policies": [
+    {
+      "id": "system_worker_example_home",
+      "ceiling": {
+        "interfaces": [
+          "system_worker_example_home",
+          "system_worker_example_task",
+          "world_provider_example_home",
+          "world_operator_chat_example_home",
+          "system_room_example_home"
+        ],
+        "tools": [
+          "artifact.send"
+        ],
+        "wek": [
+          "system_room"
+        ],
+        "mark_outcomes": [
+          "tool.call.allowed",
+          "task.summary.received"
+        ],
+        "hard_blocked_tools": [],
+        "artifact_verbs": [
+          "read",
+          "create"
+        ]
+      },
+      "role_artifacts": [
+        "artifact-worker-role-template",
+        "artifact-grounding-system-architecture",
+        "artifact-worker-role-operator-home",
+        "artifact-home-task-authoring",
+        "artifact-spawn-literacy",
+        "artifact-home-widget-authoring"
+      ]
+    },
+    {
+      "id": "system_worker_example_task",
+      "ceiling": {
+        "interfaces": [
+          "system_worker_example_task",
+          "system_worker_example_home",
+          "world_provider_example_task",
+          "world_operator_chat_example_task",
+          "system_room_example_task"
+        ],
+        "tools": [
+          "artifact.send"
+        ],
+        "wek": [
+          "system_room"
+        ],
+        "mark_outcomes": [
+          "tool.call.allowed",
+          "task.summary.received"
+        ],
+        "hard_blocked_tools": [],
+        "artifact_verbs": [
+          "read",
+          "create"
+        ]
+      },
+      "role_artifacts": [
+        "artifact-worker-role-template"
+      ]
+    }
+  ],
+  "ee_template": {
+    "id": "example_existence",
+    "goal_class": "existence",
+    "bootstrap_root": true,
+    "allowed_interfaces": [
+      "system_worker_example_home",
+      "system_worker_example_task",
+      "world_provider_example_home",
+      "world_provider_example_task",
+      "world_operator_chat_example_home",
+      "world_operator_chat_example_task",
+      "system_room_example_home",
+      "system_room_example_task"
+    ],
+    "allowed_worker_environment_kinds": [
+      "system_room"
+    ],
+    "allowed_root_slots": [
+      "run_records_root",
+      "registry_interface_root",
+      "registry_artifact_root",
+      "registry_tool_root",
+      "registry_ee_template_root",
+      "ee_instances_root"
+    ]
+  },
+  "home_record": {
+    "id": "run_example_home",
+    "ee": "ee_example_existence",
+    "worker": "system_worker_example_home",
+    "trace": "trace:run_example_home",
+    "status": "idle",
+    "interface_state": {},
+    "checkpoints": [
+      {
+        "id": "home_input",
+        "run": "run_example_home",
+        "trace": "trace:run_example_home:home_input",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_operator_chat_example_home",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_provider_example_home",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "home_result",
+        "run": "run_example_home",
+        "trace": "trace:run_example_home:home_result",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "system_worker_example_home",
+          "config": {
+            "artifact_policy": {
+              "mode": "allow",
+              "names": [
+                "task.summary"
+              ],
+              "namespaces": []
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_provider_example_home",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": [
+          {
+            "mark": "task.summary.received",
+            "artifact_label": "task.summary",
+            "verifier": "artifact_exists",
+            "params": {}
+          }
+        ]
+      },
+      {
+        "id": "home_task_address",
+        "run": "run_example_home",
+        "trace": "trace:run_example_home:home_task_address",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_provider_example_home",
+          "config": {
+            "artifact_policy": {
+              "mode": "allow",
+              "names": [
+                "task.assignment"
+              ],
+              "namespaces": []
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "system_worker_example_task",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "home_tools",
+        "run": "run_example_home",
+        "trace": "trace:run_example_home:home_tools",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_provider_example_home",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "system_room_example_home",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": [
+          {
+            "mark": "tool.call.allowed",
+            "artifact_label": "tool.call",
+            "verifier": "tool_call_allowed",
+            "params": {
+              "tools": [
+                "artifact.send"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "home_tool_result",
+        "run": "run_example_home",
+        "trace": "trace:run_example_home:home_tool_result",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "system_room_example_home",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_provider_example_home",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "home_reply",
+        "run": "run_example_home",
+        "trace": "trace:run_example_home:home_reply",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_provider_example_home",
+          "config": {
+            "artifact_policy": {
+              "mode": "allow",
+              "names": [
+                "interface.artifact.output",
+                "turn.error"
+              ],
+              "namespaces": []
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_operator_chat_example_home",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      }
+    ],
+    "active_checkpoints": [
+      "home_input",
+      "home_result",
+      "home_task_address",
+      "home_tools",
+      "home_tool_result",
+      "home_reply"
+    ]
+  },
+  "task_record": {
+    "id": "run_example_task",
+    "ee": "ee_example_existence",
+    "worker": "system_worker_example_task",
+    "trace": "trace:run_example_task",
+    "status": "idle",
+    "interface_state": {},
+    "checkpoints": [
+      {
+        "id": "task_input",
+        "run": "run_example_task",
+        "trace": "trace:run_example_task:task_input",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "system_worker_example_task",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_provider_example_task",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "task_client_input",
+        "run": "run_example_task",
+        "trace": "trace:run_example_task:task_client_input",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_operator_chat_example_task",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_provider_example_task",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "task_return_address",
+        "run": "run_example_task",
+        "trace": "trace:run_example_task:task_return_address",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_provider_example_task",
+          "config": {
+            "artifact_policy": {
+              "mode": "allow",
+              "names": [
+                "task.summary"
+              ],
+              "namespaces": []
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "system_worker_example_home",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "task_tools",
+        "run": "run_example_task",
+        "trace": "trace:run_example_task:task_tools",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_provider_example_task",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "system_room_example_task",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": [
+          {
+            "mark": "tool.call.allowed",
+            "artifact_label": "tool.call",
+            "verifier": "tool_call_allowed",
+            "params": {
+              "tools": [
+                "artifact.send"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "task_tool_result",
+        "run": "run_example_task",
+        "trace": "trace:run_example_task:task_tool_result",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "system_room_example_task",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_provider_example_task",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      },
+      {
+        "id": "task_reply",
+        "run": "run_example_task",
+        "trace": "trace:run_example_task:task_reply",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_provider_example_task",
+          "config": {
+            "artifact_policy": {
+              "mode": "allow",
+              "names": [
+                "interface.artifact.output",
+                "turn.error"
+              ],
+              "namespaces": []
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_operator_chat_example_task",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-grounding-system-architecture",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-worker-role-operator-home",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-task-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-spawn-literacy",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-home-widget-authoring",
+            "access": {
+              "read": true
+            }
+          },
+          {
+            "id": "artifact-context-collection-guide",
+            "access": {
+              "read": true
+            }
+          }
+        ],
+        "required_verified_artifacts": []
+      }
+    ],
+    "active_checkpoints": [
+      "task_input",
+      "task_client_input",
+      "task_return_address",
+      "task_tools",
+      "task_tool_result",
+      "task_reply"
+    ]
+  },
+  "assignment_tool_arguments": {
+    "interface": "system_worker_example_task",
+    "label": "task.assignment",
+    "payload": {
+      "objective": "Produce the requested deliverable independently.",
+      "constraints": [
+        "Preserve parallel work.",
+        "Return evidence and exact gaps."
+      ],
+      "context_artifact_ids": [
+        "artifact-worker-role-template"
+      ],
+      "return_interface": "system_worker_example_home",
+      "return_label": "task.summary",
+      "return_statuses": [
+        "completed",
+        "blocked",
+        "failed"
+      ],
+      "evidence_requirements": [
+        "Use admitted file/tool artifacts and any required verifier outcomes."
+      ]
+    }
+  },
+  "return_tool_arguments": {
+    "interface": "system_worker_example_home",
+    "label": "task.summary",
+    "payload": {
+      "source_run": "run_example_task",
+      "status": "blocked",
+      "summary": "A required capability is unavailable; no effect was claimed.",
+      "evidence": [],
+      "remaining_gaps": [
+        "Exact missing interface/tool/path and required owner action belong here."
+      ]
+    }
+  },
+  "new_file_tool_arguments": {
+    "path": "/declared/run-records/run_example_task.json",
+    "content": "{\n  \"id\": \"run_example_task\",\n  \"ee\": \"ee_example_existence\",\n  \"worker\": \"system_worker_example_task\",\n  \"trace\": \"trace:run_example_task\",\n  \"status\": \"idle\",\n  \"interface_state\": {},\n  \"checkpoints\": [\n    {\n      \"id\": \"task_input\",\n      \"run\": \"run_example_task\",\n      \"trace\": \"trace:run_example_task:task_input\",\n      \"epoch\": 0,\n      \"interface_binding\": {\n        \"interface\": \"system_worker_example_task\",\n        \"config\": {\n          \"artifact_policy\": {\n            \"mode\": \"all\"\n          }\n        }\n      },\n      \"outbound_interface_bindings\": [\n        {\n          \"interface\": \"world_provider_example_task\",\n          \"config\": {\n            \"artifact_policy\": {\n              \"mode\": \"all\"\n            }\n          }\n        }\n      ],\n      \"artifact_bindings\": [\n        {\n          \"id\": \"artifact-worker-role-template\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-grounding-system-architecture\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-worker-role-operator-home\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-task-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-spawn-literacy\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-widget-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        }\n      ],\n      \"required_verified_artifacts\": []\n    },\n    {\n      \"id\": \"task_client_input\",\n      \"run\": \"run_example_task\",\n      \"trace\": \"trace:run_example_task:task_client_input\",\n      \"epoch\": 0,\n      \"interface_binding\": {\n        \"interface\": \"world_operator_chat_example_task\",\n        \"config\": {\n          \"artifact_policy\": {\n            \"mode\": \"all\"\n          }\n        }\n      },\n      \"outbound_interface_bindings\": [\n        {\n          \"interface\": \"world_provider_example_task\",\n          \"config\": {\n            \"artifact_policy\": {\n              \"mode\": \"all\"\n            }\n          }\n        }\n      ],\n      \"artifact_bindings\": [\n        {\n          \"id\": \"artifact-worker-role-template\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-grounding-system-architecture\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-worker-role-operator-home\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-task-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-spawn-literacy\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-widget-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        }\n      ],\n      \"required_verified_artifacts\": []\n    },\n    {\n      \"id\": \"task_return_address\",\n      \"run\": \"run_example_task\",\n      \"trace\": \"trace:run_example_task:task_return_address\",\n      \"epoch\": 0,\n      \"interface_binding\": {\n        \"interface\": \"world_provider_example_task\",\n        \"config\": {\n          \"artifact_policy\": {\n            \"mode\": \"allow\",\n            \"names\": [\n              \"task.summary\"\n            ],\n            \"namespaces\": []\n          }\n        }\n      },\n      \"outbound_interface_bindings\": [\n        {\n          \"interface\": \"system_worker_example_home\",\n          \"config\": {\n            \"artifact_policy\": {\n              \"mode\": \"all\"\n            }\n          }\n        }\n      ],\n      \"artifact_bindings\": [\n        {\n          \"id\": \"artifact-worker-role-template\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-grounding-system-architecture\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-worker-role-operator-home\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-task-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-spawn-literacy\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-widget-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        }\n      ],\n      \"required_verified_artifacts\": []\n    },\n    {\n      \"id\": \"task_tools\",\n      \"run\": \"run_example_task\",\n      \"trace\": \"trace:run_example_task:task_tools\",\n      \"epoch\": 0,\n      \"interface_binding\": {\n        \"interface\": \"world_provider_example_task\",\n        \"config\": {\n          \"artifact_policy\": {\n            \"mode\": \"all\"\n          }\n        }\n      },\n      \"outbound_interface_bindings\": [\n        {\n          \"interface\": \"system_room_example_task\",\n          \"config\": {\n            \"artifact_policy\": {\n              \"mode\": \"all\"\n            }\n          }\n        }\n      ],\n      \"artifact_bindings\": [\n        {\n          \"id\": \"artifact-worker-role-template\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-grounding-system-architecture\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-worker-role-operator-home\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-task-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-spawn-literacy\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-widget-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        }\n      ],\n      \"required_verified_artifacts\": [\n        {\n          \"mark\": \"tool.call.allowed\",\n          \"artifact_label\": \"tool.call\",\n          \"verifier\": \"tool_call_allowed\",\n          \"params\": {\n            \"tools\": [\n              \"artifact.send\"\n            ]\n          }\n        }\n      ]\n    },\n    {\n      \"id\": \"task_tool_result\",\n      \"run\": \"run_example_task\",\n      \"trace\": \"trace:run_example_task:task_tool_result\",\n      \"epoch\": 0,\n      \"interface_binding\": {\n        \"interface\": \"system_room_example_task\",\n        \"config\": {\n          \"artifact_policy\": {\n            \"mode\": \"all\"\n          }\n        }\n      },\n      \"outbound_interface_bindings\": [\n        {\n          \"interface\": \"world_provider_example_task\",\n          \"config\": {\n            \"artifact_policy\": {\n              \"mode\": \"all\"\n            }\n          }\n        }\n      ],\n      \"artifact_bindings\": [\n        {\n          \"id\": \"artifact-worker-role-template\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-grounding-system-architecture\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-worker-role-operator-home\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-task-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-spawn-literacy\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-widget-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        }\n      ],\n      \"required_verified_artifacts\": []\n    },\n    {\n      \"id\": \"task_reply\",\n      \"run\": \"run_example_task\",\n      \"trace\": \"trace:run_example_task:task_reply\",\n      \"epoch\": 0,\n      \"interface_binding\": {\n        \"interface\": \"world_provider_example_task\",\n        \"config\": {\n          \"artifact_policy\": {\n            \"mode\": \"allow\",\n            \"names\": [\n              \"interface.artifact.output\",\n              \"turn.error\"\n            ],\n            \"namespaces\": []\n          }\n        }\n      },\n      \"outbound_interface_bindings\": [\n        {\n          \"interface\": \"world_operator_chat_example_task\",\n          \"config\": {\n            \"artifact_policy\": {\n              \"mode\": \"all\"\n            }\n          }\n        }\n      ],\n      \"artifact_bindings\": [\n        {\n          \"id\": \"artifact-worker-role-template\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-grounding-system-architecture\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-worker-role-operator-home\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-task-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-spawn-literacy\",\n          \"access\": {\n            \"read\": true\n          }\n        },\n        {\n          \"id\": \"artifact-home-widget-authoring\",\n          \"access\": {\n            \"read\": true\n          }\n        }\n      ],\n      \"required_verified_artifacts\": []\n    }\n  ],\n  \"active_checkpoints\": [\n    \"task_input\",\n    \"task_client_input\",\n    \"task_return_address\",\n    \"task_tools\",\n    \"task_tool_result\",\n    \"task_reply\"\n  ]\n}\n",
+    "expected_before_hash": null
+  },
+  "receipt_claim": "task.summary.received plus artifact_exists establishes readable artifact receipt. completed/blocked/failed is producer-authored content; it never becomes a success mark merely by arriving."
+}
