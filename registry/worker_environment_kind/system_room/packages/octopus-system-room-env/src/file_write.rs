@@ -4,7 +4,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs2::FileExt;
 use octopus_file_storage::publication::{self, DigestAlgorithm, PublicationOutcome, PublicationReceipt, WriteGuard};
 use octopus_file_write_contract::{DecodeBudget, JsonFormat, Preimage};
 use octopus_interfaces::InterfaceInvocationEnvelope;
@@ -107,7 +106,7 @@ pub(crate) fn lock_invocation(directory: &Path) -> Result<std::fs::File, String>
     if !lock.metadata().map_err(|error| error.to_string())?.is_file() {
         return Err("file.write invocation lock is not a regular file".into());
     }
-    lock.try_lock_exclusive()
+    lock.try_lock().map_err(std::io::Error::from)
         .map_err(|error| format!("file.write exact artifact is already executing: {error}"))?;
     Ok(lock)
 }

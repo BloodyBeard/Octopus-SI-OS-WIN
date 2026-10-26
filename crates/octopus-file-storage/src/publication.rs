@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -184,9 +183,9 @@ impl HeldFile {
                 return Err(invalid("publication lock is not a regular file"));
             }
             let locked = if exclusive {
-                file.try_lock_exclusive()
+                file.try_lock().map_err(io::Error::from)
             } else {
-                FileExt::try_lock_shared(&file)
+                file.try_lock_shared().map_err(io::Error::from)
             };
             match locked {
                 Ok(()) => {
@@ -254,7 +253,9 @@ impl HeldFile {
 }
 
 fn lock_held(file: &File, exclusive: bool) -> io::Result<()> {
-    if exclusive { file.try_lock_exclusive() } else { FileExt::try_lock_shared(file) }
+    // std's locks report contention as WouldBlock on every platform (fs2
+    // reports Windows' ERROR_LOCK_VIOLATION as a plain error).
+    if exclusive { file.try_lock() } else { file.try_lock_shared() }.map_err(io::Error::from)
 }
 
 /// A directory opened only to hold its identity and, on Unix, its `flock`.
@@ -802,7 +803,7 @@ impl WriteGuard {
             return Ok(receipt);
         }
     }
-    prepared.try_lock_exclusive()?;
+    prepared.try_lock().map_err(io::Error::from)?;
     lock.verify()?;
     membership.verify()?;
     if let Some(current) = held_current { current.verify()?; }

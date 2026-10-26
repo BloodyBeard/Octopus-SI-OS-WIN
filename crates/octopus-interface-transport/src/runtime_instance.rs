@@ -15,7 +15,6 @@ impl RuntimeInstanceLock {
     pub fn try_acquire(home: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use fs2::FileExt;
             use std::os::unix::fs::OpenOptionsExt;
             if !home.is_absolute() || home.components().any(|part| !matches!(part, Component::RootDir | Component::Normal(_))) {
                 return Err(invalid("runtime ownership requires an absolute normalized Home"));
@@ -40,7 +39,7 @@ impl RuntimeInstanceLock {
             let held_parent = &directories.last().unwrap().1;
             let file = open_child(held_parent, std::ffi::OsStr::new("runtime-instance.lock"), libc::O_RDWR | libc::O_CREAT)?;
             if !file.metadata()?.is_file() { return Err(invalid("runtime ownership lock is not a regular file")); }
-            FileExt::try_lock_exclusive(&file)?;
+            file.try_lock().map_err(io::Error::from)?;
             let guard = Self { directories, file };
             guard.verify()?;
             guard.directories.last().unwrap().1.sync_all()?;
@@ -51,7 +50,6 @@ impl RuntimeInstanceLock {
         // junction) and checked by volume serial number and file ID.
         #[cfg(windows)]
         {
-            use fs2::FileExt;
             use std::os::windows::fs::OpenOptionsExt;
             if !home.is_absolute()
                 || home.components().any(|part| !matches!(part, Component::Prefix(_) | Component::RootDir | Component::Normal(_)))
@@ -77,7 +75,7 @@ impl RuntimeInstanceLock {
             let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path.join("runtime-instance.lock"))?;
             if !file.metadata()?.is_file() { return Err(invalid("runtime ownership lock is not a regular file")); }
-            FileExt::try_lock_exclusive(&file)?;
+            file.try_lock().map_err(io::Error::from)?;
             let guard = Self { directories, file };
             guard.verify()?;
             octopus_private_fs::sync_directory(&path)?;

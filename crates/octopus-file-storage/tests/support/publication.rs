@@ -24,10 +24,10 @@ fn concurrent_predecessor_checks_and_read_guards_cover_replacement() {
     assert_eq!(receipts.iter().filter(|receipt| receipt.outcome == PublicationOutcome::Applied).count(), 1);
     assert_eq!(receipts.iter().filter(|receipt| receipt.outcome == PublicationOutcome::NotApplied).count(), 1);
     let guard = ReadGuard::try_acquire(std::slice::from_ref(&path), &[]).unwrap();
-    assert_eq!(open_regular(&path).unwrap().try_lock_exclusive().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert_eq!(io::Error::from(open_regular(&path).unwrap().try_lock().unwrap_err()).kind(), io::ErrorKind::WouldBlock);
     guard.verify().unwrap();
     drop(guard);
-    open_regular(&path).unwrap().try_lock_exclusive().unwrap();
+    open_regular(&path).unwrap().try_lock().unwrap();
     let absent = root.path().join("absent");
     let guard = ReadGuard::try_acquire(&[absent], &[]).unwrap();
     assert_eq!(directory_lock(root.path(), true, false).err().unwrap().kind(), io::ErrorKind::WouldBlock);

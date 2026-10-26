@@ -280,7 +280,7 @@ fn execute_batch(
     let retirement = receipts.iter().enumerate()
         .filter(|(_, receipt)| schema == 2 && receipt.outcome == Outcome::Applied)
         .try_for_each(|(index, receipt)| retire_stage(&directory, index, receipt));
-    let unlocked = FileExt::unlock(&lock).map_err(|error| error.to_string());
+    let unlocked = lock.unlock().map_err(|error| error.to_string());
     Ok((receipts, retirement.and(unlocked).err()))
 }
 

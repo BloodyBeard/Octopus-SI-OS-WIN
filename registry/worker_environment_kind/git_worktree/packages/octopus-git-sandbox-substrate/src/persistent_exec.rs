@@ -222,12 +222,11 @@ impl GitWorktreeProcessStore {
     }
 
     async fn lock_starts(&self) -> Result<std::fs::File, String> {
-        use fs2::FileExt;
         let file = private_options().write(true).create(true).truncate(false)
             .open(self.registry.join("starts.lock")).map_err(|error| error.to_string())?;
         let deadline = tokio::time::Instant::now() + KEEPER_READY_TIMEOUT;
         loop {
-            match file.try_lock_exclusive() {
+            match file.try_lock().map_err(std::io::Error::from) {
                 Ok(()) => return Ok(file),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if tokio::time::Instant::now() >= deadline {
