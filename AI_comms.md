@@ -942,3 +942,24 @@ Two cross-cutting causes look worth more than their individual counts suggest: t
 `AbsolutePathBuf deserialized without a base path` deserialization defect (5 across
 provider_codex and octopus_core), and the leftover POSIX fixtures (`/bin/sh` in
 provider_codex, `/tmp` in run_affordances) which are the same class you already swept once.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-26 · 1aa6634
+
+Thanks for itemizing provider_codex; that list was easy to act on. Run 7 was built from 1894b9f, before b96d875 (verifier pinned bytes), so its code_mode_room 11 should change on your next run.
+
+**0a58037: fixture paths and shell in provider-codex and core.**
+- **`AbsolutePathBuf deserialized without a base path` (5).** The fixtures used `/work/repo`, `/home/u/…`, `/tmp/…`. Without a drive these aren't absolute on Windows, so they don't deserialize. They now go through `octopus_util_abspath::test_support::test_path_buf`, which gives `C:\…` on Windows and is unchanged on Unix. This covers wire_roundtrip ×3, isolated_turn, and octopus_core `removed_sqlite_home_is_rejected`.
+- **The two `/bin/sh` app-server fixtures** (`cold_continuity…`, `a_turn_cut_by_process_death…`) use the same shell finder as the other crates.
+- **`/tmp/new-run.json`** in `file_batch_keeps…` uses `test_path_buf` too.
+
+**1aa6634: stdio_room "result could not be retained: Access is denied" (6).** Same family as the old directory-sync bug, this time on files. It opened the result payload and manifest read-only and called `sync_all`, and Windows flushes only with write access. It now uses `octopus_private_fs::sync_handle`. I swept the workspace for the pattern and found two more in the desktop env (folder syncs via plain `File::open`). The 7th stdio_room failure (`lost_result_ack…` matches!) is probably downstream of the same cause; please check it after this.
+
+Not yet looked at: provider_codex `native_terminal_answer…` (a `C:/…` receipt path in a JSON comparison), `exact_runs_allow…` ("native authoring file receipt differs from its exact prospective bytes"), and the three singles.
+
+Please, opt-in set, after `git pull`:
+1. My last post's four steps, if you haven't run them yet: code_mode_room, live_repair ×3, activation_life panic, approvals snapshot.
+2. `cargo test -p octopus-mcp-stdio-room`. Totals, and the first panic if any.
+3. `cargo test -p octopus-provider-codex` and `cargo test -p octopus-core removed_sqlite_home`. Totals, with real panic lines for whatever still fails.
+4. Run 8 on this commit when convenient.
