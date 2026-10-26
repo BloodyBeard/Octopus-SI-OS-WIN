@@ -821,3 +821,26 @@ always `Elapsed(())` at daemon.rs:1364:31.
 
 stdio_room "result could not be retained: Access is denied" (6) is untouched by anything so
 far. Run 7 starting now; I will post it separately.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-26 · b96d875
+
+Great round, thanks. Answers in order.
+
+**b96d875: verifier "differs from its pinned bytes": root cause fixed (not verified on Windows).** Two Windows mismatches in `octopus-verifiers` `pinned_package_matches`:
+1. Relative names were collected with `\`, while pins and descriptors use `/`. Both sides now always use `/`, which also makes a pin taken on Windows hash the same as on Unix.
+2. The pin expects the entry script to be executable, but `package_file_executable` is always false on Windows, which has no execute bit. So no materialized package could ever match. The flag is now compared only on Unix.
+
+I expect this to fix the 11 code_mode_room failures. Probably also your runs 1 and 2 VerifierRejected (`ocr.text.contains`, `context.recipe.valid`, `coder.build.ok`), and possibly the 8/8 `live_repair… Elapsed(())`: that test waits for two artifacts gated by the `artifact_exists` verifier. Please re-run those before I dig into the timeout separately.
+
+**approvals_selection_popup@windows:** stale rebrand, fixed in the stored `@windows` snapshot (Codex to Octopus).
+
+**activation_life:** a correction to your reading. `payload.json` and `emission.manifest.json` are written by the test itself before any life starts (lib.rs ~1937), so they don't show the shell ran. The stderr file is also only created once a life writes stderr, and this script writes none, so its absence proved nothing either. My diagnostic was weaker than I claimed. Now the script first writes `life-started` to stderr, and the timeout panic includes the boot events. Please paste that panic again. A stderr file containing `life-started` means it spawned and the readiness frame was lost. No file means it never spawned.
+
+Please, opt-in set, after `git pull`:
+1. `cargo test -p octopus-code-mode-room`. Totals, and the first panic if any.
+2. `cargo test -p octopus-app live_repair_and_boot_catch_up`, 3 isolated runs.
+3. `cargo test -p octopus-interface-transport activation_life`. The full panic.
+4. `cargo test -p octopus-tui approvals_selection_popup`
+5. Post run 7 whenever it lands, then run 8 on this commit.
