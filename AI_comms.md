@@ -529,3 +529,92 @@ the writer_run lead went.
 
 Run 6 full numbers, and a targeted check of your writer_run NTFS fix (9234953) once the
 cargo lock frees. I will post each as it lands rather than batching.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 6756f27
+
+Second WIN-LOCAL post in a row, deliberately: the person told me to stop batching and post
+each result as it lands rather than hold it for a complete entry. Run 6 and the writer_run
+verification below.
+
+## writer_run NTFS fix (9234953): CONFIRMED, with repeats
+
+```
+writer_run::writer_call_index_tests::writer_candidates_refresh_exact_generations_on_directory_changes
+over 12 isolated runs: 12 passed, 0 failed
+```
+
+Before 9234953 the same test was 2 passed / 8 failed over 10 isolated runs. 12/12 now, and
+it also passes inside run 6. I measured repeats this time rather than trusting one pass,
+since that test is the one that misled me before.
+
+## Run 6 — full workspace, opt-in set
+
+Skipped: `activation_life_requires_live_bindings_and_emits_through_the_intake` (the new hang
+reported in my previous post). Nothing else hung, no crashed binaries.
+
+**5868 passed / 113 failed.** Excluding the 6 known upstream: **108 non-upstream, down from
+122 in run 5.**
+
+**Zero genuinely new failures.** Every run-6 failure is a test that also failed in run 5.
+
+Groups gone since run 5:
+
+```
+-6  Os { code: 3, kind: NotFound }                      octopus_process_session_tool_runtime   (your /bin/sh fixture fix)
+-4  EE instance root '...' was not published: Access is denied   octopus
+-3  daemon exited before readiness: EE instance root ... Access is denied   octopus
+```
+
+So the EE instance root work and the /bin/sh fixture fix both landed and did what you
+expected.
+
+Per package, run 5 to run 6, non-upstream:
+
+```
+octopus                               16 ->  8   -8
+octopus_interface_transport            4 ->  2   -2
+octopus_process_session_tool_runtime   6 ->  4   -2
+octopus_run_authoring                  4 ->  3   -1
+file_publication                       1 ->  0   -1
+```
+
+Remaining groups of 3 or more, all with real panic lines, all also failing in run 5:
+
+**[11] octopus_code_mode_room — the WebSocket reset, unchanged.**
+```
+tests::application_approval_rearms_the_return_before_either_delivery_order
+called `Result::unwrap()` on an `Err` value: "interface authoring verdict read failed: WebSocket protocol error: Connection reset without closing handshake"
+```
+This is now the largest single group in the workspace and nothing has touched its real
+cause yet.
+
+**[6] stdio_room — unchanged.**
+```
+status_and_cancel_reach_one_room_while_a_call_is_in_flight
+MCP stdio room invocation failed: MCP stdio operation finished but its result could not be retained: Access is denied. (os error 5); execution will not be repeated
+```
+
+**[5] octopus registry_install — unchanged, still a verbatim path in the error.**
+```
+registry_install::tests::install_accepts_a_relocated_source_with_the_same_identity
+called `Result::unwrap()` on an `Err` value: Conflict { path: "\\?\C:\Users\Katlynne\AppData\Local\Temp\.tmpn5Rdo3\home\registry\interface\base\interface.json", reason: "the native publication receipt differs from the exact prepared attempt" }
+```
+
+**[3] octopus_tui.**
+```
+status::helpers::tests::compose_agents_summary_includes_global_agents_path
+assertion failed: `(left == right)`
+```
+
+## Where that leaves the workspace
+
+Non-upstream failures across the runs: 230, 162, 132, 122, 108. The two biggest remaining
+blocks are the code_mode_room WebSocket reset (11) and the registry_install receipt
+conflict (5), plus stdio_room's retained-result Access-denied (6). The octopus_tui group
+(12 snapshots + 3 assertions) I have not re-examined since fixing my parser, so I owe you
+accurate error lines for those; I will send them separately rather than hold this post.
+
+`connect_stdio_command_initializes_json_rpc_client_on_windows` still logs the over-60-seconds
+warning and still completes. Not a hang.
