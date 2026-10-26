@@ -104,7 +104,7 @@ impl FileIdentity {
     /// record format cannot hold exactly, so they are refused rather than
     /// truncated.
     #[cfg(windows)]
-    fn of_windows(identity: octopus_private_fs::FileIdentity) -> io::Result<Self> {
+    pub(super) fn of_windows(identity: octopus_private_fs::FileIdentity) -> io::Result<Self> {
         let inode = u64::try_from(identity.file).map_err(|_| {
             io::Error::new(io::ErrorKind::Unsupported, "file publication does not yet support 128-bit (ReFS) file IDs")
         })?;
@@ -323,7 +323,7 @@ impl Target {
         if !path.is_absolute() || path.file_name().is_none() {
             return Err(invalid("publication target must be an absolute file path"));
         }
-        let parent = std::fs::canonicalize(path.parent().unwrap())?;
+        let parent = namespace::ordinary(std::fs::canonicalize(path.parent().unwrap())?);
         let name = path.file_name().unwrap();
         if path.components().any(|component| component.as_os_str() == COORDINATION_DIRECTORY) {
             return Err(invalid("publication metadata is not a publication target"));

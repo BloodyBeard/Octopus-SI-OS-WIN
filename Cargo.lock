@@ -6735,6 +6735,7 @@ dependencies = [
  "octopus-descriptors",
  "octopus-file-storage",
  "octopus-ledger",
+ "octopus-private-fs",
  "serde",
  "serde_json",
  "tempfile",

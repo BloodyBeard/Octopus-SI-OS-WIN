@@ -1348,7 +1348,114 @@ fn read_regular_file_beneath(
     ))
 }
 
-#[cfg(not(unix))]
+/// Windows: the same capture through directory handles; see
+/// `octopus_private_fs::windows::beneath`.
+#[cfg(windows)]
+fn read_regular_file_beneath(
+    path: &Path,
+    output_roots: &[PathBuf],
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    if !path.is_absolute() {
+        return Err(format!(
+            "spawned interface output '{}' is not absolute",
+            path.display()
+        ));
+    }
+    let leaf = path.file_name().ok_or_else(|| {
+        format!(
+            "spawned interface output '{}' has no regular-file leaf",
+            path.display()
+        )
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "spawned interface output '{}' has no parent directory",
+            path.display()
+        )
+    })?;
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "spawned interface output parent '{}' cannot be canonicalized: {error}",
+            parent.display()
+        )
+    })?;
+    let normalized_path = canonical_parent.join(leaf);
+    let mut roots = output_roots
+        .iter()
+        .filter_map(|root| {
+            let root = std::fs::canonicalize(root).ok()?;
+            let relative = normalized_path.strip_prefix(&root).ok()?.to_path_buf();
+            Some((root, relative))
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|(root, _)| std::cmp::Reverse(root.components().count()));
+    let Some((root, relative)) = roots.into_iter().next() else {
+        return Err(format!(
+            "spawned interface output '{}' is outside private output roots {:?}",
+            path.display(),
+            output_roots
+        ));
+    };
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name),
+            _ => Err(format!(
+                "spawned interface output '{}' has a non-normal relative component",
+                path.display()
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if components.is_empty() {
+        return Err(format!(
+            "spawned interface output '{}' names its output root, not a regular file",
+            path.display()
+        ));
+    }
+    let mut file = octopus_private_fs::windows::beneath::open_file_at(&root, &components).map_err(|error| {
+        format!(
+            "spawned interface output '{}' cannot be opened beneath '{}': {error}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        format!(
+            "spawned interface output '{}' descriptor cannot be inspected: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.len() > maximum_bytes {
+        return Err(format!(
+            "spawned interface output '{}' is {} bytes, above its declared ceiling {}",
+            path.display(),
+            metadata.len(),
+            maximum_bytes
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(maximum_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "spawned interface output '{}' descriptor cannot be read: {error}",
+                path.display()
+            )
+        })?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(format!(
+            "spawned interface output '{}' grew above its declared ceiling {} while being read",
+            path.display(),
+            maximum_bytes
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn read_regular_file_beneath(
     path: &Path,
     _output_roots: &[PathBuf],

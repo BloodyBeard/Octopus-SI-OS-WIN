@@ -79,10 +79,13 @@ fn private_directory(parent: &File, name: &std::ffi::OsStr) -> io::Result<Option
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    if state.kind != DirectoryEntryKind::Directory || state.mode & 0o077 != 0 {
+    if state.kind != DirectoryEntryKind::Directory {
         return Err(invalid("publication history requires a real private coordination directory"));
     }
     let directory = native::child(parent, name, true)?;
+    if !native::private_directory(&state, &directory)? {
+        return Err(invalid("publication history requires a real private coordination directory"));
+    }
     let reopened = native::state(parent, name)?;
     if FileIdentity::of_file(&directory)? != state.identity
         || reopened.identity != state.identity
@@ -101,7 +104,7 @@ fn roots(path: &Path) -> io::Result<Vec<HistoryRoot>> {
 fn roots_with_ancestry(path: &Path, ancestors: &mut Vec<PathBuf>) -> io::Result<(Vec<HistoryRoot>, bool)> {
     namespace::validate_absolute(path)?;
     let parent = path.parent().ok_or_else(|| invalid("history path has no parent"))?;
-    let mut current_path = PathBuf::from("/");
+    let mut current_path = native::root_of(parent);
     let mut current = native::directory(&current_path)?;
     let mut roots = Vec::new();
     let mut parts = parent.components().filter_map(|part| match part {
@@ -117,8 +120,7 @@ fn roots_with_ancestry(path: &Path, ancestors: &mut Vec<PathBuf>) -> io::Result<
             Ok(directory) => directory,
             Err(error) if error.kind() == io::ErrorKind::NotFound => break true,
             Err(error) if error.kind() == io::ErrorKind::NotADirectory => break false,
-            #[cfg(unix)]
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => break false,
+            Err(error) if native::is_link_refusal(&error) => break false,
             Err(error) => return Err(error),
         };
         let state = native::state(&current, name)?;
@@ -267,10 +269,13 @@ pub(super) fn export_tree(source: &Path, identity: &FileIdentity, destination_ro
         let state = native::state(&directory, &name)?;
         let path = source.join(&name);
         if name == COORDINATION_DIRECTORY {
-            if state.kind != DirectoryEntryKind::Directory || state.mode & 0o077 != 0 {
+            if state.kind != DirectoryEntryKind::Directory {
                 return Err(invalid("history export rejects aliased or nonprivate publication metadata"));
             }
-            let _metadata = native::pinned_directory(&path, &state.identity)?;
+            let metadata = native::pinned_directory(&path, &state.identity)?;
+            if !native::private_directory(&state, &metadata)? {
+                return Err(invalid("history export rejects aliased or nonprivate publication metadata"));
+            }
             export_metadata(&path, destination_root)?;
         } else if state.kind == DirectoryEntryKind::Directory {
             export_tree(&path, &state.identity, destination_root)?;

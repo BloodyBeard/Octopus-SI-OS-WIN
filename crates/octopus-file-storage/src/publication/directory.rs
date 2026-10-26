@@ -97,7 +97,7 @@ fn ordinary_path(path: &Path) -> io::Result<()> {
 
 pub(super) fn exact_path(path: &Path) -> io::Result<()> {
     ordinary_path(path)?;
-    if namespace::normalize_entry(path)? != path {
+    if !namespace::same_path(&namespace::normalize_entry(path)?, path) {
         return Err(invalid("directory publication rejects aliased endpoint ancestors"));
     }
     Ok(())
@@ -223,7 +223,7 @@ fn collect(root: &File, relative: &Path, algorithm: DigestAlgorithm, metadata: b
         if name == COORDINATION_DIRECTORY && !metadata {
             let state = native::state(root, &name)?;
             let child = native::child(root, &name, true)?;
-            if state.kind != DirectoryEntryKind::Directory || state.mode & 0o077 != 0
+            if state.kind != DirectoryEntryKind::Directory || !native::private_directory(&state, &child)?
                 || FileIdentity::of_file(&child)? != state.identity
             { return Err(invalid("reserved publication metadata is not an exact private directory")); }
             continue;
@@ -502,7 +502,23 @@ fn rename_no_replace(movement: &DirectoryMove, parents: &BTreeMap<PathBuf, FileI
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
         return if result == 0 { crate::sync_ordered(&source_parent)?; crate::sync_ordered(&destination_parent) } else { Err(io::Error::last_os_error()) };
     }
-    #[cfg(not(unix))] { let _ = (source, destination, parents); Err(io::Error::new(io::ErrorKind::Unsupported, "directory publication requires native no-replace moves")) }
+    // Windows renames the source directory's handle into the destination
+    // parent handle without replacing (FileRenameInformation).
+    #[cfg(windows)] {
+        let parent = |path: &Path| native::pinned_directory(path, parents.get(path).ok_or_else(|| invalid("move lost its original parent identity"))?);
+        let source_parent = parent(source.parent().ok_or_else(|| invalid("move source has no parent"))?)?;
+        let destination_parent = parent(destination.parent().ok_or_else(|| invalid("move destination has no parent"))?)?;
+        let source_name = source.file_name().ok_or_else(|| invalid("move source has no name"))?;
+        let destination_name = destination.file_name().ok_or_else(|| invalid("move destination has no name"))?;
+        let state = native::state(&source_parent, source_name)?;
+        if state.kind != DirectoryEntryKind::Directory || state.identity != movement.expected.identity {
+            return Err(invalid("native move source differs from its original inode"));
+        }
+        octopus_private_fs::windows::beneath::rename_no_replace(&source_parent, source_name, &destination_parent, destination_name)?;
+        crate::sync_ordered(&source_parent)?;
+        crate::sync_ordered(&destination_parent)
+    }
+    #[cfg(not(any(unix, windows)))] { let _ = (source, destination, parents); Err(io::Error::new(io::ErrorKind::Unsupported, "directory publication requires native no-replace moves")) }
 }
 
 fn sync_preimage(path: &Path, expected: &DirectoryPreimage) -> io::Result<()> {

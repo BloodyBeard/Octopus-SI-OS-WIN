@@ -11,7 +11,7 @@ pub(super) struct NodeState {
     changed: (i64, i64),
 }
 
-#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
 fn unsupported() -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, "directory publication requires native descriptor-relative traversal")
 }
@@ -36,7 +36,11 @@ pub(super) fn child(parent: &File, value: &OsStr, directory: bool) -> io::Result
         }
         Ok(file)
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))] {
+    #[cfg(windows)] {
+        use octopus_private_fs::windows::beneath;
+        if directory { beneath::open_directory(parent, value) } else { beneath::open_file(parent, value) }
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))] {
         let _ = (parent, value, directory); Err(unsupported())
     }
 }
@@ -54,7 +58,32 @@ pub(super) fn directory(path: &Path) -> io::Result<File> {
         }
         Ok(held)
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))] { let _ = path; Err(unsupported()) }
+    // Windows walks from the path's drive or share root.
+    #[cfg(windows)] { octopus_private_fs::windows::beneath::open_directory_path(path) }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))] { let _ = path; Err(unsupported()) }
+}
+
+/// Whether a directory opened for `state` grants nothing to anyone but its
+/// owner. Unix reads the mode; Windows has no mode bits (`state.mode` is 0),
+/// so it reads the directory's access list through the handle.
+pub(super) fn private_directory(state: &NodeState, directory: &File) -> io::Result<bool> {
+    #[cfg(unix)] { let _ = directory; Ok(state.mode & 0o077 == 0) }
+    #[cfg(windows)] { let _ = state; octopus_private_fs::is_owner_only_handle(directory) }
+}
+
+/// Whether opening an entry failed because it is a symlink (Unix `ELOOP`,
+/// Windows any reparse point).
+pub(super) fn is_link_refusal(error: &io::Error) -> bool {
+    #[cfg(unix)] { error.raw_os_error() == Some(libc::ELOOP) }
+    #[cfg(windows)] { octopus_private_fs::windows::beneath::is_link_refusal(error) }
+}
+
+/// The filesystem root `path` starts from: `/` on Unix; the drive or share
+/// root (with any `\\?\` prefix) on Windows.
+pub(super) fn root_of(path: &Path) -> PathBuf {
+    path.components()
+        .take_while(|part| matches!(part, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+        .collect()
 }
 
 pub(super) fn pinned_directory(path: &Path, identity: &FileIdentity) -> io::Result<File> {
@@ -84,7 +113,20 @@ pub(super) fn state(parent: &File, value: &OsStr) -> io::Result<NodeState> {
             mode: state.st_mode as u32 & 0o7777, bytes: u64::try_from(state.st_size).map_err(|_| invalid("filesystem entry has negative size"))?,
             modified: (state.st_mtime as i64, state.st_mtime_nsec as i64), changed: (state.st_ctime as i64, state.st_ctime_nsec as i64) })
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))] { let _ = (parent, value); Err(unsupported()) }
+    #[cfg(windows)] {
+        use octopus_private_fs::windows::beneath::{self, EntryKind};
+        let entry = beneath::entry(parent, value)?;
+        let kind = match entry.kind {
+            EntryKind::Directory => DirectoryEntryKind::Directory,
+            EntryKind::File => DirectoryEntryKind::File,
+            EntryKind::Symlink => DirectoryEntryKind::Symlink,
+            EntryKind::Other => return Err(invalid("directory publication rejects special filesystem entries")),
+        };
+        // Windows has no mode bits; its times are 100 ns ticks.
+        Ok(NodeState { identity: FileIdentity::of_windows(entry.identity)?, kind, mode: 0, bytes: entry.len,
+            modified: (entry.modified, 0), changed: (entry.changed, 0) })
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))] { let _ = (parent, value); Err(unsupported()) }
 }
 
 pub(super) fn link_target(parent: &File, value: &OsStr) -> io::Result<Vec<u8>> {
@@ -100,7 +142,13 @@ pub(super) fn link_target(parent: &File, value: &OsStr) -> io::Result<Vec<u8>> {
             bytes.resize(bytes.len() * 2, 0);
         }
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))] { let _ = (parent, value); Err(unsupported()) }
+    // The stored target as WTF-8, the bytes `OsStr` encodes it with.
+    #[cfg(windows)] {
+        let target = octopus_private_fs::windows::beneath::read_link(parent, value)?.target;
+        if target.len() > RECORD_LIMIT as usize { return Err(invalid("symlink target exceeds directory publication bound")); }
+        Ok(target.into_encoded_bytes())
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))] { let _ = (parent, value); Err(unsupported()) }
 }
 
 pub(super) fn names(directory: &File, limit: usize) -> io::Result<Vec<OsString>> {
@@ -137,5 +185,6 @@ pub(super) fn names(directory: &File, limit: usize) -> io::Result<Vec<OsString>>
         names.sort();
         Ok(names)
     }
-    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))] { let _ = (directory, limit); Err(unsupported()) }
+    #[cfg(windows)] { octopus_private_fs::windows::beneath::names(directory, limit) }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))] { let _ = (directory, limit); Err(unsupported()) }
 }

@@ -225,7 +225,19 @@ fn unlink(path: &Path, directory: bool, parent_identity: &FileIdentity, identity
         if result != 0 { return Err(io::Error::last_os_error()); }
         crate::sync_ordered(&parent)
     }
-    #[cfg(not(unix))] { let _ = (path, directory, parent_identity, identity); Err(io::Error::new(io::ErrorKind::Unsupported, "exact tombstone reclamation requires native unlink")) }
+    // Windows removes the entry through a handle opened beneath the pinned
+    // parent, after checking that handle is still the original file.
+    #[cfg(windows)] {
+        let parent = native::pinned_directory(path.parent().ok_or_else(|| invalid("reclamation entry has no parent"))?, parent_identity)?;
+        let name = path.file_name().ok_or_else(|| invalid("reclamation entry has no name"))?;
+        let state = native::state(&parent, name)?;
+        if state.identity != *identity || (state.kind == DirectoryEntryKind::Directory) != directory {
+            return Err(invalid("native reclamation entry differs from its original inode"));
+        }
+        octopus_private_fs::windows::beneath::remove(&parent, name, directory, (identity.device, u128::from(identity.inode)))?;
+        crate::sync_ordered(&parent)
+    }
+    #[cfg(not(any(unix, windows)))] { let _ = (path, directory, parent_identity, identity); Err(io::Error::new(io::ErrorKind::Unsupported, "exact tombstone reclamation requires native unlink")) }
 }
 
 fn entry_parent_identity<'a>(intent: &'a Intent, relative: &Path) -> io::Result<&'a FileIdentity> {

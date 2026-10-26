@@ -14,7 +14,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -56,6 +56,13 @@ pub fn is_owner_only(path: &Path) -> io::Result<bool> {
     platform::is_owner_only(path)
 }
 
+/// Whether an open file or directory is owned by the current user and grants
+/// nothing to anyone else (Unix `mode & 0o077 == 0`), and is not a symlink
+/// or reparse point.
+pub fn is_owner_only_handle(file: &File) -> io::Result<bool> {
+    platform::is_owner_only_handle(file)
+}
+
 /// Whether an open file is an owner-private (Unix 0600) regular file with a
 /// single link.
 pub fn is_private_single_link_file(file: &File) -> io::Result<bool> {
@@ -72,6 +79,17 @@ pub fn is_private_single_link_file(file: &File) -> io::Result<bool> {
 /// example FAT) has nothing more to make durable.
 pub fn sync_directory(path: impl AsRef<Path>) -> io::Result<()> {
     platform::sync_directory(path.as_ref())
+}
+
+/// Makes an open file's data, or an open directory's entries, durable.
+///
+/// Unix: fsync. Windows flushes only through a handle with write access, so a
+/// read-only handle (a file opened for reading, a directory opened to list)
+/// is reopened with write access for the flush (`ReOpenFile`, same file, no
+/// path lookup). As in [`sync_directory`], a file system that cannot flush a
+/// directory has nothing more to make durable.
+pub fn sync_handle(file: &File) -> io::Result<()> {
+    platform::sync_handle(file)
 }
 
 /// Opens a directory so that `sync_all` on the handle makes its entries
@@ -126,6 +144,23 @@ pub fn is_canonical(path: &Path) -> io::Result<bool> {
     Ok(platform::same_path(&canonical, path))
 }
 
+/// Whether two absolute paths spell the same location: equal on Unix; on
+/// Windows equal once the `\\?\` prefix and `/` separators are set aside and
+/// ignoring ASCII letter case (NTFS names are case-insensitive).
+pub fn same_path(first: &Path, second: &Path) -> bool {
+    platform::same_path(first, second)
+}
+
+/// `path` in its ordinary form. Unix: unchanged. Windows: a `\\?\C:\…` or
+/// `\\?\UNC\server\share\…` path (what `canonicalize` returns) becomes
+/// `C:\…` or `\\server\share\…` when that names the same file: every
+/// component is one Win32 path parsing leaves alone (no trailing dot or
+/// space, no reserved device name such as `CON` or `NUL`, no `<>:"|?*` or
+/// control characters). Otherwise the verbatim form is kept.
+pub fn ordinary_path(path: PathBuf) -> PathBuf {
+    platform::ordinary_path(path)
+}
+
 #[cfg(unix)]
 mod platform {
     use super::*;
@@ -174,6 +209,10 @@ mod platform {
         canonical == path
     }
 
+    pub(super) fn ordinary_path(path: PathBuf) -> PathBuf {
+        path
+    }
+
     pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
         File::open(path)?.sync_all()
     }
@@ -200,6 +239,17 @@ mod platform {
 
     pub(super) fn identity_of_path_no_follow(path: &Path) -> io::Result<FileIdentity> {
         Ok(identity(&std::fs::symlink_metadata(path)?))
+    }
+
+    pub(super) fn sync_handle(file: &File) -> io::Result<()> {
+        file.sync_all()
+    }
+
+    pub(super) fn is_owner_only_handle(file: &File) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions.
+        Ok(!metadata.file_type().is_symlink() && metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0)
     }
 }
 
@@ -237,7 +287,7 @@ mod platform {
     /// private access list next to the owner.
     const TRUSTED: [&str; 4] = ["S-1-5-18", "S-1-5-32-544", "S-1-3-4", "S-1-3-0"];
 
-    struct LocalMemory(HLOCAL);
+    pub(crate) struct LocalMemory(pub(crate) HLOCAL);
     impl Drop for LocalMemory {
         fn drop(&mut self) {
             if !self.0.is_null() {
@@ -328,9 +378,102 @@ mod platform {
         plain(canonical).eq_ignore_ascii_case(&plain(path))
     }
 
+    pub(super) fn ordinary_path(path: PathBuf) -> PathBuf {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        let mut ordinary = match components.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(letter) => PathBuf::from(format!("{}:", letter as char)),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut root = std::ffi::OsString::from(r"\\");
+                    root.push(server);
+                    root.push(r"\");
+                    root.push(share);
+                    PathBuf::from(root)
+                }
+                _ => return path,
+            },
+            _ => return path,
+        };
+        for component in components {
+            match component {
+                Component::RootDir => ordinary.push(r"\"),
+                Component::Normal(name) if win32_keeps(name) => ordinary.push(name),
+                _ => return path,
+            }
+        }
+        ordinary
+    }
+
+    /// Whether Win32 path parsing passes this name through unchanged.
+    fn win32_keeps(name: &std::ffi::OsStr) -> bool {
+        const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+        let Some(name) = name.to_str() else { return false };
+        if name.is_empty()
+            || name.ends_with(['.', ' '])
+            || name.chars().any(|c| c < ' ' || "<>:\"|?*/\\".contains(c))
+        {
+            return false;
+        }
+        let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
+        let numbered = |base: &str| {
+            stem.strip_prefix(base).is_some_and(|digit| {
+                matches!(digit, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+            })
+        };
+        !(RESERVED.contains(&stem.as_str()) || numbered("COM") || numbered("LPT"))
+    }
+
+    const ERROR_INVALID_FUNCTION: i32 = 1;
+
     pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
-        const ERROR_INVALID_FUNCTION: i32 = 1;
         match open_directory_for_sync(path)?.sync_all() {
+            Err(error) if error.raw_os_error() == Some(ERROR_INVALID_FUNCTION) => Ok(()),
+            result => result,
+        }
+    }
+
+    /// A second handle to the same open file or directory with `access`,
+    /// without a path lookup.
+    fn reopen(file: &File, access: u32) -> io::Result<File> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            ReOpenFile, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        // SAFETY: `file` is an open handle; the result is checked and owned below.
+        let reopened = unsafe {
+            ReOpenFile(
+                handle(file),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if reopened == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: ReOpenFile returned a new handle this call owns.
+        Ok(unsafe { File::from_raw_handle(reopened as _) })
+    }
+
+    pub(super) fn is_owner_only_handle(file: &File) -> io::Result<bool> {
+        if reparse_point(file.metadata()?.file_attributes()) {
+            return Ok(false);
+        }
+        owner_only(&reopen(file, READ_CONTROL | FILE_READ_ATTRIBUTES)?)
+    }
+
+    pub(super) fn sync_handle(file: &File) -> io::Result<()> {
+        use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        let result = match file.sync_all() {
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                reopen(file, GENERIC_WRITE)?.sync_all()
+            }
+            result => result,
+        };
+        match result {
             Err(error) if error.raw_os_error() == Some(ERROR_INVALID_FUNCTION) => Ok(()),
             result => result,
         }
@@ -523,7 +666,7 @@ mod platform {
     /// A self-relative security descriptor whose protected access list grants
     /// full access only to the current user and SYSTEM. In a directory's list
     /// the entries are inherited by new children.
-    fn owner_only_descriptor(directory: bool) -> io::Result<LocalMemory> {
+    pub(crate) fn owner_only_descriptor(directory: bool) -> io::Result<LocalMemory> {
         let user = &principals()?[0];
         let inherit = if directory { "OICI" } else { "" };
         let sddl: Vec<u16> = format!("D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)")
@@ -671,13 +814,23 @@ mod platform {
     }
 }
 
-/// Windows-only pieces for objects that are not files.
+#[cfg(windows)]
+mod beneath_windows;
+
+/// Windows-only pieces: objects that are not files, and no-follow access to
+/// entries beneath an open directory handle.
 #[cfg(windows)]
 pub mod windows {
     pub use super::platform::{
         make_dir_owner_only, open_entry_handle, pipe_server_is_current_user, process_is_current_user,
         OwnerOnlySecurity,
     };
+
+    /// Entries opened by name beneath an open directory, never through a
+    /// symlink or other reparse point.
+    pub mod beneath {
+        pub use crate::beneath_windows::*;
+    }
 }
 
 #[cfg(test)]

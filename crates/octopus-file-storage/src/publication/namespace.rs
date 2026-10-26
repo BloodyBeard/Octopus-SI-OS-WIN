@@ -52,6 +52,25 @@ impl TreeFiles {
     }
 }
 
+/// `canonicalize`'s answer in the form callers use: on Windows without the
+/// `\\?\` prefix wherever that names the same file (see
+/// `octopus_private_fs::ordinary_path`); unchanged on Unix.
+pub(super) fn ordinary(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    return octopus_private_fs::ordinary_path(path);
+    #[cfg(not(windows))]
+    path
+}
+
+/// Whether two absolute paths spell the same location; on Windows also
+/// across the `\\?\` prefix, separators and ASCII letter case.
+pub(super) fn same_path(first: &Path, second: &Path) -> bool {
+    #[cfg(windows)]
+    return octopus_private_fs::same_path(first, second);
+    #[cfg(not(windows))]
+    { first == second }
+}
+
 pub(super) fn normalize(path: &Path) -> io::Result<PathBuf> {
     if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir | Component::CurDir)) {
         return Err(invalid("publication path must be absolute and normalized"));
@@ -64,7 +83,9 @@ pub(super) fn normalize(path: &Path) -> io::Result<PathBuf> {
                 if !missing.is_empty() && !metadata.is_dir() && !metadata.file_type().is_symlink() {
                     return Err(invalid("publication path has a non-directory ancestor"));
                 }
-                let mut resolved = std::fs::canonicalize(cursor)?;
+                // Windows: `canonicalize` answers in `\\?\` form; keep paths in
+                // the ordinary form callers use wherever that is the same file.
+                let mut resolved = ordinary(std::fs::canonicalize(cursor)?);
                 for name in missing.iter().rev() { resolved.push(name); }
                 return Ok(resolved);
             }

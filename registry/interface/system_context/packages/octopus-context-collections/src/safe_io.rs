@@ -259,7 +259,163 @@ mod platform {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) use platform::*;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows: the same walk with directory handles. Each name is opened beneath
+/// its parent handle, and a symlink or other reparse point is refused like
+/// `O_NOFOLLOW` (see `octopus_private_fs::windows::beneath`).
+#[cfg(windows)]
+mod platform {
+    use super::*;
+    use octopus_private_fs::windows::beneath;
+    use std::ffi::OsStr;
+    use std::fs::File;
+    use std::io::Read;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Fingerprint {
+        device: u64,
+        file: u128,
+        len: u64,
+        modified: i64,
+        changed: i64,
+    }
+    impl From<beneath::Entry> for Fingerprint {
+        fn from(entry: beneath::Entry) -> Self {
+            Self {
+                device: entry.identity.device,
+                file: entry.identity.file,
+                len: entry.len,
+                modified: entry.modified,
+                changed: entry.changed,
+            }
+        }
+    }
+    impl Fingerprint {
+        pub(crate) fn len(&self) -> u64 {
+            self.len
+        }
+    }
+
+    pub(crate) struct SafeDir {
+        file: File,
+        pub(crate) path: PathBuf,
+    }
+    pub(crate) struct FileRead {
+        pub(crate) bytes: Vec<u8>,
+        pub(crate) fingerprint: Fingerprint,
+    }
+
+    fn io(path: &Path, error: std::io::Error) -> CollectionError {
+        if beneath::is_link_refusal(&error)
+            || matches!(error.kind(), std::io::ErrorKind::NotADirectory | std::io::ErrorKind::IsADirectory)
+        {
+            CollectionError::UnsafePath(path.to_path_buf())
+        } else {
+            CollectionError::Io {
+                path: path.to_path_buf(),
+                source: error,
+            }
+        }
+    }
+
+    fn fingerprint_of(path: &Path, file: &File) -> Result<Fingerprint> {
+        beneath::entry_of(file).map(Fingerprint::from).map_err(|e| io(path, e))
+    }
+
+    impl SafeDir {
+        pub(crate) fn absolute(path: &Path) -> Result<Self> {
+            if !path.is_absolute() {
+                return Err(CollectionError::UnsafePath(path.to_path_buf()));
+            }
+            let file = beneath::open_directory_path(path).map_err(|e| io(path, e))?;
+            Ok(Self {
+                file,
+                path: path.to_path_buf(),
+            })
+        }
+
+        pub(crate) fn child(&self, name: &str, missing_ok: bool) -> Result<Option<Self>> {
+            crate::schema::safe_id(name)?;
+            let path = self.path.join(name);
+            match beneath::open_directory(&self.file, OsStr::new(name)) {
+                Ok(file) => Ok(Some(Self { file, path })),
+                Err(e) if missing_ok && e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(io(&path, e)),
+            }
+        }
+
+        pub(crate) fn fingerprint(&self) -> Result<Fingerprint> {
+            fingerprint_of(&self.path, &self.file)
+        }
+
+        pub(crate) fn same_identity(&self, other: &Self) -> Result<bool> {
+            let first = beneath::entry_of(&self.file).map_err(|e| io(&self.path, e))?;
+            let second = beneath::entry_of(&other.file).map_err(|e| io(&other.path, e))?;
+            Ok(first.identity.device_and_file() == second.identity.device_and_file())
+        }
+
+        pub(crate) fn read(&self, name: &str, limit: u64) -> Result<FileRead> {
+            crate::schema::safe_id(name)?;
+            let path = self.path.join(name);
+            let mut file = beneath::open_file(&self.file, OsStr::new(name)).map_err(|e| io(&path, e))?;
+            let fingerprint = fingerprint_of(&path, &file)?;
+            if fingerprint.len > limit {
+                return Err(CollectionError::LimitExceeded("file bytes"));
+            }
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(
+                    limit
+                        .checked_add(1)
+                        .ok_or(CollectionError::LimitExceeded("file bytes"))?,
+                )
+                .read_to_end(&mut bytes)
+                .map_err(|e| io(&path, e))?;
+            if bytes.len() as u64 > limit {
+                return Err(CollectionError::LimitExceeded("file bytes"));
+            }
+            if fingerprint_of(&path, &file)? != fingerprint || self.file_fingerprint(name)? != fingerprint {
+                return Err(CollectionError::ChangedDuringRead);
+            }
+            Ok(FileRead { bytes, fingerprint })
+        }
+
+        pub(crate) fn file_fingerprint(&self, name: &str) -> Result<Fingerprint> {
+            let path = self.path.join(name);
+            let file = beneath::open_file(&self.file, OsStr::new(name)).map_err(|e| io(&path, e))?;
+            fingerprint_of(&path, &file)
+        }
+
+        pub(crate) fn names(&self, limit: u32) -> Result<Vec<String>> {
+            let coordination = octopus_file_storage::publication::COORDINATION_DIRECTORY;
+            let mut names = Vec::new();
+            // One more than the limit, for the coordination directory.
+            for name in beneath::names(&self.file, limit as usize + 1).map_err(|e| io(&self.path, e))? {
+                if name == coordination {
+                    let path = self.path.join(coordination);
+                    let directory = beneath::open_directory(&self.file, &name).map_err(|e| io(&path, e))?;
+                    if !octopus_private_fs::is_owner_only_handle(&directory).map_err(|e| io(&path, e))? {
+                        return Err(CollectionError::UnsafePath(path));
+                    }
+                    continue;
+                }
+                if names.len() >= limit as usize {
+                    return Err(CollectionError::LimitExceeded("entry count"));
+                }
+                let name = name
+                    .into_string()
+                    .map_err(|_| CollectionError::UnsafePath(self.path.clone()))?;
+                crate::schema::safe_id(&name)?;
+                names.push(name);
+            }
+            Ok(names)
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) use platform::*;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use super::*;
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,5 +456,5 @@ mod platform {
         }
     }
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub(crate) use platform::*;

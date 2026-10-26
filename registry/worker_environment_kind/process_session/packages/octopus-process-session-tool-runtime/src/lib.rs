@@ -23,7 +23,9 @@ mod invocation_context_tests;
 mod process_authority;
 
 #[cfg(unix)]
-use std::ffi::{CString, OsString};
+use std::ffi::CString;
+#[cfg(any(unix, windows))]
+use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(unix)]
@@ -7042,7 +7044,7 @@ fn hash_private_read_source(
     Ok((digest.finalize(), size))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn private_read_components(declaration: &str) -> Result<Vec<OsString>, String> {
     let relative = Path::new(declaration);
     if relative.is_absolute() || relative.as_os_str().is_empty() {
@@ -7149,7 +7151,53 @@ fn open_private_read_source(
     ))
 }
 
-#[cfg(not(unix))]
+/// Windows: each component is opened beneath the one before it, and a
+/// symlink or other reparse point is refused (`O_NOFOLLOW`).
+#[cfg(windows)]
+fn open_private_read_root_windows(path: &Path, purpose: &str) -> Result<std::fs::File, String> {
+    let root = std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "tool process {purpose} root '{}' cannot be canonicalized: {error}",
+            path.display()
+        )
+    })?;
+    octopus_private_fs::windows::beneath::open_directory_path(&root).map_err(|error| {
+        format!(
+            "tool process {purpose} root '{}' cannot be opened without following links: {error}",
+            root.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn open_private_read_source(
+    interface_var_dir: &Path,
+    declaration: &str,
+) -> Result<std::fs::File, String> {
+    use octopus_private_fs::windows::beneath;
+    let components = private_read_components(declaration)?;
+    let mut directory = open_private_read_root_windows(interface_var_dir, "private source")?;
+    let (leaf, parents) = components.split_last().ok_or_else(|| {
+        format!("tool process private read path {:?} is empty", declaration)
+    })?;
+    for component in parents {
+        directory = beneath::open_directory(&directory, component).map_err(|error| {
+            format!(
+                "tool process private read path {:?} cannot be opened without following links: {error}",
+                declaration
+            )
+        })?;
+    }
+    // `open_file` refuses links and directories, so the leaf is a regular file.
+    beneath::open_file(&directory, leaf).map_err(|error| {
+        format!(
+            "tool process private read path {:?} cannot be opened without following links: {error}",
+            declaration
+        )
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_private_read_source(
     _interface_var_dir: &Path,
     declaration: &str,
@@ -7362,7 +7410,163 @@ fn materialize_private_read_source(
     Ok((root.join(declaration), digest, size))
 }
 
-#[cfg(not(unix))]
+/// Windows: the Unix steps through directory handles. Directories and the
+/// snapshot are created private to the current user (the counterparts of
+/// modes 0700 and 0600), nothing is reached through a link, and the snapshot
+/// replaces any previous one with a single rename.
+#[cfg(windows)]
+fn materialize_private_read_source(
+    process_var_dir: &Path,
+    declaration: &str,
+    max_bytes: u64,
+    source: &mut std::fs::File,
+) -> Result<(PathBuf, blake3::Hash, u64), String> {
+    use octopus_private_fs::windows::beneath;
+    let components = private_read_components(declaration)?;
+    let root = std::fs::canonicalize(process_var_dir).map_err(|error| {
+        format!(
+            "tool process private destination root '{}' cannot be canonicalized: {error}",
+            process_var_dir.display()
+        )
+    })?;
+    let mut directory = open_private_read_root_windows(&root, "private destination")?;
+    let (leaf, parents) = components.split_last().ok_or_else(|| {
+        format!("tool process private read path {:?} is empty", declaration)
+    })?;
+    for component in parents {
+        let opened = match beneath::create_directory(&directory, component) {
+            Ok(created) => Ok(created),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                beneath::open_directory(&directory, component).and_then(|existing| {
+                    // An existing directory must already be private, as the
+                    // Unix path makes it with fchmod 0700.
+                    if octopus_private_fs::is_owner_only_handle(&existing)? {
+                        Ok(existing)
+                    } else {
+                        Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "directory is not private to its owner"))
+                    }
+                })
+            }
+            Err(error) => Err(error),
+        };
+        directory = opened.map_err(|error| {
+            format!(
+                "tool process private destination for {:?} crosses an invalid directory: {error}",
+                declaration
+            )
+        })?;
+    }
+    let sequence = PRIVATE_READ_SNAPSHOT_TEMP_SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| "tool process private snapshot sequence overflowed".to_string())?;
+    let temporary = OsString::from(format!(
+        ".octopus-private-read.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let mut destination = beneath::create_file(&directory, &temporary).map_err(|error| {
+        format!(
+            "tool process private snapshot for {:?} cannot be created: {error}",
+            declaration
+        )
+    })?;
+    let result = (|| -> Result<(blake3::Hash, u64), String> {
+        let before = source.metadata().map_err(|error| {
+            format!(
+                "tool process private read path {:?} cannot be inspected: {error}",
+                declaration
+            )
+        })?;
+        if !before.is_file() {
+            return Err(format!(
+                "tool process private read path {:?} is not a regular file",
+                declaration
+            ));
+        }
+        if before.len() > max_bytes {
+            return Err(format!(
+                "tool process private read path {:?} exceeds owning life-process ceiling of {} bytes",
+                declaration, max_bytes
+            ));
+        }
+        let mut digest = blake3::Hasher::new();
+        let mut size = 0_u64;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let remaining = max_bytes.saturating_sub(size);
+            let read_limit = usize::try_from(remaining.saturating_add(1))
+                .unwrap_or(usize::MAX)
+                .min(buffer.len());
+            let read = source.read(&mut buffer[..read_limit]).map_err(|error| {
+                format!(
+                    "tool process private read path {:?} cannot be read: {error}",
+                    declaration
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            if read as u64 > remaining {
+                return Err(format!(
+                    "tool process private read path {:?} exceeds owning life-process ceiling of {} bytes",
+                    declaration, max_bytes
+                ));
+            }
+            size = size
+                .checked_add(read as u64)
+                .ok_or_else(|| "tool process private read size overflowed".to_string())?;
+            digest.update(&buffer[..read]);
+            std::io::Write::write_all(&mut destination, &buffer[..read]).map_err(|error| {
+                format!(
+                    "tool process private snapshot for {:?} cannot be written: {error}",
+                    declaration
+                )
+            })?;
+        }
+        let after = source.metadata().map_err(|error| {
+            format!(
+                "tool process private read path {:?} cannot be reinspected: {error}",
+                declaration
+            )
+        })?;
+        if before.len() != size || after.len() != size {
+            return Err(format!(
+                "tool process private read path {:?} changed while being materialized",
+                declaration
+            ));
+        }
+        destination.sync_all().map_err(|error| {
+            format!(
+                "tool process private snapshot for {:?} cannot be synced: {error}",
+                declaration
+            )
+        })?;
+        beneath::rename_replace(&directory, &temporary, &directory, leaf).map_err(|error| {
+            format!(
+                "tool process private snapshot for {:?} cannot be installed atomically: {error}",
+                declaration
+            )
+        })?;
+        octopus_private_fs::sync_handle(&directory).map_err(|error| {
+            format!(
+                "tool process private snapshot directory for {:?} cannot be synced: {error}",
+                declaration
+            )
+        })?;
+        Ok((digest.finalize(), size))
+    })();
+    if result.is_err() {
+        if let Ok(identity) = octopus_private_fs::identity_of_file(&destination) {
+            let _ = beneath::remove(&directory, &temporary, false, identity.device_and_file());
+        }
+    }
+    let (digest, size) = result?;
+    Ok((root.join(declaration), digest, size))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn materialize_private_read_source(
     _process_var_dir: &Path,
     declaration: &str,

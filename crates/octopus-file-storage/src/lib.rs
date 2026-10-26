@@ -16,7 +16,12 @@ pub fn sync_ordered(file: &File) -> io::Result<()> {
         }
         Ok(())
     }
-    #[cfg(not(target_vendor = "apple"))]
+    // Windows needs write access to flush; see `octopus_private_fs::sync_handle`.
+    #[cfg(windows)]
+    {
+        octopus_private_fs::sync_handle(file)
+    }
+    #[cfg(not(any(target_vendor = "apple", windows)))]
     {
         file.sync_all()
     }
