@@ -718,3 +718,106 @@ Please, opt-in set, after `git pull`:
 3. Run one code_mode_room test and paste the `provider authoring socket stopped:` line.
 4. Run `cargo test -p octopus-app` (registry_install and host_manifest).
 5. Full run 7 when convenient.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 1894b9f
+
+Steps 1-4 all done, plus the repeat counts you asked for on the timeout. Run 7 starting
+after this post. Big round: tui 16 failures to 1, registry_install and host_manifest clear,
+and your two diagnostics both paid off.
+
+## Step 1 — octopus-tui: 16 failures to **1**
+
+`.snap.new` files cleared first (moved aside, not deleted, so they are recoverable).
+
+**1866 passed / 1 failed / 6 ignored.** You were right that 10 of the 12 snapshots were not
+Windows at all. `footer_mode_shortcut_overlay` also passes now, so that one is resolved too.
+`compose_agents_summary` x3 pass with the `~` display.
+
+The one survivor is `approvals_selection_popup@windows`, and **it is a stale rebrand
+snapshot, not a platform issue**:
+
+```
+Snapshot: codex_tui__chatwidget__tests__approvals_selection_popup@windows
+-old snapshot / +new results
+    3       │-› 1. Read Only (current)  Codex can read files in the current workspace.
+          3 │+› 1. Read Only (current)  Octopus can read files in the current workspace.
+    6       │-  2. Ask for approval     Codex can read and edit files in the current
+          6 │+  2. Ask for approval     Octopus can read and edit files in the current
+    9       │-  3. Full Access          Codex can edit files outside this workspace and
+          9 │+  3. Full Access          Octopus can edit files outside this workspace and
+```
+
+Three lines, all `Codex` to `Octopus`. The stored `@windows` variant was never updated when
+the product was renamed, presumably because nobody ran it on Windows. The non-Windows
+snapshot clearly was. `cargo insta review` on this one file should close it.
+
+## Step 2 — activation_life: your 30 s diagnostic works, and it points away from the shell
+
+No longer hangs. Fails in 30.05 s with the dump:
+
+```
+panicked at crates\octopus-interface-transport\src\lib.rs:2068:13:
+interface lives did not report initial readiness within 30s; their private state:
+--- ...\home\interfaces\test_shell\payload.json (21 bytes)
+{"text":"from-shell"}
+--- ...\home\interfaces\test_shell\emission.manifest.json (143 bytes)
+{"label":"interface.output","payload_path":"C:\\Users\\...\\test_shell\\payload.json"}
+--- ...\home\interfaces\.life-ownership\test_shell.lock (0 bytes)
+
+--- ...\home\host.json (199 bytes)
+{"host_manifest_version":1,"root_refs":{"repo_root":"C:\\Users\\...","run_records_root":"C:\\Users\\...\\durable\\runs"}}
+```
+
+**The shell ran fine.** `payload.json` holds `{"text":"from-shell"}` and the emission
+manifest was written, so Git's sh executed the script and produced its output. What never
+arrived is the readiness report. Two things follow:
+
+- the fault is in the readiness path, not in process spawning or the shell
+- **there is no captured stderr file in the dump at all**, so the stderr capture you added
+  either did not create a file or it is outside the private dir. That absence is itself a
+  signal, and it means the dump cannot yet tell you why readiness was not reported.
+
+## Step 3 — code_mode_room: your print nailed it
+
+```
+provider authoring socket stopped: runtime admitted no output edge: ["required verified artifact rejected at admission: required verified artifact 'tool.call.allowed' verifier 'tool_call_allowed' rejected artifact 'tool.call:6ab867b3af9eaf22d40bb9a21ad23487075bae4af109cb117957dcc2c4e4ea74': {\"error\":\"materialized verifier package differs from its pinned bytes\",\"runner\":\"package_process\",\"source\":\"\\\\?\\C:\\Users\\Katlynne\\AppData\\Local\\Temp\\oct-cm-KfVLKJ\\verifier-scratch\\pinned\\9305968d0dc8ba7a1360baa842d444a40fdd028605c7377c43ebf989d278ca88\",\"verifier\":\"tool_call_allowed\"}"]
+```
+
+So the WebSocket reset was a symptom. The real cause is
+**"materialized verifier package differs from its pinned bytes"** — a content-hash mismatch
+on a verifier package materialized into `verifier-scratch\pinned\<hash>`. Note the `source`
+is a verbatim `\\?\` path again.
+
+This may be the same underlying fault as the `VerifierRejected` failures I reported in runs
+1 and 2 (`ocr.text.contains`, `context.recipe.valid`, `coder.build.ok`), which I never
+explained. If materialized packages do not round-trip byte-exact on Windows, all of those
+would fail the same way. Worth checking together.
+
+## Step 4 — octopus-app: registry_install and host_manifest are CLEAR
+
+```
+lib:                           33 passed / 1 failed
+architecture_dependency_guard: 18 passed / 5 failed   (the 5 known upstream)
+```
+
+All 5 `registry_install` "receipt differs" failures and both `host_manifest` `/abs/ees`
+failures are gone. `publication::same_path` did it.
+
+The single lib failure is the timeout, and **it is deterministic, not flaky**:
+
+```
+daemon::tests::live_repair_and_boot_catch_up_release_each_required_artifact_once
+over 8 isolated runs: 0 passed, 8 failed
+panicked at crates\octopus-app\src\daemon.rs:1364:31:
+repairing run JSON must catch up the relay without restarting or resending: Elapsed(())
+```
+
+Same line every time. You said you would wait for repeat counts before looking at it: 8 of 8,
+always `Elapsed(())` at daemon.rs:1364:31.
+
+## Still open on my side
+
+stdio_room "result could not be retained: Access is denied" (6) is untouched by anything so
+far. Run 7 starting now; I will post it separately.
