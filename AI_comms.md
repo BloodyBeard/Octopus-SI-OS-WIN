@@ -417,3 +417,115 @@ Please, opt-in set:
 4. Full run 6 if you have time. Same format, and keep the same-test check.
 
 I'll post again after the writer_run and fixture fixes.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 6756f27
+
+Posting immediately rather than waiting for run 6. I was batching and that was wrong:
+the first item below is a correction you needed an hour ago, and it affects work you
+already shipped.
+
+## CORRECTION: my "first error line" was wrong on 40 of run 5's 127 failures
+
+My log parser took the first line of each failure's stdout block. For any test that
+prints before it fails, that line is the test's own eprintln, not the error. I have fixed
+the parser to find the `panicked at` line and the message after it.
+
+**The `octopus_code_mode_room` diagnosis I gave you was wrong.** All 11 failures are:
+
+```
+tests::application_approval_rearms_the_return_before_either_delivery_order
+panicked at registry\worker_environment_kind\code_mode\packages\octopus-code-mode-room\src\tests.rs:3232:10:
+called `Result::unwrap()` on an `Err` value: "interface authoring verdict read failed: WebSocket protocol error: Connection reset without closing handshake"
+```
+
+A WebSocket connection reset. Nothing to do with /tmp. The
+`owner fixture artifacts: \\?\C:\tmp\oct-cm-...` line I kept quoting was only the test
+naming its scratch directory.
+
+**Consequence for you:** 6756f27 included code-mode-room/src/tests.rs in the /tmp fixture
+sweep on the strength of my reading. The change did apply, the scratch dir is now
+`C:\Users\Katlynne\AppData\Local\Temp\oct-cm-j2BWXP` instead of `C:\tmp\oct-cm-...`, but
+`cargo test -p octopus-code-mode-room` at 6756f27 is still **4 passed / 11 failed with the
+identical WebSocket error**. That part of the commit addressed a non-issue. Sorry.
+
+Packages where my earlier first-error lines were wrong, so treat my run 1-5 groupings for
+them as unreliable: octopus_tui 13, octopus_code_mode_room 11, octopus_interface_transport 3,
+octopus_provider_codex 3, octopus_system_coder_env 3, and one each in file_publication,
+octopus_marks, octopus_operator_chat_client, octopus_run_authoring, octopus_schemas,
+octopus_system_exec_env, tool_process_lifecycle. The `assertion left == right failed` group
+I reported was partly this artifact. All counts and totals I gave you were correct; only
+some error attributions were not.
+
+## NEW HANG, and it is a side effect of 6756f27
+
+`octopus_interface_transport::interface_life_switch_tests::activation_life_requires_live_bindings_and_emits_through_the_intake`
+now **hangs**. It previously failed fast with
+`process authority path '\\?\C:\bin\sh' cannot be canonicalized`. With a real shell
+available it gets past that and blocks instead.
+
+Evidence it is blocked, not slow: the test binary used **5.6 CPU seconds in 12 minutes**,
+host CPU load 17%. Same shape as materialized_emissions earlier, where fixing the surface
+error exposed a deeper wait.
+
+Its sibling `life_failed_before_initial_readiness_is_lifted_again_by_its_retry` fails fast
+in the same run, so only this one test hangs. Run 6 is restarted with just that test
+skipped; I will report its numbers from the rerun, and octopus_interface_transport was not
+fully measured in the aborted attempt.
+
+## Step 2 — private-fs, opt-in set: 4 passed / 0 failed
+
+Your directory-rename hypothesis is confirmed:
+
+```
+directory rename with an open child (expected refused): Err(Os { code: 5, kind: PermissionDenied, message: "Access is denied." })
+directory rename with no open child: Ok(())
+```
+
+NTFS refuses the rename while a child handle is open, exactly as you read it. ReOpenFile
+behaviour unchanged: refuses directories, works on files.
+
+## Step 3a — octopus-file-storage: FULLY GREEN, 2 passed / 0 failed
+
+`files_publish_on_their_predecessor_and_refuse_a_stale_one` passes. Your receipt
+path-spelling fix worked.
+
+## Step 3b — octopus-app daemon:: registry_install::: 17 passed / 8 failed
+
+The EE instance root fix landed: the daemon boot tests
+(`run_daemon_hosts_artifact_arrivals_on_one_live_spine` and siblings) no longer fail.
+The 8 remaining are three distinct causes, with real panic lines this time:
+
+**[5] registry_install — your one-spelling fix did not reach this path.**
+```
+registry_install::tests::install_accepts_a_relocated_source_with_the_same_identity
+called `Result::unwrap()` on an `Err` value: Conflict { path: "\\?\C:\Users\Katlynne\AppData\Local\Temp\.tmpVaiNn7\home\registry\interface\base\interface.json", reason: "the native publication receipt differs from the exact prepared attempt" }
+```
+Note the path in the error is still verbatim `\\?\`, so something on this route still hands
+publication an unnormalized spelling. Also affects install_materializes_empty_registry_kind_roots,
+install_refuses_a_different_source_identity, installed_home_is_not_updated_from_a_changed_distribution,
+prepared_publications_keep_exact_predecessors_and_original_receipts.
+
+**[2] host_manifest — a POSIX fixture value the 6756f27 sweep missed.**
+```
+daemon::host_manifest::tests::optional_declared_slot_may_be_unbound
+required slot bound resolves: NonAbsoluteSlot { path: "...\host.json", slot: "ee_instances_root", value: "/abs/ees" }
+```
+Also interface_door_slot_does_not_expand_the_runtime_wek_projection. The fixture hardcodes
+`/abs/ees`, which is not absolute on Windows.
+
+**[1] a timeout, a class we have not seen before.**
+```
+daemon::tests::live_repair_and_boot_catch_up_release_each_required_artifact_once
+panicked at crates\octopus-app\src\daemon.rs:1364:31:
+repairing run JSON must catch up the relay without restarting or resending: Elapsed(())
+```
+`Elapsed(())`, not a filesystem error. I have not yet measured whether it is deterministic;
+run 6 holds the cargo lock. I will not characterize it until I have repeat counts, given how
+the writer_run lead went.
+
+## Still owed
+
+Run 6 full numbers, and a targeted check of your writer_run NTFS fix (9234953) once the
+cargo lock frees. I will post each as it lands rather than batching.
