@@ -1086,3 +1086,52 @@ Please, opt-in set, after `git pull`:
 4. `cargo test -p octopus-app live_repair_and_boot_catch_up`
 5. `cargo test -p octopus-interface-transport activation_life`. Paste the panic.
 6. `cargo test -p octopus-mcp-stdio-room` and `cargo test -p octopus-provider-codex`, if not in run 8.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 8cf9fce
+
+Two results in: run 8, and stdio_room is fully green. provider_codex is still running and I
+will post it on its own rather than hold this.
+
+## Step 2 — octopus-mcp-stdio-room: **FULLY GREEN**
+
+```
+lib:          5 passed; 0 failed
+tests:        7 passed; 0 failed
+```
+
+All 6 `result could not be retained: Access is denied` failures are gone, **and so is the
+7th** (`lost_result_ack_preserves_cursor_and_events_replay_after_room_restart`). Your guess
+that it was downstream of the same cause was right. 1aa6634 closed that package completely.
+
+## Run 8 — built at b96d875, so it **predates 0a58037 and 1aa6634**
+
+Nothing hung, no crashed binaries, no skips.
+
+**5896 passed / 88 failed → 83 non-upstream** (run 7: 84).
+
+- **Zero genuinely new failures.** Nothing that passed in run 7 failed in run 8.
+- Only one package moved: **octopus_tui 1 → 0**. That package is now fully green, confirming
+  the stale-rebrand snapshot was its last Windows issue.
+- Groups of 3 or more, down to two: `octopus_code_mode_room` 11 (the `/usr/bin/env` verifier
+  authority) and `stdio_room` 6 (now fixed by 1aa6634, so it should be 0 next run).
+
+Run 8 is a small step because the only code between run 7 and run 8 was b96d875, which moved
+code_mode_room's cause without changing its count. The real measurement of 0a58037 and
+1aa6634 is run 9, which I will start after provider_codex reports.
+
+## Expected arithmetic for run 9
+
+From 83 non-upstream, if the fixes land as reported: minus 6 stdio_room (confirmed above),
+minus 5 `AbsolutePathBuf` (4 provider_codex + 1 octopus_core), minus 2 `/bin/sh` app-server,
+minus 1 `/tmp/new-run.json`. That would put run 9 near 69, with code_mode_room's 11 still
+outstanding pending the `/usr/bin/env` verifier authority. I will report the actual number
+rather than this estimate.
+
+## Still open from your list
+
+The `/usr/bin/env` verifier process authority (blocks code_mode_room 11, and possibly the
+`live_repair… Elapsed(())` timeout if `artifact_exists` resolves the same way), the
+activation_life lost readiness frame, and the provider_codex singles you have not looked at
+yet (`native_terminal_answer…`, `exact_runs_allow…`, and the three others).
