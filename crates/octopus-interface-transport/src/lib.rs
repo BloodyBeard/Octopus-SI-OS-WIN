@@ -1976,7 +1976,7 @@ mod interface_life_switch_tests {
                     },
                     "args": ["-c",
                         format!(
-                            "printf '%s\\n' \"$1\" \"$2\" \"$3\"; IFS= read -r verdict; printf '%s' \"$verdict\" > '{}'",
+                            "echo life-started >&2; printf '%s\\n' \"$1\" \"$2\" \"$3\"; IFS= read -r verdict; printf '%s' \"$verdict\" > '{}'",
                             verdict_path.display()
                         ),
                         "octopus-test",
@@ -2050,7 +2050,7 @@ mod interface_life_switch_tests {
         let mut report_boot_event = |event| boot_events.push(event);
         // Initial readiness has no deadline of its own; a life that never
         // reports ready would otherwise hang the test with no evidence.
-        let handle = tokio::time::timeout(
+        let prepared = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             prepare_interface_activation_reconciler(
                 root.join("registry"),
@@ -2063,15 +2063,16 @@ mod interface_life_switch_tests {
                 Some(&mut report_boot_event),
             ),
         )
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "interface lives did not report initial readiness within 30s; their private state:\n{}",
-                crate::test_programs::describe_tree(&root.join("home"))
-            )
-        })
-        .unwrap();
+        .await;
         drop(report_boot_event);
+        let handle = prepared
+            .unwrap_or_else(|_| {
+                panic!(
+                    "interface lives did not report initial readiness within 30s; boot events {boot_events:?}; their private state:\n{}",
+                    crate::test_programs::describe_tree(&root.join("home"))
+                )
+            })
+            .unwrap();
         assert_eq!(handle.initial_task_count, 1);
         assert!(
             handle

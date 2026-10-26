@@ -339,7 +339,14 @@ fn collect_package_files(
                 "path": relative.display().to_string()
             }));
         }
-        let relative = relative.to_str().ok_or_else(|| {
+        // Pinned names use `/` on every platform, as descriptors name the
+        // entry script, so a pin taken on Windows matches one taken on Unix.
+        let relative = relative
+            .components()
+            .map(|part| part.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join("/"))
+            .ok_or_else(|| {
             serde_json::json!({
                 "runner": "package_process",
                 "verifier": descriptor.id.as_str(),
@@ -360,7 +367,7 @@ fn collect_package_files(
             contents: bytes,
             executable: package_file_executable(&metadata),
         };
-        if files.insert(relative.to_string(), file).is_some() {
+        if files.insert(relative.clone(), file).is_some() {
             return Err(serde_json::json!({
                 "runner": "package_process",
                 "verifier": descriptor.id.as_str(),
@@ -658,8 +665,11 @@ fn pinned_package_matches(ctx: &PinnedVerifierPackage, package_dir: &Path) -> bo
     found.len() == ctx.files.len()
         && ctx.files.iter().all(|(relative, file)| {
             found.get(relative).is_some_and(|(contents, executable)| {
+                // Windows files carry no execute bit to compare; how the
+                // package runs comes from its descriptor there.
                 *contents == file.contents
-                    && *executable == (file.executable || *relative == ctx.descriptor.script)
+                    && (cfg!(not(unix))
+                        || *executable == (file.executable || *relative == ctx.descriptor.script))
             })
         })
 }
@@ -679,7 +689,14 @@ fn collect_materialized_files(
         if !metadata.is_file() {
             return Err(());
         }
-        let relative = path.strip_prefix(root).map_err(|_| ())?.to_str().ok_or(())?.to_string();
+        // Pinned names use `/` on every platform.
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| ())?
+            .components()
+            .map(|part| part.as_os_str().to_str().ok_or(()))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("/");
         let contents = std::fs::read(&path).map_err(|_| ())?;
         found.insert(relative, (contents, package_file_executable(&metadata)));
     }
