@@ -41,7 +41,7 @@ while IFS= read -r line; do
 done
 "#).unwrap();
     let spawned = crate::SpawnAppServerClient::connect(crate::spawn::SpawnConfig {
-        bin: "/bin/sh".into(),
+        bin: test_shell(),
         args: vec![script.display().to_string(), requests.display().to_string(), read, turns, resume],
         cwd: Some(temp.path().to_path_buf()), codex_home: None,
         initialize_params: serde_json::from_value(serde_json::json!({

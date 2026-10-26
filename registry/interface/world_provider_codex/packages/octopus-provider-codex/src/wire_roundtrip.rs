@@ -7,6 +7,13 @@ use octopus_world_terminal_client::{
     emit_elicitation_response, outbound_resolved,
 };
 
+/// A fixture path absolute on this platform: `/work/repo` stays as is on
+/// Unix and becomes `C:\work\repo` on Windows, where a path without a drive
+/// is not absolute and does not deserialize as an `AbsolutePathBuf`.
+fn native(unix_path: &str) -> String {
+    octopus_util_abspath::test_support::test_path_buf(unix_path).display().to_string()
+}
+
 fn client_envelope_for(
     dir: &std::path::Path,
     output: &CodexTurnOutput,
@@ -116,12 +123,12 @@ fn exec_command_round_trips_into_the_client_exec_item() {
         "type": "commandExecution",
         "id": "exec-1",
         "command": "cargo check --workspace",
-        "cwd": "/work/repo",
+        "cwd": native("/work/repo"),
         "processId": "proc-42",
         "source": "agent",
         "status": "completed",
         "commandActions": [
-            { "type": "read", "command": "cat src/lib.rs", "name": "lib.rs", "path": "/work/repo/src/lib.rs" },
+            { "type": "read", "command": "cat src/lib.rs", "name": "lib.rs", "path": native("/work/repo/src/lib.rs") },
             { "type": "search", "command": "rg lane", "query": "lane", "path": null }
         ],
         "aggregatedOutput": "Finished dev profile",
@@ -138,7 +145,7 @@ fn exec_command_round_trips_into_the_client_exec_item() {
         OutboundResolved::Exec { item, summary } => {
             assert_eq!(item.item_id, "exec-1");
             assert_eq!(item.command, "cargo check --workspace");
-            assert_eq!(item.cwd, "/work/repo");
+            assert_eq!(item.cwd, native("/work/repo"));
             assert_eq!(
                 item.status,
                 octopus_world_terminal_client::ExecItemStatus::Completed
@@ -156,7 +163,7 @@ fn exec_command_round_trips_into_the_client_exec_item() {
                     octopus_world_terminal_client::CommandActionItem::Read {
                         cmd: "cat src/lib.rs".to_string(),
                         name: "lib.rs".to_string(),
-                        path: "/work/repo/src/lib.rs".to_string(),
+                        path: native("/work/repo/src/lib.rs").to_string(),
                     },
                     octopus_world_terminal_client::CommandActionItem::Search {
                         cmd: "rg lane".to_string(),
@@ -381,7 +388,7 @@ fn hook_result_round_trips_into_the_client_hook_run_item() {
         "handlerType": "command",
         "executionMode": "sync",
         "scope": "turn",
-        "sourcePath": "/home/u/.octopus/hooks.toml",
+        "sourcePath": native("/home/u/.octopus/hooks.toml"),
         "source": "user",
         "displayOrder": 1,
         "status": "blocked",
@@ -414,7 +421,7 @@ fn hook_result_round_trips_into_the_client_hook_run_item() {
 #[test]
 fn hook_catalog_round_trips_into_the_client_catalog() {
     let entries: Vec<HooksListEntry> = serde_json::from_value(serde_json::json!([{
-        "cwd": "/work/repo",
+        "cwd": native("/work/repo"),
         "hooks": [{
             "key": "user:PreToolUse:0",
             "eventName": "preToolUse",
@@ -425,7 +432,7 @@ fn hook_catalog_round_trips_into_the_client_catalog() {
             "timeoutSec": 30,
             "statusMessage": null,
             "additionalContextLimit": 2500,
-            "sourcePath": "/home/u/.octopus/hooks.toml",
+            "sourcePath": native("/home/u/.octopus/hooks.toml"),
             "source": "user",
             "pluginId": null,
             "displayOrder": 1,
@@ -443,7 +450,7 @@ fn hook_catalog_round_trips_into_the_client_catalog() {
             "timeoutSec": 1,
             "statusMessage": "recording",
             "additionalContextLimit": null,
-            "sourcePath": "/work/repo/.codex/hooks.json",
+            "sourcePath": native("/work/repo/.codex/hooks.json"),
             "source": "project",
             "pluginId": null,
             "displayOrder": 2,
@@ -453,14 +460,14 @@ fn hook_catalog_round_trips_into_the_client_catalog() {
             "trustStatus": "untrusted"
         }],
         "warnings": ["one warning"],
-        "errors": [{ "path": "/bad/file.toml", "message": "parse failed" }]
+        "errors": [{ "path": native("/bad/file.toml"), "message": "parse failed" }]
     }]))
     .expect("hooks/list entries deserialize");
     let output = hook_catalog_output(&entries);
     assert_eq!(output.label, HOOK_CATALOG_LABEL);
     let bytes = payload_bytes(&output);
     let wire: serde_json::Value = serde_json::from_slice(&bytes).expect("projection is JSON");
-    assert_eq!(wire["cwds"], serde_json::json!(["/work/repo"]));
+    assert_eq!(wire["cwds"], serde_json::json!([native("/work/repo")]));
     assert_eq!(wire["hooks"][0]["handler_type"], "command");
     assert_eq!(wire["hooks"][0]["execution_mode"], "async");
     assert_eq!(wire["hooks"][0]["additional_context_limit"], 2500);
@@ -468,8 +475,8 @@ fn hook_catalog_round_trips_into_the_client_catalog() {
     assert_eq!(wire["hooks"][1]["handler_type"], "mcp_tool");
     assert_eq!(wire["hooks"][1]["handler"]["server"], "audit");
     assert_eq!(wire["hooks"][1]["handler"]["tool"], "record");
-    assert_eq!(wire["warning_entries"][0]["cwd"], "/work/repo");
-    assert_eq!(wire["errors"][0]["cwd"], "/work/repo");
+    assert_eq!(wire["warning_entries"][0]["cwd"], native("/work/repo"));
+    assert_eq!(wire["errors"][0]["cwd"], native("/work/repo"));
     let catalog = HookCatalog::from_payload(&bytes).expect("client decodes");
     assert_eq!(catalog.hooks.len(), 2);
     let hook = &catalog.hooks[0];

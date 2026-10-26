@@ -3187,7 +3187,10 @@ async fn forced_chatgpt_workspace_id_empty_values_disable_runtime_restriction()
 
 #[tokio::test]
 async fn removed_sqlite_home_is_rejected() {
-    let cfg: ConfigToml = toml::from_str(r#"sqlite_home = "/tmp/octopus-state""#)
+    // An absolute path on this platform: "/tmp/…" has no drive on Windows and
+    // would fail to deserialize before the load-time rejection under test.
+    let sqlite_home = octopus_util_abspath::test_support::test_path_buf("/tmp/octopus-state");
+    let cfg: ConfigToml = toml::from_str(&format!("sqlite_home = '{}'", sqlite_home.display()))
         .expect("removed sqlite_home poison pill should still deserialize");
 
     let err = Config::load_from_base_config_with_overrides(

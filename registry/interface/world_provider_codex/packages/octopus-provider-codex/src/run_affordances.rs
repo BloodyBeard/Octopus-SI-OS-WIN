@@ -2148,14 +2148,17 @@ mod tests {
 
     #[test]
     fn file_batch_keeps_new_file_preconditions_and_excludes_parent() {
+        // Absolute on this platform; "/tmp/…" has no drive on Windows.
+        let fixture = octopus_util_abspath::test_support::test_path_buf;
+        let parent = fixture("/tmp/parent.json");
         let write = PlannedClientWrite {
-            path: "/tmp/new-run.json".into(),
+            path: fixture("/tmp/new-run.json"),
             content: "{}\n".into(),
             tag: "run".into(),
             expected_before_hash: None,
         };
         let (batch, proofs) =
-            file_write_batch(std::slice::from_ref(&write), Path::new("/tmp/parent.json")).unwrap();
+            file_write_batch(std::slice::from_ref(&write), &parent).unwrap();
         assert!(
             batch["writes"][0]
                 .as_object()
@@ -2165,6 +2168,6 @@ mod tests {
         assert!(batch["writes"][0]["expected_before_hash"].is_null());
         assert_eq!(proofs[0].bytes, 3);
         assert!(file_write_batch(std::slice::from_ref(&write), &write.path).is_err());
-        assert!(file_write_batch(&[write.clone(), write], Path::new("/tmp/parent.json")).is_err());
+        assert!(file_write_batch(&[write.clone(), write], &parent).is_err());
     }
 }
