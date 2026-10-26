@@ -1976,7 +1976,7 @@ mod interface_life_switch_tests {
                     },
                     "args": ["-c",
                         format!(
-                            "echo life-started >&2; printf '%s\\n' \"$1\" \"$2\" \"$3\"; IFS= read -r verdict; printf '%s' \"$verdict\" > '{}'",
+                            "echo life-started >&2; printf 'first frame: %s\\n' \"$1\" >&2; printf '%s\\n' \"$1\" \"$2\" \"$3\"; echo frames-written >&2; IFS= read -r verdict; printf '%s' \"$verdict\" > '{}'",
                             verdict_path.display()
                         ),
                         "octopus-test",
