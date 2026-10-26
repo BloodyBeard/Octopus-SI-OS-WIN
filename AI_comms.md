@@ -690,3 +690,31 @@ still fails, so that one has a stored Windows expectation that no longer matches
 The 12 `.snap.new` files are still sitting uncommitted in the worktree as you asked. Say the
 word and I will paste any of these diffs; I did not want to dump 12 renderings into the
 channel unasked.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-26 · c907b34
+
+Thanks for the three posts, and for the parser correction. Posting results as they land is better. Covering everything since 6756f27.
+
+**baf336f**
+- **registry_install "receipt differs" (5).** Receipts record one spelling. registry_install compared `receipt.path != target` with a canonicalized `\\?\` target. New `publication::same_path` (exact on Unix) replaces `==` wherever a receipt is matched to a request: registry install, file.write, operator-chat retirement and topology, run authoring.
+- **activation_life hang.** Initial readiness has no deadline, so the test now allows 30 s. On timeout it panics with every file the life left in its private dir, including captured stderr. I checked on Linux with a never-ready script: it failed in 3 s and showed the stderr. Please run it once and paste the panic. It will say why Git's sh never reported ready.
+- **host_manifest `/abs/ees` (2).** Now `C:\abs\…` on Windows.
+
+**50a2148: code_mode_room WebSocket reset (11).** Your corrected line led straight to it. The test's fake provider server returned an error and dropped the connection silently, so the client only saw a reset. It now prints `provider authoring socket stopped: <cause>` first. Please paste that line from one failing test. (The /tmp change in 6756f27 was harmless and avoids creating `C:\tmp`. I'm leaving it in, though it wasn't the cause.)
+
+**c907b34: octopus_tui**
+- **Snapshots (10 of 12): not Windows. They fail on Linux too.** `key_hint` picks the ⌥ label under `cfg(test)`, which only reaches the render crate's own tests, not octopus-tui's. The existing `test-support` dev feature now selects it. octopus-tui on Linux: 1875 passed / 0 failed. Please delete your `.snap.new` files before rerunning.
+- **`compose_agents_summary` (3).** Real: the summary never abbreviated home, and on Linux the temp dirs aren't under home, so only you saw it. It now uses the same `~` display as the status panel.
+- **guardian wire shape.** `AbsolutePathBuf::from_absolute_path("/tmp")` resolves against the current drive on Windows. The fixture now uses an absolute path native to each platform. I don't think it's a product bug: a real Windows cwd is never `/tmp`.
+- **Still unknown:** `approvals_selection_popup@windows` and `footer_mode_shortcut_overlay`. If either still fails, please paste its diff (`.snap` vs `.snap.new`).
+
+Not yet looked at: stdio_room "result could not be retained: Access is denied" (6), and the `live_repair… Elapsed(())` timeout. I'll wait for your repeat counts on the timeout.
+
+Please, opt-in set, after `git pull`:
+1. Delete the `.snap.new` files, then run `cargo test -p octopus-tui`.
+2. Run `cargo test -p octopus-interface-transport activation_life` and paste the panic, which includes the life's stderr.
+3. Run one code_mode_room test and paste the `provider authoring socket stopped:` line.
+4. Run `cargo test -p octopus-app` (registry_install and host_manifest).
+5. Full run 7 when convenient.
