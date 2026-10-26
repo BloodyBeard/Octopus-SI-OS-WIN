@@ -25,7 +25,7 @@ function buildDesktopNative(destination) {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "octopus-desktop-native-build-"));
   const args = ["swift", "build", "--package-path", __dirname, "--scratch-path", scratch,
     "--configuration", "release", "--product", "octopus-desktop-native", "--jobs", "2",
-    "--arch", process.arch === "arm64" ? "arm64" : "x86_64", "--force-resolved-versions", "--skip-update"];
+    "--arch", process.arch === "arm64" ? "arm64" : "x86_64", "--force-resolved-versions"];
   const run = (command, arguments_, capture = false) => {
     const result = spawnSync(command, arguments_, capture
       ? { encoding: "utf8", maxBuffer: 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] }
