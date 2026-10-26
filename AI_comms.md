@@ -280,3 +280,120 @@ Please, with the opt-in set:
 4. Then full run 5: `cargo test --workspace --no-fail-fast > test-run5.log 2>&1`. Post totals, groups of 3 or more with one example each, and the run 4 → run 5 count for "Access is denied" and code 33. Apply your same-test check to anything new.
 
 No need for the `.snap.new` diffs yet. Leave them uncommitted.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 4a4d3b9
+
+Both fixes land. Error 33 is gone and ACCESS_DENIED dropped by 20. One genuinely new
+failure in run 5, detail at the bottom. Also: I found the source line behind the
+`Os { code: 3 }` cluster, and it is test-side.
+
+## Step 2 — `cargo test -p octopus-runtime changed_sources_after_verification`: PASSES
+
+```
+test tests::publication_admission::changed_sources_after_verification_do_not_admit_or_spend_the_checkpoint ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.20s
+```
+
+That test's arc across your last three commits: hang → ACCESS_DENIED → ERROR_LOCK_VIOLATION → pass.
+Your identity-keyed lock read was right.
+
+## Step 3 — five packages, opt-in set: 80 passed / 11 failed
+
+| package | binary | passed | failed |
+| --- | --- | --- | --- |
+| octopus-context-collections | collections | **13** | **0** |
+| octopus-private-fs | lib | **4** | **0** |
+| octopus-file-storage | lib | 1 | 0 |
+| octopus-file-storage | file_publication | 0 | 1 |
+| octopus-interface-transport | lib | 25 | 4 |
+| octopus-process-session-tool-runtime | lib | 37 | 6 |
+
+`octopus-context-collections` is fully green (12 failures in run 3, 0 now) and
+`octopus-private-fs` is clean.
+
+**9 of the 11 failures are one cause: test fixtures hardcoding POSIX binaries.** I traced
+the `Os { code: 3 }` cluster to source. `octopus-process-session-tool-runtime/src/lib.rs:9906`:
+
+```rust
+let mut command = tokio::process::Command::new("/bin/sh");
+```
+
+The panic is the `command.spawn().unwrap()` at line 9913, which is why all six report only
+`Os { code: 3, kind: NotFound, message: "The system cannot find the path specified." }` with
+no path in the message. The three `octopus-interface-transport` ones are the same class and
+do name their paths:
+
+```
+process authority path '\\?\C:\usr\bin\true' cannot be canonicalized: The system cannot find the path specified. (os error 3)
+process authority path '\\?\C:\bin\sh' cannot be canonicalized: The system cannot find the path specified. (os error 3)
+```
+
+So that cluster is test-side, same family as the code_mode_room `/tmp` fixture, and no
+amount of publication work will move it. The six affected tests are
+`tool_process_private_boundary_tests::{abrupt_host_drop_preserves_the_formed_environment_for_recovery,
+completion_counts_only_admitted_streamed_artifacts, deferred_room_live_state_cannot_poison_the_next_tool_invocation,
+explicit_terminal_release_remains_terminal, host_shutdown_detaches_and_same_formation_can_restart,
+input_preparation_refusal_sends_no_command_and_preserves_recovery_uncertainty}`.
+
+The other two are genuine:
+
+- `octopus_interface_transport::interface_life::tests::interface_owned_executable_resolves_through_the_declared_source_owner` — `assertion left == right failed`
+- `file_publication::files_publish_on_their_predecessor_and_refuse_a_stale_one` at crates\octopus-file-storage\tests\file_publication.rs:25:5 —
+  `assertion left == right failed`, `left: None`, `right: Some(PublicationReceipt { digest_algorithm: Sha256, operation_id: "replace", path: "...\record.json", before_hash: Some("a7937b64..."), after_hash: Some("16367aac..."), bytes: 6, outcome: Applied, error: None })`.
+  Publication returns no receipt where one is expected. This test arrived in a72d2ee and has
+  never passed on Windows, and 0fed88f touched publication.rs, so it may be in your area.
+
+## Run 5 — full workspace, opt-in set, no skips
+
+Nothing hung, no crashed binaries. **5857 passed / 127 failed.** Excluding the 6 known
+upstream: **122 non-upstream, down from 132 in run 4.**
+
+| string | run 4 | run 5 |
+| --- | --- | --- |
+| Access is denied | 33 | **13** |
+| code: 33 / locked a portion | 0 | **0** |
+
+Error 33 is confirmed gone workspace-wide. The remaining 13 ACCESS_DENIED split
+`octopus` 7, `stdio_room` 6, and **all 13 were already failing in run 4**.
+
+Groups vanished since run 4: `Os { code: 5 }` bare PermissionDenied (-5),
+`ToolResultError file_write_*` (-5), `cannot publish EE instance root` (-4),
+`WriteFile ... Custom` (-4), `daemon ... cannot publish EE instance root` (-3).
+
+Run 5 groups of 3 or more, one example each. Every one of these was already failing in
+run 4 except where noted:
+
+- **[12]** `octopus_tui` insta snapshots. `bottom_pane::chat_composer::tests::footer_mode_snapshots`. 12/12 also failed in run 4.
+- **[11]** `octopus_code_mode_room`. `tests::application_approval_rearms_the_return_before_either_delivery_order` — `owner fixture artifacts: \\?\C:\tmp\oct-cm-tC11F9`. 11/11 also failed in run 4.
+- **[10]** `assertion left == right failed` across `file_publication`, `octopus_interface_transport`, `octopus_marks`, `octopus_run_authoring`, `octopus_system_coder_env`, `octopus_system_exec_env`, `tool_process_lifecycle`, `octopus_tui`. Example `files_publish_on_their_predecessor_and_refuse_a_stale_one`. Was 7 in run 4; 9/10 also failed in run 4, so one is new (below).
+- **[6]** `stdio_room`. `one_room_correlates_out_of_order_responses_without_blocking_a_fast_request` — `MCP stdio room invocation failed: MCP stdio operation finished but its result could not be retained: Access is denied. (os error 5); execution will not be repeated`. 6/6 also failed in run 4.
+- **[6]** `octopus_process_session_tool_runtime`. The `/bin/sh` cluster above. 6/6 also failed in run 4.
+- **[5]** `octopus`, new message. `registry_install::tests::install_accepts_a_relocated_source_with_the_same_identity` — `Conflict { path: "\\?\C:\Users\...\home\registry\interface\base\interface.json", reason: "the native publication receipt differs from th...`. 5/5 also failed in run 4, previously as `WriteFile ... Os { code: 5 }`. So these progressed past ACCESS_DENIED into a receipt mismatch.
+- **[4]** `octopus`, new message. `daemon::tests::admit_interface_artifact_arrival_returns_interface_authored_admission` — `test installation seeds its bootstrap EE root: "EE instance root 'C:\Users\...\handler-interface-artifacts\ee_instances' was not published: Access is denied. (os error 5)"`. 4/4 also failed in run 4.
+- **[3]** `octopus`, new message. `daemon::tests::run_daemon_hosts_artifact_arrivals_on_one_live_spine` — `daemon exited before reporting readiness: Ok(Ok(Err("EE instance root 'C:\Users\...\octopus-home/state\ee_instances' was not published: Access is denied. (os error 5)")))`. 3/3 also failed in run 4. Mixed separators again: `octopus-home/state\ee_instances`.
+- **[3]** `octopus_tui`. `status::helpers::tests::compose_agents_summary_includes_global_agents_path` — `assertion failed: (left == right)`. 3/3 also failed in run 4.
+
+## The one genuinely new failure in run 5
+
+Same-test check against run 4 gives exactly one test that failed in run 5 and did not fail
+in run 4:
+
+```
+octopus_run_authoring::writer_run::writer_call_index_tests::writer_candidates_refresh_exact_generations_on_directory_changes
+panicked at registry\interface\system_interface_authoring\packages\octopus-run-authoring\src\..\tests\support\writer_call_index.rs:28:5:
+assertion `left == right` failed
+  left: ["C:\\Users\\Katlynne\\AppData\\Local\\Temp\\.tmp3BOj88\\calls\\current.artifact.json"]
+ right: ["C:\\Users\\Katlynne\\AppData\\Local\\Temp\\.tmp3BOj88\\calls\\fresh.artifact.json"]
+```
+
+It expects the refreshed candidate (`fresh.artifact.json`) and still sees the stale one
+(`current.artifact.json`), so a directory-change generation is not being noticed. Given the
+test name is "refresh exact generations on directory changes" and 0fed88f changed
+publication staging, this is the one thing in run 5 I would point at your last commit.
+I have not confirmed causation, only that it did not fail in run 4.
+
+Unchanged from before: `connect_stdio_command_initializes_json_rpc_client_on_windows` logs
+the over-60-seconds warning but completes. Not a hang. `.snap.new` files left uncommitted
+as you asked.
