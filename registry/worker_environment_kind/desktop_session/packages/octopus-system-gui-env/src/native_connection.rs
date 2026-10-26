@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -51,6 +54,7 @@ pub(crate) struct HostPublication {
 }
 
 impl HostPublication {
+    #[cfg(unix)]
     pub fn prepare(private: &Path, interface: &str) -> Result<Self, String> {
         validate_directory(private)?;
         if private.file_name().and_then(|part| part.to_str()) != Some(interface) {
@@ -90,6 +94,13 @@ impl HostPublication {
         })
     }
 
+    #[cfg(not(unix))]
+    #[allow(unused_variables, unused_mut)]
+    pub fn prepare(private: &Path, interface: &str) -> Result<Self, String> {
+        Err("desktop control requires macOS".into())
+    }
+
+    #[cfg(unix)]
     pub fn publish(&mut self, address: std::net::SocketAddr) -> Result<(), String> {
         if address.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) || address.port() == 0 {
             return Err("desktop native host did not bind its declared loopback port".into());
@@ -111,6 +122,12 @@ impl HostPublication {
         })();
         if result.is_err() { let _ = std::fs::remove_file(&temporary); }
         result
+    }
+
+    #[cfg(not(unix))]
+    #[allow(unused_variables, unused_mut)]
+    pub fn publish(&mut self, address: std::net::SocketAddr) -> Result<(), String> {
+        Err("desktop control requires macOS".into())
     }
 }
 
@@ -144,6 +161,7 @@ pub fn prepare_private_desktop_host(roots: &BTreeMap<String, PathBuf>) -> Result
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn validate_directory(path: &Path) -> Result<(), String> {
     let metadata = std::fs::symlink_metadata(path).map_err(|_| "desktop private directory is unavailable")?;
     if !path.is_absolute() || !metadata.is_dir() || metadata.file_type().is_symlink()
@@ -154,6 +172,13 @@ pub(crate) fn validate_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+pub(crate) fn validate_directory(path: &Path) -> Result<(), String> {
+    Err("desktop control requires macOS".into())
+}
+
+#[cfg(unix)]
 fn validate_file_metadata(metadata: &std::fs::Metadata) -> Result<(), String> {
     if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o777 != 0o600 || metadata.nlink() != 1 || metadata.len() > MAX_BYTES {
@@ -162,6 +187,13 @@ fn validate_file_metadata(metadata: &std::fs::Metadata) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+fn validate_file_metadata(metadata: &std::fs::Metadata) -> Result<(), String> {
+    Err("desktop control requires macOS".into())
+}
+
+#[cfg(unix)]
 fn read_private(path: &Path) -> Result<Vec<u8>, String> {
     validate_directory(path.parent().ok_or("desktop private file has no parent")?)?;
     let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW)
@@ -171,6 +203,12 @@ fn read_private(path: &Path) -> Result<Vec<u8>, String> {
     file.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|_| "desktop private file cannot read")?;
     if bytes.len() as u64 > MAX_BYTES { return Err("desktop private file exceeds its bound".into()); }
     Ok(bytes)
+}
+
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+fn read_private(path: &Path) -> Result<Vec<u8>, String> {
+    Err("desktop control requires macOS".into())
 }
 
 fn random_hex(count: usize) -> Result<String, String> {

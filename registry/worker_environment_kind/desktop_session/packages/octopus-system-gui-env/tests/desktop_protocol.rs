@@ -1,3 +1,6 @@
+// Desktop control runs a macOS host and checks Unix file modes.
+#![cfg(unix)]
+
 use octopus_system_gui_env::{
     backend::{DesktopExecutor, DesktopHost},
     protocol::{self, Request, Response, Screen},

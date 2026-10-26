@@ -475,6 +475,7 @@ impl ApplicationInstructionResource {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub(crate) fn read(&self, root: &std::path::Path) -> Result<ApplicationInstructionCatalog, String> {
         use std::io::Read;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -498,6 +499,12 @@ impl ApplicationInstructionResource {
         let result: ApplicationInstructionCatalog = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         result.validate()?;
         Ok(result)
+    }
+
+    #[cfg(not(unix))]
+    #[allow(unused_variables)]
+    pub(crate) fn read(&self, root: &std::path::Path) -> Result<ApplicationInstructionCatalog, String> {
+        Err("desktop control requires macOS".into())
     }
 }
 

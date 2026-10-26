@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::{oneshot, Notify};
 
 type Pending = Arc<Mutex<BTreeMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -73,6 +75,7 @@ impl NativeExecutor {
         Ok(self)
     }
 
+    #[cfg(unix)]
     pub fn with_device_file(mut self, file: Arc<std::fs::File>) -> Result<Self, String> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
@@ -85,6 +88,13 @@ impl NativeExecutor {
         Ok(self)
     }
 
+    #[cfg(not(unix))]
+    #[allow(unused_variables, unused_mut)]
+    pub fn with_device_file(mut self, file: Arc<std::fs::File>) -> Result<Self, String> {
+        Err("desktop control requires macOS".into())
+    }
+
+    #[cfg(unix)]
     pub fn with_sandbox(mut self, profile: PathBuf, cancel_root: PathBuf) -> Result<Self, String> {
         if !cfg!(target_os = "macos") {
             return Err("native desktop sandbox requires macOS".into());
@@ -111,6 +121,12 @@ impl NativeExecutor {
         Ok(self)
     }
 
+    #[cfg(not(unix))]
+    #[allow(unused_variables, unused_mut)]
+    pub fn with_sandbox(mut self, profile: PathBuf, cancel_root: PathBuf) -> Result<Self, String> {
+        Err("desktop control requires macOS".into())
+    }
+
     fn native_command(&self) -> tokio::process::Command {
         if let Some((profile, cancel_root)) = &self.sandbox {
             let mut command = tokio::process::Command::new("/usr/bin/sandbox-exec");
@@ -123,6 +139,7 @@ impl NativeExecutor {
         }
     }
 
+    #[cfg(unix)]
     async fn connect(&self) -> Result<Arc<Connection>, String> {
         let mut slot = self.connection.lock().await;
         if self.closed.load(Ordering::Acquire) {
@@ -269,6 +286,12 @@ impl NativeExecutor {
         *connection.reader.lock().await = Some(reader);
         *slot = Some(connection.clone());
         Ok(connection)
+    }
+
+    #[cfg(not(unix))]
+    #[allow(unused_variables, unused_mut)]
+    async fn connect(&self) -> Result<Arc<Connection>, String> {
+        Err("desktop control requires macOS".into())
     }
 
     async fn command(&self, action: Value) -> Result<Value, String> {

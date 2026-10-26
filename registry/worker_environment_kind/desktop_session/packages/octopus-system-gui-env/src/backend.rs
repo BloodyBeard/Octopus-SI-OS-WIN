@@ -15,7 +15,7 @@ use crate::protocol::{
 
 pub type Execution<'a> = Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/support/host_connection.rs"]
 mod host_connection_tests;
 
@@ -1739,6 +1739,12 @@ fn acquire_device_lock(file: &std::fs::File) -> Result<(), String> {
         return Err("desktop_device_busy: another host owns this physical computer".into());
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+fn acquire_device_lock(file: &std::fs::File) -> Result<(), String> {
+    Err("desktop control requires macOS".into())
 }
 
 #[cfg(not(unix))]

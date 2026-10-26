@@ -40,7 +40,7 @@ Still to do, roughly in dependency order:
 | Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream removed Codex's `windows-sandbox-rs` crate but kept its callers | Done: `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, now pinned for `win32-x64` with its sandbox helpers. Vendoring the real crate is optional. |
 | Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Done: the one shell-script test is Unix-only |
 | Browser driver | `octopus-browser-session-env` | Unix sockets, `O_NOFOLLOW`, uid/mode checks against the Electron browser host | Port the transport to the shared IPC crate and use Windows ACL checks |
-| Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Gate on macOS for now. A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
+| Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Compiles on Windows: its native paths report "desktop control requires macOS". A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
 | Voice | `octopus-realtime-webrtc` | — | Compiles on Windows (verified on a Windows machine) |
 
 First measurement on a real Windows machine: 6 crates fail with 254 errors

@@ -1,5 +1,8 @@
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -449,6 +452,7 @@ pub(crate) fn read_record<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T
     read_record_bounded(path, MAX_RECORD_BYTES)
 }
 
+#[cfg(unix)]
 pub(crate) fn read_record_bounded<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Result<T, String> {
     crate::native_connection::validate_directory(path.parent().ok_or("application record has no private parent")?)?;
     let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW)
@@ -464,10 +468,17 @@ pub(crate) fn read_record_bounded<T: for<'de> Deserialize<'de>>(path: &Path, lim
     serde_json::from_slice(&bytes).map_err(|error| format!("application private record is malformed: {error}"))
 }
 
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+pub(crate) fn read_record_bounded<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Result<T, String> {
+    Err("desktop control requires macOS".into())
+}
+
 pub(crate) fn create_record<T: Serialize>(path: &Path, record: &T) -> Result<(), String> {
     create_record_bounded(path, record, MAX_RECORD_BYTES)
 }
 
+#[cfg(unix)]
 pub(crate) fn create_record_bounded<T: Serialize>(path: &Path, record: &T, limit: u64) -> Result<(), String> {
     let parent = path.parent().ok_or("application record has no private parent")?;
     crate::native_connection::validate_directory(parent)?;
@@ -477,6 +488,12 @@ pub(crate) fn create_record_bounded<T: Serialize>(path: &Path, record: &T, limit
         .open(path).map_err(|error| format!("application private record cannot be created: {error}"))?;
     file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|error| error.to_string())?;
     std::fs::File::open(parent).and_then(|file| file.sync_all()).map_err(|error| error.to_string())
+}
+
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+pub(crate) fn create_record_bounded<T: Serialize>(path: &Path, record: &T, limit: u64) -> Result<(), String> {
+    Err("desktop control requires macOS".into())
 }
 
 pub(crate) fn admit_response(_ctx: &octopus_tool_door_runtime::InterfaceLiftContext, root: &Path, door: &InterfaceId, envelope: &InterfaceInvocationEnvelope, config: &crate::config::DesktopConfig) -> Result<ToolCallArtifact, String> {
@@ -615,6 +632,7 @@ fn permission_path(root: &Path, request: &OperatorRequest, persistence: Operator
     Ok(root.join(format!("app-permission-{name}-{digest}.json")))
 }
 
+#[cfg(unix)]
 fn permission_lock(root: &Path) -> Result<std::fs::File, String> {
     crate::native_connection::validate_directory(root)?;
     let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
@@ -629,6 +647,12 @@ fn permission_lock(root: &Path) -> Result<std::fs::File, String> {
         return Err("application_preferences_busy: another settings transaction holds the private preferences".into());
     }
     Ok(file)
+}
+
+#[cfg(not(unix))]
+#[allow(unused_variables, unused_mut)]
+fn permission_lock(root: &Path) -> Result<std::fs::File, String> {
+    Err("desktop control requires macOS".into())
 }
 
 fn read_permission(root: &Path, request: &OperatorRequest, persistence: OperatorPermissionPersistence) -> Result<Option<PermissionRecord>, String> {

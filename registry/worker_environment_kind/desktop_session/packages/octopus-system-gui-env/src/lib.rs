@@ -1,3 +1,6 @@
+// Desktop control needs the macOS host; elsewhere its native paths report that and stay unused.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use base64::Engine;
 use std::collections::BTreeMap;
 use std::sync::Arc;
