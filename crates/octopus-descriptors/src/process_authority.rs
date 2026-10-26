@@ -21,6 +21,49 @@ pub enum ProcessSandboxMode {
     Disabled,
 }
 
+/// The environment variable through which the person running Octopus allows
+/// `Enforced` processes to run without an OS sandbox on a platform that has
+/// no sandbox backend (Windows and Linux today; macOS always sandboxes).
+///
+/// Only the exact value `1` opts in. The runtime passes it on to the
+/// processes it starts, and descriptors cannot set or inherit it, so only the
+/// person who started Octopus can turn it on.
+pub const UNSANDBOXED_PROCESSES_ENV: &str = "OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES";
+
+/// Whether this process was started with [`UNSANDBOXED_PROCESSES_ENV`] = `1`.
+pub fn unsandboxed_processes_allowed() -> bool {
+    opts_out_of_sandbox(std::env::var_os(UNSANDBOXED_PROCESSES_ENV).as_deref())
+}
+
+fn opts_out_of_sandbox(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "1")
+}
+
+#[cfg(test)]
+mod unsandboxed_tests {
+    use super::opts_out_of_sandbox;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn only_exactly_one_opts_out_of_the_sandbox() {
+        assert!(opts_out_of_sandbox(Some(OsStr::new("1"))));
+        for value in ["", "0", "true", "yes", " 1", "1 ", "01"] {
+            assert!(!opts_out_of_sandbox(Some(OsStr::new(value))), "{value:?}");
+        }
+        assert!(!opts_out_of_sandbox(None));
+    }
+}
+
+/// The refusal for an `Enforced` process on a platform without a sandbox
+/// backend, naming the opt-in.
+pub fn no_sandbox_backend_refusal(what: &str) -> String {
+    format!(
+        "{what} needs an OS sandbox, and this platform has no Octopus sandbox backend; \
+         refusing to run it unsandboxed (fail-closed). To run without a sandbox anyway, \
+         start Octopus with {UNSANDBOXED_PROCESSES_ENV}=1 (see docs/windows-port.md)"
+    )
+}
+
 #[derive(
     Clone,
     Debug,

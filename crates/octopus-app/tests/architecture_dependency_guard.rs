@@ -78,6 +78,7 @@ const WORKER_ENVIRONMENT_PASSIVE_BOX_PACKAGES: &[&str] = &[
     // sync) with no executor, tool or door behavior, like the util crates.
     "octopus-local-socket",
     "octopus-private-fs",
+    "octopus-process-job",
     "octopus-tool-handlers",
     "octopus-tool-registry",
     "octopus-util-abspath",

@@ -366,6 +366,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   loginItemSettings(request) {
     return invokeAccess("octopus:login-item-settings", request);
   },
+  runtimeSandboxSettings(request) {
+    return invokeAccess("octopus:runtime-sandbox-settings", request);
+  },
   windowControl(action) {
     ipcRenderer.send("octopus:window-control", action);
   },

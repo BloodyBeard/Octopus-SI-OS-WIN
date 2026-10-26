@@ -424,6 +424,7 @@ fn is_reserved_tool_process_env(name: &str) -> bool {
             | "OCTOPUS_MOVEMENTS_JSONL"
             | "OCTOPUS_BLOBS_DIR"
             | "OCTOPUS_LEDGER_INDEX_SQLITE"
+            | octopus_descriptors::UNSANDBOXED_PROCESSES_ENV
             | "TMPDIR"
     )
 }

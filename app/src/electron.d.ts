@@ -138,6 +138,7 @@ declare global {
       openTaskMonitorWindow(runId: string): Promise<{ opened: true; runId: string }>;
       setTaskMonitorWindowPinned(enabled: boolean): Promise<{ pinned: boolean }>;
       loginItemSettings(request?: { enabled: boolean }): Promise<OctopusLoginItemSettings>;
+      runtimeSandboxSettings(request?: { allowUnsandboxedProcesses: boolean }): Promise<OctopusRuntimeSandboxSettings>;
       windowControl(action: "close" | "minimize" | "zoom"): void;
       relaunchClient(): Promise<{ relaunching: true }>;
       defaults(): Promise<OctopusTransportDefaults>;
@@ -506,6 +507,12 @@ export type OctopusGlobalDictationShortcutState = {
 export type OctopusLoginItemSettings = {
   supported: boolean;
   enabled: boolean;
+};
+
+export type OctopusRuntimeSandboxSettings = {
+  /** False on macOS, which always sandboxes runtime processes. */
+  supported: boolean;
+  allowUnsandboxedProcesses: boolean;
 };
 
 export type OctopusCdpViewerOpenRequest = {

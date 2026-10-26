@@ -3588,6 +3588,42 @@ ipcMain.handle("octopus:native-command-shortcuts", async (_event, token, shortcu
   setApplicationMenu();
   return { configured: Object.keys(nativeCommandShortcuts).length };
 });
+// Whether the runtime started from this app may run processes without an OS
+// sandbox where the platform has no sandbox backend (not macOS). Off unless
+// the person turns it on; it reaches the runtime as
+// OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES=1 in the launch environment.
+function runtimeSandboxSettingsPath() {
+  return path.join(app.getPath("userData"), "runtime-sandbox.json");
+}
+
+function runtimeSandboxOptOutSupported() {
+  return process.platform !== "darwin";
+}
+
+function allowUnsandboxedProcesses() {
+  if (!runtimeSandboxOptOutSupported()) return false;
+  try {
+    return JSON.parse(fs.readFileSync(runtimeSandboxSettingsPath(), "utf8"))?.allow_unsandboxed_processes === true;
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle("octopus:runtime-sandbox-settings", async (_event, token, request) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  const supported = runtimeSandboxOptOutSupported();
+  if (request && Object.prototype.hasOwnProperty.call(request, "allowUnsandboxedProcesses")) {
+    if (!supported) throw new Error("macOS always runs Octopus processes in its sandbox.");
+    const file = runtimeSandboxSettingsPath();
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(temporary, JSON.stringify({ allow_unsandboxed_processes: request.allowUnsandboxedProcesses === true }));
+    fs.renameSync(temporary, file);
+    void appendClientLog("warn", "runtime.sandbox_setting_changed", { allow_unsandboxed_processes: request.allowUnsandboxedProcesses === true }).catch(() => {});
+  }
+  return { supported, allowUnsandboxedProcesses: allowUnsandboxedProcesses() };
+});
+
 ipcMain.handle("octopus:login-item-settings", async (_event, token, request) => {
   getClientAccessController().requireSession(token, ["live"]);
   const supported = app.isPackaged;
@@ -4932,6 +4968,7 @@ function resolveRuntimeLaunchEnv() {
     OCTOPUS_SOURCE_REGISTRY: resolveSourceRegistry(),
     OCTOPUS_MACHINE_CODEX_AUTH_FILE: path.join(resolveOperatorCodexHome(), "auth.json"),
   };
+  if (allowUnsandboxedProcesses()) env.OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES = "1";
   if (stringValue(process.env.OCTOPUS_RUNTIME_BIN)) return env;
   const root = resolveInstallationRoot();
   if (!root) return env;

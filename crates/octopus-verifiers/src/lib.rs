@@ -233,7 +233,17 @@ fn native_executable_header(contents: &[u8]) -> bool {
                 | object::FileKind::MachOFat64)
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // A PE image: the DOS "MZ" stub whose e_lfanew field points at "PE\0\0".
+        contents.starts_with(b"MZ")
+            && contents
+                .get(0x3c..0x40)
+                .map(|field| u32::from_le_bytes([field[0], field[1], field[2], field[3]]) as usize)
+                .and_then(|offset| contents.get(offset..offset.checked_add(4)?))
+                == Some(b"PE\0\0".as_slice())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         contents.starts_with(b"\x7fELF")
     }

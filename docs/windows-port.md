@@ -55,6 +55,28 @@ The repo's architecture guard (`crates/octopus-app/tests/architecture_dependency
 lists `octopus-local-socket` and `octopus-private-fs` as passive crates that
 worker-environment kinds may link. Its remaining failures predate the port.
 
+#### Running without a sandbox
+
+Windows and Linux have no Octopus process sandbox yet, so processes whose
+descriptors require one are refused. You can choose to run them without
+one:
+
+- **Desktop app:** Settings → General → Process sandbox → **Run without a
+  sandbox**. It applies the next time the runtime starts from the app.
+- **Terminal:** start the runtime with `OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES=1`
+  (only the exact value `1` counts).
+
+With it on, agents' tools and helper programs run with your account's full
+access: they can read, change and delete your files and reach the network.
+The runtime's boot report prints a `sandbox` line that says which mode it is
+in, and the first unsandboxed process logs a warning. The runtime passes the
+setting to the processes it starts. Descriptors cannot set or inherit it, so
+only the person who starts Octopus can turn it on. It has no effect on macOS,
+which always sandboxes.
+
+Verifier programs may be Windows executables: the verifier check accepts a PE
+image on Windows, as it accepts ELF on Linux and Mach-O on macOS.
+
 #### Runtime gaps on Windows
 
 These compile, but refuse at run time on Windows ("fail-closed"), so the
@@ -62,13 +84,13 @@ kernel cannot run real work on Windows yet. Most-blocking first:
 
 | # | Gap | Where | Effect today | Windows design |
 | --- | --- | --- | --- | --- |
-| 1 | **Process sandbox** | `octopus-verifiers` `ProcessAuthority::prepare` | Every interface whose descriptor keeps the default `sandbox_mode: enforced` (nearly all) is refused at launch. Linux has the same gap; only macOS has a backend. | An AppContainer backend: read, write and execute roots become access-list grants to the container, and network is a capability. Or an explicit, visible opt-out for users who accept running unsandboxed. **This needs your decision.** |
+| 1 | **Process sandbox** | `octopus-verifiers` `ProcessAuthority::prepare` | Every interface whose descriptor keeps the default `sandbox_mode: enforced` (nearly all) is refused at launch, unless you opt out (see [Running without a sandbox](#running-without-a-sandbox)). Linux has the same gap; only macOS has a backend. | An AppContainer backend: read, write and execute roots become access-list grants to the container, and network is a capability. |
 | 2 | File identity and no-replace moves | `octopus-file-storage` (`FileIdentity`, `native.rs`, directory publication, reclaim), `octopus-interface-transport` `runtime_instance.rs` | File publication, registry install and runtime-instance ownership refuse. | Volume serial plus file ID (`FileIdInfo`), handle-relative opens (`NtCreateFile` with a root directory), no-replace rename (`SetFileInformationByHandle` with `FileRenameInfo`, `ReplaceIfExists = false`), and identity-checked delete. |
 | 3 | Spawned-life output capture | `interface_life.rs` and `door_life.rs` `read_regular_file_beneath` | Interface outputs cannot be captured. | A no-follow, beneath-root reader (per-component reparse checks). |
 | 4 | Tool-process owner lease | `octopus-process-session-tool-runtime` | Process-session tool processes refuse to spawn. | A job-object owner lease (as for interface processes). |
 | 5 | Other stores | remote-exec room records, context collections (`SafeDir`), code-mode continuation (exclusive rename), memory `exchange` (`ReplaceFileW`), operator-chat task retirement, MCP OAuth randomness (`/dev/urandom`) | Each refuses its feature. | Mostly `octopus-private-fs` plus the identity and rename pieces from #2. |
 | 6 | Symlinks | registry validation snapshot, Codex auth boundary | Need Developer Mode or admin on Windows. | Copy or junction fallback. |
-| 7 | Git-worktree sandbox | `octopus-git-sandbox-substrate` `run_sandboxed_in_worktree` | Coder exec refuses ("no platform floor"). Linux uses bubblewrap, macOS Seatbelt. | Same decision as #1. |
+| 7 | Git-worktree sandbox | `octopus-git-sandbox-substrate` `run_sandboxed_in_worktree` | Coder exec refuses on Windows unless you opt out. Linux uses bubblewrap, macOS Seatbelt. With the opt-out, Windows runs it through a bounded runner (timeout, output ceiling, cancellation, whole process tree killed through a job object). | Same backend as #1. |
 
 The Unix-only helpers behind these refusals are gated `#[cfg(unix)]` and say
 why, instead of being left as unused code on Windows.

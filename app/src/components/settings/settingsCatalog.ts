@@ -80,6 +80,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   destination("general.spell-check", "general", "Spell check", "Use the operating system dictionary in the task composer.", "setting", ["composer", "dictionary"]),
   destination("general.active-reply", "general", "While a run is active", "Send steers immediately. Right-click Send or use the queue shortcut to queue a message.", "setting", ["steer", "queue", "follow-up"]),
   destination("general.work-mode", "general", "Work mode", "Choose detailed or concise projected activity in task chats.", "setting", ["technical detail", "reasoning", "tools"]),
+  destination("general.unsandboxed-processes", "general", "Run without a sandbox", "Allow agents' processes to run without an OS sandbox on platforms that have none.", "setting", ["sandbox", "security", "windows", "unsandboxed"]),
   destination("general.provider", "general", "Provider", "Choose the default declared provider interface for new tasks.", "setting", ["model", "codex", "interface"]),
   destination("general.on-launch", "general", "On launch", "Restore the last active surface when the client opens.", "destination", ["startup"]),
   destination("general.open-at-login", "general", "Open at login", "Launch the packaged Octopus client after operating-system sign-in.", "setting", ["startup", "macos"]),

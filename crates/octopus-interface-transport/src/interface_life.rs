@@ -2142,6 +2142,7 @@ fn is_reserved_life_env(name: &str) -> bool {
             | "OCTOPUS_MOVEMENTS_JSONL"
             | "OCTOPUS_BLOBS_DIR"
             | "OCTOPUS_LEDGER_INDEX_SQLITE"
+            | octopus_descriptors::UNSANDBOXED_PROCESSES_ENV
             | "TMPDIR"
     )
 }
@@ -2980,6 +2981,11 @@ fn spawn_process_command_life(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // The no-sandbox opt-in belongs to whoever started the runtime; pass it
+        // on so the processes this one starts follow the same choice.
+        if octopus_descriptors::unsandboxed_processes_allowed() {
+            command.env(octopus_descriptors::UNSANDBOXED_PROCESSES_ENV, "1");
+        }
         if let Some(movements_path) = movements_path {
             command.env("OCTOPUS_MOVEMENTS_JSONL", movements_path);
         }

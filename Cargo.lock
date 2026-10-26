@@ -7055,6 +7055,7 @@ dependencies = [
  "octopus-local-socket",
  "octopus-network-proxy",
  "octopus-private-fs",
+ "octopus-process-job",
  "octopus-sandbox-substrate",
  "octopus-substrate-contract",
  "octopus-util-abspath",
@@ -7228,6 +7229,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-private-fs",
+ "octopus-process-job",
  "octopus-runtime",
  "octopus-util-pty",
  "octopus-verifiers",
@@ -7240,7 +7242,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7590,6 +7591,13 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "pretty_assertions",
+]
+
+[[package]]
+name = "octopus-process-job"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

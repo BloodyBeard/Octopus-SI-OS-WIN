@@ -343,6 +343,7 @@ fn is_reserved_tool_process_host_env(name: &str) -> bool {
             | "OCTOPUS_MOVEMENTS_JSONL"
             | "OCTOPUS_BLOBS_DIR"
             | "OCTOPUS_LEDGER_INDEX_SQLITE"
+            | octopus_descriptors::UNSANDBOXED_PROCESSES_ENV
             | "TMPDIR"
     )
 }
@@ -2524,6 +2525,10 @@ impl ToolProcessClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Follow the runtime's no-sandbox opt-in (see interface life spawn).
+        if octopus_descriptors::unsandboxed_processes_allowed() {
+            command.env(octopus_descriptors::UNSANDBOXED_PROCESSES_ENV, "1");
+        }
         if let Some(path) = &durable_var {
             command.env(TOOL_PROCESS_DURABLE_VAR_DIR_ENV, path);
         }

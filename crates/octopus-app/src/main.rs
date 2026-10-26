@@ -99,6 +99,21 @@ fn runtime_installation_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(root)
 }
 
+/// What the boot report says about process sandboxing. macOS always has its
+/// sandbox; elsewhere processes that need one are refused unless the person
+/// starting Octopus opted out of it.
+fn process_sandbox_posture() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macOS sandbox"
+    } else if octopus_descriptors::unsandboxed_processes_allowed() {
+        "WARNING: none. OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES=1 runs processes without an OS \
+         sandbox; they can reach everything this user account can"
+    } else {
+        "none on this platform: processes that need a sandbox are refused \
+         (set OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES=1 to run them anyway)"
+    }
+}
+
 /// The user's home folder: `HOME` on Unix. Windows rarely sets `HOME`, so
 /// there it is the profile folder (`USERPROFILE`).
 fn user_home_dir() -> Option<PathBuf> {
@@ -393,6 +408,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
     survive_terminal_hangup(&octopus_home.join("state").join("runtime-instance").join("output.log"))?;
     let runtime_control = runtime_control::RuntimeControl::bind(&octopus_home).await?;
     boot.stage("control", runtime_control.path().display());
+    boot.stage("sandbox", process_sandbox_posture());
     let _runtime_control_task = AbortOnDrop(tokio::spawn(runtime_control.serve(
         octopus_home.clone(),
         cancel.clone(),

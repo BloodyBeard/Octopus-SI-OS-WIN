@@ -1,22 +1,14 @@
-#[cfg(unix)]
 use std::collections::VecDeque;
-#[cfg(unix)]
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::process::Child;
-#[cfg(unix)]
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::AtomicBool;
-#[cfg(unix)]
-use std::sync::atomic::Ordering;
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use octopus_descriptors::ProcessSandboxMode;
-#[cfg(unix)]
 use octopus_worker_env::CapturedExecFailure;
 use octopus_worker_env::{AbsPath, ExecOutput, ProjectedSandbox, WorkerEnvError};
 
@@ -128,17 +120,21 @@ fn platform_sandboxed_worktree_process_argv(
     Ok(process_argv)
 }
 
+/// No sandbox backend here: run unsandboxed only when the person running
+/// Octopus opted in (`OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES=1`).
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn platform_sandboxed_worktree_process_argv(
     _sandbox: &ProjectedSandbox,
     _cwd: &AbsPath,
-    _argv: Vec<String>,
+    argv: Vec<String>,
 ) -> Result<Vec<String>, WorkerEnvError> {
-    Err(WorkerEnvError::ExecFailed(
-        "sandboxed worktree exec has no platform floor here; refusing to run unsandboxed \
-         (fail-closed)"
-            .into(),
-    ))
+    if octopus_descriptors::unsandboxed_processes_allowed() {
+        Ok(argv)
+    } else {
+        Err(WorkerEnvError::ExecFailed(octopus_descriptors::no_sandbox_backend_refusal(
+            "sandboxed worktree exec",
+        )))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -228,7 +224,40 @@ pub fn run_sandboxed_in_worktree(
     )
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows has no worktree sandbox backend, so this runs only in
+/// `Disabled` mode or with the no-sandbox opt-in (see
+/// `platform_sandboxed_worktree_process_argv`).
+#[cfg(windows)]
+pub fn run_sandboxed_in_worktree(
+    sandbox: &ProjectedSandbox,
+    sandbox_mode: ProcessSandboxMode,
+    cwd: &AbsPath,
+    argv: Vec<String>,
+    timeout: Duration,
+    max_output_bytes: usize,
+    cancelled: &AtomicBool,
+) -> Result<ExecOutput, WorkerEnvError> {
+    let process_argv = sandboxed_worktree_process_argv(sandbox, sandbox_mode, cwd, argv)?;
+    let (program, process_args) = process_argv
+        .split_first()
+        .ok_or_else(|| WorkerEnvError::ExecFailed("worktree exec produced empty argv".into()))?;
+    let mut command = Command::new(program);
+    command
+        .args(process_args)
+        .current_dir(cwd.as_path())
+        .env("TMPDIR", cwd.as_path())
+        .env("TMP", cwd.as_path())
+        .env("TEMP", cwd.as_path());
+    run_bounded_command_windows(
+        command,
+        timeout,
+        max_output_bytes,
+        &format!("command under {program} (sandbox_mode={sandbox_mode:?}, no OS sandbox)"),
+        cancelled,
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn run_sandboxed_in_worktree(
     _sandbox: &ProjectedSandbox,
     _sandbox_mode: ProcessSandboxMode,
@@ -238,17 +267,200 @@ pub fn run_sandboxed_in_worktree(
     _max_output_bytes: usize,
     _cancelled: &AtomicBool,
 ) -> Result<ExecOutput, WorkerEnvError> {
-    Err(WorkerEnvError::ExecFailed(
-        "sandboxed worktree exec has no platform floor here; refusing to run unsandboxed \
-         (fail-closed)"
-            .into(),
-    ))
+    Err(WorkerEnvError::ExecFailed(octopus_descriptors::no_sandbox_backend_refusal(
+        "sandboxed worktree exec",
+    )))
 }
 
-// The bounded runner below serves the Linux (bubblewrap) and macOS (Seatbelt)
-// backends. Windows has no worktree sandbox backend yet, so it refuses above
-// (fail-closed) and never reaches this code.
-#[cfg(unix)]
+fn cancelled_before_spawn(action: &str) -> WorkerEnvError {
+    WorkerEnvError::ExecFailedWithOutput {
+        reason: format!("{action} cancelled before spawn"),
+        captured: Box::new(CapturedExecFailure {
+            output: ExecOutput {
+                exit_code: -1,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_total_bytes: 0,
+                stderr_total_bytes: 0,
+                duration: Duration::ZERO,
+                timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            exit_observed: false,
+            stdout_complete: true,
+            stderr_complete: true,
+            cancelled: true,
+            cleanup_errors: Vec::new(),
+        }),
+    }
+}
+
+/// The Windows bounded runner: the same contract as the Unix one (timeout,
+/// output ceiling, cancellation, the whole process tree killed afterwards),
+/// with a job object in place of the process group and reader threads in
+/// place of `poll`.
+#[cfg(windows)]
+fn run_bounded_command_windows(
+    mut command: Command,
+    timeout: Duration,
+    max_output_bytes: usize,
+    action: &str,
+    cancelled: &AtomicBool,
+) -> Result<ExecOutput, WorkerEnvError> {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::mpsc;
+
+    if timeout.is_zero() || max_output_bytes == 0 {
+        return Err(WorkerEnvError::ExecFailed(format!(
+            "{action} requires positive timeout and output ceilings"
+        )));
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err(cancelled_before_spawn(action));
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| WorkerEnvError::ExecFailed(format!("{action} failed to spawn: {error}")))?;
+    let job = match octopus_process_job::Job::containing(child.as_raw_handle()) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(WorkerEnvError::ExecFailed(format!(
+                "{action} could not be placed in a process job: {error}"
+            )));
+        }
+    };
+    let started = Instant::now();
+    // Each pipe is read on its own thread; a pipe ends once every process in
+    // the tree that inherited it has exited.
+    let capture = |reader: Option<Box<dyn Read + Send>>| {
+        let (sender, receiver) = mpsc::channel();
+        if let Some(mut reader) = reader {
+            std::thread::spawn(move || {
+                let mut output = RetainedOutput::new(max_output_bytes);
+                let mut buffer = [0u8; 8192];
+                let error = loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break None,
+                        Ok(count) => output.push(&buffer[..count]),
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => break Some(error.to_string()),
+                    }
+                };
+                let _ = sender.send((output, error));
+            });
+        } else {
+            let _ = sender.send((RetainedOutput::new(max_output_bytes), Some("pipe was not opened".into())));
+        }
+        receiver
+    };
+    let stdout = capture(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stderr = capture(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let mut reason = None;
+    let mut timed_out = false;
+    let mut was_cancelled = false;
+    let mut status = None;
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            was_cancelled = true;
+            reason = Some(format!("{action} cancelled; effects already performed are not rolled back"));
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(observed)) => {
+                status = Some(observed);
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                reason = Some(format!("{action} status inspection failed: {error}"));
+                break;
+            }
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Like the Unix process group, the job is ended even after a normal exit
+    // so no descendant keeps running.
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = job.terminate() {
+        cleanup_errors.push(format!("process-tree termination failed: {error}"));
+    }
+    let cleanup_deadline = Instant::now() + COMMAND_CLEANUP_TIMEOUT;
+    while status.is_none() && Instant::now() < cleanup_deadline {
+        match child.try_wait() {
+            Ok(observed) => status = observed,
+            Err(error) => {
+                cleanup_errors.push(format!("child reap failed: {error}"));
+                break;
+            }
+        }
+        if status.is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    if status.is_none() {
+        cleanup_errors.push("child exit was not observed before cleanup deadline".to_string());
+    }
+    let mut collect = |stream: &str, receiver: mpsc::Receiver<(RetainedOutput, Option<String>)>| {
+        let remaining = cleanup_deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok((output, error)) => {
+                if let Some(error) = &error {
+                    cleanup_errors.push(format!("{stream} capture incomplete: {error}"));
+                }
+                (output.finish(), error.is_none())
+            }
+            Err(_) => {
+                cleanup_errors.push(format!("{stream} did not close before cleanup deadline"));
+                ((Vec::new(), 0), false)
+            }
+        }
+    };
+    let ((stdout, stdout_total_bytes), stdout_complete) = collect("stdout", stdout);
+    let ((stderr, stderr_total_bytes), stderr_complete) = collect("stderr", stderr);
+    let output = ExecOutput {
+        exit_code: status.as_ref().and_then(ExitStatus::code).unwrap_or(-1),
+        stdout_truncated: stdout_total_bytes > stdout.len(),
+        stderr_truncated: stderr_total_bytes > stderr.len(),
+        stdout,
+        stderr,
+        stdout_total_bytes,
+        stderr_total_bytes,
+        duration: started.elapsed(),
+        timed_out,
+    };
+    if reason.is_some() || !cleanup_errors.is_empty() {
+        let mut reason = reason.unwrap_or_else(|| format!("{action} cleanup failed"));
+        if !cleanup_errors.is_empty() {
+            reason.push_str("; ");
+            reason.push_str(&cleanup_errors.join("; "));
+        }
+        return Err(WorkerEnvError::ExecFailedWithOutput {
+            reason,
+            captured: Box::new(CapturedExecFailure {
+                output,
+                exit_observed: status.is_some(),
+                stdout_complete,
+                stderr_complete,
+                cancelled: was_cancelled,
+                cleanup_errors,
+            }),
+        });
+    }
+    Ok(output)
+}
+
+// The Unix bounded runner below serves the Linux (bubblewrap) and macOS
+// (Seatbelt) backends; Windows uses `run_bounded_command_windows` above.
 const COMMAND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[cfg(unix)]
@@ -265,27 +477,7 @@ fn run_bounded_command(
         )));
     }
     if cancelled.load(Ordering::Acquire) {
-        return Err(WorkerEnvError::ExecFailedWithOutput {
-            reason: format!("{action} cancelled before spawn"),
-            captured: Box::new(CapturedExecFailure {
-                output: ExecOutput {
-                    exit_code: -1,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    stdout_total_bytes: 0,
-                    stderr_total_bytes: 0,
-                    duration: Duration::ZERO,
-                    timed_out: false,
-                    stdout_truncated: false,
-                    stderr_truncated: false,
-                },
-                exit_observed: false,
-                stdout_complete: true,
-                stderr_complete: true,
-                cancelled: true,
-                cleanup_errors: Vec::new(),
-            }),
-        });
+        return Err(cancelled_before_spawn(action));
     }
     configure_process_group(&mut command);
     let mut child = command
@@ -613,7 +805,6 @@ impl<R: Read + std::os::fd::AsRawFd> CommandCapture<R> {
     }
 }
 
-#[cfg(unix)]
 struct RetainedOutput {
     max_bytes: usize,
     head: Vec<u8>,
@@ -622,7 +813,6 @@ struct RetainedOutput {
     total_bytes: usize,
 }
 
-#[cfg(unix)]
 impl RetainedOutput {
     fn new(max_bytes: usize) -> Self {
         Self {
@@ -903,5 +1093,49 @@ mod tests {
         assert!(sandboxed_worktree_process_argv(&projected, ProcessSandboxMode::Disabled,
             &AbsPath::new(&root).unwrap(), vec!["/usr/bin/true".into()]).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn run(script: &str, timeout: Duration, max_output_bytes: usize) -> Result<ExecOutput, WorkerEnvError> {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/d", "/c", script]);
+        run_bounded_command_windows(command, timeout, max_output_bytes, "test command", &AtomicBool::new(false))
+    }
+
+    #[test]
+    fn captures_output_and_exit_code() {
+        let output = run("echo hello& echo oops 1>&2& exit /b 3", Duration::from_secs(20), 4096).unwrap();
+        assert_eq!(output.exit_code, 3);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "oops");
+        assert!(!output.timed_out);
+    }
+
+    #[test]
+    fn caps_output_and_keeps_the_true_total() {
+        let output = run("for /l %i in (1,1,400) do @echo 0123456789", Duration::from_secs(20), 256).unwrap();
+        assert!(output.stdout.len() <= 256);
+        assert!(output.stdout_truncated);
+        assert!(output.stdout_total_bytes > 256);
+    }
+
+    #[test]
+    fn times_out_and_kills_the_whole_tree() {
+        // `start /b` leaves a grandchild that holds the pipe; the job must end it.
+        let started = Instant::now();
+        let output = run("start /b ping -n 30 127.0.0.1 >nul & ping -n 30 127.0.0.1 >nul", Duration::from_secs(1), 4096).unwrap();
+        assert!(output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_cancelled_command_never_starts() {
+        let command = Command::new("cmd.exe");
+        let error = run_bounded_command_windows(command, Duration::from_secs(5), 64, "test command", &AtomicBool::new(true)).unwrap_err();
+        assert!(matches!(error, WorkerEnvError::ExecFailedWithOutput { ref captured, .. } if captured.cancelled));
     }
 }

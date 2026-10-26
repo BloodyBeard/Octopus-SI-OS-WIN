@@ -8,6 +8,7 @@ use thiserror::Error;
 pub mod process_authority;
 
 pub use process_authority::{
+    no_sandbox_backend_refusal, unsandboxed_processes_allowed, UNSANDBOXED_PROCESSES_ENV,
     ProcessArgumentPathSpec, ProcessAuthoritySpec, ProcessEnvironmentSubpathSpec,
     ProcessRootSubpathSpec, ProcessSandboxMode,
 };

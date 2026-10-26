@@ -34,7 +34,7 @@ libc = "0.2.182"
 
 [target.'cfg(windows)'.dependencies]
 octopus-private-fs = { path = "../octopus-private-fs" }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+octopus-process-job = { path = "../octopus-process-job" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 object = { version = "0.37.3", default-features = false, features = ["read", "std"] }

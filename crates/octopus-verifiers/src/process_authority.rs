@@ -154,23 +154,41 @@ impl ProcessAuthority {
         {
             return prepare_macos(self, executable, args, &cwd, profile_root);
         }
-        #[cfg(target_os = "linux")]
+        // No backend enforces independent read, write and execute roots here.
+        // Run unsandboxed only when the person running Octopus opted in.
+        #[cfg(not(target_os = "macos"))]
         {
-            let _ = (self, executable, args, cwd, search_path, profile_root);
-            return Err(
-                "no Linux process-authority backend enforces independent read, write, and execute roots"
-                    .to_string(),
-            );
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            let _ = (args, cwd, search_path, executable, profile_root);
-            Err(
-                "no fail-closed process authority backend is available on this operating system"
-                    .to_string(),
-            )
+            let _ = (cwd, search_path, profile_root);
+            if !octopus_descriptors::unsandboxed_processes_allowed() {
+                return Err(octopus_descriptors::no_sandbox_backend_refusal(&format!(
+                    "process '{}'",
+                    executable.display()
+                )));
+            }
+            warn_unsandboxed_once();
+            Ok(PreparedProcess {
+                program: executable.clone(),
+                args: args.to_vec(),
+                executable,
+                environment: BTreeMap::new(),
+                sandbox_profile: None,
+            })
         }
     }
+}
+
+/// Says once per process, on stderr (captured in the runtime log), that
+/// processes now run without a sandbox.
+#[cfg(not(target_os = "macos"))]
+fn warn_unsandboxed_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "octopus: WARNING: {}=1 is set; processes run WITHOUT an OS sandbox and can reach \
+             everything this user account can",
+            octopus_descriptors::UNSANDBOXED_PROCESSES_ENV
+        );
+    });
 }
 
 pub trait ProcessAuthoritySpecExecution {

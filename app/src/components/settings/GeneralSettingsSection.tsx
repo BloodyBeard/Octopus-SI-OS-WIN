@@ -30,7 +30,38 @@ export function GeneralSection({ accessProfile, surfaces }: { accessProfile: Oct
     !providerState.loading && !providerState.error && providerInterfaceId
       && !providerState.providers.some((provider) => provider.id === providerInterfaceId),
   );
-  useAppErrorToast(providerState.error || loginItem.error);
+  const [runtimeSandbox, setRuntimeSandbox] = useState<{ supported: boolean; allowUnsandboxedProcesses: boolean; loading: boolean; error: string }>({
+    supported: false,
+    allowUnsandboxedProcesses: false,
+    loading: accessProfile === "live",
+    error: "",
+  });
+  useAppErrorToast(providerState.error || loginItem.error || runtimeSandbox.error);
+
+  useEffect(() => {
+    if (accessProfile !== "live" || !window.octopusTransport?.runtimeSandboxSettings) return;
+    let cancelled = false;
+    window.octopusTransport.runtimeSandboxSettings()
+      .then((state) => {
+        if (!cancelled) setRuntimeSandbox({ ...state, loading: false, error: "" });
+      })
+      .catch((error) => {
+        if (!cancelled) setRuntimeSandbox({ supported: false, allowUnsandboxedProcesses: false, loading: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return () => { cancelled = true; };
+  }, [accessProfile]);
+
+  async function setAllowUnsandboxedProcesses(allowUnsandboxedProcesses: boolean) {
+    const bridge = window.octopusTransport;
+    if (!bridge?.runtimeSandboxSettings) return;
+    setRuntimeSandbox((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const state = await bridge.runtimeSandboxSettings({ allowUnsandboxedProcesses });
+      setRuntimeSandbox({ ...state, loading: false, error: "" });
+    } catch (error) {
+      setRuntimeSandbox((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
 
   useEffect(() => {
     if (accessProfile !== "live" || !window.octopusTransport?.loginItemSettings) return;
@@ -258,6 +289,33 @@ export function GeneralSection({ accessProfile, surfaces }: { accessProfile: Oct
           />
         </OcCard>
       </OcGroup>
+
+      {runtimeSandbox.supported ? (
+        <OcGroup title="Process sandbox" description="This platform has no Octopus sandbox, so Octopus refuses to run agents' processes unless you allow it.">
+          <OcCard>
+            <OcSettingsRow {...settingsTargetProps("general.unsandboxed-processes")}
+              control={(
+                <OcSwitch
+                  checked={runtimeSandbox.allowUnsandboxedProcesses}
+                  disabled={runtimeSandbox.loading}
+                  label="Run without a sandbox"
+                  onCheckedChange={(enabled) => void setAllowUnsandboxedProcesses(enabled)}
+                />
+              )}
+              description="Agents' tools and helper programs run with your account's full access: they can read, change and delete any of your files and reach the network. Turn this on only on a machine and account you are willing to expose."
+              label="Run without a sandbox"
+              meta={runtimeSandbox.allowUnsandboxedProcesses ? "On. Takes effect the next time the runtime starts." : "Off: processes that need a sandbox are refused."}
+            />
+            {runtimeSandbox.allowUnsandboxedProcesses ? (
+              <OcSettingsRow
+                control={<OcStatus label="No sandbox" tone="danger" />}
+                description="The runtime started from this app runs processes without an OS sandbox."
+                label="Status"
+              />
+            ) : null}
+          </OcCard>
+        </OcGroup>
+      ) : null}
       <OcGroup title="Notifications">
         <OcCard>
           <MarkActivitySettingsRow />
