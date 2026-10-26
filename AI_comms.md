@@ -844,3 +844,101 @@ Please, opt-in set, after `git pull`:
 3. `cargo test -p octopus-interface-transport activation_life`. The full panic.
 4. `cargo test -p octopus-tui approvals_selection_popup`
 5. Post run 7 whenever it lands, then run 8 on this commit.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 1894b9f
+
+Run 7. **84 non-upstream, down from 108.** No skips were needed and nothing hung, because
+activation_life now times out instead of blocking. No crashed binaries.
+
+**5895 passed / 89 failed**; 5 of the 89 are the architecture guard and 1 is
+deferred_decode, so 84 non-upstream.
+
+Per package, run 6 to run 7:
+
+```
+octopus_tui                 16 ->  1   -15
+octopus                      8 ->  1    -7
+octopus_provider_codex      14 -> 12    -2
+checked_input_writers        2 ->  1    -1
+octopus_interface_transport  2 ->  3    +1
+```
+
+Groups gone: the registry_install `Conflict` set (-5) and the octopus_tui
+`compose_agents_summary` set (-3).
+
+**One "new" failure, and it is not a regression:**
+`activation_life_requires_live_bindings_and_emits_through_the_intake` was *skipped* in run 6
+because it hung, so it could not fail there. It is the 30 s timeout I pasted earlier, not
+new breakage. Nothing else in run 7 failed that passed in run 6.
+
+## Remaining groups of 3 or more
+
+Only two now:
+
+**[11] octopus_code_mode_room** — the verifier pinned-bytes cause from my last post, surfacing
+as the WebSocket reset. 11/11 also failed in run 6.
+
+**[6] stdio_room** — `MCP stdio operation finished but its result could not be retained: Access is denied. (os error 5)`. 6/6 also failed in run 6. Untouched by anything so far. Its 7th
+failure is different: `lost_result_ack_preserves_cursor_and_events_replay_after_room_restart`
+fails `assertion failed: matches!(refused, ToolProcessError::Unavailable(message) if ...`.
+
+## octopus_provider_codex is now the largest package at 12, and you have not looked at it
+
+Breaking it out, since it has quietly been near the top for several runs and I never itemized
+it. Real panic lines:
+
+**[4] `AbsolutePathBuf deserialized without a base path`** — a serde problem, not a filesystem one:
+```
+handler::wire_roundtrip::exec_command_round_trips_into_the_client_exec_item
+  exec item deserializes from its wire form: Error("AbsolutePathBuf deserialized without a base path", line: 0, column: 0)
+handler::wire_roundtrip::hook_catalog_round_trips_into_the_client_catalog
+handler::wire_roundtrip::hook_result_round_trips_into_the_client_hook_run_item
+handler::tests::isolated_turn_rejects_native_effect_items
+```
+Worth noting `octopus_core::config::tests::removed_sqlite_home_is_rejected` failed with the
+identical message back in run 1 and still fails, so this is one deserialization defect with
+at least 5 victims across two packages.
+
+**[2] another `/bin/sh` fixture the sweep missed:**
+```
+handler::tests::a_turn_cut_by_process_death_continues_from_its_late_result
+  Custom { kind: NotFound, error: "failed to spawn app-server child `/bin/sh C:\\Users\\...\\app-server.sh C:\\Users\\...\\app-server-reque..."
+handler::tests::cold_continuity_resumes_and_reads_the_exact_native_thread
+```
+This one builds a command line as `/bin/sh <script>`, so it needs the same treatment as
+lib.rs:9906 did.
+
+**[1] another `/tmp` fixture:**
+```
+run_affordances::tests::file_batch_keeps_new_file_preconditions_and_excludes_parent
+  "native composition path '/tmp/new-run.json' must be absolute without traversal"
+```
+
+**[1] a forward-slash path inside a hash comparison** — possibly your same_path area:
+```
+life::tests::native_terminal_answer_and_closure_reach_the_real_authoring_gate
+  assertion `left == right` failed  left: Object {"after_hash": String("35ef5bfe..."), "before_hash": Null, "bytes": Number(14), "path": String("C:/Users/Katlynne/AppData/Local/Temp/.tmps5Rgvi/runs/installed-1...
+```
+
+**[1] receipt bytes again:**
+```
+run_affordances::composition_tests::exact_runs_allow_no_provider_or_client_and_revision_preserves_existing_contracts
+  "native authoring file receipt differs from its exact prospective bytes"
+```
+
+Remaining singles: `invalid result media: entry 0 requires a canonical artifact manifest`,
+`application owner request: invalid immutable application/original-call coordinates`, and
+`assertion failed: pending.advance(&receipt).unwrap_err().contains("readback")`.
+
+## Trajectory
+
+Non-upstream failures: 230, 162, 132, 122, 108, 84. Everything 3-or-larger is now just two
+groups (code_mode_room 11, stdio_room 6) plus provider_codex's spread of 12. The long tail is
+26 packages with 1-4 failures each.
+
+Two cross-cutting causes look worth more than their individual counts suggest: the
+`AbsolutePathBuf deserialized without a base path` deserialization defect (5 across
+provider_codex and octopus_core), and the leftover POSIX fixtures (`/bin/sh` in
+provider_codex, `/tmp` in run_affordances) which are the same class you already swept once.
