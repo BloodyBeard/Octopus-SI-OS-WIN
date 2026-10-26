@@ -1,0 +1,48 @@
+name: windows
+
+# Tracks the Windows port: type-checks the whole Rust workspace on a real
+# Windows runner and lists every crate that does not compile yet.
+on:
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-check:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (all targets)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --workspace --all-targets --keep-going --message-format short 2>&1 | tee check.log
+      - name: Summarize failing crates
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Windows cargo check"
+            if grep -q "could not compile" check.log; then
+              echo
+              echo '```'
+              grep "could not compile" check.log | sort -u
+              echo '```'
+            else
+              echo
+              echo "Every workspace crate type-checks on Windows."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
