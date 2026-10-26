@@ -6639,6 +6639,7 @@ dependencies = [
  "octopus-sandbox-substrate",
  "octopus-util-abspath",
  "octopus-utils-cli",
+ "octopus-windows-sandbox",
  "pretty_assertions",
  "regex-lite",
  "serde_json",
@@ -6786,6 +6787,7 @@ dependencies = [
  "octopus-util-pty",
  "octopus-utils-home-dir",
  "octopus-utils-path",
+ "octopus-windows-sandbox",
  "once_cell",
  "openssl-sys",
  "pretty_assertions",
@@ -8137,6 +8139,7 @@ dependencies = [
  "octopus-utils-home-dir",
  "octopus-utils-path",
  "octopus-utils-sleep-inhibitor",
+ "octopus-windows-sandbox",
  "octopus-world-terminal-client",
  "octopus-world-terminal-config",
  "octopus-world-terminal-keymap",
@@ -8366,6 +8369,13 @@ dependencies = [
  "octopus-descriptors",
  "octopus-process-session-tool-runtime",
  "tokio",
+]
+
+[[package]]
+name = "octopus-windows-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

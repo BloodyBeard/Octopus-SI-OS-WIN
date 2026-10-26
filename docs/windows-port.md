@@ -37,7 +37,7 @@ Still to do, roughly in dependency order:
 | Area | Crate(s) | Problem | Plan |
 | --- | --- | --- | --- |
 | Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate` | Interface control sockets use `tokio::net::Unix*` | Extract the existing AF_UNIX wrapper (verified to compile on Windows) (`world_provider_codex/.../octopus-app-server-transport/src/uds.rs`, backed by `uds_windows`) into a shared crate and use it everywhere. Windows 10 1803+ supports AF_UNIX. |
-| Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream dropped Codex's `windows-sandbox-rs` crate but still references `octopus_windows_sandbox` | Vendor `codex-rs/windows-sandbox-rs` from openai/codex (Apache-2.0) as `octopus-windows-sandbox` |
+| Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream removed Codex's `windows-sandbox-rs` crate but kept its callers | Done: `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, now pinned for `win32-x64` with its sandbox helpers. Vendoring the real crate is optional. |
 | Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Add Windows equivalents or gate the tests |
 | Browser driver | `octopus-browser-session-env` | Unix sockets, `O_NOFOLLOW`, uid/mode checks against the Electron browser host | Port the transport to the shared IPC crate and use Windows ACL checks |
 | Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Gate on macOS for now. A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
@@ -75,6 +75,11 @@ measured yet.
 - Llama 3.1 8B on llama.cpp (`--jinja`) returns valid tool calls (checked on Windows).
 - Fixed: content-hashed files (theme sources, notices, schemas) broke on Windows
   clones with `core.autocrlf=true`. `.gitattributes` now forces LF checkouts.
+- The managed Codex CLI is now pinned for `win32-x64` (`codex.exe`, `codex-code-mode-host.exe`,
+  `codex-windows-sandbox-setup.exe`, `codex-command-runner.exe`), and the `windows` CI job installs it
+  and checks its protocol schemas. Descriptors still name `packages/bin/codex`. Rust's process spawning
+  appends `.exe` to such paths, but the Electron/Node callers and the room sandbox's exact-path
+  authority checks still need to use the `.exe` name on Windows.
 - The launcher `./octopus` is a POSIX shell script. Windows needs an
   `octopus.cmd` equivalent.
 - `app/electron/main.cjs` already branches on `process.platform` for window

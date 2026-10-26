@@ -13,6 +13,17 @@ const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SCHEMA_NAME = /^(v2\/)?[A-Za-z][A-Za-z0-9]*\.json$/;
+const PLATFORM_ENTRIES = {
+  "darwin-arm64": "codex-aarch64-apple-darwin",
+  "darwin-x64": "codex-x86_64-apple-darwin",
+  "win32-x64": "codex-x86_64-pc-windows-msvc.exe",
+};
+// The Windows release runs its sandbox through these helpers, which must sit next to codex.exe.
+const WINDOWS_SANDBOX_COMPANIONS = ["codex-windows-sandbox-setup", "codex-command-runner"];
+
+function windowsPlatform(platform) { return platform.startsWith("win32-"); }
+function companionNames(windows) { return windows ? [COMPANION, ...WINDOWS_SANDBOX_COMPANIONS] : [COMPANION]; }
+function executableFile(name, windows) { return windows ? `${name}.exe` : name; }
 
 function record(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
 
@@ -67,7 +78,7 @@ function releaseManifest(file = path.join(__dirname, "release.json")) {
     }
   }
   for (const [platform, asset] of Object.entries(manifest.platforms)) {
-    const entry = { "darwin-arm64": "codex-aarch64-apple-darwin", "darwin-x64": "codex-x86_64-apple-darwin" }[platform];
+    const entry = PLATFORM_ENTRIES[platform];
     if (!entry || !fields(asset, ["archive_entry", "archive_bytes", "archive_sha256", "url", "companions"]) || asset.archive_entry !== entry
         || asset.url !== `https://github.com/openai/codex/releases/download/${manifest.tag}/${asset.archive_entry}.tar.gz`
         || !SHA256.test(asset.archive_sha256) || !Number.isSafeInteger(asset.archive_bytes)
@@ -76,12 +87,15 @@ function releaseManifest(file = path.join(__dirname, "release.json")) {
     }
   }
   for (const [platform, asset] of Object.entries(manifest.platforms)) {
-    if (!fields(asset.companions, [COMPANION])) throw new Error(`Missing pinned Codex companion for ${platform}`);
-    const helper = asset.companions[COMPANION], entry = asset.archive_entry.replace("codex-", `${COMPANION}-`);
-    if (!fields(helper, ["archive_entry", "archive_bytes", "archive_sha256", "url"]) || helper.archive_entry !== entry
-        || helper.url !== `https://github.com/openai/codex/releases/download/${manifest.tag}/${entry}.tar.gz`
-        || !SHA256.test(helper.archive_sha256) || !Number.isSafeInteger(helper.archive_bytes)
-        || helper.archive_bytes <= 0 || helper.archive_bytes > 256 * 1024 * 1024) throw new Error(`Invalid pinned Codex companion for ${platform}`);
+    const names = companionNames(windowsPlatform(platform));
+    if (!fields(asset.companions, names)) throw new Error(`Missing pinned Codex companion for ${platform}`);
+    for (const name of names) {
+      const helper = asset.companions[name], entry = asset.archive_entry.replace("codex-", `${name}-`);
+      if (!fields(helper, ["archive_entry", "archive_bytes", "archive_sha256", "url"]) || helper.archive_entry !== entry
+          || helper.url !== `https://github.com/openai/codex/releases/download/${manifest.tag}/${entry}.tar.gz`
+          || !SHA256.test(helper.archive_sha256) || !Number.isSafeInteger(helper.archive_bytes)
+          || helper.archive_bytes <= 0 || helper.archive_bytes > 256 * 1024 * 1024) throw new Error(`Invalid pinned Codex companion for ${platform}`);
+    }
   }
   for (const [name, evidence] of Object.entries(manifest.legal)) {
     if (!fields(evidence, ["source_url", "sha256"])
@@ -127,7 +141,8 @@ function sameSchemas(left, right) {
 
 function validateReceipt(receipt) {
   if (!fields(receipt, ["schema_version", "version", "release_url", "archive_sha256", "executable", "executable_sha256", "executable_bytes", "schema_baseline", "schemas", "legal", "signing", "companions"])
-      || receipt.schema_version !== 2 || typeof receipt.version !== "string" || !VERSION.test(receipt.version) || receipt.executable !== "codex"
+      || receipt.schema_version !== 2 || typeof receipt.version !== "string" || !VERSION.test(receipt.version)
+      || !["codex", "codex.exe"].includes(receipt.executable)
       || receipt.schema_baseline !== `rust-v${receipt.version}`
       || receipt.release_url !== `https://github.com/openai/codex/releases/tag/rust-v${receipt.version}`
       || !SHA256.test(receipt.archive_sha256) || !SHA256.test(receipt.executable_sha256)
@@ -136,26 +151,29 @@ function validateReceipt(receipt) {
       || !Object.keys(receipt.schemas).length
       || Object.entries(receipt.schemas).some(([name, hash]) => !SCHEMA_NAME.test(name) || typeof hash !== "string" || !SHA256.test(hash))
       || !legalHashes(receipt.legal)
-      || !fields(receipt.companions, [COMPANION]) || !validCompanion(receipt.companions[COMPANION])
+      || !fields(receipt.companions, companionNames(receipt.executable === "codex.exe"))
+      || Object.entries(receipt.companions).some(([name, value]) => !validCompanion(value, executableFile(name, receipt.executable === "codex.exe")))
       || (receipt.signing !== null && (!fields(receipt.signing, ["kind", "before_sha256"])
           || receipt.signing.kind !== "ad-hoc" || !SHA256.test(receipt.signing.before_sha256)))) {
     throw new Error("Invalid managed Codex distribution receipt");
   }
 }
 
-function validCompanion(value) {
+function validCompanion(value, file) {
   return fields(value, ["archive_sha256", "executable", "executable_sha256", "executable_bytes", "signing"])
-    && value.executable === COMPANION && SHA256.test(value.archive_sha256) && SHA256.test(value.executable_sha256)
+    && value.executable === file && SHA256.test(value.archive_sha256) && SHA256.test(value.executable_sha256)
     && Number.isSafeInteger(value.executable_bytes) && value.executable_bytes > 0 && value.executable_bytes <= 512 * 1024 * 1024
     && (value.signing === null || (fields(value.signing, ["kind", "before_sha256"])
       && value.signing.kind === "ad-hoc" && SHA256.test(value.signing.before_sha256)));
 }
 
-function executableReceipts(receipt) { return [receipt, receipt.companions[COMPANION]]; }
+function executableReceipts(receipt) { return [receipt, ...Object.values(receipt.companions)]; }
 
 function verifiedBinary(file, receipt) {
   const stat = fs.lstatSync(file);
-  return stat.isFile() && stat.size === receipt.executable_bytes && !!(stat.mode & 0o111) && digest(file) === receipt.executable_sha256;
+  // Windows has no execute bit; an .exe is executable by name.
+  const executable = file.endsWith(".exe") || !!(stat.mode & 0o111);
+  return stat.isFile() && stat.size === receipt.executable_bytes && executable && digest(file) === receipt.executable_sha256;
 }
 
 function verifyInstallation(root) {
@@ -221,7 +239,8 @@ function execute(command, args, options = {}) {
 function verifySchema(binary, manifest, stage) {
   const home = path.join(stage, "probe-home"), schemas = path.join(stage, "schema");
   fs.mkdirSync(home);
-  const env = { PATH: process.env.PATH || "/usr/bin:/bin", HOME: home, CODEX_HOME: home, TMPDIR: home };
+  const env = { PATH: process.env.PATH || "/usr/bin:/bin", HOME: home, CODEX_HOME: home, TMPDIR: home,
+    ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, USERPROFILE: home, TEMP: home, TMP: home } : {}) };
   if (execute(binary, ["--version"], { env, cwd: home }) !== `codex-cli ${manifest.version}`) {
     throw new Error("Official Codex executable reports an unexpected version");
   }
@@ -237,11 +256,11 @@ function recoverPending(root, manifest, asset) {
   const pending = readJson(pendingFile);
   if (!fields(pending, ["candidate", "receipt"]) || pending.receipt?.version !== manifest.version
       || pending.receipt?.archive_sha256 !== asset.archive_sha256 || pending.receipt?.signing !== null
-      || pending.receipt?.companions?.[COMPANION]?.archive_sha256 !== asset.companions[COMPANION].archive_sha256
-      || pending.receipt?.companions?.[COMPANION]?.signing !== null
+      || Object.entries(asset.companions).some(([name, helper]) => pending.receipt?.companions?.[name]?.archive_sha256 !== helper.archive_sha256
+        || pending.receipt?.companions?.[name]?.signing !== null)
       || !sameSchemas(pending.receipt?.schemas, manifest.schemas)
       || !sameSchemas(pending.receipt?.legal, Object.fromEntries(Object.entries(manifest.legal).map(([name, evidence]) => [name, evidence.sha256])))
-      || !/^\.codex-stage-[A-Za-z0-9]+\/codex$/.test(pending.candidate)) {
+      || !/^\.codex-stage-[A-Za-z0-9]+\/codex(\.exe)?$/.test(pending.candidate)) {
     throw new Error("Unfinished Codex installation has invalid or different release evidence");
   }
   validateReceipt(pending.receipt);
@@ -284,13 +303,17 @@ async function materialize({ destination, platform = `${process.platform}-${proc
       if (versionOrder(existing.version, manifest.version) > 0) throw new Error("Managed Codex downgrade is forbidden");
       if (existing.version === manifest.version) {
         if (existing.archive_sha256 !== asset.archive_sha256
-            || existing.companions[COMPANION].archive_sha256 !== asset.companions[COMPANION].archive_sha256 || !sameSchemas(existing.schemas, manifest.schemas)
+            || Object.entries(asset.companions).some(([name, helper]) => existing.companions[name]?.archive_sha256 !== helper.archive_sha256)
+            || !sameSchemas(existing.schemas, manifest.schemas)
             || !sameSchemas(existing.legal, Object.fromEntries(Object.entries(manifest.legal).map(([name, evidence]) => [name, evidence.sha256])))) {
           throw new Error("Managed Codex release identity conflicts with the pinned manifest");
         }
         return existing;
       }
-    } else if (["codex", COMPANION].some(name => fs.existsSync(path.join(destination, name)))) throw new Error("Refusing to overwrite a Codex binary without distribution evidence");
+    } else if (["codex", ...companionNames(true)].some(name => [name, `${name}.exe`].some(file => fs.existsSync(path.join(destination, file))))) {
+      throw new Error("Refusing to overwrite a Codex binary without distribution evidence");
+    }
+    const windows = windowsPlatform(platform);
     stage = fs.mkdtempSync(path.join(destination, ".codex-stage-"));
     const stageExecutable = async (asset, name) => {
       const archive = path.join(stage, `${name}.tar.gz`);
@@ -301,19 +324,20 @@ async function materialize({ destination, platform = `${process.platform}-${proc
       const entries = execute("tar", ["-tzf", archive]).split("\n");
       if (entries.length !== 1 || entries[0] !== asset.archive_entry) throw new Error("Official Codex archive has unexpected entries");
       execute("tar", ["-xzf", archive, "-C", stage, asset.archive_entry]);
-      const candidate = path.join(stage, name);
-      fs.renameSync(path.join(stage, asset.archive_entry), candidate);
+      const candidate = path.join(stage, executableFile(name, windows));
+      if (asset.archive_entry !== path.basename(candidate)) fs.renameSync(path.join(stage, asset.archive_entry), candidate);
       if (!fs.lstatSync(candidate).isFile() || fs.statSync(candidate).size > 512 * 1024 * 1024) {
         throw new Error("Official Codex archive did not contain a bounded regular executable");
       }
       fs.chmodSync(candidate, 0o755);
       syncFile(candidate);
-      return { archive_sha256: asset.archive_sha256, executable: name, executable_sha256: digest(candidate),
+      return { archive_sha256: asset.archive_sha256, executable: path.basename(candidate), executable_sha256: digest(candidate),
         executable_bytes: fs.statSync(candidate).size, signing: null };
     };
     const primary = await stageExecutable(asset, "codex");
-    const companions = { [COMPANION]: await stageExecutable(asset.companions[COMPANION], COMPANION) };
-    const candidate = path.join(stage, "codex");
+    const companions = {};
+    for (const name of companionNames(windows)) companions[name] = await stageExecutable(asset.companions[name], name);
+    const candidate = path.join(stage, executableFile("codex", windows));
     verifySchema(candidate, manifest, stage);
     fs.mkdirSync(path.join(stage, "upstream"));
     for (const [name, evidence] of Object.entries(manifest.legal)) {
@@ -329,7 +353,7 @@ async function materialize({ destination, platform = `${process.platform}-${proc
       ...primary, companions, schema_baseline: manifest.tag, schemas: manifest.schemas,
       legal: Object.fromEntries(Object.entries(manifest.legal).map(([name, evidence]) => [name, evidence.sha256])), signing: null,
     };
-    atomicJson(path.join(destination, PENDING), { candidate: path.relative(destination, candidate), receipt });
+    atomicJson(path.join(destination, PENDING), { candidate: path.relative(destination, candidate).split(path.sep).join("/"), receipt });
     recoverPending(destination, manifest, asset);
     return receipt;
   } finally {
@@ -362,7 +386,8 @@ function sealSigning(inputs) {
       return { ...evidence, executable_sha256: digest(binary), executable_bytes: fs.statSync(binary).size,
         signing: { kind: "ad-hoc", before_sha256: evidence.executable_sha256 } };
     };
-    atomicJson(path.join(root, RECEIPT), { ...seal(receipt), companions: { [COMPANION]: seal(receipt.companions[COMPANION]) } });
+    atomicJson(path.join(root, RECEIPT), { ...seal(receipt),
+      companions: Object.fromEntries(Object.entries(receipt.companions).map(([name, evidence]) => [name, seal(evidence)])) });
     verifyInstallation(root);
   }
 }

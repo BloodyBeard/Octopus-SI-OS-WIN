@@ -107,3 +107,63 @@ test("interrupted receipt publication resumes from exact installed bytes without
     assert.equal(fs.existsSync(path.join(destination, ".codex-cli-pending.json")), true);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+function windowsFixture(root, version) {
+  const source = path.join(root, `windows-${version}`); fs.mkdirSync(source);
+  const entry = "codex-x86_64-pc-windows-msvc.exe";
+  const pack = (name, body) => {
+    const file = path.join(source, name), archive = path.join(source, `${name}.tar.gz`);
+    fs.writeFileSync(file, body, { mode: 0o755 });
+    assert.equal(spawnSync("tar", ["-czf", archive, "-C", source, name]).status, 0);
+    return { archive, evidence: { archive_entry: name, archive_bytes: fs.statSync(archive).size, archive_sha256: cli.digest(archive),
+      url: `https://github.com/openai/codex/releases/download/rust-v${version}/${name}.tar.gz` } };
+  };
+  const primary = pack(entry, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'codex-cli ${version}'; exit 0; fi\nif [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then\nmkdir -p "$5"\nprintf '{}\\n' > "$5/SourceProbe.json"\nexit 0\nfi\nexit 1\n`);
+  const archives = { [primary.evidence.url]: primary.archive };
+  const companions = {};
+  for (const name of ["codex-code-mode-host", "codex-windows-sandbox-setup", "codex-command-runner"]) {
+    const helper = pack(entry.replace("codex-", `${name}-`), `#!/bin/sh\necho '${name} ${version}'\n`);
+    companions[name] = helper.evidence;
+    archives[helper.evidence.url] = helper.archive;
+  }
+  const manifest = {
+    schema_version: 2, version, tag: `rust-v${version}`, release_url: `https://github.com/openai/codex/releases/tag/rust-v${version}`,
+    platforms: { "win32-x64": { ...primary.evidence, companions } },
+    schemas: { "SourceProbe.json": crypto.createHash("sha256").update("{}\n").digest("hex") },
+    legal: {},
+  };
+  fs.mkdirSync(path.join(source, "upstream"));
+  for (const name of ["LICENSE", "NOTICE"]) {
+    const file = path.join(source, "upstream", name);
+    fs.writeFileSync(file, `${name} fixture for ${version}\n`);
+    manifest.legal[name] = { source_url: `https://raw.githubusercontent.com/openai/codex/rust-v${version}/${name}`, sha256: cli.digest(file) };
+  }
+  const manifestPath = path.join(source, "release.json"); fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+  return { manifestPath, fetchArchive: async (url, target) => fs.copyFileSync(archives[url], target) };
+}
+
+test("Windows installs codex.exe with its code-mode and sandbox helpers", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "octopus-codex-installer-test-"));
+  try {
+    const destination = path.join(root, "bin"), source = windowsFixture(root, "0.162.0");
+    const receipt = await cli.materialize({ destination, platform: "win32-x64", ...source });
+    assert.equal(receipt.executable, "codex.exe");
+    assert.deepEqual(Object.values(receipt.companions).map((entry) => entry.executable).sort(),
+      ["codex-code-mode-host.exe", "codex-command-runner.exe", "codex-windows-sandbox-setup.exe"]);
+    for (const file of ["codex.exe", "codex-code-mode-host.exe", "codex-windows-sandbox-setup.exe", "codex-command-runner.exe"]) {
+      assert.ok(fs.existsSync(path.join(destination, file)), file);
+    }
+    assert.deepEqual(cli.verifyInstallation(destination), receipt);
+    const reused = await cli.materialize({ destination, platform: "win32-x64", manifestPath: source.manifestPath,
+      fetchArchive: async () => { throw new Error("no download for verified installed release"); } });
+    assert.deepEqual(reused, receipt);
+    fs.appendFileSync(path.join(destination, "codex-command-runner.exe"), "corrupt");
+    assert.throws(() => cli.verifyInstallation(destination), /differs from its receipt/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the pinned release declares every Windows sandbox helper", () => {
+  const manifest = cli.releaseManifest();
+  assert.deepEqual(Object.keys(manifest.platforms["win32-x64"].companions).sort(),
+    ["codex-code-mode-host", "codex-command-runner", "codex-windows-sandbox-setup"]);
+});

@@ -25,6 +25,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned Windows Codex CLI
+        shell: bash
+        # Downloads codex.exe and its helpers, checks their pinned SHA-256, the
+        # reported version and the app-server protocol schemas.
+        run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$(cygpath -w "$PWD/registry/interface/world_provider_codex/packages/bin")"
       - name: cargo check (all targets)
         shell: bash
         run: |

@@ -122,6 +122,7 @@ octopus-utils-sleep-inhibitor = { path = "../octopus-utils-sleep-inhibitor" }
 libc = "0.2.182"
 
 [target.'cfg(windows)'.dependencies]
+octopus-windows-sandbox = { path = "../../../world_provider_codex/packages/octopus-windows-sandbox" }
 which = "8"
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
