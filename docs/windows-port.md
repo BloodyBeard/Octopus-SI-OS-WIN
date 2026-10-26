@@ -36,12 +36,20 @@ Still to do, roughly in dependency order:
 
 | Area | Crate(s) | Problem | Plan |
 | --- | --- | --- | --- |
-| Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate` | Interface control sockets use `tokio::net::Unix*` | Extract the existing AF_UNIX wrapper (`world_provider_codex/.../octopus-app-server-transport/src/uds.rs`, backed by `uds_windows`) into a shared crate and use it everywhere. Windows 10 1803+ supports AF_UNIX. |
+| Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate` | Interface control sockets use `tokio::net::Unix*` | Extract the existing AF_UNIX wrapper (verified to compile on Windows) (`world_provider_codex/.../octopus-app-server-transport/src/uds.rs`, backed by `uds_windows`) into a shared crate and use it everywhere. Windows 10 1803+ supports AF_UNIX. |
 | Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream dropped Codex's `windows-sandbox-rs` crate but still references `octopus_windows_sandbox` | Vendor `codex-rs/windows-sandbox-rs` from openai/codex (Apache-2.0) as `octopus-windows-sandbox` |
 | Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Add Windows equivalents or gate the tests |
 | Browser driver | `octopus-browser-session-env` | Unix sockets, `O_NOFOLLOW`, uid/mode checks against the Electron browser host | Port the transport to the shared IPC crate and use Windows ACL checks |
 | Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Gate on macOS for now. A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
-| Voice | `octopus-realtime-webrtc` | Builds libwebrtc | Check on CI |
+| Voice | `octopus-realtime-webrtc` | — | Compiles on Windows (verified on a Windows machine) |
+
+First measurement on a real Windows machine: 6 crates fail with 254 errors
+(`octopus-browser-session-env` 126, `octopus-system-gui-env` 79,
+`octopus-run-authoring` 19, `octopus-git-sandbox-substrate` 13, `octopus-core` 12,
+`octopus-verifiers` 5). `--keep-going` does not check crates that depend on a
+failing one, so `octopus-tui`, `octopus-codex-sandbox-launcher` (behind
+`octopus-core`) and `octopus-interface-activation-app-server-transport` are not
+measured yet.
 
 ### Desktop client (Electron)
 
