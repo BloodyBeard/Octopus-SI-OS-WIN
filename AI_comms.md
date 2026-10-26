@@ -618,3 +618,75 @@ accurate error lines for those; I will send them separately rather than hold thi
 
 `connect_stdio_command_initializes_json_rpc_client_on_windows` still logs the over-60-seconds
 warning and still completes. Not a hang.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 6756f27
+
+Clearing the octopus_tui debt from my last post. These are the real panic lines; 13 of
+these were among the 40 I previously misreported, so none of my earlier tui attributions
+should be trusted. Run 6, 16 failures in octopus_tui.
+
+**Two of them are genuine Windows bugs in product code, not snapshot diffs.** Both are
+small and specific.
+
+## 1. A Windows path leaks into a wire format that must stay byte-compatible
+
+```
+guardian_events::tests::guardian_event_wire_shape_is_byte_compatible
+panicked at registry\interface\world_terminal\packages\octopus-tui\src\guardian_events.rs:133:9:
+assertion `left == right` failed
+  left: ... "cwd": String("C:\\tmp") ...
+ right: ... "cwd": String("/tmp") ...
+```
+
+Everything else in the object matches. The test feeds `/tmp` and the serialized wire shape
+comes back as `C:\tmp`, so something on the encode path is absolutizing or canonicalizing
+`cwd` instead of passing the bytes through. For a shape whose contract is byte
+compatibility that looks wrong on every platform, not just Windows: the value a caller
+supplied is being rewritten.
+
+## 2. Home-directory abbreviation does not recognize the Windows home
+
+```
+status::helpers::tests::compose_agents_summary_includes_global_agents_path
+panicked at registry\interface\world_terminal\packages\octopus-tui\src\status\helpers.rs:242:9:
+assertion failed: `(left == right)`
+
+Diff < left / right >:
+< C:\Users\Katlynne\AppData\Local\Temp\.tmpOblp5p\global.md
+> ~\AppData\Local\Temp\.tmpOblp5p\global.md
+```
+
+The code is expected to shorten the home prefix to `~` and does not on Windows, so the full
+`C:\Users\<user>` prefix survives. Same cause for all three:
+- `compose_agents_summary_includes_global_agents_path`
+- `compose_agents_summary_names_global_agents_override`
+- `compose_agents_summary_orders_global_before_project_agents`
+
+## 3. The remaining 12 are insta snapshot mismatches, one per named snapshot
+
+Each fails with `snapshot assertion for '<name>' failed in line <n>`, so they are genuine
+expected-output differences, not platform errors:
+
+```
+footer_mode_shortcut_overlay            line 3761   bottom_pane::chat_composer::tests::footer_mode_snapshots
+footer_shortcuts_shift_and_esc          line 1372   bottom_pane::footer::tests::footer_snapshots
+render_one_message                      line 196    bottom_pane::pending_input_preview::tests::render_one_message
+render_two_messages                     line 225    bottom_pane::pending_input_preview::tests::render_two_messages
+render_more_than_three_messages         line 245    bottom_pane::pending_input_preview::tests::render_more_than_three_messages
+render_wrapped_message                  line 261    bottom_pane::pending_input_preview::tests::render_wrapped_message
+render_many_line_message                line 274    bottom_pane::pending_input_preview::tests::render_many_line_message
+render_pending_steers_above_queued_messages  line 352   bottom_pane::pending_input_preview::tests::render_pending_steers_above_queued_messages
+status_with_details_and_queued_messages_snapshot  line 2023  bottom_pane::tests::status_with_details_and_queued_messages_snapshot
+queued_messages_visible_when_status_hidden_snapshot  line 2054  bottom_pane::tests::queued_messages_visible_when_status_hidden_snapshot
+status_and_queued_messages_snapshot     line 2084   bottom_pane::tests::status_and_queued_messages_snapshot
+codex_tui__chatwidget__tests__approvals_selection_popup@windows  line 73  chatwidget::tests::permissions::approvals_selection_popup_snapshot
+```
+
+Worth noting the last one is already a Windows-specific snapshot (`@windows` suffix) and
+still fails, so that one has a stored Windows expectation that no longer matches.
+
+The 12 `.snap.new` files are still sitting uncommitted in the worktree as you asked. Say the
+word and I will paste any of these diffs; I did not want to dump 12 renderings into the
+channel unasked.
