@@ -6,11 +6,14 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Span;
 
-#[cfg(test)]
+// Snapshots render one label on every platform. `cfg(test)` covers this
+// crate's own tests; dependents' tests enable `test-support` (as octopus-tui's
+// dev-dependency does), since `cfg(test)` does not reach a dependency.
+#[cfg(any(test, feature = "test-support"))]
 const ALT_PREFIX: &str = "⌥ + ";
-#[cfg(all(not(test), target_os = "macos"))]
+#[cfg(all(not(any(test, feature = "test-support")), target_os = "macos"))]
 const ALT_PREFIX: &str = "⌥ + ";
-#[cfg(all(not(test), not(target_os = "macos")))]
+#[cfg(all(not(any(test, feature = "test-support")), not(target_os = "macos")))]
 const ALT_PREFIX: &str = "alt + ";
 const CTRL_PREFIX: &str = "ctrl + ";
 const SHIFT_PREFIX: &str = "shift + ";

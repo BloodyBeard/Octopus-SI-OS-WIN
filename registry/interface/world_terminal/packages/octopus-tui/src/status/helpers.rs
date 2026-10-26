@@ -72,7 +72,9 @@ pub(crate) fn compose_agents_summary(config: &TuiConfig, paths: &[PathUri]) -> S
                 } else if let Ok(stripped) = p.strip_prefix(&config.cwd) {
                     normalize_agents_display_path(stripped)
                 } else {
-                    normalize_agents_display_path(p)
+                    // Outside the project: shown like the status panel's
+                    // directories, home-relative (`~/…`) when under home.
+                    format_directory_display(dunce::simplified(p), None)
                 }
             }
         } else {

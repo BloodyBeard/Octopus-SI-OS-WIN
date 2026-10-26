@@ -109,6 +109,14 @@ pub(crate) struct GuardianAssessmentEvent {
 mod tests {
     use super::*;
 
+    /// An absolute directory on this platform; "/tmp" has no drive on
+    /// Windows, where AbsolutePathBuf would resolve it against the current
+    /// drive.
+    #[cfg(windows)]
+    const ABSOLUTE_CWD: &str = r"C:\tmp";
+    #[cfg(not(windows))]
+    const ABSOLUTE_CWD: &str = "/tmp";
+
     #[test]
     fn guardian_event_wire_shape_is_byte_compatible() {
         let event = GuardianAssessmentEvent {
@@ -125,7 +133,7 @@ mod tests {
             action: GuardianAssessmentAction::Command {
                 source: GuardianCommandSource::Shell,
                 command: "rm -rf /".to_string(),
-                cwd: octopus_util_abspath::AbsolutePathBuf::from_absolute_path("/tmp")
+                cwd: octopus_util_abspath::AbsolutePathBuf::from_absolute_path(ABSOLUTE_CWD)
                     .expect("absolute"),
             },
         };
@@ -144,7 +152,7 @@ mod tests {
                     "type": "command",
                     "source": "shell",
                     "command": "rm -rf /",
-                    "cwd": "/tmp",
+                    "cwd": ABSOLUTE_CWD,
                 },
             })
         );
