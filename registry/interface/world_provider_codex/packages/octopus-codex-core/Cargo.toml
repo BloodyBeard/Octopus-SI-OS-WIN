@@ -102,4 +102,4 @@ openssl-sys = { version = "*", features = ["vendored"] }
 ignored = ["openssl-sys"]
 
 [target.'cfg(windows)'.dependencies]
-octopus-windows-sandbox = { path = "../octopus-windows-sandbox" }
+octopus-windows-sandbox = { path = "../../../../../crates/octopus-windows-sandbox" }

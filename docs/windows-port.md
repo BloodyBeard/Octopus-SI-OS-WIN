@@ -40,13 +40,18 @@ Done:
 | Process room viewer | `octopus-system-exec-env`, `app/electron/processViewer.cjs` | The live terminal view works on Windows: a pipe, an owner-only credential file and OS randomness (`getrandom`). Before this, every process room failed to form on Windows. |
 | Exec-server secrets | `octopus-exec-substrate` `direct_auth` | Loaded on Windows with the same rules (no reparse points, owner-only single-link file, size bounds). Before this, loading refused outright. |
 | Browser driver | `octopus-browser-session-env`, `native/electron-host.cjs` | The Rust door checks its private files with `octopus-private-fs`. The Electron host listens on the pipe, gives its host folder an owner-only access list (`icacls`), and the Rust door checks that list before trusting the folder. Node cannot set a pipe's access list, so the host's pipe keeps Windows' default list, which lets other users open it read-only. The HMAC challenge keyed by the owner-only `auth.key` still keeps them out. |
-| Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, pinned for `win32-x64` with its sandbox helpers. |
+| Directory sync | `octopus_private_fs::sync_directory` and about 45 callers across the kernel, providers and rooms | Windows opens a folder only with `FILE_FLAG_BACKUP_SEMANTICS` and flushes it only through a write handle. Upstream opened folders with plain `File::open`, which fails on Windows with "Access is denied"; that broke every artifact write (confirmed on Windows). Every caller now uses the shared helper. The ledger store and git-sandbox markers, which used to skip the flush on Windows, now flush. |
+| Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | `crates/octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, pinned for `win32-x64` with its sandbox helpers. |
 | Desktop driver | `octopus-system-gui-env` | Compiles; its native paths report "desktop control requires macOS". A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
 | Voice | `octopus-realtime-webrtc` | Compiles on Windows (verified on a Windows machine). |
 
 To cross-check from Linux, point V8's build at its MSVC bindings and a
 placeholder archive (`cargo check` does not link):
 `RUSTY_V8_SRC_BINDING_PATH=<v8>/gen/src_binding_release_x86_64-pc-windows-msvc.rs RUSTY_V8_ARCHIVE=<empty .gz>`.
+
+The repo's architecture guard (`crates/octopus-app/tests/architecture_dependency_guard.rs`)
+lists `octopus-local-socket` and `octopus-private-fs` as passive crates that
+worker-environment kinds may link. Its remaining failures predate the port.
 
 #### Runtime gaps on Windows
 
@@ -59,10 +64,9 @@ kernel cannot run real work on Windows yet. Most-blocking first:
 | 2 | File identity and no-replace moves | `octopus-file-storage` (`FileIdentity`, `native.rs`, directory publication, reclaim), `octopus-interface-transport` `runtime_instance.rs` | File publication, registry install and runtime-instance ownership refuse. | Volume serial plus file ID (`FileIdInfo`), handle-relative opens (`NtCreateFile` with a root directory), no-replace rename (`SetFileInformationByHandle` with `FileRenameInfo`, `ReplaceIfExists = false`), and identity-checked delete. |
 | 3 | Spawned-life output capture | `interface_life.rs` and `door_life.rs` `read_regular_file_beneath` | Interface outputs cannot be captured. | A no-follow, beneath-root reader (per-component reparse checks). |
 | 4 | Tool-process owner lease | `octopus-process-session-tool-runtime` | Process-session tool processes refuse to spawn. | A job-object owner lease (as for interface processes). |
-| 5 | Directory fsync | `sync_directory` helpers (runtime instance, artifact writes, journals) | Opening a directory for fsync needs `FILE_FLAG_BACKUP_SEMANTICS` on Windows. Needs confirming on Windows. | One shared helper. |
-| 6 | Other stores | remote-exec room records, context collections (`SafeDir`), code-mode continuation (exclusive rename), memory `exchange` (`ReplaceFileW`), operator-chat task retirement, MCP OAuth randomness (`/dev/urandom`) | Each refuses its feature. | Mostly `octopus-private-fs` plus the identity and rename pieces from #2. |
-| 7 | Symlinks | registry validation snapshot, Codex auth boundary | Need Developer Mode or admin on Windows. | Copy or junction fallback. |
-| 8 | Git-worktree sandbox | `octopus-git-sandbox-substrate` `run_sandboxed_in_worktree` | Coder exec refuses ("no platform floor"). Linux uses bubblewrap, macOS Seatbelt. | Same decision as #1. |
+| 5 | Other stores | remote-exec room records, context collections (`SafeDir`), code-mode continuation (exclusive rename), memory `exchange` (`ReplaceFileW`), operator-chat task retirement, MCP OAuth randomness (`/dev/urandom`) | Each refuses its feature. | Mostly `octopus-private-fs` plus the identity and rename pieces from #2. |
+| 6 | Symlinks | registry validation snapshot, Codex auth boundary | Need Developer Mode or admin on Windows. | Copy or junction fallback. |
+| 7 | Git-worktree sandbox | `octopus-git-sandbox-substrate` `run_sandboxed_in_worktree` | Coder exec refuses ("no platform floor"). Linux uses bubblewrap, macOS Seatbelt. | Same decision as #1. |
 
 The Unix-only helpers behind these refusals are gated `#[cfg(unix)]` and say
 why, instead of being left as unused code on Windows.

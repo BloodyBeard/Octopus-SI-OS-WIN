@@ -1851,7 +1851,7 @@ impl BrowserRoom {
                 }
                 Err(error) => return Err(format!("browser screenshot cannot be created: {error}")),
             }
-            std::fs::File::open(&root).and_then(|directory| directory.sync_all())
+            octopus_private_fs::sync_directory(&root)
                 .map_err(|error| format!("browser screenshot directory cannot be synced: {error}"))?;
         }
         let manifest = serde_json::to_vec_pretty(&octopus_interfaces::InterfaceArtifactManifest {
@@ -1865,11 +1865,11 @@ impl BrowserRoom {
         ).map_err(|error| format!("browser screenshot artifact could not be written: {error}"))?
             .read_manifest()
             .map_err(|error| format!("browser screenshot artifact could not be read: {error}"))?;
-        std::fs::File::open(root.join("artifacts")).and_then(|directory| directory.sync_all())
+        octopus_private_fs::sync_directory(root.join("artifacts"))
             .map_err(|error| format!("browser screenshot artifact directory cannot be synced: {error}"))?;
         let mut directory = root.as_path();
         loop {
-            std::fs::File::open(directory).and_then(|directory| directory.sync_all())
+            octopus_private_fs::sync_directory(directory)
                 .map_err(|error| format!("browser screenshot parent directory cannot be synced: {error}"))?;
             if directory == self.environment.var_dir { break; }
             directory = directory.parent().filter(|parent| parent.starts_with(&self.environment.var_dir))

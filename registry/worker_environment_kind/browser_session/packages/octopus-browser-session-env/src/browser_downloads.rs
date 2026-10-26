@@ -37,8 +37,7 @@ impl DownloadImport {
         if bytes.len() as u64 > maximum { return Err("download import record exceeds the declared manifest bound".into()); }
         let mut file = private_fs::create_private_file(path).map_err(|error| format!("download import record cannot be created: {error}"))?;
         file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|error| format!("download import record cannot be synced: {error}"))?;
-        std::fs::File::open(path.parent().ok_or("download import record has no owner directory")?)
-            .and_then(|file| file.sync_all()).map_err(|error| format!("download import directory cannot be synced: {error}"))
+        octopus_private_fs::sync_directory(path.parent().ok_or("download import record has no owner directory")?).map_err(|error| format!("download import directory cannot be synced: {error}"))
     }
 
     fn restore(&self, root: &Path, decoded: &DecodedRoomInvocation, current: &Value, maximum: u64) -> Result<Value, String> {
@@ -135,7 +134,7 @@ impl BrowserRoom {
         if artifact.read_payload_bytes().map_err(|error| error.to_string())? != payload {
             return Err("download payload changed while its output manifest was published".into());
         }
-        std::fs::File::open(&root).and_then(|directory| directory.sync_all())
+        octopus_private_fs::sync_directory(&root)
             .map_err(|error| format!("download output directory cannot be synced: {error}"))?;
         let pinned = artifact.read_manifest_bounded(self.environment.host_io_limits.max_manifest_bytes).map_err(|error| error.to_string())?;
         let content = octopus_descriptors::DescriptorHash::of_bytes(&pinned.manifest_bytes);
@@ -280,7 +279,7 @@ impl BrowserRoom {
             let artifact = InterfaceArtifactFile::new(manifest_path).map_err(|error| error.to_string())?
                 .read_manifest_bounded(16_384).map_err(|error| format!("download artifact import failed: {error}"))?.manifest;
             for directory in [artifact_root.as_path(), root.as_path(), root.parent().ok_or("download import directory has no owner")?] {
-                std::fs::File::open(directory).and_then(|file| file.sync_all())
+                octopus_private_fs::sync_directory(directory)
                     .map_err(|error| format!("download artifact directory cannot be synced: {error}"))?;
             }
             imported.persist(import_record.as_deref().ok_or("completed download lost its import record location")?, self.environment.host_io_limits.max_manifest_bytes)?;

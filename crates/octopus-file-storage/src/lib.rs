@@ -22,7 +22,14 @@ pub fn sync_ordered(file: &File) -> io::Result<()> {
     }
 }
 
+/// Makes the entries of a directory (new names, renames, removals) durable
+/// with an ordering barrier, like `sync_ordered` for files.
 pub fn sync_directory_ordered(path: &Path) -> io::Result<()> {
+    // Windows cannot open a directory with `File::open`; see
+    // `octopus_private_fs::sync_directory`.
+    #[cfg(windows)]
+    return octopus_private_fs::sync_directory(path);
+    #[cfg(not(windows))]
     sync_ordered(&File::open(path)?)
 }
 
@@ -73,4 +80,14 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<File> {
         return Err(error);
     }
     Ok(file)
+}
+
+#[cfg(test)]
+mod directory_sync_tests {
+    #[test]
+    fn a_directory_with_a_new_entry_syncs() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("entry"), b"bytes").unwrap();
+        super::sync_directory_ordered(root.path()).unwrap();
+    }
 }

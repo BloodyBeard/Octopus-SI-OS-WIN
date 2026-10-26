@@ -13,6 +13,7 @@ name = "octopus-operator-chat-artifact"
 path = "src/bin/octopus-operator-chat-artifact.rs"
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 blake3.workspace = true
 octopus-app-server = { path = "../../../../../crates/octopus-app-server" }
 octopus-context-collections = { path = "../../../system_context/packages/octopus-context-collections" }

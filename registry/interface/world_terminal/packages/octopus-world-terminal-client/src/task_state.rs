@@ -168,9 +168,7 @@ impl TaskStateStore {
             file.write_all(b"\n")?;
             file.sync_all()?;
             std::fs::rename(&staged, &self.path)?;
-            if let Ok(directory) = std::fs::File::open(parent) {
-                let _ = directory.sync_all();
-            }
+            let _ = octopus_private_fs::sync_directory(parent);
             Ok::<(), std::io::Error>(())
         })();
         if let Err(source) = write_result {

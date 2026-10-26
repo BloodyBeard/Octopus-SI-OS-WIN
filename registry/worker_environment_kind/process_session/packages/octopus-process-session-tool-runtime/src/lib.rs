@@ -6534,7 +6534,7 @@ fn write_tool_process_owner_record(
 }
 
 fn sync_tool_process_owner_directory(generation: &Path) -> Result<(), String> {
-    let directory = std::fs::File::open(generation).map_err(|error| {
+    let directory = octopus_private_fs::open_directory_for_sync(generation).map_err(|error| {
         format!(
             "tool process generation '{}' cannot be opened for sync: {error}",
             generation.display()
@@ -6567,7 +6567,7 @@ fn remove_tool_process_generation(root: &Path, generation: &Path) -> Result<(), 
                     generation.display()
                 )
             })?;
-            let root_handle = std::fs::File::open(root).map_err(|error| {
+            let root_handle = octopus_private_fs::open_directory_for_sync(root).map_err(|error| {
                 format!(
                     "tool process generation root '{}' cannot be opened for sync: {error}",
                     root.display()
@@ -6796,7 +6796,7 @@ fn materialize_private_read_generation(
                 ));
             }
         }
-        let directory = std::fs::File::open(&process_root).map_err(|error| {
+        let directory = octopus_private_fs::open_directory_for_sync(&process_root).map_err(|error| {
             format!(
                 "tool process generation root '{}' cannot be opened for sync: {error}",
                 process_root.display()
@@ -7777,7 +7777,7 @@ fn validate_tool_door_journal_transition(
 }
 
 fn sync_tool_door_journal_parent(parent: &Path) -> Result<(), String> {
-    let directory = std::fs::File::open(parent).map_err(|error| {
+    let directory = octopus_private_fs::open_directory_for_sync(parent).map_err(|error| {
         format!(
             "tool-door completion journal directory '{}' cannot be opened: {error}",
             parent.display()

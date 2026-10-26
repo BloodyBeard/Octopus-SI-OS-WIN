@@ -34,4 +34,4 @@ tempfile = "3.23.0"
 libc = "0.2.182"
 
 [target.'cfg(windows)'.dependencies]
-octopus-windows-sandbox = { path = "../octopus-windows-sandbox" }
+octopus-windows-sandbox = { path = "../../../../../crates/octopus-windows-sandbox" }

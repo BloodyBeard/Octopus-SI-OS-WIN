@@ -296,7 +296,7 @@ impl RoomProjectionCursor {
                     self.path.display()
                 )
             })?;
-            let directory = std::fs::File::open(parent).map_err(|error| {
+            let directory = octopus_private_fs::open_directory_for_sync(parent).map_err(|error| {
                 format!(
                     "MCP stdio projected event cursor directory '{}' cannot be opened: {error}",
                     parent.display()
@@ -460,8 +460,7 @@ impl McpStdioRoom {
             .map_err(|error| ToolProcessError::Unavailable(error.to_string()))?;
         match std::fs::create_dir(&call_root) {
             Ok(()) => {
-                std::fs::File::open(&result_root)
-                    .and_then(|file| file.sync_all())
+                octopus_private_fs::sync_directory(&result_root)
                     .map_err(|error| ToolProcessError::Unavailable(error.to_string()))?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1567,11 +1566,9 @@ fn materialize_completed_result(
             .map_err(|error| error.to_string())?;
         std::fs::hard_link(artifact.manifest_path(), completed.manifest_path())
             .map_err(|error| error.to_string())?;
-        std::fs::File::open(root)
-            .and_then(|file| file.sync_all())
+        octopus_private_fs::sync_directory(root)
             .map_err(|error| error.to_string())?;
-        std::fs::File::open(root.parent().ok_or("MCP result root has no parent")?)
-            .and_then(|file| file.sync_all())
+        octopus_private_fs::sync_directory(root.parent().ok_or("MCP result root has no parent")?)
             .map_err(|error| error.to_string())?;
         Ok(())
     };

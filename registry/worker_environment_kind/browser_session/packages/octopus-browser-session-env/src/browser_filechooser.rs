@@ -192,7 +192,7 @@ pub(crate) fn create_record_bounded(path: &Path, value: &impl Serialize, limit: 
     if bytes.len() > limit { return Err("Browser pending record exceeds its bound".into()); }
     let mut file = private_fs::create_private_file(path).map_err(|error| error.to_string())?;
     file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|error| error.to_string())?;
-    std::fs::File::open(path.parent().ok_or("Browser pending record has no parent")?).and_then(|file| file.sync_all()).map_err(|error| error.to_string())
+    octopus_private_fs::sync_directory(path.parent().ok_or("Browser pending record has no parent")?).map_err(|error| error.to_string())
 }
 
 impl BrowserRoom {

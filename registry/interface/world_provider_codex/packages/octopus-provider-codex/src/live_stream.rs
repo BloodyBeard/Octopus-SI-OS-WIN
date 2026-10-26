@@ -1030,8 +1030,7 @@ fn write_manifest_atomic(path: &Path, manifest: &InterfaceArtifactManifest) -> R
             path.display()
         )
     })?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(parent)
         .map_err(|error| {
             format!(
                 "Codex live stream directory '{}' could not be synced: {error}",

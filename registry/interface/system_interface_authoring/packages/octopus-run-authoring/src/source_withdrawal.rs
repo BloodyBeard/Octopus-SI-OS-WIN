@@ -390,7 +390,7 @@ impl ProviderOutputHandoff {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|error| error.to_string())?;
-                std::fs::File::open(path.parent().ok_or("dispatch marker has no parent")?).and_then(|file| file.sync_all()).map_err(|error| error.to_string())?;
+                octopus_private_fs::sync_directory(path.parent().ok_or("dispatch marker has no parent")?).map_err(|error| error.to_string())?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if std::fs::read(&path).map_err(|error| error.to_string())? != bytes { return Err("handoff dispatch evidence is corrupt".into()); }

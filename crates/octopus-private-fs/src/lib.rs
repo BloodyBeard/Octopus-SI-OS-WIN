@@ -1,4 +1,5 @@
-//! Owner-private files, directories and sockets on Unix and Windows.
+//! Owner-private files and directories, and directory sync, on Unix and
+//! Windows.
 //!
 //! Unix: owned by the effective user, mode 0600 (files, sockets) or 0700
 //! (directories), and never reached through a symlink.
@@ -61,6 +62,26 @@ pub fn is_private_single_link_file(file: &File) -> io::Result<bool> {
     platform::is_private_single_link_file(file)
 }
 
+/// Makes a directory's entries (new names, renames, removals) durable.
+///
+/// Unix: fsync on the directory. Windows opens a directory only with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, and flushes it only through a handle with
+/// write access, so a plain `File::open(dir)` fails there with "Access is
+/// denied". NTFS then flushes the directory's journaled metadata. A file
+/// system that cannot flush a directory (`ERROR_INVALID_FUNCTION`, for
+/// example FAT) has nothing more to make durable.
+pub fn sync_directory(path: impl AsRef<Path>) -> io::Result<()> {
+    platform::sync_directory(path.as_ref())
+}
+
+/// Opens a directory so that `sync_all` on the handle makes its entries
+/// durable, for callers that report opening and syncing separately. Prefer
+/// [`sync_directory`], which also accepts file systems that cannot flush a
+/// directory.
+pub fn open_directory_for_sync(path: impl AsRef<Path>) -> io::Result<File> {
+    platform::open_directory_for_sync(path.as_ref())
+}
+
 /// Whether `path` is already canonical: absolute, without symlinks, `.` or
 /// `..`. On Windows the comparison ignores the `\\?\` prefix and letter case.
 pub fn is_canonical(path: &Path) -> io::Result<bool> {
@@ -114,6 +135,14 @@ mod platform {
 
     pub(super) fn same_path(canonical: &Path, path: &Path) -> bool {
         canonical == path
+    }
+
+    pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+        File::open(path)?.sync_all()
+    }
+
+    pub(super) fn open_directory_for_sync(path: &Path) -> io::Result<File> {
+        File::open(path)
     }
 }
 
@@ -239,6 +268,23 @@ mod platform {
 
     pub(super) fn same_path(canonical: &Path, path: &Path) -> bool {
         plain(canonical).eq_ignore_ascii_case(&plain(path))
+    }
+
+    pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+        const ERROR_INVALID_FUNCTION: i32 = 1;
+        match open_directory_for_sync(path)?.sync_all() {
+            Err(error) if error.raw_os_error() == Some(ERROR_INVALID_FUNCTION) => Ok(()),
+            result => result,
+        }
+    }
+
+    pub(super) fn open_directory_for_sync(path: &Path) -> io::Result<File> {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        OpenOptions::new()
+            .access_mode(GENERIC_READ | GENERIC_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
     }
 
     /// The path without its `\\?\` (verbatim) prefix and with `\` separators.
@@ -546,6 +592,7 @@ mod tests {
         // dotted path from the plain form for the `..` to survive.
         let plain = std::path::PathBuf::from(directory.to_string_lossy().trim_start_matches(r"\\?\").to_string());
         assert!(!is_canonical(&plain.join("..").join("private").join("record.json")).unwrap());
+        sync_directory(&directory).unwrap();
 
         #[cfg(unix)]
         {

@@ -804,8 +804,7 @@ fn sync_stderr_parent(path: &Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("MCP stdio stderr log '{}' has no parent", path.display()))?;
-    std::fs::File::open(parent)
-        .and_then(|file| file.sync_all())
+    octopus_private_fs::sync_directory(parent)
         .map_err(|error| error.to_string())
 }
 

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1375,8 +1375,7 @@ fn publish_record(path: &Path, value: &impl Serialize, exact_existing: bool) -> 
     if exact_existing && !moved && read_record_bytes(path)? != bytes {
         return Err(format!("code mode prospective record {} conflicts with its immutable bytes", path.display()));
     }
-    File::open(parent)
-        .and_then(|file| file.sync_all())
+    octopus_private_fs::sync_directory(parent)
         .map_err(|e| e.to_string())
 }
 

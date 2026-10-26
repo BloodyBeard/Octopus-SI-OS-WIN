@@ -175,8 +175,7 @@ impl Store {
             .map_err(|_| "realtime private state cannot be persisted")?;
         std::fs::rename(&next, &self.path)
             .map_err(|_| "realtime private state cannot be installed")?;
-        std::fs::File::open(root)
-            .and_then(|file| file.sync_all())
+        octopus_private_fs::sync_directory(root)
             .map_err(|_| "realtime private state directory cannot be synced".to_string())
     }
 }

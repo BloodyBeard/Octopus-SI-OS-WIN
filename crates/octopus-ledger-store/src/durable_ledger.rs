@@ -867,17 +867,11 @@ pub(super) fn verify_blob_file(path: &Path, expected: &ContentHash) -> LedgerRes
     Ok(())
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> LedgerResult<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(path)
         .map_err(|error| io_err(path, &error))
 }
 
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> LedgerResult<()> {
-    Ok(())
-}
 
 impl BlobStore for DurableBlobs {
     fn put(&mut self, bytes: &[u8]) -> ContentHash {

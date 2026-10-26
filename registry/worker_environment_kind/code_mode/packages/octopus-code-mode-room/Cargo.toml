@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { workspace = true, features = ["derive"] }

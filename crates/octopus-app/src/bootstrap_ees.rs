@@ -77,11 +77,9 @@ pub fn ensure_bootstrap_ee_instances(
                 staged_root.display()
             )
         })?;
-        std::fs::File::open(&staged_root)
-            .and_then(|file| file.sync_all())
+        octopus_private_fs::sync_directory(&staged_root)
             .map_err(|error| format!("bootstrap EE root did not sync: {error}"))?;
-        std::fs::File::open(&staging)
-            .and_then(|directory| directory.sync_all())
+        octopus_private_fs::sync_directory(&staging)
             .map_err(|error| format!("bootstrap EE staging directory did not sync: {error}"))
     })();
     if let Err(error) = staged {

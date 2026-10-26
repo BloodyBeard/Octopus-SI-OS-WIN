@@ -100,7 +100,7 @@ impl RuntimeInstance {
         file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(&staged, &self.state_path)?;
-        std::fs::File::open(&self.root)?.sync_all()?;
+        octopus_private_fs::sync_directory(&self.root)?;
         self._lock.verify()?;
         Ok(())
     }
@@ -113,7 +113,7 @@ impl Drop for RuntimeInstance {
         if owned {
             let _ = std::fs::remove_dir_all(&self.root);
             if let Some(parent) = self.root.parent() {
-                let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+                let _ = octopus_private_fs::sync_directory(parent);
             }
         }
     }

@@ -896,9 +896,7 @@ fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Result<(), Worke
             path: path.display().to_string(),
             reason: error.to_string(),
         })?;
-        #[cfg(unix)]
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
+        octopus_private_fs::sync_directory(parent)
             .map_err(|error| WorkerEnvError::RecordFailed {
                 path: parent.display().to_string(),
                 reason: error.to_string(),

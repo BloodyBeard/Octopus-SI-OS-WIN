@@ -858,8 +858,7 @@ pub(crate) fn persist_control_journal(
             path.display()
         )
     })?;
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(parent)
         .map_err(|error| {
             format!(
                 "turn-control journal directory '{}' cannot be synced: {error}",

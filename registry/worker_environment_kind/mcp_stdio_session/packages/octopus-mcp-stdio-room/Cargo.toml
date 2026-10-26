@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 futures-util = "0.3"
 libc = "0.2.182"
 serde = { workspace = true, features = ["derive"] }

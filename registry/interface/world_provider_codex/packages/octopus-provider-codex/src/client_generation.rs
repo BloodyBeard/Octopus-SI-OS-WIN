@@ -182,8 +182,7 @@ fn persist(root: &Path, receipt: &Path, output: &Value) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     std::fs::rename(temporary, receipt).map_err(|e| e.to_string())?;
-    std::fs::File::open(root)
-        .and_then(|file| file.sync_all())
+    octopus_private_fs::sync_directory(root)
         .map_err(|e| e.to_string())
 }
 

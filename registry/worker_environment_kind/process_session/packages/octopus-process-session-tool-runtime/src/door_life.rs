@@ -2317,7 +2317,7 @@ impl LedgerTailReader {
                     self.cursor_path.display()
                 )
             })?;
-            let directory = std::fs::File::open(parent).map_err(|error| {
+            let directory = octopus_private_fs::open_directory_for_sync(parent).map_err(|error| {
                 format!(
                     "cursor directory '{}' cannot be opened: {error}",
                     parent.display()

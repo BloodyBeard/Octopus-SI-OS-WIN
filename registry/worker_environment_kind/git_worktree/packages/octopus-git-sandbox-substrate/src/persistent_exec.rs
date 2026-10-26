@@ -885,8 +885,7 @@ fn retire_spec(path: &Path, spec: &KeeperSpec) -> Result<(), String> {
         }
         Err(error) => return Err(format!("persistent process record cannot be retained: {error}")),
     }
-    std::fs::File::open(retained.parent().expect("retained process parent"))
-        .and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())?;
+    octopus_private_fs::sync_directory(retained.parent().expect("retained process parent")).map_err(|error| error.to_string())?;
     private_options().write(true).create(true).truncate(false).open(retired_marker(path))
         .and_then(|file| file.sync_all()).map_err(|error| error.to_string())?;
     match std::fs::remove_file(path) {
@@ -894,8 +893,7 @@ fn retire_spec(path: &Path, spec: &KeeperSpec) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
         Err(error) => return Err(format!("persistent process live record cannot be retired: {error}")),
     }
-    std::fs::File::open(path.parent().expect("process registry parent"))
-        .and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())
+    octopus_private_fs::sync_directory(path.parent().expect("process registry parent")).map_err(|error| error.to_string())
 }
 
 /// Unix: mode 0600. Windows: records take the owner-only access list of the
@@ -918,8 +916,7 @@ fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("persistent process record '{}' cannot be created: {error}", path.display()))?;
     file.write_all(bytes).and_then(|()| file.sync_all())
         .map_err(|error| format!("persistent process record cannot be written: {error}"))?;
-    std::fs::File::open(path.parent().ok_or("persistent process record has no parent")?)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(path.parent().ok_or("persistent process record has no parent")?)
         .map_err(|error| format!("persistent process registry cannot be synced: {error}"))
 }
 
@@ -946,8 +943,7 @@ fn retain_response(path: &Path, response: &KeeperResponse) -> Result<(), String>
     let published = path.with_extension("response");
     std::fs::hard_link(&staged, &published)
         .map_err(|error| format!("persistent process outcome cannot be published: {error}"))?;
-    std::fs::File::open(path.parent().ok_or("persistent process outcome has no parent")?)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(path.parent().ok_or("persistent process outcome has no parent")?)
         .map_err(|error| format!("persistent process outcome cannot be synced: {error}"))?;
     std::fs::remove_file(staged).map_err(|error| error.to_string())
 }

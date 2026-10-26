@@ -568,7 +568,6 @@ pub fn save_state(path: &Path, state: &IntakeState, maximum: u64) -> Result<(), 
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())?;
     std::fs::rename(&temporary, path).map_err(|e| e.to_string())?;
-    std::fs::File::open(path.parent().ok_or("intake state has no parent")?)
-        .and_then(|file| file.sync_all())
+    octopus_private_fs::sync_directory(path.parent().ok_or("intake state has no parent")?)
         .map_err(|e| e.to_string())
 }

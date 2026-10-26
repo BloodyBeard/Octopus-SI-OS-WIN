@@ -4719,8 +4719,7 @@ fn commit_client_writes(writes: &[PlannedWrite]) -> Result<(), TopologyError> {
                     source,
                 })?;
             }
-            std::fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
+            octopus_private_fs::sync_directory(parent)
                 .map_err(|source| TopologyError::Read {
                     surface: "client authoring directory",
                     path: parent.display().to_string(),

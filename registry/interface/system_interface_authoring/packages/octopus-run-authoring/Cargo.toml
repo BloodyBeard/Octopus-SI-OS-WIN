@@ -11,6 +11,7 @@ name = "octopus_run_authoring"
 path = "src/lib.rs"
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

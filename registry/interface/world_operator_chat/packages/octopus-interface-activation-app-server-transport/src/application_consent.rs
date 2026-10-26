@@ -1938,7 +1938,7 @@ fn write_private_once(root: &Path, name: &str, value: &impl Serialize, limit: u6
     file.sync_all().map_err(string_error)?;
     std::fs::hard_link(&staging, &path).map_err(string_error)?;
     std::fs::remove_file(&staging).map_err(string_error)?;
-    std::fs::File::open(root).and_then(|f| f.sync_all()).map_err(string_error)
+    octopus_private_fs::sync_directory(root).map_err(string_error)
 }
 
 fn session_key(session: &ConsentSession, subject: &ConsentSubject) -> Result<String, String> {

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 
 [dependencies]
+octopus-private-fs = { path = "../octopus-private-fs" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
@@ -36,7 +37,6 @@ notify.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 octopus-local-socket = { path = "../octopus-local-socket" }
-octopus-private-fs = { path = "../octopus-private-fs" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process", "stdio"] }

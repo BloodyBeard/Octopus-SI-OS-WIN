@@ -741,8 +741,7 @@ pub(crate) fn sync_parent(target: &std::path::Path) -> Result<(), String> {
             target.display()
         )
     })?;
-    std::fs::File::open(parent)
-        .and_then(|directory| octopus_file_storage::sync_ordered(&directory))
+    octopus_file_storage::sync_directory_ordered(parent)
         .map_err(|error| {
             format!(
                 "file.write could not synchronize parent directory '{}': {error}",

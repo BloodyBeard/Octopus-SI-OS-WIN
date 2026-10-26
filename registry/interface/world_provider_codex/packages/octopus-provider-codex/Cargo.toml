@@ -33,6 +33,7 @@ embed-support = [
 ]
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 serde.workspace = true
 serde_json.workspace = true

@@ -246,7 +246,7 @@ pub(super) fn write_receipt(root: &Path, run: &RunId, ee: &octopus_descriptors::
     let mut file = std::fs::File::create(&staged).map_err(|error| error.to_string())?;
     file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|error| error.to_string())?;
     std::fs::rename(&staged, &path).map_err(|error| error.to_string())?;
-    std::fs::File::open(root).and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())
+    octopus_private_fs::sync_directory(root).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

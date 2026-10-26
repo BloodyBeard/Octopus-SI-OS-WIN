@@ -2713,8 +2713,7 @@ fn sync_event_parent(path: &Path) -> Result<(), McpClientError> {
     let parent = path.parent().ok_or_else(|| {
         McpClientError::Journal(format!("event journal '{}' has no parent", path.display()))
     })?;
-    std::fs::File::open(parent)
-        .and_then(|file| file.sync_all())
+    octopus_private_fs::sync_directory(parent)
         .map_err(|error| McpClientError::Journal(error.to_string()))
 }
 

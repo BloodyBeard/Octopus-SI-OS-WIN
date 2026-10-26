@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 blake3.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

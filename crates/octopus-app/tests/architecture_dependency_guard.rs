@@ -74,6 +74,10 @@ const WORKER_ENVIRONMENT_PASSIVE_BOX_PACKAGES: &[&str] = &[
     "octopus-descriptors",
     "octopus-interfaces",
     "octopus-ledger",
+    // Leaf OS primitives (local sockets, owner-private files, directory
+    // sync) with no executor, tool or door behavior, like the util crates.
+    "octopus-local-socket",
+    "octopus-private-fs",
     "octopus-tool-handlers",
     "octopus-tool-registry",
     "octopus-util-abspath",

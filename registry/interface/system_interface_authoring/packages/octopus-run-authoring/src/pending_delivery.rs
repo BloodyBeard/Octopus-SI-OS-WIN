@@ -271,8 +271,7 @@ impl Identity {
         file.write_all(&bytes)
             .and_then(|_| file.sync_all())
             .map_err(|error| error.to_string())?;
-        std::fs::File::open(parent)
-            .and_then(|file| file.sync_all())
+        octopus_private_fs::sync_directory(parent)
             .map_err(|error| error.to_string())
     }
 }

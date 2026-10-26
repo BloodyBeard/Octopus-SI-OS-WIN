@@ -450,7 +450,7 @@ pub fn prepare_private_native_host(roots: &std::collections::BTreeMap<String, Pa
         file.write_all(&bundle).map_err(|_| "browser private publication cannot write")?;
         file.sync_all().map_err(|_| "browser private publication cannot sync")?;
         std::fs::rename(&temporary, &target).map_err(|_| "browser private publication cannot commit")?;
-        std::fs::File::open(&secrets).and_then(|file| file.sync_all()).map_err(|_| "browser private directory cannot sync")?;
+        octopus_private_fs::sync_directory(&secrets).map_err(|_| "browser private directory cannot sync")?;
         Ok(roots.clone())
     })();
     if result.is_err() { let _ = std::fs::remove_file(&temporary); }

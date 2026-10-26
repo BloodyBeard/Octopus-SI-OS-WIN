@@ -1201,10 +1201,8 @@ fn verify_existing_abandoned_formation(
     Ok(())
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), WorkerEnvError> {
-    std::fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(path)
         .map_err(|error| {
             open_failed(format!(
                 "syncing abandoned-formation marker directory {} failed: {error}",
@@ -1213,10 +1211,6 @@ fn sync_directory(path: &Path) -> Result<(), WorkerEnvError> {
         })
 }
 
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), WorkerEnvError> {
-    Ok(())
-}
 
 fn read_abandoned_formation(
     marker: &Path,

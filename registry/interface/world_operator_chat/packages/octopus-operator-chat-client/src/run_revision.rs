@@ -552,8 +552,7 @@ pub fn prepare_run_revision(request: RunRevisionRequest) -> Result<Value, String
     )
     .map_err(|e| e.to_string())?;
     match std::fs::hard_link(retained.manifest_path(), &scope.proposal_path) {
-        Ok(()) => std::fs::File::open(&scope.root)
-            .and_then(|file| file.sync_all())
+        Ok(()) => octopus_private_fs::sync_directory(&scope.root)
             .map_err(|e| e.to_string())?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.to_string()),

@@ -18,6 +18,7 @@ path = "src/bin/tool_door_life.rs"
 owner-contract-tests = []
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -38,9 +39,6 @@ octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.182"
-
-[target.'cfg(windows)'.dependencies]
-octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 
 [dev-dependencies]
 tempfile = "3.23.0"

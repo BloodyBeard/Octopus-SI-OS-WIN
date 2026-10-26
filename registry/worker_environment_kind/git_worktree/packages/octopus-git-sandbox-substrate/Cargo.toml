@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-network-proxy = { path = "../../../process_session/packages/octopus-network-proxy" }
@@ -45,7 +46,6 @@ libc = "0.2.182"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 dirs = "6"
-octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 tempfile = "3.23.0"
 
 [dev-dependencies]

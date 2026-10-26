@@ -378,8 +378,7 @@ pub(crate) fn remove_deferred_provider_turn(
             path.display()
         )
     })?;
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    octopus_private_fs::sync_directory(parent)
         .map_err(|error| {
             format!(
                 "deferred provider turn directory '{}' cannot be synced: {error}",
