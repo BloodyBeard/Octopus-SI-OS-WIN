@@ -161,8 +161,9 @@ impl ProcessAuthority {
             let _ = (cwd, search_path, profile_root);
             if !octopus_descriptors::unsandboxed_processes_allowed() {
                 return Err(octopus_descriptors::no_sandbox_backend_refusal(&format!(
-                    "process '{}'",
-                    executable.display()
+                    "process '{}' ({})",
+                    executable.display(),
+                    self.requested_access()
                 )));
             }
             warn_unsandboxed_once();
@@ -174,6 +175,36 @@ impl ProcessAuthority {
                 sandbox_profile: None,
             })
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl ProcessAuthority {
+    /// What this authority would let the process reach, for a refusal that
+    /// has no sandbox to enforce it: the person deciding whether to opt in
+    /// sees what the process asked for.
+    fn requested_access(&self) -> String {
+        let count = |roots: &BTreeSet<PathBuf>, exact: &BTreeSet<PathBuf>| roots.len() + exact.len();
+        let mut parts = vec![
+            format!("reads {} paths", count(&self.readable, &self.readable_exact)),
+            format!("writes {} paths", count(&self.writable, &self.writable_exact)),
+            format!(
+                "runs {} programs",
+                count(&self.executable, &self.executable_exact) + self.executable_links.len()
+            ),
+        ];
+        for (allowed, what) in [
+            (self.allow_network, "network"),
+            (self.allow_local_ipc, "local IPC"),
+            (self.allow_application_launch, "launching applications"),
+            (self.allow_sandbox_delegation, "nested sandboxes"),
+            (self.allow_process_signals, "signalling processes"),
+        ] {
+            if allowed {
+                parts.push(what.to_string());
+            }
+        }
+        format!("asks for: {}", parts.join(", "))
     }
 }
 

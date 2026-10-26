@@ -13,7 +13,8 @@ mod contract_update;
 pub use contract_update::{ToolContractUpdateRequest, ToolContractUpdateProof, ToolRetirementRequest, tool_contract_update_quiescent, tool_retirement_quiescent};
 pub use completed_output::{PreparedToolOutputRecovery, prepare_tool_output_recovery};
 
-#[cfg(test)]
+// Loading an authored tool needs the process sandbox, which only macOS has.
+#[cfg(all(test, target_os = "macos"))]
 #[path = "../tests/support/execution_loading.rs"]
 mod execution_loading_tests;
 #[cfg(test)]

@@ -8,12 +8,28 @@ fn publish_record(path: &std::path::Path, operation: &str, bytes: &[u8]) {
     assert_eq!(receipt.outcome, PublicationOutcome::Applied);
 }
 
+/// Releases the parked verification when dropped, so a failed assertion ends
+/// the test instead of leaving the runtime waiting on that thread forever.
+struct ReleaseOnDrop(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+impl ReleaseOnDrop {
+    fn release(&self) {
+        *self.0.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        self.0.1.notify_all();
+    }
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) { self.release(); }
+}
+
 #[tokio::test]
 async fn changed_sources_after_verification_do_not_admit_or_spend_the_checkpoint() {
     for change in ["record", "authority", "withdraw"] {
         let runtime = runtime_with_interface_catalog();
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let releaser = ReleaseOnDrop(release.clone());
         runtime.set_verified_artifact_admission(Arc::new(BlockingVerifiedArtifactAdmission {
             started: started.clone(), release: release.clone(),
         }));
@@ -44,8 +60,7 @@ async fn changed_sources_after_verification_do_not_admit_or_spend_the_checkpoint
             else { edited["trace"] = serde_json::json!("changed while verification ran"); }
             publish_record(&path, "concurrent-edit", &serde_json::to_vec(&edited).unwrap());
         }
-        *release.0.lock().unwrap() = true;
-        release.1.notify_all();
+        releaser.release();
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), pending).await.unwrap().unwrap();
         assert!(result.is_err(), "{change} must invalidate the prepared admission");
         assert!(runtime.admitted_mark_outcomes().is_empty());

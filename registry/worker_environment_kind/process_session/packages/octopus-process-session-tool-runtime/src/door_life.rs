@@ -3240,8 +3240,14 @@ mod tests {
             let artifact = InterfaceArtifactFile::write(output, "test.output", b"payload").unwrap();
             let original = artifact.manifest_path().to_path_buf();
             let send = ctx.hand_system_emission(SystemInterfaceEmissionArtifact::Materialized(artifact), 17, InterfaceId::new("target"));
+            tokio::pin!(send);
+            // A hand-off that fails before sending must fail the test, not
+            // leave the host side waiting for an emission that never comes.
+            let emission = tokio::select! {
+                failed = &mut send => panic!("emission ended before it was sent: {failed:?}"),
+                emission = received.recv() => emission.unwrap(),
+            };
             let host = async {
-                let emission = received.recv().await.unwrap();
                 let (SystemInterfaceEmissionArtifact::Materialized(artifact), seq, target, verdict) = emission.into_parts()
                     else { panic!("materialized emission changed kind") };
                 assert_eq!(seq, 17); assert_eq!(target.as_str(), "target");
@@ -3250,7 +3256,7 @@ mod tests {
                 assert_eq!(recaptured.read_payload_bytes().unwrap(), b"payload");
                 verdict.send(DeliveryVerdict::Admitted { seq: 18 }).unwrap();
             };
-            let (verdict, ()) = tokio::join!(send, host);
+            let (verdict, ()) = tokio::join!(&mut send, host);
             assert!(matches!(verdict.unwrap(), DeliveryVerdict::Admitted { seq: 18 }));
         }
         assert!(!var.join("emitted").exists());
