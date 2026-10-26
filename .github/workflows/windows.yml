@@ -7,6 +7,8 @@ on:
     paths-ignore:
       - "docs/**"
       - "README.md"
+      # The temporary channel between the cloud and Windows port sessions.
+      - "AI_comms.md"
   pull_request:
   workflow_dispatch: {}
 
@@ -22,6 +24,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
+      # Some snapshot files have names that put their full path past Windows'
+      # 260-character limit; without long paths, checkout cannot create them.
+      - name: Allow long paths in git
+        run: git config --system core.longpaths true
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
