@@ -64,6 +64,9 @@ pub use door_life::{
     LedgerTailReader, OwnOutboundMovement, run_spawned_interface_life,
 };
 pub use notify;
+// The macOS-only private snapshot test builds a ProcessAuthority directly.
+#[cfg(all(test, target_os = "macos"))]
+use process_authority::ProcessAuthority;
 use process_authority::{ProcessAuthoritySpecExecution, ProcessInvocationAuthorityError};
 
 const TOOL_PROCESS_DURABLE_VAR_DIR_ENV: &str = "OCTOPUS_TOOL_PROCESS_DURABLE_VAR_DIR";

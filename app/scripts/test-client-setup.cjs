@@ -375,7 +375,7 @@ async function refuseCredentialStoreOnlyPlan(root) {
   plan.provider.required_state = "configured";
   await assert.rejects(
     store.begin({ operationId, plan }),
-    /required_state must be equal to constant/,
+    /required_state must be equal to one of the allowed values/,
   );
 }
 
