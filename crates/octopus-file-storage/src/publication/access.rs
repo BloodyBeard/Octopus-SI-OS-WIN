@@ -16,6 +16,7 @@ pub struct FilePublicationAccess {
 }
 
 pub fn publication_ancestor_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let path = &namespace::entry(path);
     namespace::validate_absolute(path)?;
     let mut directories = BTreeSet::new();
     for parent in path.parent().into_iter().flat_map(Path::ancestors) {
@@ -27,6 +28,7 @@ pub fn publication_ancestor_directories(path: &Path) -> io::Result<Vec<PathBuf>>
 }
 
 pub fn file_publication_access(path: &Path) -> io::Result<FilePublicationAccess> {
+    let path = &namespace::entry(path);
     namespace::validate_absolute(path)?;
     if path.file_name().is_none() || path.components().any(|part| part.as_os_str() == COORDINATION_DIRECTORY) {
         return Err(invalid("publication access requires an ordinary absolute file path"));

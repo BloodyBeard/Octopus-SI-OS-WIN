@@ -33,8 +33,10 @@ impl TreeFiles {
         }
         let mut held = Vec::new();
         for (identity, path) in files {
-            let file = HeldFile::existing(path, true, false, wait)?;
-            if FileIdentity::of_file(&file.file)? != identity { return Err(invalid("directory member changed while its inode lock was acquired")); }
+            let mut file = HeldFile::existing(path, true, false, wait)?;
+            if FileIdentity::of_file(file.file())? != identity { return Err(invalid("directory member changed while its inode lock was acquired")); }
+            // Members are inside trees that move; see `HeldFile::detach`.
+            file.detach();
             held.push(file);
         }
         Ok(Self { held })
@@ -50,6 +52,13 @@ impl TreeFiles {
         for held in &self.held { held.verify()?; }
         Ok(())
     }
+}
+
+/// The one spelling a path is recorded under: receipts and history are keyed
+/// by a hash of the path, so `\\?\C:\…`, `C:/…` and `C:\…` must agree. Every
+/// public entry point passes its paths through this. Unix: unchanged.
+pub(super) fn entry(path: &Path) -> PathBuf {
+    ordinary(path.to_path_buf())
 }
 
 /// `canonicalize`'s answer in the form callers use: on Windows without the
@@ -136,7 +145,12 @@ impl NamespaceGuard {
             }
         }
         let mut held = Vec::new();
-        for (path, exclusive) in identities.into_values() { held.push(HeldFile::existing(path, exclusive, true, wait)?); }
+        for (path, exclusive) in identities.into_values() {
+            // Held directories include trees that move; see `HeldFile::detach`.
+            let mut directory = HeldFile::existing(path, exclusive, true, wait)?;
+            directory.detach();
+            held.push(directory);
+        }
         let guard = Self { held, retired: Vec::new(), names };
         guard.verify()?;
         Ok(guard)

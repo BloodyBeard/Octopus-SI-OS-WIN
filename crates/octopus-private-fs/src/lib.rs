@@ -151,9 +151,10 @@ pub fn same_path(first: &Path, second: &Path) -> bool {
     platform::same_path(first, second)
 }
 
-/// `path` in its ordinary form. Unix: unchanged. Windows: a `\\?\C:\…` or
-/// `\\?\UNC\server\share\…` path (what `canonicalize` returns) becomes
-/// `C:\…` or `\\server\share\…` when that names the same file: every
+/// `path` in its ordinary form. Unix: unchanged. Windows: separators become
+/// `\`, and a `\\?\C:\…` or `\\?\UNC\server\share\…` path (what
+/// `canonicalize` returns) becomes `C:\…` or `\\server\share\…` when that
+/// names the same file: every
 /// component is one Win32 path parsing leaves alone (no trailing dot or
 /// space, no reserved device name such as `CON` or `NUL`, no `<>:"|?*` or
 /// control characters). Otherwise the verbatim form is kept.
@@ -383,6 +384,8 @@ mod platform {
         let mut components = path.components();
         let mut ordinary = match components.next() {
             Some(Component::Prefix(prefix)) => match prefix.kind() {
+                // Already ordinary: only the separators may differ.
+                Prefix::Disk(_) | Prefix::UNC(..) => return path.components().collect(),
                 Prefix::VerbatimDisk(letter) => PathBuf::from(format!("{}:", letter as char)),
                 Prefix::VerbatimUNC(server, share) => {
                     let mut root = std::ffi::OsString::from(r"\\");

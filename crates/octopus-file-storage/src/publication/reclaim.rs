@@ -248,6 +248,8 @@ fn entry_parent_identity<'a>(intent: &'a Intent, relative: &Path) -> io::Result<
 }
 
 pub fn reclaim_directory(tombstone: &Path, proof: &DirectoryMoveReceipt, expected: &DirectoryPreimage) -> io::Result<()> {
+    let tombstone = namespace::entry(tombstone);
+    let tombstone = tombstone.as_path();
     directory::validate_receipt(proof)?;
     if proof.outcome != PublicationOutcome::Applied || expected != &proof.movement.expected || tombstone != proof.movement.destination {
         return Err(invalid("reclamation requires the original applied destination and exact public manifest"));

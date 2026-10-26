@@ -285,6 +285,7 @@ pub(super) fn capture(path: &Path, algorithm: DigestAlgorithm, metadata: bool, i
 }
 
 pub fn snapshot_directory(path: &Path, algorithm: DigestAlgorithm) -> io::Result<DirectoryPreimage> {
+    let path = &namespace::entry(path);
     exact_path(path)?;
     let path = path.to_path_buf();
     let guard = NamespaceGuard::acquire(&[(path.clone(), true)], true)?;
@@ -595,7 +596,12 @@ pub fn publish_directory_moves(operation_id: &str, moves: &[DirectoryMove]) -> i
         validate_request(&plan, &path)?;
         Ok((plan, path))
     };
-    let (mut plan, plan_path) = make_plan(moves.to_vec())?;
+    let moves = moves.iter().map(|movement| DirectoryMove {
+        source: namespace::entry(&movement.source),
+        destination: namespace::entry(&movement.destination),
+        expected: movement.expected.clone(),
+    }).collect::<Vec<_>>();
+    let (mut plan, plan_path) = make_plan(moves)?;
     if let Some(result) = original_result(&plan)? { return Ok(result); }
     for movement in &plan.moves {
         exact_path(&movement.source)?;

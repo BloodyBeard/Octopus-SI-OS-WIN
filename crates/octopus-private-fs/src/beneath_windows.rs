@@ -686,6 +686,19 @@ mod tests {
         for (step, result) in &steps {
             eprintln!("{step}: {result:?}");
         }
+        // File publication closes member handles before moving a tree,
+        // because NTFS is expected to refuse renaming a directory with
+        // anything inside it open. Report what this machine does.
+        let moving = create_directory(&top, OsStr::new("moving")).unwrap();
+        let child = create_file(&moving, OsStr::new("child")).unwrap();
+        drop(moving);
+        let open_child = rename_no_replace(&top, OsStr::new("moving"), &top, OsStr::new("moved"));
+        eprintln!("directory rename with an open child (expected refused): {open_child:?}");
+        drop(child);
+        let source = if open_child.is_ok() { "moved" } else { "moving" };
+        let closed = rename_no_replace(&top, OsStr::new(source), &top, OsStr::new("moved-again"));
+        eprintln!("directory rename with no open child: {closed:?}");
+        closed.unwrap();
         // The kernel32 reopen is only a fallback; everything else must work.
         let failed: Vec<_> = steps.iter().filter(|(step, result)| result.is_err() && !step.contains("ReOpenFile")).collect();
         assert!(failed.is_empty(), "failed steps: {failed:?}");
@@ -698,6 +711,7 @@ mod tests {
         assert_eq!(ordinary(r"\\?\C:\Users\me\file.txt"), Path::new(r"C:\Users\me\file.txt"));
         assert_eq!(ordinary(r"\\?\UNC\server\share\dir"), Path::new(r"\\server\share\dir"));
         assert_eq!(ordinary(r"C:\already"), Path::new(r"C:\already"));
+        assert_eq!(ordinary("C:/mixed/separators\\here").as_os_str(), r"C:\mixed\separators\here");
         for kept in [r"\\?\C:\dir\trailing.", r"\\?\C:\dir\space ", r"\\?\C:\dir\CON", r"\\?\C:\dir\nul.txt", r"\\?\C:\dir\COM1", r"\\?\GLOBALROOT\x"] {
             assert_eq!(ordinary(kept), Path::new(kept), "{kept} must stay verbatim");
         }

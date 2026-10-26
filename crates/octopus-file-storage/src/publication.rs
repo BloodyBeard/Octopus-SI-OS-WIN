@@ -60,6 +60,7 @@ pub struct PublicationReceipt {
 }
 
 pub fn read_receipt(path: &Path, operation_id: &str) -> io::Result<Option<PublicationReceipt>> {
+    let path = &namespace::entry(path);
     namespace::validate_absolute(path)?;
     validate_operation(operation_id)?;
     if path.file_name().is_none() || path.components().any(|part| part.as_os_str() == COORDINATION_DIRECTORY) {
@@ -122,7 +123,10 @@ struct PendingPublication {
 }
 
 struct HeldFile {
-    file: File,
+    /// The held entry, open since it was locked. `None` once `detach`ed.
+    handle: Option<File>,
+    /// Which file was locked, read from the handle when it was taken.
+    identity: FileIdentity,
     path: PathBuf,
     directory: bool,
     version: Option<FileVersion>,
@@ -172,6 +176,31 @@ impl FileVersion {
 }
 
 impl HeldFile {
+    fn new(file: File, path: PathBuf, directory: bool, version: Option<FileVersion>, #[cfg(windows)] lock: Option<File>) -> io::Result<Self> {
+        Ok(Self {
+            identity: FileIdentity::of_file(&file)?,
+            handle: Some(file), path, directory, version,
+            #[cfg(windows)]
+            _lock: lock,
+        })
+    }
+
+    /// The held entry's open handle; holds that were `detach`ed have none.
+    fn file(&self) -> &File {
+        self.handle.as_ref().expect("publication hold was detached from its handle")
+    }
+
+    /// Windows: closes the entry's handle and keeps only its identity lock.
+    /// NTFS refuses to rename a directory while anything inside it is open,
+    /// so holds on members of a tree that is about to move must not keep
+    /// handles. The lock is the identity lock file, so it stays held, and
+    /// `verify` compares identities by path. Unix: `flock` lives on the
+    /// handle, so it stays open.
+    fn detach(&mut self) {
+        #[cfg(windows)]
+        { self.handle = None; }
+    }
+
     fn acquire(path: PathBuf, exclusive: bool, wait: bool) -> io::Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -189,11 +218,7 @@ impl HeldFile {
             };
             match locked {
                 Ok(()) => {
-                    let held = Self {
-                        file, path, directory: false, version: None,
-                        #[cfg(windows)]
-                        _lock: None,
-                    };
+                    let held = Self::new(file, path, false, None, #[cfg(windows)] None)?;
                     held.verify()?;
                     return Ok(held);
                 }
@@ -209,7 +234,8 @@ impl HeldFile {
     fn verify(&self) -> io::Result<()> {
         let current = std::fs::symlink_metadata(&self.path)?;
         if (if self.directory { !current.is_dir() } else { !current.is_file() })
-            || FileIdentity::of_path(&self.path)? != FileIdentity::of_file(&self.file)?
+            || FileIdentity::of_path(&self.path)? != self.identity
+            || self.handle.as_ref().map(FileIdentity::of_file).transpose()?.is_some_and(|identity| identity != self.identity)
         {
             return Err(invalid("publication lock was replaced while held"));
         }
@@ -235,11 +261,7 @@ impl HeldFile {
             match result {
                 Ok(()) => {
                     let version = if directory || exclusive { None } else { Some(FileVersion::of_file(&file)?) };
-                    let held = Self {
-                        file, path, directory, version,
-                        #[cfg(windows)]
-                        _lock: lock,
-                    };
+                    let held = Self::new(file, path, directory, version, #[cfg(windows)] lock)?;
                     held.verify()?;
                     return Ok(held);
                 }
@@ -561,6 +583,7 @@ impl WriteGuard {
     }
 
     fn acquire_inner(path: &Path, may_create: bool, operation_id: Option<&str>, create_parents: bool) -> io::Result<Self> {
+        let path = &namespace::entry(path);
         namespace::validate_absolute(path)?;
         if path.file_name().is_none() || path.components().any(|part| part.as_os_str() == COORDINATION_DIRECTORY) {
             return Err(invalid("publication requires an ordinary absolute file path"));
@@ -694,15 +717,15 @@ impl WriteGuard {
         if current_file(&stage)?.is_some() {
             return Err(invalid("removal tombstone already exists without a settled receipt"));
         }
-        let identity = FileIdentity::of_file(&current.file)?;
-        target.retain_predecessor(operation_id, &current.file)?;
+        let identity = FileIdentity::of_file(current.file())?;
+        target.retain_predecessor(operation_id, current.file())?;
         let pending = PendingPublication {
             schema_version: 4,
             receipt: expected,
             before_identity: Some(identity.clone()),
             stage_identity: identity,
         };
-        crate::sync_ordered(&current.file)?;
+        crate::sync_ordered(current.file())?;
         write_record_once(&target.pending(), &pending)?;
         #[cfg(test)]
         interrupt_at(Interruption::Prepared);
@@ -710,7 +733,7 @@ impl WriteGuard {
         membership.verify()?;
         current.verify()?;
         std::fs::rename(&target.path, &stage)?;
-        crate::sync_ordered(&current.file)?;
+        crate::sync_ordered(current.file())?;
         sync_directory(&target.root)?;
         sync_directory(target.path.parent().unwrap())?;
         #[cfg(test)]
@@ -859,6 +882,8 @@ pub struct ReadGuard {
 
 impl ReadGuard {
     pub fn try_acquire(paths: &[PathBuf], directories: &[PathBuf]) -> io::Result<Self> {
+        let paths = &paths.iter().map(|path| namespace::entry(path)).collect::<Vec<_>>();
+        let directories = &directories.iter().map(|path| namespace::entry(path)).collect::<Vec<_>>();
         let mut parents = BTreeSet::new();
         for path in paths {
             namespace::validate_absolute(path)?;
@@ -896,7 +921,7 @@ impl ReadGuard {
                 }
                 drop(recovery);
                 if let Some(lock) = lock.as_mut() {
-                    lock.version = Some(FileVersion::of_file(&lock.file)?);
+                    lock.version = Some(FileVersion::of_file(lock.file())?);
                 }
                 if target.pending().try_exists()? {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, "publication changed during recovery"));
@@ -947,7 +972,7 @@ impl ReadGuard {
 }
 
 pub fn create_dir_all(path: &Path) -> io::Result<()> {
-    let original = path.to_path_buf();
+    let original = namespace::entry(path);
     let path = namespace::normalize(path)?;
     let guard = NamespaceGuard::acquire(&[(path.clone(), true), (original.clone(), false)], true)?;
     directory::check_fences(&[original, path.clone()], None, true)?;
