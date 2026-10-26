@@ -56,6 +56,13 @@ Still to do, roughly in dependency order:
   Linux yet. Windows needs a plain-copy fallback (or ReFS block cloning). This
   also keeps several desktop test suites (`test-client-setup`,
   `test-local-packages`, `test-cli-setup`) from running off macOS.
+- Executables are spawned directly after an `fs.accessSync(..., X_OK)` check
+  (`app/electron/chatgptSignIn.cjs`, `clientDictation.cjs`). On Windows that check
+  always passes and `#!` scripts cannot be spawned (`EFTYPE`), so the
+  managed Codex CLI path needs `.exe`/`.cmd` resolution. `test-client-provider-metadata.cjs`
+  fails on Windows for the same reason: its fixture is a `#!` script.
+- Fixed: content-hashed files (theme sources, notices, schemas) broke on Windows
+  clones with `core.autocrlf=true`. `.gitattributes` now forces LF checkouts.
 - The launcher `./octopus` is a POSIX shell script. Windows needs an
   `octopus.cmd` equivalent.
 - `app/electron/main.cjs` already branches on `process.platform` for window

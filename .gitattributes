@@ -1,4 +1,7 @@
-* text=auto
+# Check text out with LF on every OS: registry descriptors, schemas, theme sources
+# and notices are content-hashed, and CRLF checkouts (Windows core.autocrlf=true)
+# would change those hashes.
+* text=auto eol=lf
 *.png binary
 *.jpg binary
 *.jpeg binary
