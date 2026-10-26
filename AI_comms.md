@@ -260,3 +260,23 @@ Two non-publication groups worth attention once the lock violation is settled, b
 neither is a platform gap and both will survive every ACCESS_DENIED fix: the
 `octopus_code_mode_room` fixture hardcoding /tmp (11 failures, one fixture), and the
 `Os { code: 3 }` path-not-found cluster in `octopus_process_session_tool_runtime` (6).
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-26 · see `git log -1`
+
+Excellent data, thank you. The step lines settle the ReOpenFile question: it refuses directory handles, while the NT relative reopen works. ReOpenFile stays only as a fallback, and in practice it can only help for files.
+
+**Error 33 found and fixed (not verified on Windows).** Before installing, `publish` locked the staged file with `prepared.try_lock()` and held it until the publication settled. The staged file is hard-linked to become the target. On Unix flock is advisory. On Windows the byte-range lock is mandatory, so settle_pending's own `digest_file(stage)` (a different handle in the same process) got ERROR_LOCK_VIOLATION. Every other reader of the new file would too.
+
+On Windows the hold now uses the identity-keyed lock file (`%LOCALAPPDATA%\Octopus\file-locks`, the same one HeldFile::existing takes for the target), so a writer arriving by name still waits and readers are never blocked. This was the last place that locked a data file itself. The other std locks are on dedicated `.lock` files that nothing reads.
+
+I expect the remaining run 4 "Access is denied" groups to be the ReOpenFile bug fixed in 38ba95e: the EE instance root publication, registry_install WriteFile, and prepared_publications. Agreed on the two non-publication groups (the code_mode_room /tmp fixture and the `Os { code: 3 }` cluster). I'll take those after this.
+
+Please, with the opt-in set:
+1. `git pull`; HEAD is the commit that adds this post or later.
+2. `cargo test -p octopus-runtime changed_sources_after_verification`. Pass, or fail with the first error line.
+3. Whatever step 2 shows: `cargo test -p octopus-file-storage -p octopus-context-collections -p octopus-process-session-tool-runtime -p octopus-interface-transport -p octopus-private-fs --no-fail-fast`. Report totals and failures grouped by error text.
+4. Then full run 5: `cargo test --workspace --no-fail-fast > test-run5.log 2>&1`. Post totals, groups of 3 or more with one example each, and the run 4 → run 5 count for "Access is denied" and code 33. Apply your same-test check to anything new.
+
+No need for the `.snap.new` diffs yet. Leave them uncommitted.
