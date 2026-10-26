@@ -12,7 +12,7 @@ use octopus_core::config::find_codex_home;
         .required(true)
         .args(["user", "current_user"])
 ))]
-pub(crate) struct SandboxSetupCommand {
+pub struct SandboxSetupCommand {
     #[arg(long = "elevated", action = ArgAction::SetTrue)]
     elevated_sandbox_level: bool,
 
@@ -50,13 +50,13 @@ impl SandboxSetupCommand {
     }
 }
 
-pub(crate) async fn run(cmd: SandboxSetupCommand) -> anyhow::Result<()> {
+pub async fn run(cmd: SandboxSetupCommand) -> anyhow::Result<()> {
     match cmd.setup_level()? {
         SandboxSetupLevel::Elevated => run_elevated(cmd).await,
     }
 }
 
-pub(crate) fn parse_setup_command(
+pub fn parse_setup_command(
     sandbox_command: &[String],
 ) -> anyhow::Result<Option<SandboxSetupCommand>> {
     if sandbox_command

@@ -958,6 +958,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn pinned_package_is_materialized_once_and_restored_before_it_runs() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

@@ -6221,7 +6221,6 @@ name = "octopus-app-server-transport"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-io",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -6237,6 +6236,7 @@ dependencies = [
  "octopus-config",
  "octopus-cxapi",
  "octopus-identity",
+ "octopus-local-socket",
  "octopus-login",
  "octopus-util-abspath",
  "octopus-utils-home-dir",
@@ -6253,7 +6253,6 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
- "uds_windows",
  "url",
  "uuid",
 ]
@@ -6440,6 +6439,7 @@ dependencies = [
  "octopus-exec-substrate",
  "octopus-execpolicy",
  "octopus-features",
+ "octopus-local-socket",
  "octopus-login",
  "octopus-otel",
  "octopus-protocol",
@@ -6606,6 +6606,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "which 8.0.4",
+ "windows-sys 0.52.0",
  "zstd 0.13.3",
 ]
 
@@ -7043,6 +7044,7 @@ dependencies = [
  "octopus-descriptors",
  "octopus-exec-substrate",
  "octopus-file-system",
+ "octopus-local-socket",
  "octopus-network-proxy",
  "octopus-sandbox-substrate",
  "octopus-substrate-contract",
@@ -7155,6 +7157,7 @@ dependencies = [
  "octopus-ledger",
  "octopus-ledger-index",
  "octopus-ledger-store",
+ "octopus-local-socket",
  "octopus-policy",
  "octopus-run-authoring",
  "octopus-runtime",
@@ -7287,6 +7290,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "octopus-local-socket"
+version = "0.1.0"
+dependencies = [
+ "async-io",
+ "pretty_assertions",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uds_windows",
 ]
 
 [[package]]
@@ -7641,6 +7656,7 @@ dependencies = [
  "octopus-ledger",
  "octopus-ledger-index",
  "octopus-ledger-store",
+ "octopus-local-socket",
  "octopus-login",
  "octopus-model-context-render",
  "octopus-operator-chat-client",
@@ -7778,6 +7794,7 @@ dependencies = [
  "octopus-ledger",
  "octopus-ledger-index",
  "octopus-ledger-store",
+ "octopus-local-socket",
  "octopus-marks",
  "octopus-runtime",
  "octopus-system-room-env",
@@ -8472,6 +8489,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-ledger-store",
+ "octopus-local-socket",
  "octopus-policy",
  "octopus-runtime",
  "octopus-tool-handlers",

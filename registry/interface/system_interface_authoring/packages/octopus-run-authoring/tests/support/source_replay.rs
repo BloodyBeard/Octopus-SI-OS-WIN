@@ -69,21 +69,21 @@ async fn authoring_retains_exact_request_while_registry_changes() {
     let original_run = std::fs::read(&handoff.run_path).unwrap();
     let late = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let (stream, _) = listener.accept().await.unwrap();
+        let mut listener = octopus_local_socket::UnixListener::bind(&socket).await.unwrap();
+        let stream = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         assert_eq!(socket.next().await.unwrap().unwrap().into_text().unwrap().as_bytes(), manifest);
         socket.send(WsMessage::Text(serde_json::to_string(&DeliveryVerdict::Admitted { seq: 41 }).unwrap().into())).await.unwrap();
         listener
     };
-    let (result, listener) = tokio::join!(handoff.send_authoring_manifest(&manifest), late);
+    let (result, mut listener) = tokio::join!(handoff.send_authoring_manifest(&manifest), late);
     assert_eq!(result.unwrap(), DeliveryVerdict::Admitted { seq: 41 });
     for terminal in [DeliveryVerdict::Admitted { seq: 42 }, DeliveryVerdict::refused(
         octopus_ledger::RefusedReason::Policy, serde_json::json!({"message":"revoked"}))] {
         let serve = async {
             for verdict in [DeliveryVerdict::refused(octopus_ledger::RefusedReason::RegistryUnstable,
                 serde_json::json!({"message":"registry changed before admission"})), terminal.clone()] {
-                let (stream, _) = listener.accept().await.unwrap();
+                let stream = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
                 assert_eq!(socket.next().await.unwrap().unwrap().into_text().unwrap().as_bytes(), manifest);
                 assert_eq!(std::fs::read(&handoff.run_path).unwrap(), original_run);
@@ -1283,6 +1283,7 @@ fn payload_readiness_proves_completed_newer_inputs() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "requires an explicitly selected stopped Home after exact source settlement"]
 fn selected_home_payload_readiness_proves_consumed_independent_input() {

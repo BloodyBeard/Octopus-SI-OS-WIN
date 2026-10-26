@@ -1,3 +1,6 @@
+// These tests drive fake hosts over Tokio Unix sockets and check Unix file modes.
+#![cfg(unix)]
+
 use octopus_operator_chat_client::run_composition::*;
 use octopus_runtime::run_record::RunRecord;
 use serde_json::{Value, json};

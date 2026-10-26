@@ -688,7 +688,7 @@ async fn ask_keeper(
     spec: &KeeperSpec,
     request: &KeeperRequest,
 ) -> Result<KeeperResponse, KeeperFailure> {
-    let mut stream = match tokio::net::UnixStream::connect(&spec.socket).await {
+    let mut stream = match octopus_local_socket::UnixStream::connect(&spec.socket).await {
         Ok(stream) => stream,
         Err(error)
             if matches!(
@@ -836,7 +836,7 @@ async fn spawn_keeper(
     })?;
     let deadline = tokio::time::Instant::now() + KEEPER_READY_TIMEOUT;
     loop {
-        if tokio::net::UnixStream::connect(&spec.socket).await.is_ok() {
+        if octopus_local_socket::UnixStream::connect(&spec.socket).await.is_ok() {
             tokio::spawn(async move {
                 let _ = child.wait().await;
             });
@@ -1064,7 +1064,7 @@ pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), Str
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(format!("keeper socket cannot be inspected: {error}")),
     }
-    let listener = tokio::net::UnixListener::bind(&spec.socket).map_err(|error| {
+    let mut listener = octopus_local_socket::UnixListener::bind(&spec.socket).await.map_err(|error| {
         format!(
             "keeper socket '{}' cannot be bound: {error}",
             spec.socket.display()
@@ -1131,7 +1131,7 @@ pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), Str
                 }
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted.map_err(|error| format!("keeper socket stopped accepting: {error}"))?;
+                let stream = accepted.map_err(|error| format!("keeper socket stopped accepting: {error}"))?;
                 let keeper = Arc::clone(&keeper);
                 tokio::spawn(async move {
                     if let Err(error) = keeper.answer(stream).await {
@@ -1170,8 +1170,8 @@ impl Keeper {
         now.duration_since(closed_at) >= retention
     }
 
-    async fn answer(&self, stream: tokio::net::UnixStream) -> Result<(), String> {
-        let (reader, mut writer) = stream.into_split();
+    async fn answer(&self, stream: octopus_local_socket::UnixStream) -> Result<(), String> {
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut line = String::new();
         tokio::io::BufReader::new(reader.take(KEEPER_FRAME_BYTES))
             .read_line(&mut line)

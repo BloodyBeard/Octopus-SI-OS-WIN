@@ -125,7 +125,7 @@ impl TerminalDaemonEmitter {
             ));
         }
 
-        let stream = tokio::net::UnixStream::connect(socket_path)
+        let stream = octopus_local_socket::UnixStream::connect(socket_path)
             .await
             .map_err(|source| DaemonArrivalError::Connect {
                 path: socket_path.display().to_string(),

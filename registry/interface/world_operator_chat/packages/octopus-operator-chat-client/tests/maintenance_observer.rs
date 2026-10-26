@@ -1,3 +1,6 @@
+// These tests drive fake hosts over Tokio Unix sockets and check Unix file modes.
+#![cfg(unix)]
+
 use octopus_operator_chat_client::{
     ConversationSeed, OperatorChatPlanRequest, PlannedClientWrite, WriteHashAlgorithm,
     maintenance_observer::wire_source_terminal_declaration, plan_operator_chat_topology,

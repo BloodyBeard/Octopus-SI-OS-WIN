@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
+use octopus_local_socket::UnixStream;
 
 pub async fn run(socket_path: &Path) -> anyhow::Result<()> {
     let stream = UnixStream::connect(socket_path)

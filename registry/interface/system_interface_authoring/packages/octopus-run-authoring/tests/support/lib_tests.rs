@@ -5621,7 +5621,7 @@
                 control_dir.path(), &handoff.config.authoring_source_interface,
             );
             std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let mut listener = octopus_local_socket::UnixListener::bind(&socket).await.unwrap();
             let journal_prefix = std::fs::read(&movements_path).unwrap();
             let call_seq = journal_prefix
                 .split(|b| *b == b'\n')
@@ -5640,7 +5640,7 @@
             let path = handoff.run_path.clone();
             let host = tokio::spawn(async move {
               for (next_for_host, call_file, call_bytes, call_seq) in writes_for_host {
-                let (stream, _) = listener.accept().await.unwrap();
+                let stream = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
                 let received = ws.next().await.unwrap().unwrap().into_text().unwrap();
                 assert_eq!(

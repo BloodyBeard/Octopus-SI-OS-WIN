@@ -429,15 +429,13 @@ async fn hand_in_captured_artifact(
     }
 }
 
-#[cfg(unix)]
 mod socket {
     use super::*;
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{Message as WsMessage, protocol::WebSocketConfig};
 
+    #[cfg(unix)]
     const CONTROL_SOCKET_MODE: u32 = 0o600;
-    const SOCKET_DIR_MODE: u32 = 0o700;
-    const SOCKET_DIR_PERMISSION_BITS: u32 = 0o777;
 
     pub async fn spawn_transport_arrivals(
         socket_path: octopus_util_abspath::AbsolutePathBuf,
@@ -466,7 +464,7 @@ mod socket {
             )
         })?;
         prepare_control_socket_path(socket_path.as_path()).await?;
-        let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        let mut listener = octopus_local_socket::UnixListener::bind(socket_path.as_path()).await?;
         set_control_socket_permissions(socket_path.as_path()).await?;
         tracing::info!(
             socket_path = %socket_path.as_path().display(),
@@ -480,7 +478,7 @@ mod socket {
                 let stream = tokio::select! {
                     _ = accept_cancel.cancelled() => break,
                     accepted = listener.accept() => match accepted {
-                        Ok((stream, _addr)) => stream,
+                        Ok(stream) => stream,
                         Err(err) => {
                             tracing::warn!(error = %err, "control socket accept error");
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -518,7 +516,7 @@ mod socket {
     }
 
     async fn run_connection(
-        stream: tokio::net::UnixStream,
+        stream: octopus_local_socket::UnixStream,
         tx: tokio::sync::mpsc::Sender<InterfaceActivationArrival>,
         interface_id: InterfaceId,
         artifact_root: PathBuf,
@@ -591,39 +589,12 @@ mod socket {
 
     async fn prepare_control_socket_path(socket_path: &std::path::Path) -> std::io::Result<()> {
         use std::io::ErrorKind;
-        use std::os::unix::fs::FileTypeExt;
-        use std::os::unix::fs::PermissionsExt;
 
         if let Some(parent) = socket_path.parent() {
-            let mut dir_builder = tokio::fs::DirBuilder::new();
-            dir_builder.mode(SOCKET_DIR_MODE);
-            match dir_builder.create(parent).await {
-                Ok(()) => {}
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                    let metadata = tokio::fs::symlink_metadata(parent).await?;
-                    if !metadata.is_dir() {
-                        return Err(std::io::Error::new(
-                            ErrorKind::AlreadyExists,
-                            format!(
-                                "socket directory path exists and is not a directory: {}",
-                                parent.display()
-                            ),
-                        ));
-                    }
-                    if metadata.permissions().mode() & SOCKET_DIR_PERMISSION_BITS != SOCKET_DIR_MODE
-                    {
-                        tokio::fs::set_permissions(
-                            parent,
-                            std::fs::Permissions::from_mode(SOCKET_DIR_MODE),
-                        )
-                        .await?;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
+            octopus_local_socket::prepare_private_socket_directory(parent).await?;
         }
 
-        match tokio::net::UnixStream::connect(socket_path).await {
+        match octopus_local_socket::UnixStream::connect(socket_path).await {
             Ok(_stream) => {
                 return Err(std::io::Error::new(
                     ErrorKind::AddrInUse,
@@ -646,11 +617,7 @@ mod socket {
         if !socket_path.try_exists()? {
             return Ok(());
         }
-        let is_socket = tokio::fs::symlink_metadata(socket_path)
-            .await?
-            .file_type()
-            .is_socket();
-        if !is_socket {
+        if !octopus_local_socket::is_stale_socket_path(socket_path).await? {
             return Err(std::io::Error::new(
                 ErrorKind::AlreadyExists,
                 format!(
@@ -662,6 +629,7 @@ mod socket {
         tokio::fs::remove_file(socket_path).await
     }
 
+    #[cfg(unix)]
     async fn set_control_socket_permissions(socket_path: &std::path::Path) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(
@@ -670,24 +638,16 @@ mod socket {
         )
         .await
     }
+
+    /// On Windows the socket file inherits the access control list of its
+    /// directory, which lives under the owner's Octopus home.
+    #[cfg(not(unix))]
+    async fn set_control_socket_permissions(_socket_path: &std::path::Path) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
-#[cfg(unix)]
 pub use socket::spawn_transport_arrivals;
-
-#[cfg(not(unix))]
-pub async fn spawn_transport_arrivals(
-    _socket_path: octopus_util_abspath::AbsolutePathBuf,
-    _tx: tokio::sync::mpsc::Sender<InterfaceActivationArrival>,
-    _interface_id: InterfaceId,
-    _artifact_root: PathBuf,
-    _host_io_limits: InterfaceHostIoLimits,
-    _verdict_timeout: Duration,
-    _cancel: CancellationToken,
-) -> Result<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>>
-{
-    Err("the app_server_transport activation source requires unix domain sockets".into())
-}
 
 #[cfg(test)]
 mod tests {
@@ -758,7 +718,7 @@ mod tests {
              client's daemon_control_socket_path)",
             socket.display()
         );
-        tokio::net::UnixStream::connect(&socket)
+        octopus_local_socket::UnixStream::connect(&socket)
             .await
             .expect("the conventional socket accepts a client connection");
         cancel.cancel();
@@ -801,7 +761,7 @@ mod tests {
             socket.parent(),
             Some(home.path().join(CONTROL_SOCKET_DIR_NAME).as_path())
         );
-        tokio::net::UnixStream::connect(&socket)
+        octopus_local_socket::UnixStream::connect(&socket)
             .await
             .expect("the interface socket accepts a client connection");
         cancel.cancel();

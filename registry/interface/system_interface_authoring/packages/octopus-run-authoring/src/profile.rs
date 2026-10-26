@@ -25,7 +25,7 @@ pub(crate) async fn send_authoring_manifest(
         if ctx.cancel.is_cancelled() {
             return Err("interface authoring hand-in was cancelled".into());
         }
-        let stream = match tokio::net::UnixStream::connect(&socket).await {
+        let stream = match octopus_local_socket::UnixStream::connect(&socket).await {
             Ok(stream) => stream,
             Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound) => {
                 unavailable = Some(error.to_string());

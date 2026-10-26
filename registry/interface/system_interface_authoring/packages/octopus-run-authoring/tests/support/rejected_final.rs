@@ -12,7 +12,7 @@ async fn rejected_final_replacement_preserves_proof_and_recovers_crashes() {
         f.handoff.ctx.root_slots.insert("interface_hand_in_root".into(), f.handoff.hand_in_root.parent().unwrap().to_path_buf());
         let socket = octopus_app_server_interface::interface_control_socket_path_from_root(&control, &f.handoff.config.authoring_source_interface);
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let mut listener = octopus_local_socket::UnixListener::bind(socket).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1); f.handoff.ctx.arrivals = tx;
         let original = InterfaceArtifactFile::write(f.handoff.var_dir.join("answer"), "answer", br#"{"value":"rejected"}"#).unwrap();
         let initial = std::fs::read(&f.handoff.run_path).unwrap();
@@ -72,7 +72,7 @@ async fn rejected_final_replacement_preserves_proof_and_recovers_crashes() {
             };
             let record_bytes=std::fs::read(&f.handoff.run_path).unwrap(); let record=RunRecord::from_bytes(&record_bytes).unwrap();
             if !(mode=="after_write" && attempt==1) {
-                let stream=tokio::select! { accepted=listener.accept()=>accepted.unwrap().0, result=&mut sending=>panic!("{mode}: early replacement {result:?}") };
+                let stream=tokio::select! { accepted=listener.accept()=>accepted.unwrap(), result=&mut sending=>panic!("{mode}: early replacement {result:?}") };
                 let mut ws=tokio::select! {ws=tokio_tungstenite::accept_async(stream)=>ws.unwrap(),result=&mut sending=>panic!("{result:?}")};
                 let _=tokio::select! {message=ws.next()=>message.unwrap().unwrap(),result=&mut sending=>panic!("{result:?}")};
                 let AuthoringAttemptRecovery::InFlight(saved)=h.recover_authoring_attempt(&record,&record_bytes).unwrap() else {panic!("replacement attempt missing")};

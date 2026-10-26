@@ -16,6 +16,7 @@ doctest = false
 default = []
 
 [dependencies]
+octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 # workspace primitives (kept as workspace deps)
 anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -79,10 +80,6 @@ octopus-appserver-proto = { path = "../octopus-appserver-proto" }
 octopus-identity = { path = "../octopus-codex-identity" }
 octopus-login = { path = "../octopus-codex-login" }
 octopus-util-abspath = { path = "../../../../worker_environment_kind/process_session/packages/octopus-util-abspath" }
-
-[target.'cfg(windows)'.dependencies]
-async-io = "2.6.0"
-uds_windows = "1.1.0"
 
 [dev-dependencies]
 chrono = "0.4.43"

@@ -21,7 +21,7 @@ mod result_media;
 mod run_affordances;
 mod rustls_provider;
 mod spawn;
-mod uds;
+use octopus_local_socket as uds;
 
 #[cfg(feature = "embed-support")]
 mod embed_support;

@@ -462,6 +462,6 @@ pub(crate) async fn flush<H: EmissionHandoff>(
 #[path = "../tests/support/realtime_recovery.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/support/realtime_shared_recovery.rs"]
 mod shared_recovery_tests;

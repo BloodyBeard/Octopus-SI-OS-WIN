@@ -1,3 +1,6 @@
+// These tests drive fake hosts over Tokio Unix sockets and check Unix file modes.
+#![cfg(unix)]
+
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

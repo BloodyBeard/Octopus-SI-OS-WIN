@@ -2,7 +2,7 @@ mod outgoing_message;
 mod transport;
 
 mod rustls_provider;
-mod uds;
+use octopus_local_socket as uds;
 
 mod home_dir;
 

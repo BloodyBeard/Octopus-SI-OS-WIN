@@ -1,4 +1,8 @@
-#![allow(dead_code)]
+//! Local stream sockets that work on Unix and on Windows 10 1803+ (AF_UNIX).
+//!
+//! Tokio's `UnixListener`/`UnixStream` exist only on Unix. These wrappers keep
+//! the same shape on both: Unix uses Tokio directly, Windows uses `uds_windows`
+//! driven by `async-io`.
 
 use std::io::Result as IoResult;
 use std::path::Path;
@@ -202,12 +206,12 @@ mod platform {
     }
 
     async fn spawn_blocking_io<T>(
-        tool: impl FnOnce() -> IoResult<T> + Send + 'static,
+        operation: impl FnOnce() -> IoResult<T> + Send + 'static,
     ) -> IoResult<T>
     where
         T: Send + 'static,
     {
-        task::spawn_blocking(tool)
+        task::spawn_blocking(operation)
             .await
             .map_err(|err| io::Error::other(format!("blocking socket task failed: {err}")))?
     }
@@ -306,3 +310,7 @@ mod platform {
     unsafe impl async_io::IoSafe for WindowsUnixListener {}
     unsafe impl async_io::IoSafe for WindowsUnixStream {}
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;

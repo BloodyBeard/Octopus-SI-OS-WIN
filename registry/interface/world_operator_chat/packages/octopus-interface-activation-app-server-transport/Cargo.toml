@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 octopus-app-server-interface = { path = "../octopus-app-server-interface" }
 octopus-run-authoring = { path = "../../../system_interface_authoring/packages/octopus-run-authoring" }
 json-patch.workspace = true

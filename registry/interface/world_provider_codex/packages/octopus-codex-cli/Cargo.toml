@@ -55,3 +55,6 @@ octopus-terminal-detection = { path = "../../../world_terminal/packages/octopus-
 [dev-dependencies]
 insta = "1"
 pretty_assertions = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Console"] }

@@ -36,9 +36,9 @@ Still to do, roughly in dependency order:
 
 | Area | Crate(s) | Problem | Plan |
 | --- | --- | --- | --- |
-| Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate` | Interface control sockets use `tokio::net::Unix*` | Extract the existing AF_UNIX wrapper (verified to compile on Windows) (`world_provider_codex/.../octopus-app-server-transport/src/uds.rs`, backed by `uds_windows`) into a shared crate and use it everywhere. Windows 10 1803+ supports AF_UNIX. |
+| Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate`, `octopus-provider-codex`, `octopus-cli`, `octopus-world-terminal-client` | Interface control sockets used `tokio::net::Unix*` | Done: all use `crates/octopus-local-socket` (AF_UNIX on Windows 10 1803+ via `uds_windows`). Some test fixtures that drive fake hosts over Tokio Unix sockets are still Unix-only (`octopus-operator-chat-client` integration tests, realtime-signaling handoff tests, provider-codex native terminal handoff tests). |
 | Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream removed Codex's `windows-sandbox-rs` crate but kept its callers | Done: `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, now pinned for `win32-x64` with its sandbox helpers. Vendoring the real crate is optional. |
-| Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Add Windows equivalents or gate the tests |
+| Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Done: the one shell-script test is Unix-only |
 | Browser driver | `octopus-browser-session-env` | Unix sockets, `O_NOFOLLOW`, uid/mode checks against the Electron browser host | Port the transport to the shared IPC crate and use Windows ACL checks |
 | Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Gate on macOS for now. A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
 | Voice | `octopus-realtime-webrtc` | — | Compiles on Windows (verified on a Windows machine) |

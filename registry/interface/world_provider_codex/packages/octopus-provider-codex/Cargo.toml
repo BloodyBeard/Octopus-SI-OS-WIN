@@ -33,6 +33,7 @@ embed-support = [
 ]
 
 [dependencies]
+octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 serde.workspace = true
 serde_json.workspace = true
 blake3 = "1"

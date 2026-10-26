@@ -34,7 +34,7 @@ pub use writer_runs::{OperatorWriterRunPlanRequest, plan_operator_writer_runs};
 #[cfg(test)]
 #[path = "../tests/support/home_delegation.rs"]
 mod home_delegation;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../tests/support/home_turn_controls.rs"]
 mod home_turn_controls;
 #[cfg(test)]

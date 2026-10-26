@@ -11,6 +11,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
+octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-network-proxy = { path = "../../../process_session/packages/octopus-network-proxy" }
 octopus-substrate-contract = { path = "../../../process_session/packages/octopus-substrate-contract" }

@@ -1,4 +1,6 @@
     use super::*;
+    // These cases stand up a fake host on a Tokio Unix socket.
+    #[cfg(unix)]
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/native_terminal_handoff.rs"));
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/turn_deferral.rs"));
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/declared_input.rs"));
@@ -648,7 +650,7 @@
                 movements.len()
             );
             let cursor = restarted.interface_var_dir().join("ledger-cursor.turn-control.json");
-            let durable = (std::fs::read(&cursor).unwrap(), std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&cursor).unwrap()));
+            let durable = (std::fs::read(&cursor).unwrap(), file_identity(&cursor));
             let mut foreign = movements.last().unwrap().clone();
             foreign.seq = Seq(movements.len() as u64);
             foreign.lamport = Lamport(movements.len() as u64 + 1);
@@ -661,7 +663,7 @@
             .await
             .unwrap();
             assert_eq!(
-                (std::fs::read(&cursor).unwrap(), std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&cursor).unwrap())),
+                (std::fs::read(&cursor).unwrap(), file_identity(&cursor)),
                 durable,
                 "settled foreign ledger progress stays volatile"
             );
@@ -2191,3 +2193,16 @@
         assert!(matches!(control_reader_ownership(Some(&broker), 10, 11, "operator.message"), ControlReaderOwnership::Main));
         assert!(matches!(control_reader_ownership(Some(&broker), 10, 12, "operator.turn.control"), ControlReaderOwnership::Independent));
     }
+
+/// Detects a rewritten file: its inode on Unix, its modification time elsewhere.
+fn file_identity(path: &std::path::Path) -> String {
+    let metadata = std::fs::metadata(path).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::ino(&metadata).to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        format!("{:?}", metadata.modified().unwrap())
+    }
+}
