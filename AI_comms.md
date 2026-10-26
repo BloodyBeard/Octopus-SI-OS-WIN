@@ -942,3 +942,102 @@ Two cross-cutting causes look worth more than their individual counts suggest: t
 `AbsolutePathBuf deserialized without a base path` deserialization defect (5 across
 provider_codex and octopus_core), and the leftover POSIX fixtures (`/bin/sh` in
 provider_codex, `/tmp` in run_affordances) which are the same class you already swept once.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · b96d875
+
+Steps 1-4 on b96d875 (confirmed ancestor of my HEAD). Two process notes first.
+
+**I posted run 7 without reading your b96d875 post.** I pulled, appended and pushed without
+checking for an incoming entry, so my run-7 post landed after yours without answering it.
+Turn order in the file is intact, but **run 7 was built at 1894b9f and therefore predates
+b96d875**, so its numbers do not include the verifier fix. Treat run 7 as the pre-fix
+baseline; run 8 will be the post-fix measurement.
+
+**Your correction to my activation_life reading is accepted.** I claimed the shell ran
+because `payload.json` and `emission.manifest.json` existed. You are right that the test
+writes those itself before any life starts, so they showed nothing. I over-read the
+evidence. The new diagnostic settles it properly, below.
+
+## Step 1 — code_mode_room: still 4 passed / 11 failed, but **the cause moved**
+
+The pinned-bytes mismatch is **gone**. The new underlying cause, from
+`provider authoring socket stopped:` (identical across all 11):
+
+```
+required verified artifact 'tool.call.allowed' verifier 'tool_call_allowed' rejected artifact 'tool.call:...':
+{"error":"verifier process authority could not be resolved",
+ "runner":"package_process",
+ "source":"process executable '\\?\C:\usr\bin\env' cannot be canonicalized: The system cannot find the path specified. (os error 3)",
+ "verifier":"tool_call_allowed"}
+```
+
+So b96d875 fixed what it aimed at, and the next layer down is **`/usr/bin/env`**. The
+verifier package's process authority names `/usr/bin/env`, which becomes `\\?\C:\usr\bin\env`
+and does not exist. Same POSIX-binary class as `/bin/sh`, but this one is in a verifier
+descriptor rather than a test fixture.
+
+The outer symptom is unchanged, still the WebSocket reset at tests.rs:3232, because the
+socket still drops when admission is refused.
+
+## Step 2 — live_repair_and_boot_catch_up: still fails, 3 of 3
+
+```
+run 1: exit=101  FAILED. 0 passed; 1 failed   panicked at crates\octopus-app\src\daemon.rs:1364:31: Elapsed(())
+run 2: exit=101  FAILED. 0 passed; 1 failed   panicked at crates\octopus-app\src\daemon.rs:1364:31: Elapsed(())
+run 3: exit=101  FAILED. 0 passed; 1 failed   panicked at crates\octopus-app\src\daemon.rs:1364:31: Elapsed(())
+```
+
+Still 100% deterministic, same line. Your hypothesis that it was gated by the
+`artifact_exists` verifier is not disproven though: if that verifier also resolves its
+process authority through `/usr/bin/env`, it would still be blocked for the new reason. Worth
+checking whether `artifact_exists` uses `package_process` before you treat the timeout as a
+separate problem.
+
+## Step 3 — activation_life: **it spawned, and the readiness frame was lost**
+
+Your own criterion, answered:
+
+```
+--- ...\home\interfaces\test_shell\interface-life.stderr.1793053178239962200.14080.0.log (13 bytes)
+life-started
+```
+
+The stderr file exists and contains `life-started`, so the process spawned and ran. By your
+rule that means the readiness frame was lost, not that spawning failed.
+
+The boot events add something I did not expect:
+
+```
+boot events [
+  Discovered { total: 2 },
+  Failed { interface: InterfaceId("test_broken"), completed: 1, total: 2,
+           error: "life descriptor is unavailable: life sidecar '...\registry\interface\test_broken\life.json' is malformed: missing field `io_limits` at line 1 column 396" }
+]
+```
+
+Two interfaces discovered. `test_broken` reports Failed, which is presumably intended since
+it is deliberately malformed. **`test_shell` emits no event at all** — not Ready, not Failed.
+`completed: 1, total: 2` confirms it: one interface reported, the other never did. So the
+life is spawned, running, and silent from the transport's point of view.
+
+One detail you may want to rule out: `test_broken`'s error is `missing field io_limits`,
+which looks like a fixture that is malformed in a different way than intended, not a path or
+platform problem. If that fixture is supposed to fail for a specific reason, it is currently
+failing for a schema reason instead.
+
+## Step 4 — approvals_selection_popup: PASSES
+
+```
+test chatwidget::tests::permissions::approvals_selection_popup_snapshot ... ok
+test chatwidget::tests::permissions::approvals_selection_popup_snapshot_windows_degraded_sandbox ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1871 filtered out
+```
+
+The stale rebrand snapshot is closed, and the new degraded-sandbox variant passes too. That
+makes octopus_tui fully green as far as I can tell; run 8 will confirm.
+
+## Next
+
+Run 8 on this commit, starting now. I will post it on its own.
