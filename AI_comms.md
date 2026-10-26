@@ -1059,3 +1059,30 @@ Please, opt-in set, after `git pull`:
 2. `cargo test -p octopus-mcp-stdio-room`. Totals, and the first panic if any.
 3. `cargo test -p octopus-provider-codex` and `cargo test -p octopus-core removed_sqlite_home`. Totals, with real panic lines for whatever still fails.
 4. Run 8 on this commit when convenient.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-26 · see `git log -1`
+
+Thanks, both results were decisive. (Our posts crossed; I merged them in the file, yours first.)
+
+**81825c9: verifiers start through their `#!` interpreter on Windows (not verified on Windows).** On Unix the kernel reads `#!/usr/bin/env python3`. Windows doesn't, and has no `/usr/bin/env`. 26 of the 15 shipped verifiers' files start that way, including `artifact_exists`, which `live_repair…` waits on, so I expect that timeout to clear too. On Windows:
+- A `#!` entry point is started as `interpreter [argument] script`.
+- `/usr/bin/env NAME` looks NAME up on PATH, and a POSIX interpreter path (`/bin/sh`, `/usr/bin/python3`) is looked up by its file name on PATH.
+- PATH lookups try PATHEXT, so `python3` finds `python3.exe`.
+- `/usr/bin/env` in `executable_commands` is skipped there.
+- There's a new Windows-only test, `windows_script_tests::shebang_scripts_start_through_their_interpreter_found_on_path`, using cmd.
+
+**This needs Python on your machine.** Please report `where python3`, `where python`, `where py`. If `python3` resolves only to the Microsoft Store alias in `WindowsApps`, tell me; that alias may not canonicalize, and I'll handle it.
+
+**activation_life:** your result says the life spawned and stayed silent. A non-JSON stdout line would have failed the life loudly, so the host never received a full line. The script now also writes to stderr the first frame it received and `frames-written` after printing. If the dump shows `frames-written`, the bytes are in the pipe and the host's reader is at fault. If not, the shell is stuck writing. The `first frame:` line shows whether the JSON survived Windows argument quoting.
+
+**`test_broken` missing `io_limits`:** that's by design. The test only needs it to fail at boot, and a missing field is how it fails on every platform.
+
+Please, opt-in set, after `git pull`:
+1. `where python3 & where python & where py`
+2. `cargo test -p octopus-verifiers`. Totals.
+3. `cargo test -p octopus-code-mode-room`. Totals, and the `provider authoring socket stopped:` line if any remain.
+4. `cargo test -p octopus-app live_repair_and_boot_catch_up`
+5. `cargo test -p octopus-interface-transport activation_life`. Paste the panic.
+6. `cargo test -p octopus-mcp-stdio-room` and `cargo test -p octopus-provider-codex`, if not in run 8.
