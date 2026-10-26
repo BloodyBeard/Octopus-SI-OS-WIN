@@ -82,6 +82,30 @@ pub fn open_directory_for_sync(path: impl AsRef<Path>) -> io::Result<File> {
     platform::open_directory_for_sync(path.as_ref())
 }
 
+/// Which file an entry is, and when its contents or metadata last changed.
+///
+/// Unix: device, inode and ctime. Windows: volume serial number, the 128-bit
+/// file ID (NTFS and ReFS) and NTFS's change time, the counterpart of ctime.
+/// Two equal identities name the same file with no change in between, so a
+/// replacement with the same size and modification time still differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub file: u128,
+    pub changed: (i64, i64),
+}
+
+/// The identity of an open file.
+pub fn identity_of_file(file: &File) -> io::Result<FileIdentity> {
+    platform::identity_of_file(file)
+}
+
+/// The identity of the file at `path`, following a final symlink like
+/// `std::fs::metadata`.
+pub fn identity_of_path(path: impl AsRef<Path>) -> io::Result<FileIdentity> {
+    platform::identity_of_path(path.as_ref())
+}
+
 /// Whether `path` is already canonical: absolute, without symlinks, `.` or
 /// `..`. On Windows the comparison ignores the `\\?\` prefix and letter case.
 pub fn is_canonical(path: &Path) -> io::Result<bool> {
@@ -144,6 +168,22 @@ mod platform {
     pub(super) fn open_directory_for_sync(path: &Path) -> io::Result<File> {
         File::open(path)
     }
+
+    fn identity(metadata: &std::fs::Metadata) -> FileIdentity {
+        FileIdentity {
+            device: metadata.dev(),
+            file: u128::from(metadata.ino()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+
+    pub(super) fn identity_of_file(file: &File) -> io::Result<FileIdentity> {
+        Ok(identity(&file.metadata()?))
+    }
+
+    pub(super) fn identity_of_path(path: &Path) -> io::Result<FileIdentity> {
+        Ok(identity(&std::fs::metadata(path)?))
+    }
 }
 
 #[cfg(windows)]
@@ -165,7 +205,8 @@ mod platform {
         TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
+        FileBasicInfo, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_ID_INFO,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
         READ_CONTROL, WRITE_DAC,
     };
@@ -276,6 +317,50 @@ mod platform {
             Err(error) if error.raw_os_error() == Some(ERROR_INVALID_FUNCTION) => Ok(()),
             result => result,
         }
+    }
+
+    pub(super) fn identity_of_file(file: &File) -> io::Result<FileIdentity> {
+        let mut id: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: the buffer is a FILE_ID_INFO of the size passed.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                handle(file),
+                FileIdInfo,
+                (&mut id as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+        // SAFETY: the buffer is a FILE_BASIC_INFO of the size passed.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                handle(file),
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(FileIdentity {
+            device: id.VolumeSerialNumber,
+            file: u128::from_le_bytes(id.FileId.Identifier),
+            changed: (basic.ChangeTime, 0),
+        })
+    }
+
+    pub(super) fn identity_of_path(path: &Path) -> io::Result<FileIdentity> {
+        // Attribute access only, and every sharing mode, so querying never
+        // blocks or is blocked by writers; backup semantics also opens folders.
+        let file = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        identity_of_file(&file)
     }
 
     pub(super) fn open_directory_for_sync(path: &Path) -> io::Result<File> {
@@ -593,6 +678,19 @@ mod tests {
         let plain = std::path::PathBuf::from(directory.to_string_lossy().trim_start_matches(r"\\?\").to_string());
         assert!(!is_canonical(&plain.join("..").join("private").join("record.json")).unwrap());
         sync_directory(&directory).unwrap();
+
+        // The same file keeps its identity; a same-size replacement does not.
+        let tracked = directory.join("tracked.json");
+        std::fs::write(&tracked, b"{}").unwrap();
+        let before = identity_of_path(&tracked).unwrap();
+        assert_eq!(before, identity_of_file(&open_read_no_follow(&tracked).unwrap()).unwrap());
+        assert_eq!(before, identity_of_path(&tracked).unwrap());
+        let replacement = directory.join("replacement.json");
+        std::fs::write(&replacement, b"[]").unwrap();
+        std::fs::rename(&replacement, &tracked).unwrap();
+        assert_ne!(before, identity_of_path(&tracked).unwrap());
+        assert_ne!(identity_of_path(&directory).unwrap(), identity_of_path(&tracked).unwrap());
+        std::fs::remove_file(&tracked).unwrap();
 
         #[cfg(unix)]
         {

@@ -613,427 +613,447 @@ async fn spawn_context_cdp_mock(context_available: bool, target_available: bool,
     (discovery_url, ws)
 }
 
-#[tokio::test]
-async fn browser_room_keeps_one_cdp_session_across_snapshot_ref_actions_and_publishes_viewer() {
-    let (discovery_url, ws) = spawn_context_cdp_mock(true, true, 3).await;
-    let root = tempfile::tempdir().unwrap();
-    let interface_dir = root.path().join("registry/interface").join(DOOR);
-    let process_var = root.path().join("var");
-    write_browser_interface(&interface_dir, &discovery_url);
-    let mut environment = ToolProcessEnvironment {
-        interface: InterfaceId::new(DOOR),
-        interface_dir,
-        descriptor_snapshot: None,
-        var_dir: process_var.clone(),
-        durable_var_dir: Some(root.path().join("durable")),
-        host_io_limits: InterfaceHostIoLimits {
-            max_control_frame_bytes: 1024 * 1024,
-            max_stderr_bytes: 256 * 1024,
-            max_manifest_bytes: 1024 * 1024,
-            max_payload_bytes: 64 * 1024 * 1024,
-        },
-        private_reads: BTreeMap::new(),
-        root_slots: BTreeMap::new(),
-    };
-    environment.descriptor_snapshot = Some(environment.resolved_interface_descriptor().unwrap());
-    let mut restart_environment = environment.clone();
-    let room = BrowserRoom::load(environment).unwrap();
-    let mut tools = browser_tools();
-    tools.push("browser.history".into());
-    tools.push("browser.history_resume".into());
-    tools.sort();
-    let (formation, kind) = formation("browser_session", &tools, "browser.navigate");
-    let recorder = TestWorkerEnvironmentRecorder {
-        records: Some(WorkerEnvironmentRecordStore::new(root.path().join("host"))),
-        ..Default::default()
-    };
-
-    let navigated = response(received(
-        room.receive(
-            invocation(
-                root.path(),
-                1,
-                "browser.navigate",
-                json!({"url": "https://example.com/"}),
-                &tools,
-                &formation,
-                &kind,
-            ),
-            &recorder,
-        )
-        .await,
-    ));
-    assert_eq!(navigated["ok"], true, "{navigated}");
-    assert_eq!(navigated["body"]["snapshot"]["ref_count"], 4);
-    assert_eq!(navigated["body"]["snapshot"]["source_movement_seq"], 1);
-    assert_eq!(navigated["body"]["snapshot"]["target_id"], "TARGET1");
-    assert_eq!(navigated["body"]["snapshot"]["frame_id"], "FRAME1");
-    assert_eq!(navigated["body"]["snapshot"]["loader_id"], "LOAD1");
-    assert_eq!(navigated["body"]["snapshot"]["frames"].as_array().unwrap().len(),5);
-    assert_eq!(navigated["body"]["snapshot"]["frame_capture_complete"],true);
-    let reference = navigated["body"]["snapshot"]["refs"][3]["ref"].clone();
-    let click_arguments = json!({"ref":reference,"snapshot":false});
-    let mut type_arguments = json!({"ref":navigated["body"]["snapshot"]["refs"][2]["ref"],"text":"contract input","clear":true,"snapshot":false});
-    for (tool, arguments) in [("browser.click", &click_arguments), ("browser.type", &type_arguments)] {
-        let actual = descriptor(tool);
-        let validator = ToolArgumentValidator::compile(&actual.args_schema).unwrap();
-        validator.validate(arguments).unwrap();
-        for malformed in ["@e1", "@m0e1", "@m1e0", "@m01e1", "@m1e01", "@m1e1suffix"] {
-            let mut invalid = arguments.clone();
-            invalid["ref"] = json!(malformed);
-            assert!(validator.validate(&invalid).is_err(), "{tool} admitted malformed ref {malformed}");
+// The body is one long async test. In debug builds its frame alone is about
+// 780 KB, so it runs on a thread with an explicit stack instead of relying on
+// the default test-thread stack (2 MiB, and frames are larger on Windows).
+#[test]
+fn browser_room_keeps_one_cdp_session_across_snapshot_ref_actions_and_publishes_viewer() {
+    on_large_stack(async {
+        let (discovery_url, ws) = spawn_context_cdp_mock(true, true, 3).await;
+        let root = tempfile::tempdir().unwrap();
+        let interface_dir = root.path().join("registry/interface").join(DOOR);
+        let process_var = root.path().join("var");
+        write_browser_interface(&interface_dir, &discovery_url);
+        let mut environment = ToolProcessEnvironment {
+            interface: InterfaceId::new(DOOR),
+            interface_dir,
+            descriptor_snapshot: None,
+            var_dir: process_var.clone(),
+            durable_var_dir: Some(root.path().join("durable")),
+            host_io_limits: InterfaceHostIoLimits {
+                max_control_frame_bytes: 1024 * 1024,
+                max_stderr_bytes: 256 * 1024,
+                max_manifest_bytes: 1024 * 1024,
+                max_payload_bytes: 64 * 1024 * 1024,
+            },
+            private_reads: BTreeMap::new(),
+            root_slots: BTreeMap::new(),
+        };
+        environment.descriptor_snapshot = Some(environment.resolved_interface_descriptor().unwrap());
+        let mut restart_environment = environment.clone();
+        let room = BrowserRoom::load(environment).unwrap();
+        let mut tools = browser_tools();
+        tools.push("browser.history".into());
+        tools.push("browser.history_resume".into());
+        tools.sort();
+        let (formation, kind) = formation("browser_session", &tools, "browser.navigate");
+        let recorder = TestWorkerEnvironmentRecorder {
+            records: Some(WorkerEnvironmentRecordStore::new(root.path().join("host"))),
+            ..Default::default()
+        };
+    
+        let navigated = response(received(
+            room.receive(
+                invocation(
+                    root.path(),
+                    1,
+                    "browser.navigate",
+                    json!({"url": "https://example.com/"}),
+                    &tools,
+                    &formation,
+                    &kind,
+                ),
+                &recorder,
+            )
+            .await,
+        ));
+        assert_eq!(navigated["ok"], true, "{navigated}");
+        assert_eq!(navigated["body"]["snapshot"]["ref_count"], 4);
+        assert_eq!(navigated["body"]["snapshot"]["source_movement_seq"], 1);
+        assert_eq!(navigated["body"]["snapshot"]["target_id"], "TARGET1");
+        assert_eq!(navigated["body"]["snapshot"]["frame_id"], "FRAME1");
+        assert_eq!(navigated["body"]["snapshot"]["loader_id"], "LOAD1");
+        assert_eq!(navigated["body"]["snapshot"]["frames"].as_array().unwrap().len(),5);
+        assert_eq!(navigated["body"]["snapshot"]["frame_capture_complete"],true);
+        let reference = navigated["body"]["snapshot"]["refs"][3]["ref"].clone();
+        let click_arguments = json!({"ref":reference,"snapshot":false});
+        let mut type_arguments = json!({"ref":navigated["body"]["snapshot"]["refs"][2]["ref"],"text":"contract input","clear":true,"snapshot":false});
+        for (tool, arguments) in [("browser.click", &click_arguments), ("browser.type", &type_arguments)] {
+            let actual = descriptor(tool);
+            let validator = ToolArgumentValidator::compile(&actual.args_schema).unwrap();
+            validator.validate(arguments).unwrap();
+            for malformed in ["@e1", "@m0e1", "@m1e0", "@m01e1", "@m1e01", "@m1e1suffix"] {
+                let mut invalid = arguments.clone();
+                invalid["ref"] = json!(malformed);
+                assert!(validator.validate(&invalid).is_err(), "{tool} admitted malformed ref {malformed}");
+            }
         }
-    }
-    let initial_live = recorder.live_states.lock().unwrap()[0].clone();
-    assert_eq!(initial_live["activity"]["status"], "running");
-    assert!(initial_live["presentation_intent"].is_null());
-    assert_eq!(initial_live["viewer"]["target_id"], "TARGET1");
-    assert_eq!(initial_live["url"], "about:blank");
-    let record = recorder.records.as_ref().unwrap()
-        .read(&formation.worker_environment_id).unwrap();
-    assert_eq!(record.formation, formation);
-    assert_eq!(record.lifecycle, WorkerEnvironmentLifecycle::Active);
-
-    let before_history = recorder.live_states.lock().unwrap().clone();
-    let live_path = root.path().join("durable/worker-environments").join(formation.worker_environment_id.as_str()).join("live-state.json");
-    let before_private_history = std::fs::read(&live_path).unwrap();
-    let history = response(received(room.receive(invocation(root.path(), 101, "browser.history", json!({"source":{"id":"explicit-history","content":vec![6;32]}}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(history["ok"], false);
-    assert!(history["error"]["message"].as_str().unwrap().contains("native browser host transport"));
-    assert_eq!(*recorder.live_states.lock().unwrap(), before_history);
-    assert_eq!(std::fs::read(&live_path).unwrap(), before_private_history);
-    assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
-
-    let console = response(received(
-        room.receive(
-            invocation(
-                root.path(),
-                2,
-                "browser.console",
-                json!({"clear": true}),
-                &tools,
-                &formation,
-                &kind,
-            ),
-            &recorder,
-        )
-        .await,
-    ));
-    assert_eq!(console["ok"], true, "{console}");
-    assert_eq!(console["body"]["entries"][0]["text"], "console-proof");
-
-    let clicked = response(received(
-        room.receive(
-            invocation(
-                root.path(),
-                3,
-                "browser.click",
-                click_arguments,
-                &tools,
-                &formation,
-                &kind,
-            ),
-            &recorder,
-        )
-        .await,
-    ));
-    assert_eq!(clicked["ok"], true, "{clicked}");
-    assert_eq!(clicked["body"]["x"], 170.0);
-    assert_eq!(clicked["body"]["y"], 290.0);
-    assert_eq!(
-        clicked["body"]["pending_dialogs"][0]["message"],
-        "continue?"
-    );
-
-    let dialog = response(received(
-        room.receive(
-            invocation(
-                root.path(),
-                4,
-                "browser.dialog",
-                json!({"action":"accept"}),
-                &tools,
-                &formation,
-                &kind,
-            ),
-            &recorder,
-        )
-        .await,
-    ));
-    assert_eq!(dialog["ok"], true, "{dialog}");
-    assert_eq!(dialog["body"]["dialog"]["type"], "confirm");
-
-    let live = {
-        let live_states = recorder.live_states.lock().unwrap();
-        assert_eq!(live_states.iter().filter(|state| state["activity"]["status"] == "completed").count(), 4);
-        live_states.last().cloned().unwrap()
-    };
-    assert_eq!(live["viewer"]["protocol"], "cdp");
-    assert_eq!(live["viewer"]["target_id"], "TARGET1");
-    assert_eq!(live["activity"]["source_movement_seq"], 4);
-    assert_eq!(live["activity"]["status"], "completed");
-    assert_eq!(live["tabs"][0]["target_id"], "TARGET1");
-    assert_eq!(live["tabs"][0]["url"], "https://example.com/");
-    let private_live_path = root.path().join("durable")
-        .join("worker-environments")
-        .join(formation.worker_environment_id.as_str())
-        .join("live-state.json");
-    let private_live: Value =
-        serde_json::from_slice(&std::fs::read(private_live_path).unwrap()).unwrap();
-    assert_eq!(private_live, live);
-
-    let observed = response(received(room.receive(invocation(
-        root.path(), 5, "browser.snapshot", json!({}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(observed["ok"], true);
-    assert_ne!(observed["body"]["snapshot"]["refs"][0]["ref"], navigated["body"]["snapshot"]["refs"][0]["ref"]);
-    let stale = response(received(room.receive(invocation(
-        root.path(), 6, "browser.click", json!({"ref": navigated["body"]["snapshot"]["refs"][0]["ref"]}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(stale["ok"], false);
-    assert!(stale["error"]["message"].as_str().unwrap().contains("stale or unknown"));
-    assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
-    let failed_live = recorder.live_states.lock().unwrap().last().unwrap().clone();
-    assert_eq!(failed_live["status"], "ready");
-    assert_eq!(failed_live["activity"]["status"], "failed");
-    assert_eq!(failed_live["detail"], stale["error"]["message"]);
-    assert_eq!(failed_live["browser_context_id"], "CONTEXT1");
-    assert_eq!(failed_live["target_id"], "TARGET1");
-    let capture = response(received(room.receive(invocation(
-        root.path(), 7, "browser.screenshot", json!({"full_page":true}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(capture["ok"], true, "{capture}");
-    let image = &capture["body"]["media"][0];
-    assert_eq!(image["mime_type"], "image/png");
-    assert_eq!(image["artifact"]["payload_content_hash"], capture["body"]["content_hash"]);
-    let media_bytes = std::fs::read(image["artifact"]["payload_path"].as_str().unwrap()).unwrap();
-    assert_eq!(image["artifact"]["payload_path"], capture["body"]["path"]);
-    let media_root = PathBuf::from(image["artifact"]["payload_path"].as_str().unwrap()).parent().unwrap().join("artifacts");
-    assert!(std::fs::read_dir(media_root).unwrap().all(|entry| entry.unwrap().path().extension().is_some_and(|extension| extension == "json")));
-    assert_eq!(blake3::hash(&media_bytes).to_hex().to_string(), capture["body"]["content_hash"].as_str().unwrap());
-    assert_eq!(capture["body"]["source_movement_seq"], 7);
-    let geometry = &capture["body"]["geometry"];
-    assert_eq!(geometry["image"],json!({"width":4,"height":8,"media_type":"image/png","content_hash":capture["body"]["content_hash"]}));
-    assert_eq!(geometry["capture"]["document_css_rect"],json!({"x":-12.0,"y":24.0,"width":1200.0,"height":2400.0}));
-    assert_eq!(geometry["document"]["frame_id"],"FRAME1");
-    assert_eq!(geometry["document"]["loader_id"],"LOAD1");
-    assert_eq!(geometry["observed"]["device_pixel_ratio"],2.5);
-    assert_eq!(geometry["coordinates"]["document_css_per_image_pixel"],json!({"x":300.0,"y":300.0}));
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["last_capture"]["geometry"],*geometry);
-    assert_eq!(media_bytes,base64::engine::general_purpose::STANDARD.decode(image["payload_base64"].as_str().unwrap()).unwrap());
-
-
-    let tabs = response(received(room.receive(invocation(
-        root.path(), 8, "browser.tabs", json!({}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(tabs["body"]["tabs"].as_array().unwrap().len(), 1);
-    assert_eq!(tabs["body"]["tabs"][0]["target_id"], "TARGET1");
-    for (sequence, tool) in [(9,"browser.tab_select"),(10,"browser.tab_close")] {
+        let initial_live = recorder.live_states.lock().unwrap()[0].clone();
+        assert_eq!(initial_live["activity"]["status"], "running");
+        assert!(initial_live["presentation_intent"].is_null());
+        assert_eq!(initial_live["viewer"]["target_id"], "TARGET1");
+        assert_eq!(initial_live["url"], "about:blank");
+        let record = recorder.records.as_ref().unwrap()
+            .read(&formation.worker_environment_id).unwrap();
+        assert_eq!(record.formation, formation);
+        assert_eq!(record.lifecycle, WorkerEnvironmentLifecycle::Active);
+    
+        let before_history = recorder.live_states.lock().unwrap().clone();
+        let live_path = root.path().join("durable/worker-environments").join(formation.worker_environment_id.as_str()).join("live-state.json");
+        let before_private_history = std::fs::read(&live_path).unwrap();
+        let history = response(received(room.receive(invocation(root.path(), 101, "browser.history", json!({"source":{"id":"explicit-history","content":vec![6;32]}}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(history["ok"], false);
+        assert!(history["error"]["message"].as_str().unwrap().contains("native browser host transport"));
+        assert_eq!(*recorder.live_states.lock().unwrap(), before_history);
+        assert_eq!(std::fs::read(&live_path).unwrap(), before_private_history);
+        assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
+    
+        let console = response(received(
+            room.receive(
+                invocation(
+                    root.path(),
+                    2,
+                    "browser.console",
+                    json!({"clear": true}),
+                    &tools,
+                    &formation,
+                    &kind,
+                ),
+                &recorder,
+            )
+            .await,
+        ));
+        assert_eq!(console["ok"], true, "{console}");
+        assert_eq!(console["body"]["entries"][0]["text"], "console-proof");
+    
+        let clicked = response(received(
+            room.receive(
+                invocation(
+                    root.path(),
+                    3,
+                    "browser.click",
+                    click_arguments,
+                    &tools,
+                    &formation,
+                    &kind,
+                ),
+                &recorder,
+            )
+            .await,
+        ));
+        assert_eq!(clicked["ok"], true, "{clicked}");
+        assert_eq!(clicked["body"]["x"], 170.0);
+        assert_eq!(clicked["body"]["y"], 290.0);
+        assert_eq!(
+            clicked["body"]["pending_dialogs"][0]["message"],
+            "continue?"
+        );
+    
+        let dialog = response(received(
+            room.receive(
+                invocation(
+                    root.path(),
+                    4,
+                    "browser.dialog",
+                    json!({"action":"accept"}),
+                    &tools,
+                    &formation,
+                    &kind,
+                ),
+                &recorder,
+            )
+            .await,
+        ));
+        assert_eq!(dialog["ok"], true, "{dialog}");
+        assert_eq!(dialog["body"]["dialog"]["type"], "confirm");
+    
+        let live = {
+            let live_states = recorder.live_states.lock().unwrap();
+            assert_eq!(live_states.iter().filter(|state| state["activity"]["status"] == "completed").count(), 4);
+            live_states.last().cloned().unwrap()
+        };
+        assert_eq!(live["viewer"]["protocol"], "cdp");
+        assert_eq!(live["viewer"]["target_id"], "TARGET1");
+        assert_eq!(live["activity"]["source_movement_seq"], 4);
+        assert_eq!(live["activity"]["status"], "completed");
+        assert_eq!(live["tabs"][0]["target_id"], "TARGET1");
+        assert_eq!(live["tabs"][0]["url"], "https://example.com/");
+        let private_live_path = root.path().join("durable")
+            .join("worker-environments")
+            .join(formation.worker_environment_id.as_str())
+            .join("live-state.json");
+        let private_live: Value =
+            serde_json::from_slice(&std::fs::read(private_live_path).unwrap()).unwrap();
+        assert_eq!(private_live, live);
+    
+        let observed = response(received(room.receive(invocation(
+            root.path(), 5, "browser.snapshot", json!({}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(observed["ok"], true);
+        assert_ne!(observed["body"]["snapshot"]["refs"][0]["ref"], navigated["body"]["snapshot"]["refs"][0]["ref"]);
+        let stale = response(received(room.receive(invocation(
+            root.path(), 6, "browser.click", json!({"ref": navigated["body"]["snapshot"]["refs"][0]["ref"]}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(stale["ok"], false);
+        assert!(stale["error"]["message"].as_str().unwrap().contains("stale or unknown"));
+        assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
+        let failed_live = recorder.live_states.lock().unwrap().last().unwrap().clone();
+        assert_eq!(failed_live["status"], "ready");
+        assert_eq!(failed_live["activity"]["status"], "failed");
+        assert_eq!(failed_live["detail"], stale["error"]["message"]);
+        assert_eq!(failed_live["browser_context_id"], "CONTEXT1");
+        assert_eq!(failed_live["target_id"], "TARGET1");
+        let capture = response(received(room.receive(invocation(
+            root.path(), 7, "browser.screenshot", json!({"full_page":true}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(capture["ok"], true, "{capture}");
+        let image = &capture["body"]["media"][0];
+        assert_eq!(image["mime_type"], "image/png");
+        assert_eq!(image["artifact"]["payload_content_hash"], capture["body"]["content_hash"]);
+        let media_bytes = std::fs::read(image["artifact"]["payload_path"].as_str().unwrap()).unwrap();
+        assert_eq!(image["artifact"]["payload_path"], capture["body"]["path"]);
+        let media_root = PathBuf::from(image["artifact"]["payload_path"].as_str().unwrap()).parent().unwrap().join("artifacts");
+        assert!(std::fs::read_dir(media_root).unwrap().all(|entry| entry.unwrap().path().extension().is_some_and(|extension| extension == "json")));
+        assert_eq!(blake3::hash(&media_bytes).to_hex().to_string(), capture["body"]["content_hash"].as_str().unwrap());
+        assert_eq!(capture["body"]["source_movement_seq"], 7);
+        let geometry = &capture["body"]["geometry"];
+        assert_eq!(geometry["image"],json!({"width":4,"height":8,"media_type":"image/png","content_hash":capture["body"]["content_hash"]}));
+        assert_eq!(geometry["capture"]["document_css_rect"],json!({"x":-12.0,"y":24.0,"width":1200.0,"height":2400.0}));
+        assert_eq!(geometry["document"]["frame_id"],"FRAME1");
+        assert_eq!(geometry["document"]["loader_id"],"LOAD1");
+        assert_eq!(geometry["observed"]["device_pixel_ratio"],2.5);
+        assert_eq!(geometry["coordinates"]["document_css_per_image_pixel"],json!({"x":300.0,"y":300.0}));
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["last_capture"]["geometry"],*geometry);
+        assert_eq!(media_bytes,base64::engine::general_purpose::STANDARD.decode(image["payload_base64"].as_str().unwrap()).unwrap());
+    
+    
+        let tabs = response(received(room.receive(invocation(
+            root.path(), 8, "browser.tabs", json!({}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(tabs["body"]["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(tabs["body"]["tabs"][0]["target_id"], "TARGET1");
+        for (sequence, tool) in [(9,"browser.tab_select"),(10,"browser.tab_close")] {
+            let refused = response(received(room.receive(invocation(
+                root.path(), sequence, tool, json!({"target_id":"FOREIGN"}), &tools, &formation, &kind,
+            ), &recorder).await));
+            assert_eq!(refused["ok"], false);
+            assert!(refused["error"]["message"].as_str().unwrap().contains("owned context"));
+        }
+        let cookies = response(received(room.receive(invocation(
+            root.path(), 11, "browser.cookies", json!({"urls":["https://example.com/"]}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(cookies["body"]["cookies"][0]["name"], "room_cookie");
+    
+        let selected = response(received(room.receive(invocation(
+            root.path(), 12, "browser.tab_select", json!({"target_id":"TARGET1"}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(selected["ok"], true, "{selected}");
+        let intent = json!({"id":12,"target_id":"TARGET1","source":"tool","activate":true});
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"], intent);
+        let observed = response(received(room.receive(invocation(
+            root.path(), 13, "browser.snapshot", json!({}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(observed["ok"], true, "{observed}");
         let refused = response(received(room.receive(invocation(
-            root.path(), sequence, tool, json!({"target_id":"FOREIGN"}), &tools, &formation, &kind,
+            root.path(), 14, "browser.tab_select", json!({"target_id":"FOREIGN"}), &tools, &formation, &kind,
         ), &recorder).await));
         assert_eq!(refused["ok"], false);
-        assert!(refused["error"]["message"].as_str().unwrap().contains("owned context"));
-    }
-    let cookies = response(received(room.receive(invocation(
-        root.path(), 11, "browser.cookies", json!({"urls":["https://example.com/"]}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(cookies["body"]["cookies"][0]["name"], "room_cookie");
-
-    let selected = response(received(room.receive(invocation(
-        root.path(), 12, "browser.tab_select", json!({"target_id":"TARGET1"}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(selected["ok"], true, "{selected}");
-    let intent = json!({"id":12,"target_id":"TARGET1","source":"tool","activate":true});
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"], intent);
-    let observed = response(received(room.receive(invocation(
-        root.path(), 13, "browser.snapshot", json!({}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(observed["ok"], true, "{observed}");
-    let refused = response(received(room.receive(invocation(
-        root.path(), 14, "browser.tab_select", json!({"target_id":"FOREIGN"}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(refused["ok"], false);
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"], intent);
-
-    let back = response(received(room.receive(invocation(
-        root.path(), 15, "browser.back", json!({}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(back["ok"], false);
-    assert!(back["error"]["message"].as_str().unwrap().contains("previous history entry"));
-    let capture = response(received(room.receive(invocation(
-        root.path(), 16, "browser.screenshot", json!({"full_page":true}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(capture["ok"], true, "{capture}");
-    assert_eq!(capture["body"]["target_id"], "TARGET1");
-    for sequence in [17, 18] {
-        let closed = response(received(room.receive(invocation(root.path(), sequence, "browser.close", json!({}), &tools, &formation, &kind), &recorder).await));
-        assert_eq!(closed["ok"], sequence == 17);
-        assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
-        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["status"], "closed");
-    }
-    let reopened = response(received(room.receive(invocation(root.path(), 19, "browser.tab_new", json!({}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(reopened["ok"], true, "{reopened}");
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"],json!({"id":19,"target_id":"TARGET1","source":"tool","activate":true}));
-
-    let observed = response(received(room.receive(invocation(
-        root.path(), 22, "browser.snapshot", json!({}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(observed["ok"], true, "{observed}");
-    type_arguments["ref"] = observed["body"]["snapshot"]["refs"][2]["ref"].clone();
-    ToolArgumentValidator::compile(&descriptor("browser.type").args_schema).unwrap().validate(&type_arguments).unwrap();
-    let typed = response(received(room.receive(invocation(
-        root.path(), 23, "browser.type", type_arguments, &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(typed["ok"], true, "{typed}");
-    assert_eq!(typed["body"]["typed_chars"], 14);
-    let observed = response(received(room.receive(invocation(
-        root.path(), 24, "browser.snapshot", json!({}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(observed["ok"], true, "{observed}");
-    let changed = response(received(room.receive(invocation(
-        root.path(), 25, "browser.eval", json!({"script":"location.reload()"}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(changed["ok"], true, "{changed}");
-    let stale_document = response(received(room.receive(invocation(
-        root.path(), 26, "browser.click", json!({"ref":observed["body"]["snapshot"]["refs"][0]["ref"]}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(stale_document["ok"], false);
-    assert!(stale_document["error"]["message"].as_str().unwrap().contains("stale document"));
-    let viewport = response(received(room.receive(invocation(root.path(), 27, "browser.screenshot", json!({}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(viewport["ok"],true,"{viewport}");
-    let geometry = &viewport["body"]["geometry"];
-    assert_eq!(geometry["capture"]["scope"],"viewport");
-    assert_eq!(geometry["capture"]["clip"],Value::Null);
-    assert_eq!(geometry["capture"]["document_css_rect"],Value::Null);
-    assert_eq!(geometry["coordinates"],json!({"image_space":"encoded_image_pixels","mapping_status":"unavailable_unclipped_surface"}));
-    assert_eq!(geometry["observed"]["css_visual_viewport"],json!({"offsetX":5.0,"offsetY":8.0,"pageX":15.0,"pageY":88.0,"clientWidth":300.0,"clientHeight":200.0,"scale":2.0,"zoom":1.25}));
-    assert_eq!((geometry["image"]["width"].as_u64(),geometry["image"]["height"].as_u64()),(Some(3),Some(2)));
-    let mismatch = response(received(room.receive(invocation(root.path(), 28, "browser.screenshot", json!({"format":"jpeg"}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(mismatch["ok"],false);
-    assert!(mismatch["error"]["message"].as_str().unwrap().contains("image format or original bytes"));
-    let scrolled = response(received(room.receive(invocation(root.path(), 29, "browser.eval", json!({"script":"window.scrollTo(0, 80)"}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(scrolled["ok"],true);
-    let unstable = response(received(room.receive(invocation(root.path(), 30, "browser.screenshot", json!({}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(unstable["ok"],false);
-    assert!(unstable["error"]["message"].as_str().unwrap().contains("metrics changed during capture"));
-    let live = recorder.live_states.lock().unwrap().last().unwrap().clone();
-    assert_eq!(live["activity"]["status"],"failed");
-    assert_eq!(live["last_capture"]["source_movement_seq"],27);
-    assert_eq!(live["last_capture"]["geometry"],*geometry);
-    assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
-    let captures = process_var.join("worker-environments").join(formation.worker_environment_id.as_str()).join("captures");
-    assert!(!captures.join("capture-30.png").exists());
-    assert!(!captures.join("capture-28.jpg").exists());
-
-    let retained = response(received(room.receive(invocation(root.path(),37,"browser.snapshot",json!({"target_id":"TARGET1"}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(retained["ok"],true,"{retained}");
-    let second = response(received(room.receive(invocation(root.path(),38,"browser.tab_new",json!({"url":"https://second.test/"}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(second["body"]["target_id"],"TARGET2");
-    let second_intent = json!({"id":38,"target_id":"TARGET2","source":"tool","activate":true});
-    let direct = response(received(room.receive(invocation(root.path(),39,"browser.click",json!({"target_id":"TARGET1","ref":retained["body"]["snapshot"]["refs"][0]["ref"]}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(direct["ok"],true,"{direct}"); assert_eq!(direct["body"]["target_id"],"TARGET1");
-    let direct = response(received(room.receive(invocation(root.path(),40,"browser.eval",json!({"target_id":"TARGET1","script":"retained-target-proof"}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(direct["ok"],true,"{direct}");
-    let live = recorder.live_states.lock().unwrap().last().unwrap().clone();
-    assert_eq!(live["target_id"],"TARGET2"); assert_eq!(live["presentation_intent"],second_intent);
-    let foreign = response(received(room.receive(invocation(root.path(),41,"browser.snapshot",json!({"target_id":"FOREIGN"}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(foreign["ok"],false);
-    let closed = response(received(room.receive(invocation(root.path(),42,"browser.tab_close",json!({"target_id":"TARGET2"}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(closed["ok"],true,"{closed}");
-    let selected = response(received(room.receive(invocation(root.path(),43,"browser.tab_select",json!({"target_id":"TARGET1"}),&tools,&formation,&kind),&recorder).await));
-    assert_eq!(selected["ok"],true,"{selected}");
-    let intent = json!({"id":43,"target_id":"TARGET1","source":"tool","activate":true});
-
-
-    drop(room);
-    let methods = ws.await.unwrap();
-    assert_eq!(methods.iter().filter(|method| *method == "Target.createBrowserContext").count(), 1);
-    assert_eq!(methods.iter().filter(|method| *method == "Target.createTarget").count(), 3);
-    assert_eq!(methods.iter().filter(|method| *method == "Target.activateTarget").count(), 2);
-    assert!(methods.iter().any(|method| method == "retained-proof:/devtools/page/TARGET1"));
-    assert!(!methods.iter().any(|method| method == "retained-proof:/devtools/page/TARGET2"));
-    assert!(!methods.iter().any(|method| method == "Page.navigateToHistoryEntry"));
-    assert_eq!(methods.iter().filter(|method| *method == "Page.captureScreenshot").count(),7);
-    assert_eq!(methods.iter().filter(|method| *method == "Input.insertText").count(), 1);
-    assert_eq!(
-        methods
-            .iter()
-            .filter(|method| *method == "Page.navigate")
-            .count(),
-        1
-    );
-    assert_eq!(
-        methods
-            .iter()
-            .filter(|method| *method == "Input.dispatchMouseEvent")
-            .count(),
-        6
-    );
-
-    let (discovery, recovered_ws) = spawn_context_cdp_mock(true, false, 0).await;
-    write_browser_interface(&restart_environment.interface_dir, &discovery);
-    restart_environment.descriptor_snapshot = None;
-    restart_environment.var_dir = root.path().join("next-process-generation");
-    let resumed = BrowserRoom::load(restart_environment.clone()).unwrap();
-    let missing = response(received(resumed.receive(invocation(
-        root.path(), 20, "browser.navigate", json!({"url": "https://example.com/"}), &tools, &formation, &kind,
-    ), &recorder).await));
-    assert_eq!(missing["ok"], false);
-    assert!(missing["error"]["message"].as_str().unwrap().contains("exact target 'TARGET1' was preserved"));
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["target_id"], "TARGET1");
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"], intent);
-    assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["status"], "error");
-    drop(resumed);
-    let recovered_methods = recovered_ws.await.unwrap();
-    assert!(!recovered_methods.iter().any(|method| method == "Target.createBrowserContext" || method == "Target.createTarget"));
-
-    let (discovery, lost_ws) = spawn_context_cdp_mock(false, false, 0).await;
-    write_browser_interface(&restart_environment.interface_dir, &discovery);
-    let lost = BrowserRoom::load(restart_environment.clone()).unwrap();
-    let failed = response(received(lost.receive(invocation(root.path(), 21, "browser.screenshot", json!({}), &tools, &formation, &kind), &recorder).await));
-    assert_eq!(failed["ok"], false);
-    assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Failed);
-    assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["status"], "error");
-    drop(lost);
-    assert!(lost_ws.await.unwrap().iter().all(|method| method == "Target.getBrowserContexts"));
-
-    let (discovery, viewport_ws) = spawn_context_cdp_mock(true, false, 1).await;
-    write_browser_interface(&restart_environment.interface_dir, &discovery);
-    restart_environment.descriptor_snapshot = None;
-    restart_environment.durable_var_dir = Some(root.path().join("viewport-context"));
-    let viewport_room = BrowserRoom::load(restart_environment).unwrap();
-    for (seq, tool, args) in [(31, "browser.viewport_set", json!({"width":10,"height":9000})), (32, "browser.viewport_reset", json!({})), (33, "browser.viewport_set", json!({"width":800,"height":600}))] {
-        ToolArgumentValidator::compile(&descriptor(tool).args_schema).unwrap().validate(&args).unwrap();
-        let result = response(received(viewport_room.receive(invocation(root.path(), seq, tool, args, &tools, &formation, &kind), &recorder).await));
-        assert_eq!(result["ok"], true, "{result}");
-        assert!(result["body"]["target_id"].is_null());
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"], intent);
+    
+        let back = response(received(room.receive(invocation(
+            root.path(), 15, "browser.back", json!({}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(back["ok"], false);
+        assert!(back["error"]["message"].as_str().unwrap().contains("previous history entry"));
+        let capture = response(received(room.receive(invocation(
+            root.path(), 16, "browser.screenshot", json!({"full_page":true}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(capture["ok"], true, "{capture}");
+        assert_eq!(capture["body"]["target_id"], "TARGET1");
+        for sequence in [17, 18] {
+            let closed = response(received(room.receive(invocation(root.path(), sequence, "browser.close", json!({}), &tools, &formation, &kind), &recorder).await));
+            assert_eq!(closed["ok"], sequence == 17);
+            assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
+            assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["status"], "closed");
+        }
+        let reopened = response(received(room.receive(invocation(root.path(), 19, "browser.tab_new", json!({}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(reopened["ok"], true, "{reopened}");
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"],json!({"id":19,"target_id":"TARGET1","source":"tool","activate":true}));
+    
+        let observed = response(received(room.receive(invocation(
+            root.path(), 22, "browser.snapshot", json!({}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(observed["ok"], true, "{observed}");
+        type_arguments["ref"] = observed["body"]["snapshot"]["refs"][2]["ref"].clone();
+        ToolArgumentValidator::compile(&descriptor("browser.type").args_schema).unwrap().validate(&type_arguments).unwrap();
+        let typed = response(received(room.receive(invocation(
+            root.path(), 23, "browser.type", type_arguments, &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(typed["ok"], true, "{typed}");
+        assert_eq!(typed["body"]["typed_chars"], 14);
+        let observed = response(received(room.receive(invocation(
+            root.path(), 24, "browser.snapshot", json!({}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(observed["ok"], true, "{observed}");
+        let changed = response(received(room.receive(invocation(
+            root.path(), 25, "browser.eval", json!({"script":"location.reload()"}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(changed["ok"], true, "{changed}");
+        let stale_document = response(received(room.receive(invocation(
+            root.path(), 26, "browser.click", json!({"ref":observed["body"]["snapshot"]["refs"][0]["ref"]}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(stale_document["ok"], false);
+        assert!(stale_document["error"]["message"].as_str().unwrap().contains("stale document"));
+        let viewport = response(received(room.receive(invocation(root.path(), 27, "browser.screenshot", json!({}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(viewport["ok"],true,"{viewport}");
+        let geometry = &viewport["body"]["geometry"];
+        assert_eq!(geometry["capture"]["scope"],"viewport");
+        assert_eq!(geometry["capture"]["clip"],Value::Null);
+        assert_eq!(geometry["capture"]["document_css_rect"],Value::Null);
+        assert_eq!(geometry["coordinates"],json!({"image_space":"encoded_image_pixels","mapping_status":"unavailable_unclipped_surface"}));
+        assert_eq!(geometry["observed"]["css_visual_viewport"],json!({"offsetX":5.0,"offsetY":8.0,"pageX":15.0,"pageY":88.0,"clientWidth":300.0,"clientHeight":200.0,"scale":2.0,"zoom":1.25}));
+        assert_eq!((geometry["image"]["width"].as_u64(),geometry["image"]["height"].as_u64()),(Some(3),Some(2)));
+        let mismatch = response(received(room.receive(invocation(root.path(), 28, "browser.screenshot", json!({"format":"jpeg"}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(mismatch["ok"],false);
+        assert!(mismatch["error"]["message"].as_str().unwrap().contains("image format or original bytes"));
+        let scrolled = response(received(room.receive(invocation(root.path(), 29, "browser.eval", json!({"script":"window.scrollTo(0, 80)"}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(scrolled["ok"],true);
+        let unstable = response(received(room.receive(invocation(root.path(), 30, "browser.screenshot", json!({}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(unstable["ok"],false);
+        assert!(unstable["error"]["message"].as_str().unwrap().contains("metrics changed during capture"));
         let live = recorder.live_states.lock().unwrap().last().unwrap().clone();
-        assert_eq!(live["status"], "closed"); assert_eq!(live["browser_context_id"], "CONTEXT1");
-        assert!(live["tabs"].as_array().unwrap().is_empty()); assert!(live["presentation_intent"].is_null());
+        assert_eq!(live["activity"]["status"],"failed");
+        assert_eq!(live["last_capture"]["source_movement_seq"],27);
+        assert_eq!(live["last_capture"]["geometry"],*geometry);
         assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
-        if seq == 31 { assert_eq!(live["viewport"]["pending"]["viewport"], json!({"width":240,"height":4096})); }
-        if seq == 32 { assert!(live["viewport"]["pending"].is_null()); }
-    }
-    for bad in [json!({"width":0,"height":600}),json!({"width":1.5,"height":600}),json!({"width":800,"height":600,"session_id":"foreign"})] {
-        assert!(ToolArgumentValidator::compile(&descriptor("browser.viewport_set").args_schema).unwrap().validate(&bad).is_err());
-    }
-    for (seq, tool, args) in [(34,"browser.tab_new",json!({"url":"https://example.com/"})),(35,"browser.viewport_set",json!({"width":800,"height":600})),(36,"browser.viewport_reset",json!({}))] {
-        let result = response(received(viewport_room.receive(invocation(root.path(),seq,tool,args,&tools,&formation,&kind),&recorder).await));
-        assert_eq!(result["ok"],true,"{result}");
+        let captures = process_var.join("worker-environments").join(formation.worker_environment_id.as_str()).join("captures");
+        assert!(!captures.join("capture-30.png").exists());
+        assert!(!captures.join("capture-28.jpg").exists());
+    
+        let retained = response(received(room.receive(invocation(root.path(),37,"browser.snapshot",json!({"target_id":"TARGET1"}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(retained["ok"],true,"{retained}");
+        let second = response(received(room.receive(invocation(root.path(),38,"browser.tab_new",json!({"url":"https://second.test/"}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(second["body"]["target_id"],"TARGET2");
+        let second_intent = json!({"id":38,"target_id":"TARGET2","source":"tool","activate":true});
+        let direct = response(received(room.receive(invocation(root.path(),39,"browser.click",json!({"target_id":"TARGET1","ref":retained["body"]["snapshot"]["refs"][0]["ref"]}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(direct["ok"],true,"{direct}"); assert_eq!(direct["body"]["target_id"],"TARGET1");
+        let direct = response(received(room.receive(invocation(root.path(),40,"browser.eval",json!({"target_id":"TARGET1","script":"retained-target-proof"}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(direct["ok"],true,"{direct}");
         let live = recorder.live_states.lock().unwrap().last().unwrap().clone();
-        assert!(live["viewport"]["pending"].is_null());
-        assert_eq!(live["viewport"]["pages"]["TARGET1"]["model_viewport"]["revision"], if seq == 36 {36} else {33});
-    }
-    drop(viewport_room);
-    let methods = viewport_ws.await.unwrap();
-    assert_eq!(methods.iter().filter(|m| m.as_str() == "Target.createBrowserContext").count(),1);
-    assert_eq!(methods.iter().filter(|m| m.as_str() == "Target.createTarget").count(),1);
-    assert_eq!(methods.iter().filter(|m| m.as_str() == "Emulation.setDeviceMetricsOverride").count(),1);
-    assert_eq!(methods.iter().filter(|m| m.as_str() == "Emulation.clearDeviceMetricsOverride").count(),1);
-    assert!(methods.iter().position(|m| m == "Emulation.setDeviceMetricsOverride").unwrap() < methods.iter().position(|m| m == "Page.enable").unwrap());
-    assert!(methods.iter().position(|m| m == "Emulation.setDeviceMetricsOverride").unwrap() < methods.iter().position(|m| m == "Page.navigate").unwrap());
+        assert_eq!(live["target_id"],"TARGET2"); assert_eq!(live["presentation_intent"],second_intent);
+        let foreign = response(received(room.receive(invocation(root.path(),41,"browser.snapshot",json!({"target_id":"FOREIGN"}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(foreign["ok"],false);
+        let closed = response(received(room.receive(invocation(root.path(),42,"browser.tab_close",json!({"target_id":"TARGET2"}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(closed["ok"],true,"{closed}");
+        let selected = response(received(room.receive(invocation(root.path(),43,"browser.tab_select",json!({"target_id":"TARGET1"}),&tools,&formation,&kind),&recorder).await));
+        assert_eq!(selected["ok"],true,"{selected}");
+        let intent = json!({"id":43,"target_id":"TARGET1","source":"tool","activate":true});
+    
+    
+        drop(room);
+        let methods = ws.await.unwrap();
+        assert_eq!(methods.iter().filter(|method| *method == "Target.createBrowserContext").count(), 1);
+        assert_eq!(methods.iter().filter(|method| *method == "Target.createTarget").count(), 3);
+        assert_eq!(methods.iter().filter(|method| *method == "Target.activateTarget").count(), 2);
+        assert!(methods.iter().any(|method| method == "retained-proof:/devtools/page/TARGET1"));
+        assert!(!methods.iter().any(|method| method == "retained-proof:/devtools/page/TARGET2"));
+        assert!(!methods.iter().any(|method| method == "Page.navigateToHistoryEntry"));
+        assert_eq!(methods.iter().filter(|method| *method == "Page.captureScreenshot").count(),7);
+        assert_eq!(methods.iter().filter(|method| *method == "Input.insertText").count(), 1);
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "Page.navigate")
+                .count(),
+            1
+        );
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| *method == "Input.dispatchMouseEvent")
+                .count(),
+            6
+        );
+    
+        let (discovery, recovered_ws) = spawn_context_cdp_mock(true, false, 0).await;
+        write_browser_interface(&restart_environment.interface_dir, &discovery);
+        restart_environment.descriptor_snapshot = None;
+        restart_environment.var_dir = root.path().join("next-process-generation");
+        let resumed = BrowserRoom::load(restart_environment.clone()).unwrap();
+        let missing = response(received(resumed.receive(invocation(
+            root.path(), 20, "browser.navigate", json!({"url": "https://example.com/"}), &tools, &formation, &kind,
+        ), &recorder).await));
+        assert_eq!(missing["ok"], false);
+        assert!(missing["error"]["message"].as_str().unwrap().contains("exact target 'TARGET1' was preserved"));
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["target_id"], "TARGET1");
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["presentation_intent"], intent);
+        assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["status"], "error");
+        drop(resumed);
+        let recovered_methods = recovered_ws.await.unwrap();
+        assert!(!recovered_methods.iter().any(|method| method == "Target.createBrowserContext" || method == "Target.createTarget"));
+    
+        let (discovery, lost_ws) = spawn_context_cdp_mock(false, false, 0).await;
+        write_browser_interface(&restart_environment.interface_dir, &discovery);
+        let lost = BrowserRoom::load(restart_environment.clone()).unwrap();
+        let failed = response(received(lost.receive(invocation(root.path(), 21, "browser.screenshot", json!({}), &tools, &formation, &kind), &recorder).await));
+        assert_eq!(failed["ok"], false);
+        assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Failed);
+        assert_eq!(recorder.live_states.lock().unwrap().last().unwrap()["status"], "error");
+        drop(lost);
+        assert!(lost_ws.await.unwrap().iter().all(|method| method == "Target.getBrowserContexts"));
+    
+        let (discovery, viewport_ws) = spawn_context_cdp_mock(true, false, 1).await;
+        write_browser_interface(&restart_environment.interface_dir, &discovery);
+        restart_environment.descriptor_snapshot = None;
+        restart_environment.durable_var_dir = Some(root.path().join("viewport-context"));
+        let viewport_room = BrowserRoom::load(restart_environment).unwrap();
+        for (seq, tool, args) in [(31, "browser.viewport_set", json!({"width":10,"height":9000})), (32, "browser.viewport_reset", json!({})), (33, "browser.viewport_set", json!({"width":800,"height":600}))] {
+            ToolArgumentValidator::compile(&descriptor(tool).args_schema).unwrap().validate(&args).unwrap();
+            let result = response(received(viewport_room.receive(invocation(root.path(), seq, tool, args, &tools, &formation, &kind), &recorder).await));
+            assert_eq!(result["ok"], true, "{result}");
+            assert!(result["body"]["target_id"].is_null());
+            let live = recorder.live_states.lock().unwrap().last().unwrap().clone();
+            assert_eq!(live["status"], "closed"); assert_eq!(live["browser_context_id"], "CONTEXT1");
+            assert!(live["tabs"].as_array().unwrap().is_empty()); assert!(live["presentation_intent"].is_null());
+            assert_eq!(recorder.records.as_ref().unwrap().read(&formation.worker_environment_id).unwrap().lifecycle, WorkerEnvironmentLifecycle::Active);
+            if seq == 31 { assert_eq!(live["viewport"]["pending"]["viewport"], json!({"width":240,"height":4096})); }
+            if seq == 32 { assert!(live["viewport"]["pending"].is_null()); }
+        }
+        for bad in [json!({"width":0,"height":600}),json!({"width":1.5,"height":600}),json!({"width":800,"height":600,"session_id":"foreign"})] {
+            assert!(ToolArgumentValidator::compile(&descriptor("browser.viewport_set").args_schema).unwrap().validate(&bad).is_err());
+        }
+        for (seq, tool, args) in [(34,"browser.tab_new",json!({"url":"https://example.com/"})),(35,"browser.viewport_set",json!({"width":800,"height":600})),(36,"browser.viewport_reset",json!({}))] {
+            let result = response(received(viewport_room.receive(invocation(root.path(),seq,tool,args,&tools,&formation,&kind),&recorder).await));
+            assert_eq!(result["ok"],true,"{result}");
+            let live = recorder.live_states.lock().unwrap().last().unwrap().clone();
+            assert!(live["viewport"]["pending"].is_null());
+            assert_eq!(live["viewport"]["pages"]["TARGET1"]["model_viewport"]["revision"], if seq == 36 {36} else {33});
+        }
+        drop(viewport_room);
+        let methods = viewport_ws.await.unwrap();
+        assert_eq!(methods.iter().filter(|m| m.as_str() == "Target.createBrowserContext").count(),1);
+        assert_eq!(methods.iter().filter(|m| m.as_str() == "Target.createTarget").count(),1);
+        assert_eq!(methods.iter().filter(|m| m.as_str() == "Emulation.setDeviceMetricsOverride").count(),1);
+        assert_eq!(methods.iter().filter(|m| m.as_str() == "Emulation.clearDeviceMetricsOverride").count(),1);
+        assert!(methods.iter().position(|m| m == "Emulation.setDeviceMetricsOverride").unwrap() < methods.iter().position(|m| m == "Page.enable").unwrap());
+        assert!(methods.iter().position(|m| m == "Emulation.setDeviceMetricsOverride").unwrap() < methods.iter().position(|m| m == "Page.navigate").unwrap());
+    });
+}
+
+fn on_large_stack(test: impl std::future::Future<Output = ()> + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(test)
+        })
+        .unwrap()
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }
 
 #[tokio::test]

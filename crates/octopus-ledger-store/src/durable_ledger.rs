@@ -22,33 +22,37 @@ struct RowIndex {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct LedgerIdentity {
     device: u64,
-    inode: u64,
+    inode: u128,
     len: u64,
 }
 
+/// Unix reads device and inode from the metadata. Windows has them only on a
+/// handle (volume serial number and file ID), so it asks
+/// `octopus-private-fs` for the file's identity.
 impl LedgerIdentity {
     fn of(path: &Path) -> LedgerResult<Self> {
         let metadata = std::fs::metadata(path).map_err(|e| io_err(path, &e))?;
-        Ok(Self::from_metadata(&metadata))
+        Self::from_metadata(path, &metadata)
     }
 
     #[cfg(unix)]
-    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+    fn from_metadata(_path: &Path, metadata: &std::fs::Metadata) -> LedgerResult<Self> {
         use std::os::unix::fs::MetadataExt;
-        Self {
+        Ok(Self {
             device: metadata.dev(),
-            inode: metadata.ino(),
+            inode: u128::from(metadata.ino()),
             len: metadata.len(),
-        }
+        })
     }
 
     #[cfg(not(unix))]
-    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        Self {
-            device: 0,
-            inode: 0,
+    fn from_metadata(path: &Path, metadata: &std::fs::Metadata) -> LedgerResult<Self> {
+        let identity = octopus_private_fs::identity_of_path(path).map_err(|e| io_err(path, &e))?;
+        Ok(Self {
+            device: identity.device,
+            inode: identity.file,
             len: metadata.len(),
-        }
+        })
     }
 }
 
@@ -63,20 +67,33 @@ fn movement_metadata_root(path: &Path) -> PathBuf {
 struct GrantFileFingerprint {
     identity: LedgerIdentity,
     modified: std::time::SystemTime,
-    #[cfg(unix)]
     changed: (i64, i64),
 }
 
 impl GrantFileFingerprint {
+    #[cfg(unix)]
     fn from_metadata(path: &Path, metadata: &std::fs::Metadata) -> LedgerResult<Self> {
+        use std::os::unix::fs::MetadataExt;
         Ok(Self {
-            identity: LedgerIdentity::from_metadata(metadata),
+            identity: LedgerIdentity::from_metadata(path, metadata)?,
             modified: metadata.modified().map_err(|error| io_err(path, &error))?,
-            #[cfg(unix)]
-            changed: {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.ctime(), metadata.ctime_nsec())
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+
+    /// Windows: the file ID and the NTFS change time (the ctime counterpart)
+    /// from one handle.
+    #[cfg(not(unix))]
+    fn from_metadata(path: &Path, metadata: &std::fs::Metadata) -> LedgerResult<Self> {
+        let identity = octopus_private_fs::identity_of_path(path).map_err(|error| io_err(path, &error))?;
+        Ok(Self {
+            identity: LedgerIdentity {
+                device: identity.device,
+                inode: identity.file,
+                len: metadata.len(),
             },
+            modified: metadata.modified().map_err(|error| io_err(path, &error))?,
+            changed: identity.changed,
         })
     }
 }
@@ -353,7 +370,7 @@ impl DurableLog {
             .map_err(|e| io_err(&path, &e))?;
         let file_metadata = file.metadata().map_err(|e| io_err(&path, &e))?;
         let end_offset = file_metadata.len();
-        let identity = LedgerIdentity::from_metadata(&file_metadata);
+        let identity = LedgerIdentity::from_metadata(&path, &file_metadata)?;
         Ok(Self {
             path,
             file,

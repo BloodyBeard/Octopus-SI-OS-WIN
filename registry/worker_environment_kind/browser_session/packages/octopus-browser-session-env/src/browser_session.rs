@@ -457,7 +457,7 @@ impl BrowserRoom {
                 "status": "running",
             }));
         }
-        let result = Box::pin(self.dispatch(&decoded, recorder)).await;
+        let result = self.dispatch(&decoded, recorder).await;
         let mut evidence_write_errors = Vec::new();
         let mut detail = result.as_ref().err().cloned();
         let available = if result.is_ok() && decoded.operation != BrowserOperation::FilechooserResume {
@@ -507,53 +507,58 @@ impl BrowserRoom {
         crate::browser_wait_completion::finish(&decoded.envelope, response, match &self.transport { BrowserTransport::Native(transport) => Some(transport), _ => None }, None).await
     }
 
-    async fn dispatch(
-        &self,
-        decoded: &DecodedRoomInvocation,
-        recorder: &dyn WorkerEnvironmentRecorder,
-    ) -> Result<Value, String> {
+    /// Picks the operation's future without polling it. Each operation's
+    /// future is built inside `boxed_operation`, so this frame does not reserve
+    /// room for all of them at once: as one `async fn` awaiting every arm,
+    /// a debug build needed about 400 KB of stack here (too much for a 1 MiB
+    /// Windows main thread).
+    fn dispatch<'a>(
+        &'a self,
+        decoded: &'a DecodedRoomInvocation,
+        recorder: &'a dyn WorkerEnvironmentRecorder,
+    ) -> OperationFuture<'a> {
         match decoded.operation {
-            BrowserOperation::Navigate => self.navigate(decoded, recorder).await,
-            BrowserOperation::Snapshot => self.snapshot(decoded, recorder).await,
-            BrowserOperation::Click => self.click(decoded, recorder).await,
-            BrowserOperation::Type => self.type_text(decoded, recorder).await,
-            BrowserOperation::Key => self.key(decoded, recorder).await,
-            BrowserOperation::Scroll => self.scroll(decoded, recorder).await,
-            BrowserOperation::Back => self.back(decoded, recorder).await,
-            BrowserOperation::Forward => self.forward(decoded, recorder).await,
-            BrowserOperation::Reload => self.reload(decoded, recorder).await,
-            BrowserOperation::ViewportSet | BrowserOperation::ViewportReset => self.viewport(decoded).await,
-            BrowserOperation::Eval => self.evaluate(decoded, recorder).await,
+            BrowserOperation::Navigate => boxed_operation(|| self.navigate(decoded, recorder)),
+            BrowserOperation::Snapshot => boxed_operation(|| self.snapshot(decoded, recorder)),
+            BrowserOperation::Click => boxed_operation(|| self.click(decoded, recorder)),
+            BrowserOperation::Type => boxed_operation(|| self.type_text(decoded, recorder)),
+            BrowserOperation::Key => boxed_operation(|| self.key(decoded, recorder)),
+            BrowserOperation::Scroll => boxed_operation(|| self.scroll(decoded, recorder)),
+            BrowserOperation::Back => boxed_operation(|| self.back(decoded, recorder)),
+            BrowserOperation::Forward => boxed_operation(|| self.forward(decoded, recorder)),
+            BrowserOperation::Reload => boxed_operation(|| self.reload(decoded, recorder)),
+            BrowserOperation::ViewportSet | BrowserOperation::ViewportReset => boxed_operation(|| self.viewport(decoded)),
+            BrowserOperation::Eval => boxed_operation(|| self.evaluate(decoded, recorder)),
             BrowserOperation::EvaluateReadonly | BrowserOperation::LocatorQuery | BrowserOperation::LocatorFill
             | BrowserOperation::LocatorPress | BrowserOperation::LocatorSelect | BrowserOperation::LocatorCheck
             | BrowserOperation::LocatorWait | BrowserOperation::PointerMove | BrowserOperation::Paste
-            | BrowserOperation::MediaDownload => self.browser_family(decoded, recorder).await,
+            | BrowserOperation::MediaDownload => boxed_operation(|| self.browser_family(decoded, recorder)),
             BrowserOperation::ClipboardRead | BrowserOperation::ClipboardWrite
-            | BrowserOperation::VisibilityGet | BrowserOperation::VisibilitySet => self.browser_family_control(decoded).await,
-            BrowserOperation::PlaywrightDomSnapshot | BrowserOperation::DomSnapshot | BrowserOperation::DomClick | BrowserOperation::DomScroll => self.browser_family(decoded, recorder).await,
-            BrowserOperation::Hover => self.hover(decoded, recorder).await,
-            BrowserOperation::Select => self.select(decoded, recorder).await,
-            BrowserOperation::Drag => self.drag(decoded, recorder).await,
-            BrowserOperation::Wait => self.wait(decoded, recorder).await,
-            BrowserOperation::WaitComplete => Err("Wait completion requires its separately declared observer executable".into()),
-            BrowserOperation::History | BrowserOperation::HistoryResume => Err("History source operations cannot enter page dispatch".into()),
-            BrowserOperation::Images => self.images(decoded, recorder).await,
-            BrowserOperation::Console => self.console(decoded, recorder).await,
-            BrowserOperation::Dialog => self.dialog(decoded, recorder).await,
-            BrowserOperation::Screenshot => self.screenshot(decoded, recorder).await,
-            BrowserOperation::Pdf => self.pdf(decoded, recorder).await,
-            BrowserOperation::DownloadArm | BrowserOperation::DownloadWait | BrowserOperation::DownloadCancel => self.download(decoded, recorder).await,
+            | BrowserOperation::VisibilityGet | BrowserOperation::VisibilitySet => boxed_operation(|| self.browser_family_control(decoded)),
+            BrowserOperation::PlaywrightDomSnapshot | BrowserOperation::DomSnapshot | BrowserOperation::DomClick | BrowserOperation::DomScroll => boxed_operation(|| self.browser_family(decoded, recorder)),
+            BrowserOperation::Hover => boxed_operation(|| self.hover(decoded, recorder)),
+            BrowserOperation::Select => boxed_operation(|| self.select(decoded, recorder)),
+            BrowserOperation::Drag => boxed_operation(|| self.drag(decoded, recorder)),
+            BrowserOperation::Wait => boxed_operation(|| self.wait(decoded, recorder)),
+            BrowserOperation::WaitComplete => Box::pin(std::future::ready(Err("Wait completion requires its separately declared observer executable".into()))),
+            BrowserOperation::History | BrowserOperation::HistoryResume => Box::pin(std::future::ready(Err("History source operations cannot enter page dispatch".into()))),
+            BrowserOperation::Images => boxed_operation(|| self.images(decoded, recorder)),
+            BrowserOperation::Console => boxed_operation(|| self.console(decoded, recorder)),
+            BrowserOperation::Dialog => boxed_operation(|| self.dialog(decoded, recorder)),
+            BrowserOperation::Screenshot => boxed_operation(|| self.screenshot(decoded, recorder)),
+            BrowserOperation::Pdf => boxed_operation(|| self.pdf(decoded, recorder)),
+            BrowserOperation::DownloadArm | BrowserOperation::DownloadWait | BrowserOperation::DownloadCancel => boxed_operation(|| self.download(decoded, recorder)),
             BrowserOperation::FilechooserArm | BrowserOperation::FilechooserWait | BrowserOperation::FilechooserSetFiles
-            | BrowserOperation::FilechooserCancel | BrowserOperation::FilechooserResume => self.filechooser(decoded, recorder).await,
-            BrowserOperation::Cookies => self.cookies(decoded, recorder).await,
-            BrowserOperation::CookieSet => self.cookie_set(decoded, recorder).await,
-            BrowserOperation::CookieDelete => self.cookie_delete(decoded, recorder).await,
-            BrowserOperation::Tabs => self.tabs(decoded).await,
-            BrowserOperation::TabNew => self.tab_new(decoded, recorder).await,
-            BrowserOperation::TabSelect => self.tab_select(decoded, recorder).await,
-            BrowserOperation::TabMark => self.tab_mark(decoded).await,
-            BrowserOperation::TabClose => self.tab_close(decoded).await,
-            BrowserOperation::Close => self.close(decoded).await,
+            | BrowserOperation::FilechooserCancel | BrowserOperation::FilechooserResume => boxed_operation(|| self.filechooser(decoded, recorder)),
+            BrowserOperation::Cookies => boxed_operation(|| self.cookies(decoded, recorder)),
+            BrowserOperation::CookieSet => boxed_operation(|| self.cookie_set(decoded, recorder)),
+            BrowserOperation::CookieDelete => boxed_operation(|| self.cookie_delete(decoded, recorder)),
+            BrowserOperation::Tabs => boxed_operation(|| self.tabs(decoded)),
+            BrowserOperation::TabNew => boxed_operation(|| self.tab_new(decoded, recorder)),
+            BrowserOperation::TabSelect => boxed_operation(|| self.tab_select(decoded, recorder)),
+            BrowserOperation::TabMark => boxed_operation(|| self.tab_mark(decoded)),
+            BrowserOperation::TabClose => boxed_operation(|| self.tab_close(decoded)),
+            BrowserOperation::Close => boxed_operation(|| self.close(decoded)),
         }
     }
 
@@ -4183,4 +4188,17 @@ pub(super) fn completion_transport(environment: &ToolProcessEnvironment) -> Resu
     let BrowserTransportConfig::Native(transport) = config.transport else { return Err("Wait observer requires its exact native transport".into()); };
     let dependency = config.wait_completion.ok_or("Wait observer dependency is not selected")?;
     Ok((NativeTransport::new(environment, &transport)?, dependency))
+}
+
+type OperationFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>;
+
+/// Builds one operation's future in its own stack frame and moves it to the
+/// heap (see `BrowserRoom::dispatch`).
+#[inline(never)]
+fn boxed_operation<'a, F>(operation: impl FnOnce() -> F) -> OperationFuture<'a>
+where
+    F: std::future::Future<Output = Result<Value, String>> + Send + 'a,
+{
+    Box::pin(operation())
 }

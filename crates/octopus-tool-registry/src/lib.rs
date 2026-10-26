@@ -16,14 +16,42 @@ pub struct ToolArgumentValidator {
     validator: jsonschema::Validator,
 }
 
+/// Runs JSON Schema compilation on a thread with a large stack.
+///
+/// `jsonschema` builds its meta-schema validators lazily: each draft, and
+/// each part of it, the first time a schema needs it. That build recurses
+/// deeply, well over 1 MiB of stack in debug builds. Windows gives a main
+/// thread only 1 MiB and test threads get 2 MiB everywhere, so compiling
+/// wherever a descriptor happens to load can overflow the stack. A short-lived
+/// thread costs microseconds next to loading a descriptor or a tool call.
+fn on_large_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    const STACK_BYTES: usize = 16 * 1024 * 1024;
+    let mut work = Some(work);
+    let result = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("octopus-json-schema".into())
+            .stack_size(STACK_BYTES)
+            .spawn_scoped(scope, || (work.take().expect("work runs once"))())
+            .map(|thread| thread.join())
+    });
+    match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        // The thread could not start: compile here instead.
+        Err(_) => (work.take().expect("work did not run"))(),
+    }
+}
+
 impl ToolArgumentValidator {
     pub fn compile(schema: &serde_json::Value) -> Result<Self, String> {
         let schema_hash = Self::hash(schema);
-        let validator = jsonschema::options()
-            .should_validate_formats(true)
-            .should_ignore_unknown_formats(false)
-            .build(schema)
-            .map_err(|error| format!("args_schema is invalid: {error}"))?;
+        let validator = on_large_stack(|| {
+            jsonschema::options()
+                .should_validate_formats(true)
+                .should_ignore_unknown_formats(false)
+                .build(schema)
+        })
+        .map_err(|error| format!("args_schema is invalid: {error}"))?;
         Ok(Self {
             schema_hash,
             validator,
@@ -363,7 +391,7 @@ impl desc::Descriptor for ToolDescriptor {
                 ));
             }
         }
-        jsonschema::meta::try_validate(&self.args_schema)
+        on_large_stack(|| jsonschema::meta::try_validate(&self.args_schema).map(|valid| valid.map_err(|error| error.to_string())))
             .map_err(|error| {
                 format!(
                     "tool descriptor '{}' args_schema draft cannot be resolved: {error}",
