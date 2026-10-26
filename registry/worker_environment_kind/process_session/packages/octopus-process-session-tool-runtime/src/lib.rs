@@ -9894,6 +9894,29 @@ mod tool_process_private_boundary_tests {
         test_process_client_with_script(root, formation, script)
     }
 
+    /// A POSIX shell for test tool processes written as `sh -c` scripts.
+    /// Windows has none built in: `OCTOPUS_TEST_SH`, then Git for Windows'
+    /// `sh.exe`, then `sh.exe` on `PATH`. Without one the test fails saying
+    /// so, rather than passing without running.
+    fn test_shell() -> std::path::PathBuf {
+        #[cfg(unix)]
+        return std::path::PathBuf::from("/bin/sh");
+        #[cfg(windows)]
+        {
+            let configured = std::env::var_os("OCTOPUS_TEST_SH").map(std::path::PathBuf::from);
+            let git = ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"].iter().filter_map(std::env::var_os).flat_map(|root| {
+                let root = std::path::PathBuf::from(root);
+                [root.join(r"Git\bin\sh.exe"), root.join(r"Programs\Git\bin\sh.exe")]
+            });
+            let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
+                std::env::split_paths(&path).map(|directory| directory.join("sh.exe")).collect::<Vec<_>>()
+            });
+            configured.into_iter().chain(git).chain(on_path).find(|candidate| candidate.is_file()).expect(
+                "this test runs a POSIX sh script; install Git for Windows or set OCTOPUS_TEST_SH to an sh.exe",
+            )
+        }
+    }
+
     fn test_process_client_with_script(
         root: &std::path::Path,
         formation: &octopus_worker_env::WorkerEnvironmentFormation,
@@ -9903,7 +9926,7 @@ mod tool_process_private_boundary_tests {
         let generation_dir = generation_root.join("a".repeat(64));
         let stderr_path = generation_root.join("stderr.log");
         std::fs::create_dir_all(&generation_dir).unwrap();
-        let mut command = tokio::process::Command::new("/bin/sh");
+        let mut command = tokio::process::Command::new(test_shell());
         command
             .args(["-c", script])
             .stdin(std::process::Stdio::piped())

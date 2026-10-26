@@ -1484,6 +1484,44 @@ pub async fn prepare_interface_activation_reconciler(
     })
 }
 
+/// Programs that test interface lives run or name, on every platform.
+#[cfg(test)]
+pub(crate) mod test_programs {
+    use std::path::PathBuf;
+
+    /// A POSIX shell for lives written as `sh -c` scripts. Windows has none
+    /// built in: `OCTOPUS_TEST_SH`, then Git for Windows' `sh.exe`, then
+    /// `sh.exe` on `PATH`. Without one the test fails saying so, rather than
+    /// passing without running.
+    pub(crate) fn shell() -> PathBuf {
+        #[cfg(unix)]
+        return PathBuf::from("/bin/sh");
+        #[cfg(windows)]
+        {
+            let configured = std::env::var_os("OCTOPUS_TEST_SH").map(PathBuf::from);
+            let git = ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"].iter().filter_map(std::env::var_os).flat_map(|root| {
+                let root = PathBuf::from(root);
+                [root.join(r"Git\bin\sh.exe"), root.join(r"Programs\Git\bin\sh.exe")]
+            });
+            let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
+                std::env::split_paths(&path).map(|directory| directory.join("sh.exe")).collect::<Vec<_>>()
+            });
+            configured.into_iter().chain(git).chain(on_path).find(|candidate| candidate.is_file()).expect(
+                "this test runs a POSIX sh script; install Git for Windows or set OCTOPUS_TEST_SH to an sh.exe",
+            )
+        }
+    }
+
+    /// An existing program for lives whose executable is only resolved and
+    /// checked, never run: `/usr/bin/true`, or `cmd.exe` on Windows.
+    pub(crate) fn harmless() -> PathBuf {
+        #[cfg(unix)]
+        return PathBuf::from("/usr/bin/true");
+        #[cfg(windows)]
+        return PathBuf::from(std::env::var_os("SystemRoot").expect("Windows sets SystemRoot")).join(r"System32\cmd.exe");
+    }
+}
+
 #[cfg(test)]
 mod interface_life_switch_tests {
     use super::*;
@@ -1712,7 +1750,7 @@ mod interface_life_switch_tests {
         }).to_string();
         std::fs::write(iface_dir.join("life.json"), serde_json::json!({
             "processes": [{
-                "bin": "/bin/sh",
+                "bin": crate::test_programs::shell(),
                 "io_limits": {"max_control_frame_bytes": 65536, "max_stderr_bytes": 65536,
                     "max_manifest_bytes": 65536, "max_payload_bytes": 1048576},
                 "args": ["-c", format!(
@@ -1720,7 +1758,7 @@ mod interface_life_switch_tests {
                     marker.display()), "octopus-test", ready, arrival],
                 "authority": {
                     "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
-                    "read_paths": [], "write_paths": [marker], "executable_paths": ["/bin/sh"],
+                    "read_paths": [], "write_paths": [marker], "executable_paths": [crate::test_programs::shell()],
                     "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
                     "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
                 },
@@ -1838,7 +1876,7 @@ mod interface_life_switch_tests {
             broken_dir.join("life.json"),
             serde_json::json!({
                 "processes": [{
-                    "bin": "/bin/sh",
+                    "bin": crate::test_programs::shell(),
                     "args": ["-c", "exit 9"],
                     "authority": {
                         "read_root_slots": [],
@@ -1846,7 +1884,7 @@ mod interface_life_switch_tests {
                         "executable_root_slots": [],
                         "read_paths": [],
                         "write_paths": [],
-                        "executable_paths": ["/bin/sh"],
+                        "executable_paths": [crate::test_programs::shell()],
                         "executable_commands": [],
                         "read_env_paths": [],
                         "write_env_paths": [],
@@ -1906,7 +1944,7 @@ mod interface_life_switch_tests {
             iface_dir.join("life.json"),
             serde_json::json!({
                 "processes": [{
-                    "bin": "/bin/sh",
+                    "bin": crate::test_programs::shell(),
                     "io_limits": {
                         "max_control_frame_bytes": 65536,
                         "max_stderr_bytes": 65536,
@@ -1929,7 +1967,7 @@ mod interface_life_switch_tests {
                         "executable_root_slots": [],
                         "read_paths": [],
                         "write_paths": [verdict_path],
-                        "executable_paths": ["/bin/sh"],
+                        "executable_paths": [crate::test_programs::shell()],
                         "executable_commands": [],
                         "read_env_paths": [],
                         "write_env_paths": [],

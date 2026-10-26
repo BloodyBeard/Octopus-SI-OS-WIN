@@ -1872,7 +1872,14 @@ fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) -> Pin
         InterfaceClass, InterfaceRuntimeDisposition, InterfaceType, Runtime,
         RuntimeInterfaceCatalog, RuntimeServices,
     };
-    let root_guard = tempfile::Builder::new().prefix("oct-cm-").tempdir_in("/tmp").unwrap();
+    // Unix keeps the root short for its socket paths; Windows sockets are
+    // named pipes with hashed names, so its temp folder is fine (and "/tmp"
+    // there would be C:\tmp at the drive root).
+    #[cfg(unix)]
+    let temp_parent = std::path::PathBuf::from("/tmp");
+    #[cfg(not(unix))]
+    let temp_parent = std::env::temp_dir();
+    let root_guard = tempfile::Builder::new().prefix("oct-cm-").tempdir_in(temp_parent).unwrap();
     let root = root_guard.path().canonicalize().unwrap();
     eprintln!("owner fixture artifacts: {}",root.display());
     bounded_room_media_preserves_the_actual_image_carrier(&root);

@@ -3899,7 +3899,7 @@ mod tests {
     fn life_host_var_is_available_only_through_declared_subpaths() {
         let sidecar = serde_json::json!({
             "processes": [{
-                "bin": "/usr/bin/true",
+                "bin": crate::test_programs::harmless(),
                 "doctor": {
                     "args": ["--doctor"],
                     "timeout_ms": 5000
@@ -3917,7 +3917,7 @@ mod tests {
                     "executable_root_slots": [],
                     "read_paths": [],
                     "write_paths": [],
-                    "executable_paths": ["/usr/bin/true"],
+                    "executable_paths": [crate::test_programs::harmless()],
                     "executable_commands": [],
                     "read_env_paths": [],
                     "write_env_paths": [],
@@ -4558,7 +4558,7 @@ mod tests {
         );
         assert!(std::env::var_os(&missing_name).is_none());
         let missing = SpawnLifeCommand {
-            bin: "/usr/bin/true".to_string(),
+            bin: crate::test_programs::harmless().to_string_lossy().into_owned(),
             io_limits: test_host_io_limits(),
             doctor: None,
             private_var_directories: BTreeSet::new(),
