@@ -14,9 +14,19 @@ pub(super) struct WriterCallIndex {
     directories: BTreeMap<PathBuf, WriterCallDirectory>,
 }
 
+/// What says a hand-in directory is unchanged since it was last listed.
+/// Unix: its modification time and size, which change with every entry.
+/// NTFS reports a directory size of 0 and does not reliably move the
+/// directory's modification time in step with its entries, so Windows adds a
+/// digest of the entry names.
+#[cfg(not(windows))]
+type DirectoryFingerprint = (std::time::SystemTime, u64);
+#[cfg(windows)]
+type DirectoryFingerprint = (std::time::SystemTime, u64, u64);
+
 #[derive(Default)]
 struct WriterCallDirectory {
-    fingerprint: Option<(std::time::SystemTime, u64)>,
+    fingerprint: Option<DirectoryFingerprint>,
     by_generation: BTreeMap<u64, BTreeSet<PathBuf>>,
     unclassified: BTreeSet<PathBuf>,
 }
@@ -91,7 +101,7 @@ impl WriterCallIndex {
             .collect())
     }
 
-    fn fingerprint(root: &Path) -> Result<(std::time::SystemTime, u64), std::io::Error> {
+    fn fingerprint(root: &Path) -> Result<DirectoryFingerprint, std::io::Error> {
         let metadata = std::fs::metadata(root)?;
         if !metadata.is_dir() {
             return Err(std::io::Error::new(
@@ -99,7 +109,19 @@ impl WriterCallIndex {
                 "provider hand-in root is not a directory",
             ));
         }
-        Ok((metadata.modified()?, metadata.len()))
+        #[cfg(not(windows))]
+        return Ok((metadata.modified()?, metadata.len()));
+        #[cfg(windows)]
+        {
+            use std::hash::{Hash, Hasher};
+            let mut names = std::fs::read_dir(root)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Result<Vec<_>, _>>()?;
+            names.sort();
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            names.hash(&mut digest);
+            Ok((metadata.modified()?, metadata.len(), digest.finish()))
+        }
     }
 
     fn record(&mut self, path: PathBuf, generation: Option<u64>) {
