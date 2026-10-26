@@ -434,12 +434,17 @@ mod platform {
     }
 
     /// A second handle to the same open file or directory with `access`,
-    /// without a path lookup.
+    /// without a path lookup: a relative open with an empty name, then
+    /// `ReOpenFile` (which does the same through kernel32) if that is refused.
     fn reopen(file: &File, access: u32) -> io::Result<File> {
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
         use windows_sys::Win32::Storage::FileSystem::{
             ReOpenFile, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let first = match crate::beneath_windows::reopen(file, access) {
+            Ok(reopened) => return Ok(reopened),
+            Err(error) => error,
         };
         // SAFETY: `file` is an open handle; the result is checked and owned below.
         let reopened = unsafe {
@@ -451,17 +456,25 @@ mod platform {
             )
         };
         if reopened == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+            return Err(first);
         }
         // SAFETY: ReOpenFile returned a new handle this call owns.
         Ok(unsafe { File::from_raw_handle(reopened as _) })
     }
 
     pub(super) fn is_owner_only_handle(file: &File) -> io::Result<bool> {
+        use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
         if reparse_point(file.metadata()?.file_attributes()) {
             return Ok(false);
         }
-        owner_only(&reopen(file, READ_CONTROL | FILE_READ_ATTRIBUTES)?)
+        // Handles opened for reading (and directory handles from
+        // `windows::beneath`) can read the access list themselves.
+        match owner_only(file) {
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                owner_only(&reopen(file, READ_CONTROL | FILE_READ_ATTRIBUTES)?)
+            }
+            result => result,
+        }
     }
 
     pub(super) fn sync_handle(file: &File) -> io::Result<()> {

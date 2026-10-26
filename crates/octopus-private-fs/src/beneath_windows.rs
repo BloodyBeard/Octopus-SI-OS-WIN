@@ -36,7 +36,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
     FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO,
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, SYNCHRONIZE,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Kernel::OBJ_CASE_INSENSITIVE;
 use windows_sys::Win32::System::WindowsProgramming::{FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS};
@@ -115,7 +115,7 @@ pub fn open_directory_path(path: &Path) -> io::Result<File> {
         return Err(invalid("a no-follow directory walk needs an absolute path without . or .."));
     }
     let mut directory = OpenOptions::new()
-        .access_mode(FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .access_mode(DIRECTORY_ACCESS)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(&root)?;
@@ -126,15 +126,22 @@ pub fn open_directory_path(path: &Path) -> io::Result<File> {
     Ok(directory)
 }
 
+/// What directory handles here are opened for: listing, opening beneath,
+/// attributes, and reading the access list (privacy checks read it from the
+/// handle, see `is_owner_only_handle`).
+const DIRECTORY_ACCESS: u32 = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
+
 /// Opens the directory `name` beneath `parent` for listing and further
-/// opens; a link there is refused.
+/// opens; a link there is refused. A directory whose access list does not
+/// let this user read it (another user's folder on the way to one's own) is
+/// opened without that right.
 pub fn open_directory(parent: &File, name: &OsStr) -> io::Result<File> {
-    let directory = open_relative(
-        parent,
-        name,
-        FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        FILE_DIRECTORY_FILE,
-    )?;
+    let directory = match open_relative(parent, name, DIRECTORY_ACCESS, FILE_DIRECTORY_FILE) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            open_relative(parent, name, DIRECTORY_ACCESS & !READ_CONTROL, FILE_DIRECTORY_FILE)?
+        }
+        result => result?,
+    };
     refuse_reparse(&directory)?;
     Ok(directory)
 }
@@ -350,7 +357,7 @@ fn set_rename(source: &File, destination_parent: &File, name: &[u16], class: i32
 /// user (as `create_private_dir`), and opens it; fails with `AlreadyExists`
 /// if anything, a link included, has that name.
 pub fn create_directory(parent: &File, name: &OsStr) -> io::Result<File> {
-    create(parent, name, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_DIRECTORY_FILE, true)
+    create(parent, name, DIRECTORY_ACCESS, FILE_DIRECTORY_FILE, true)
 }
 
 /// Creates the file `name` beneath `parent`, private to the current user,
@@ -408,6 +415,41 @@ pub fn remove(parent: &File, name: &OsStr, directory: bool, expected: (u64, u128
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// A second handle to the same open file or directory with `access`: an
+/// open relative to the handle with an empty name, so no path is looked up.
+pub(crate) fn reopen(file: &File, access: u32) -> io::Result<File> {
+    let name = UNICODE_STRING { Length: 0, MaximumLength: 0, Buffer: std::ptr::null_mut() };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: handle(file),
+        ObjectName: &name,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut opened: HANDLE = std::ptr::null_mut();
+    let mut status_block: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+    // SAFETY: every pointer refers to a live local for the duration of the call.
+    let status = unsafe {
+        NtCreateFile(
+            &mut opened,
+            access | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    nt_result(status)?;
+    // SAFETY: NtCreateFile succeeded, so `opened` is a handle this call owns.
+    Ok(unsafe { File::from_raw_handle(opened as _) })
 }
 
 fn refuse_reparse(file: &File) -> io::Result<()> {
@@ -592,6 +634,61 @@ mod tests {
         let link = entry(&top, OsStr::new("link")).unwrap().identity.device_and_file();
         remove(&top, OsStr::new("link"), false, link).unwrap();
         assert!(target.join("t.txt").exists(), "removing a link leaves its target");
+    }
+
+    /// Runs each handle operation the folder-handle code depends on by
+    /// itself and prints every result (`--nocapture` shows them), so a
+    /// failure names the exact call.
+    #[test]
+    fn handle_operations_report_each_step() {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Storage::FileSystem::ReOpenFile;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        let root = tempfile::tempdir().unwrap();
+        let top = open_directory_path(&std::fs::canonicalize(root.path()).unwrap()).unwrap();
+        let directory = create_directory(&top, OsStr::new("d")).unwrap();
+        create_file(&directory, OsStr::new("f")).unwrap().write_all(b"x").unwrap();
+        let file = open_file(&directory, OsStr::new("f")).unwrap();
+        let kernel32_reopen = |target: &File, access: u32| -> io::Result<()> {
+            // SAFETY: an open handle; the result is checked and closed by File.
+            let reopened = unsafe {
+                ReOpenFile(
+                    handle(target),
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                )
+            };
+            if reopened == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            drop(unsafe { File::from_raw_handle(reopened as _) });
+            Ok(())
+        };
+        let steps: Vec<(&str, io::Result<()>)> = vec![
+            ("top: owner-only check", crate::is_owner_only_handle(&top).map(|_| ())),
+            ("created directory: owner-only check", crate::is_owner_only_handle(&directory).and_then(|private| {
+                if private { Ok(()) } else { Err(invalid("created directory is not owner-only")) }
+            })),
+            ("created file (read handle): owner-only check", crate::is_owner_only_handle(&file).and_then(|private| {
+                if private { Ok(()) } else { Err(invalid("created file is not owner-only")) }
+            })),
+            ("directory: NT reopen for READ_CONTROL", reopen(&directory, READ_CONTROL).map(drop)),
+            ("directory: NT reopen for write", reopen(&directory, GENERIC_WRITE).map(drop)),
+            ("file: NT reopen for write", reopen(&file, GENERIC_WRITE).map(drop)),
+            ("directory: ReOpenFile for READ_CONTROL", kernel32_reopen(&directory, READ_CONTROL)),
+            ("directory: ReOpenFile for write", kernel32_reopen(&directory, GENERIC_WRITE)),
+            ("file: ReOpenFile for write", kernel32_reopen(&file, GENERIC_WRITE)),
+            ("directory: sync_handle", crate::sync_handle(&directory)),
+            ("file (read handle): sync_handle", crate::sync_handle(&file)),
+            ("top: sync_handle", crate::sync_handle(&top)),
+        ];
+        for (step, result) in &steps {
+            eprintln!("{step}: {result:?}");
+        }
+        // The kernel32 reopen is only a fallback; everything else must work.
+        let failed: Vec<_> = steps.iter().filter(|(step, result)| result.is_err() && !step.contains("ReOpenFile")).collect();
+        assert!(failed.is_empty(), "failed steps: {failed:?}");
     }
 
     #[test]
