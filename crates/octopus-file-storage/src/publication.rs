@@ -803,7 +803,19 @@ impl WriteGuard {
             return Ok(receipt);
         }
     }
+    // Held until this publication settles, so a writer reaching the new
+    // file through the target name waits for it. Windows locks are
+    // mandatory, and the staged file becomes the target, so there the lock
+    // is the identity lock file `HeldFile::existing` takes for the target
+    // (locking the file itself would make every read of it fail).
+    #[cfg(unix)]
     prepared.try_lock().map_err(io::Error::from)?;
+    #[cfg(windows)]
+    let _prepared_lock = {
+        let lock = identity_lock(&prepared)?;
+        lock_held(&lock, true)?;
+        lock
+    };
     lock.verify()?;
     membership.verify()?;
     if let Some(current) = held_current { current.verify()?; }
