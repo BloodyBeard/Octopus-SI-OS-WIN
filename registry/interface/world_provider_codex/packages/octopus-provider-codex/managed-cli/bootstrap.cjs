@@ -230,6 +230,15 @@ async function downloadArchive(url, destination, expectedBytes) {
   if (received !== expectedBytes) throw new Error("Official Codex archive is truncated");
 }
 
+// On Windows the first tar on PATH is often GNU tar from Git or MSYS, which
+// reads "D:\\stage\\x.tar.gz" as host "D" plus a remote path ("Cannot connect
+// to D"). Windows' own bsdtar (System32, Windows 10 1803+) takes drive paths.
+function tarProgram() {
+  if (process.platform !== "win32") return "tar";
+  const systemTar = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+  return fs.existsSync(systemTar) ? systemTar : "tar";
+}
+
 function execute(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 30000, maxBuffer: 4 * 1024 * 1024, ...options });
   if (result.error || result.status !== 0) throw new Error(`Codex distribution command failed: ${command}: ${result.error?.message || result.stderr || result.status}`);
@@ -321,9 +330,9 @@ async function materialize({ destination, platform = `${process.platform}-${proc
       if (fs.statSync(archive).size !== asset.archive_bytes || digest(archive) !== asset.archive_sha256) {
         throw new Error(`Official Codex archive SHA-256 does not match the pinned release: ${name}`);
       }
-      const entries = execute("tar", ["-tzf", archive]).split("\n");
+      const entries = execute(tarProgram(), ["-tzf", archive]).split("\n");
       if (entries.length !== 1 || entries[0] !== asset.archive_entry) throw new Error("Official Codex archive has unexpected entries");
-      execute("tar", ["-xzf", archive, "-C", stage, asset.archive_entry]);
+      execute(tarProgram(), ["-xzf", archive, "-C", stage, asset.archive_entry]);
       const candidate = path.join(stage, executableFile(name, windows));
       if (asset.archive_entry !== path.basename(candidate)) fs.renameSync(path.join(stage, asset.archive_entry), candidate);
       if (!fs.lstatSync(candidate).isFile() || fs.statSync(candidate).size > 512 * 1024 * 1024) {
