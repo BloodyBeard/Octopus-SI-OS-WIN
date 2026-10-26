@@ -1,6 +1,8 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { modelServiceTiers, validateModelServiceTier } = require("./providerModelTiers.cjs");
+const { readInterfaceEnvironmentDeclarations, readInterfacePrivateEnvironmentDocument } = require("./projection/privateConfiguration.cjs");
+const { resolveAuthoredApplicationSetupFields } = require("./projection/sidecars.cjs");
 
 // Desktop account/catalog operations do not invoke a model or require a Home run.
 async function readProvider(registryRoot, id) {
@@ -69,6 +71,16 @@ function createClientProviderMetadata({ registryRoot, sourceRegistryRoot, accoun
   async function accountOperation(plan, operation) {
     const root = registryRoot();
     const descriptor = await readProvider(root, plan.provider.interface_id);
+    const credentials = descriptorAccountKind(descriptor) === "credentials";
+    const expectedState = credentials ? "credentials_configured" : "account_readable";
+    if (plan.provider.required_state !== undefined && plan.provider.required_state !== expectedState) {
+      throw new Error(`Provider '${descriptor.id}' setup must verify '${expectedState}'.`);
+    }
+    if (credentials) {
+      const result = await credentialOperation(root, descriptor, operation);
+      if (registryRoot() !== root) throw new Error("Provider configuration scope changed during setup.");
+      return result;
+    }
     const client = await loadClientMetadata(root, descriptor);
     if (typeof client?.[operation] !== "function") {
       throw new Error(`Provider '${descriptor.id}' does not support desktop account setup.`);
@@ -77,8 +89,27 @@ function createClientProviderMetadata({ registryRoot, sourceRegistryRoot, accoun
     if (registryRoot() !== root) throw new Error("Provider account scope changed during setup.");
     return result;
   }
+  // Providers that connect with an API key, server URL and model name instead of a
+  // desktop account are ready once every required setup field has a value.
+  async function credentialOperation(root, descriptor, operation) {
+    const status = await providerCredentialStatus(root, descriptor);
+    if (status.missing.length === 0) {
+      return operation === "probeAccount"
+        ? [reference("provider_observation", descriptor.id, { source: "provider.configuration", configured: status.configured })]
+        : undefined;
+    }
+    if (operation === "probeAccount") return null;
+    throw new Error(`${status.name} needs ${status.missing.join(", ")} before Home can use it.`);
+  }
   return {
     catalog,
+    async providerAccountKind(id) {
+      return setupAccountKind(registryRoot(), id);
+    },
+    async providerConfiguration(id) {
+      const root = registryRoot();
+      return providerCredentialStatus(root, await readProvider(root, id));
+    },
     async setupCatalog(localPackages) {
       const activeRoot = registryRoot();
       const sourceRoot = sourceRegistryRoot();
@@ -92,7 +123,17 @@ function createClientProviderMetadata({ registryRoot, sourceRegistryRoot, accoun
         const selectedRoot = owners[0].materialized === true || owners[0].partially_materialized === true
           ? registryRoot : sourceRegistryRoot;
         const [provider] = await catalog([pack.setup_provider], selectedRoot);
-        return { ...pack, setup_provider: provider };
+        const choices = await Promise.all((pack.setup_provider_choices ?? []).map(async (choice) => {
+          const owner = pack.components.find((component) => component.product_id === choice.id);
+          const root = owner?.materialized === true || owner?.partially_materialized === true ? registryRoot : sourceRegistryRoot;
+          const [discovered] = await catalog([choice], root);
+          return { ...discovered, setupAccount: await setupAccountKind(root(), choice.id) };
+        }));
+        return {
+          ...pack,
+          setup_provider: { ...provider, setupAccount: await setupAccountKind(selectedRoot(), id) },
+          setup_provider_choices: choices,
+        };
       }));
       if (registryRoot() !== activeRoot || sourceRegistryRoot() !== sourceRoot) {
         throw new Error("Setup provider catalogue scope changed during discovery.");
@@ -109,6 +150,60 @@ function createClientProviderMetadata({ registryRoot, sourceRegistryRoot, accoun
       if (modelCatalogError) throw new Error(modelCatalogError);
       return { providerInterfaceId: id, models, observedAtUnixMs: Date.now() };
     },
+  };
+}
+
+// "chatgpt": a desktop account module signs in; "credentials": an API key, server URL
+// or model name configures it; "unsupported": desktop setup cannot connect it.
+function descriptorAccountKind(descriptor) {
+  const config = descriptor.interface_driver_config?.private_config;
+  if (config?.client_metadata !== undefined) return "chatgpt";
+  return config?.opencodex !== undefined ? "credentials" : "unsupported";
+}
+
+async function setupAccountKind(root, id) {
+  try {
+    return descriptorAccountKind(await readProvider(root, id));
+  } catch {
+    return "unsupported";
+  }
+}
+
+async function providerCredentialStatus(root, descriptor) {
+  const directory = path.join(root, "interface", descriptor.id);
+  let application = null;
+  try {
+    application = JSON.parse(await fs.readFile(path.join(directory, "application.json"), "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const declarations = await readInterfaceEnvironmentDeclarations(descriptor, descriptor.id, directory);
+  const authored = Array.isArray(application?.setup?.fields) ? application.setup.fields : [];
+  const fields = authored.some((field) => field?.interface === descriptor.id)
+    ? resolveAuthoredApplicationSetupFields(authored, descriptor.id, declarations, `provider '${descriptor.id}' setup`)
+      .map(({ presentation, declaration }) => ({
+        name: declaration.name,
+        label: String(presentation.label ?? declaration.name),
+        kind: ["text", "url", "secret"].includes(presentation.kind) ? presentation.kind : "secret",
+        required: presentation.required === true || declaration.required === true,
+      }))
+    : declarations.map((declaration) => ({ name: declaration.name, label: declaration.name, kind: "secret", required: declaration.required === true }));
+  const document = await readInterfacePrivateEnvironmentDocument(
+    path.join(path.dirname(root), "interfaces", descriptor.id),
+    descriptor.id,
+    new Set(declarations.map((declaration) => declaration.name)),
+  );
+  const rows = fields.map((field) => ({
+    ...field,
+    configured: document.values.has(field.name) || Boolean(process.env[field.name]),
+  }));
+  return {
+    interfaceId: descriptor.id,
+    name: typeof application?.name === "string" ? application.name : descriptor.id,
+    documentDigest: document.digest,
+    fields: rows,
+    configured: rows.filter((field) => field.configured).map((field) => field.name).sort(),
+    missing: rows.filter((field) => field.required && !field.configured).map((field) => field.label),
   };
 }
 

@@ -166,7 +166,13 @@ test("catalogue uses declared data or owner modules independently of provider an
     await installNativeMetadata(installedRoot);
     setup.packs[0].setup_provider = { ...native, id: "unbound" };
     await assert.rejects(setupMetadata.setupCatalog(setup), /no exact provider catalogue owner/);
-    await assert.rejects(service.setupOwner.probe({ provider: { interface_id: "custom" } }), /does not support desktop account/);
+    const credentialSetup = createClientProviderMetadata({ registryRoot: () => root, sourceRegistryRoot: () => root,
+      accountClient: () => assert.fail("credential providers must not consult the ChatGPT account"),
+      reference: (kind, id, evidence) => ({ kind, id, evidence }) });
+    const [observation] = await credentialSetup.setupOwner.probe({ provider: { interface_id: "custom", required_state: "credentials_configured" } });
+    assert.equal(observation.evidence.source, "provider.configuration");
+    await assert.rejects(credentialSetup.setupOwner.probe({ provider: { interface_id: "custom", required_state: "account_readable" } }), /must verify 'credentials_configured'/);
+    await assert.rejects(credentialSetup.setupOwner.probe({ provider: { interface_id: "other" } }), /does not support desktop account/);
     validateProviderModelSelection(providers, { providerInterfaceId: "custom", providerModel: "custom-model", reasoningEffort: "high" });
     for (const selection of [{ providerInterfaceId: "native", providerModel: "custom-model", reasoningEffort: "high" },
       { providerInterfaceId: "native", providerModel: "stale-model", reasoningEffort: "high" },

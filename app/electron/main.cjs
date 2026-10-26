@@ -1383,6 +1383,16 @@ function requireClientSetupPack(catalog, plan) {
   const taskRecipe = pack.workspace_setup?.task;
   const requestHome = plan.workspace.request?.home;
   const requestTask = plan.workspace.request?.task;
+  const providerChoices = new Set(recipe?.provider_choices ?? []);
+  const homeProvider = requestHome?.providerInterfaceId;
+  if (homeProvider !== recipe?.provider_interface_id && !providerChoices.has(homeProvider)) {
+    throw new Error(`Client setup Application Pack '${plan.pack.id}' does not offer Home provider '${homeProvider}'.`);
+  }
+  for (const component of pack.components.filter((entry) => providerChoices.has(entry.product_id))) {
+    if (plan.pack.selected_recommended.includes(component.package_id) !== (component.product_id === homeProvider)) {
+      throw new Error(`Client setup Application Pack '${plan.pack.id}' must install exactly the chosen Home provider.`);
+    }
+  }
   const selectedPackageIds = new Set(expectedPackages);
   const expectedProjectDefaults = (pack.workspace_setup?.project_defaults ?? [])
     .filter((entry) => selectedPackageIds.has(entry.package_id))
@@ -1417,7 +1427,7 @@ function requireClientSetupPack(catalog, plan) {
         || !selectedPackageIds.has(preset.component_package_id)
         || !Array.isArray(choice.projectKeys) || choice.projectKeys.length === 0
         || new Set(choice.projectKeys).size !== choice.projectKeys.length || choice.projectKeys.some((key) => !requestProjectKeys.has(key))
-        || choice.providerInterfaceId !== preset.provider_interface_id || choice.providerInterfaceId !== requestHome?.providerInterfaceId
+        || choice.providerInterfaceId !== requestHome?.providerInterfaceId
         || choice.providerModel !== requestHome?.providerModel || choice.reasoningEffort !== (requestHome?.reasoningEffort ?? "")
         || (choice.serviceTier ?? "") !== (requestHome?.serviceTier ?? "")) {
       throw new Error(`Client setup Agent preset does not match its reviewed pack, Projects, or provider selection.`);
@@ -1441,8 +1451,7 @@ function requireClientSetupPack(catalog, plan) {
   if (
     !recipe
     || !taskRecipe
-    || plan.provider.interface_id !== recipe.provider_interface_id
-    || requestHome?.providerInterfaceId !== recipe.provider_interface_id
+    || plan.provider.interface_id !== homeProvider
     || requestHome?.workerInterfaceId !== recipe.worker_interface_id
     || stableClientSetupJson(requestHome?.doorHostSlots ?? {}) !== stableClientSetupJson(recipe.door_host_slots ?? {})
     || typeof requestHome?.providerModel !== "string" || !requestHome.providerModel.trim()
@@ -1520,7 +1529,7 @@ async function clientSetupWorkspaceProof(plan, operationId) {
 
 async function clientSetupTriggerEntries(plan) {
   const pack = requireClientSetupPack(await readLocalPackageCatalog(clientSetupPackageRoots()), plan);
-  return setupTriggerEntries(pack, plan.pack.selected_recommended);
+  return setupTriggerEntries(pack, plan.pack.selected_recommended, plan.workspace.request.home.providerInterfaceId);
 }
 
 async function applyClientSetupTriggers(plan, operationId) {
@@ -3796,6 +3805,11 @@ ipcMain.handle("octopus:client-setup-begin", async (_event, token, request) => {
   getClientAccessController().requireSession(token, ["live"]);
   await validateClientSetupPlan(request?.plan);
   return getClientSetupStore().begin(request);
+});
+
+ipcMain.handle("octopus:client-setup-provider-configuration", async (_event, token, request) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  return getClientProviderMetadata().providerConfiguration(request?.interfaceId);
 });
 
 ipcMain.handle("octopus:client-setup-resume", async (event, token, request) => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { providerServiceTierAvailable } from "../chat/chatWorkspaceCapabilities";
 import type {
-  OctopusProviderInterface,
+  OctopusProviderConfiguration,
   OctopusClientAccessProfile,
   OctopusClientSetupPlan,
   OctopusClientSetupProgress,
@@ -19,6 +19,7 @@ import {
   readWorkspaceSetupDraft,
   saveWorkspaceSetupDraft,
   workspaceInitializeRequestDigest,
+  workspaceSetupProviderId,
   type WorkspaceSetupCapabilityKind,
   type WorkspaceSetupDraft,
   type WorkspaceSetupHomeRecipe,
@@ -30,8 +31,10 @@ import {
   readProjection,
   readClientSetup,
   readCurrentClientSetup,
+  readSetupProviderConfiguration,
   readWorkspaceSetupState,
   resumeClientSetup,
+  saveSetupProviderConfiguration,
 } from "../../projectionClient";
 import { useProjectionStructureGeneration } from "../../projectionLive";
 import { useChatgptAccount } from "../../account/useChatgptAccount";
@@ -40,10 +43,12 @@ import { chatgptSignInCompleted } from "../../onboarding/chatgptSignIn";
 import { OcButton } from "../../design-system/components";
 import { OctopusLoadingLogo, OctopusLoadingState } from "../OctopusLoadingLogo";
 import {
+  ProviderSetupForm,
   WorkspaceSetupOverlay,
   createDefaultWorkspaceSetupDraft,
   type WorkspaceSetupApplyState,
   type WorkspaceSetupCatalogCapability,
+  type WorkspaceSetupProviderOption,
 } from "./WorkspaceSetupOverlay";
 
 type Props = {
@@ -111,7 +116,8 @@ type WorkspacePack = {
   components: PackComponent[];
   extensions: PackExtension[];
   recipe: WorkspaceSetupHomeRecipe;
-  setupProvider: OctopusProviderInterface | null;
+  setupProvider: WorkspaceSetupProviderOption | null;
+  setupProviderChoices: WorkspaceSetupProviderOption[];
 };
 
 type LocalPackagesProjection = {
@@ -175,6 +181,28 @@ const AWAITING_SIGN_IN: WorkspaceSetupApplyState = {
   error: "",
 };
 
+function awaitingProvider(configuration: OctopusProviderConfiguration): WorkspaceSetupApplyState {
+  return {
+    state: "awaiting_provider",
+    label: `Your space is ready. Connect ${configuration.name}.`,
+    detail: "Enter the connection details for your model. They are saved only on this device.",
+    percent: null,
+    error: "",
+    providerConfiguration: configuration,
+  };
+}
+
+// The ChatGPT sign-in screen can be skipped by people who will use another provider.
+const CHATGPT_SKIPPED_KEY = "octopus.setup.chatgpt-skipped";
+
+function chatgptSignInSkipped(): boolean {
+  try {
+    return window.localStorage.getItem(CHATGPT_SKIPPED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function WorkspaceSetupGate({ accessProfile, runtimeHome, children }: Props) {
   if (accessProfile !== "live") return <>{children}</>;
   if (!runtimeHome) return <OpeningState />;
@@ -214,7 +242,18 @@ function WorkspaceHomeGate({ runtimeHome, children }: Pick<Props, "runtimeHome" 
 
 function WorkspaceAccountSetupGate({ runtimeHome, children }: Pick<Props, "runtimeHome" | "children">) {
   const account = useChatgptAccount();
-  if (!account.account?.signedIn || account.account.octopusHome !== runtimeHome) return <ChatGptSignInGate />;
+  const [skipped, setSkipped] = useState(chatgptSignInSkipped);
+  const signedIn = account.account?.signedIn && account.account.octopusHome === runtimeHome;
+  if (!signedIn && !skipped) {
+    return <ChatGptSignInGate onSkip={() => {
+      try {
+        window.localStorage.setItem(CHATGPT_SKIPPED_KEY, "1");
+      } catch {
+        // The choice still applies for this window.
+      }
+      setSkipped(true);
+    }} />;
+  }
   return <WorkspaceSetupFlow accessProfile="live">{children}</WorkspaceSetupFlow>;
 }
 
@@ -368,10 +407,13 @@ function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHom
     allowSignIn = false,
   ): Promise<void> => {
     if (inFlight.current) return inFlight.current;
+    const credentials = setup.plan.provider.required_state === "credentials_configured";
     setApplyState({
       state: "running",
-      label: allowSignIn ? "Connecting ChatGPT" : "Resuming setup",
-      detail: allowSignIn ? "Finish signing in in your browser. Octopus will continue once your account is verified." : "Octopus is continuing from the last verified step on this device.",
+      label: allowSignIn ? credentials ? "Connecting your model" : "Connecting ChatGPT" : "Resuming setup",
+      detail: allowSignIn
+        ? credentials ? "Octopus is checking the connection details you saved." : "Finish signing in in your browser. Octopus will continue once your account is verified."
+        : "Octopus is continuing from the last verified step on this device.",
       percent: 0,
       error: "",
     });
@@ -387,11 +429,11 @@ function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHom
         );
       }
       const resumed = await resumeClientSetup(setup.operationId, { allowSignIn });
-      return resumed.status === "in_progress" && chatgptSignInCompleted() ? verifyExistingSignIn(setup.operationId) : resumed;
+      return resumed.status === "in_progress" ? continueAtProvider(resumed) : resumed;
     }).then(async (completed) => {
       if (completed.status === "in_progress") {
         await refresh(false);
-        setApplyState(AWAITING_SIGN_IN);
+        setApplyState(await awaitingProviderState(completed));
         return;
       }
       await refresh(false, (proven) => proveCompletedClientSetup(completed, proven));
@@ -528,6 +570,26 @@ function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHom
 
   if (!matrix) return <OpeningState />;
   if (matrix.mode === "shell") return <>{children}</>;
+  const configureProvider = async (updates: Record<string, string>) => {
+    const configuration = applyState.providerConfiguration;
+    if (!configuration) return;
+    await saveSetupProviderConfiguration(configuration, updates);
+    const setup = await readCurrentClientSetup();
+    if (!setup) throw new Error("The prepared setup is no longer available.");
+    await resumeCurrent(setup, draftState.draft, true);
+  };
+
+  if (matrix.mode === "resume" && draftState.draft?.step !== "applying" && applyState.state === "awaiting_provider" && applyState.providerConfiguration) {
+    return (
+      <GateState
+        action={<ProviderSetupForm configuration={applyState.providerConfiguration} onSubmit={configureProvider} />}
+        detail={applyState.detail}
+        title={applyState.label}
+        tone="neutral"
+      />
+    );
+  }
+
   if (matrix.mode === "resume" && draftState.draft?.step !== "applying") {
     return (
       <GateState
@@ -556,6 +618,7 @@ function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHom
   }
 
   const draft = draftState.draft ?? createDefaultWorkspaceSetupDraft();
+  const setupProvider = catalogResult.pack ? chosenSetupProvider(catalogResult.pack, draft) : null;
   return (
     <WorkspaceSetupOverlay
       applyState={applyState}
@@ -563,7 +626,9 @@ function WorkspaceSetupFlow({ accessProfile, children }: Omit<Props, "runtimeHom
       catalogError={catalogResult.error || catalogResult.warning}
       catalogLoading={extensions.loading}
       draft={draft}
-      provider={catalogResult.pack?.setupProvider ?? null}
+      provider={setupProvider}
+      providers={catalogResult.pack ? setupProviderOptions(catalogResult.pack) : []}
+      onProviderConfigured={configureProvider}
       agentPresets={catalogResult.pack?.recipe.agent_presets ?? []}
       onApply={apply}
       onSignIn={async () => {
@@ -613,13 +678,13 @@ async function performApply({
     ? setup
     : await resumeClientSetup(draft.operationId);
   let finished = completed;
-  if (finished.status === "in_progress" && chatgptSignInCompleted()) {
+  if (finished.status === "in_progress") {
     await refresh(false);
-    finished = await verifyExistingSignIn(draft.operationId);
+    finished = await continueAtProvider(finished);
   }
   if (finished.status === "in_progress") {
     await refresh(false);
-    setApplyState(AWAITING_SIGN_IN);
+    setApplyState(await awaitingProviderState(finished));
     return false;
   }
   await refresh(false, (proven) => proveCompletedClientSetup(finished, proven, draft));
@@ -637,15 +702,48 @@ async function verifyExistingSignIn(operationId: string): Promise<OctopusClientS
   return resumeClientSetup(operationId, { allowSignIn: true });
 }
 
+/** Finishes the provider step without asking when its account or connection details are already present. */
+async function continueAtProvider(setup: OctopusClientSetupState): Promise<OctopusClientSetupState> {
+  if (setup.plan.provider.required_state === "credentials_configured") {
+    const configuration = await readSetupProviderConfiguration(setup.plan.provider.interface_id);
+    return configuration.missing.length ? setup : verifyExistingSignIn(setup.operationId);
+  }
+  return chatgptSignInCompleted() ? verifyExistingSignIn(setup.operationId) : setup;
+}
+
+async function awaitingProviderState(setup: OctopusClientSetupState): Promise<WorkspaceSetupApplyState> {
+  if (setup.plan.provider.required_state !== "credentials_configured") return AWAITING_SIGN_IN;
+  return awaitingProvider(await readSetupProviderConfiguration(setup.plan.provider.interface_id));
+}
+
+function setupProviderOptions(pack: WorkspacePack): WorkspaceSetupProviderOption[] {
+  return [pack.setupProvider, ...pack.setupProviderChoices].filter((provider): provider is WorkspaceSetupProviderOption => provider !== null);
+}
+
+/** The provider the draft chose, or the first offered provider that can list models now. */
+function chosenSetupProvider(pack: WorkspacePack, draft: WorkspaceSetupDraft | null): WorkspaceSetupProviderOption | null {
+  const options = setupProviderOptions(pack);
+  if (draft?.providerInterfaceId !== undefined) {
+    return options.find((provider) => provider.id === draft.providerInterfaceId) ?? null;
+  }
+  return options.find((provider) => !provider.modelCatalogError) ?? options[0] ?? null;
+}
+
+function providerChoiceComponent(pack: WorkspacePack, component: PackComponent): boolean {
+  return (pack.recipe.provider_choices ?? []).includes(component.productId);
+}
+
 async function compileClientSetupPlan(
   draft: WorkspaceSetupDraft,
   pack: WorkspacePack,
   selection: ApplySelection,
 ): Promise<OctopusClientSetupPlan> {
-  if (!pack.setupProvider?.models.some((model) => model.model === draft.providerModel && model.showInPicker)) {
+  const providerId = workspaceSetupProviderId(draft, pack.recipe);
+  const provider = setupProviderOptions(pack).find((option) => option.id === providerId);
+  if (!provider?.models.some((model) => model.model === draft.providerModel && model.showInPicker)) {
     throw new ProductSetupError("Choose a model from the current provider catalog.");
   }
-  if (!providerServiceTierAvailable(pack.setupProvider, draft.providerModel!, draft.serviceTier ?? "default")) {
+  if (!providerServiceTierAvailable(provider, draft.providerModel!, draft.serviceTier ?? "default")) {
     throw new ProductSetupError(`Model '${draft.providerModel}' does not advertise service tier '${draft.serviceTier}'. Choose an available speed.`);
   }
   const workspaceRequest = compileWorkspaceInitializeRequest(draft, pack.recipe, pack);
@@ -705,8 +803,10 @@ function compileClientSetupPlanWithDigest(
       desired_state: extension.desiredState,
     })).sort((left, right) => left.id.localeCompare(right.id)),
     provider: {
-      interface_id: pack.recipe.provider_interface_id,
-      required_state: "account_readable",
+      interface_id: workspaceRequest.home.providerInterfaceId,
+      required_state: setupProviderOptions(pack).find((provider) => provider.id === workspaceRequest.home.providerInterfaceId)?.setupAccount === "credentials"
+        ? "credentials_configured"
+        : "account_readable",
     },
     workspace: {
       request_digest: workspaceRequestDigest,
@@ -945,7 +1045,7 @@ function buildCatalog(
   const pack = requireWorkspacePack(localPackages);
   const extensionById = new Map(extensions.extensions.map((extension) => [extension.manifest.id, extension]));
   const providerStatus = findProviderCredentialStatus(pack, extensions);
-  const components: WorkspaceSetupCatalogCapability["components"] = pack.components.map((component) => ({
+  const components: WorkspaceSetupCatalogCapability["components"] = pack.components.filter((component) => !providerChoiceComponent(pack, component)).map((component) => ({
     id: component.packageId,
     name: component.name,
     description: component.reason,
@@ -987,7 +1087,7 @@ function buildCatalog(
     setupDetail: providerStatusText(providerStatus, setup),
   }];
 
-  for (const component of pack.components.filter((candidate) => (
+  for (const component of pack.components.filter((candidate) => !providerChoiceComponent(pack, candidate) && (
     candidate.selection === "recommended" || projectDefaultPackages.has(candidate.packageId)
   ))) {
     catalog.push({
@@ -1024,7 +1124,7 @@ function buildCatalog(
     catalog,
     pack,
     error: "",
-    warning: pack.setupProvider?.modelCatalogError || (localPackages.errors.length || extensions.errors.length
+    warning: (pack.setupProviderChoices.length ? "" : pack.setupProvider?.modelCatalogError) || (localPackages.errors.length || extensions.errors.length
       ? "Some optional local capability records could not be verified."
       : ""),
   };
@@ -1048,7 +1148,17 @@ function compileApplySelection(
   const packageIds: string[] = [];
   const selectedRecommended: string[] = [];
   const projectKeysByPackage: Record<string, string[]> = {};
+  const homeProvider = workspaceSetupProviderId(draft, pack.recipe);
   for (const component of pack.components) {
+    if (providerChoiceComponent(pack, component)) {
+      if (component.productId !== homeProvider) continue;
+      if (!component.available || !DIGEST.test(component.sourceDigest)) {
+        throw new ProductSetupError(`${component.name} is not available from a verified local snapshot.`);
+      }
+      packageIds.push(component.packageId);
+      selectedRecommended.push(component.packageId);
+      continue;
+    }
     const key = `${capabilityKind(component.productKind)}:${component.packageId}`;
     const capability = selected.get(key);
     const include = component.selection === "included" || capability?.selected === true;
@@ -1096,6 +1206,7 @@ function assertDraftCatalogIdentity(draft: WorkspaceSetupDraft, pack: WorkspaceP
   const expected = new Map<string, boolean>([[`pack:${pack.id}`, true]]);
   const projectDefaultPackages = new Set([...pack.recipe.project_defaults.map((entry) => entry.package_id), ...(pack.recipe.agent_presets ?? []).map((entry) => entry.component_package_id)]);
   for (const component of pack.components) {
+    if (providerChoiceComponent(pack, component)) continue;
     if (component.selection === "recommended" || projectDefaultPackages.has(component.packageId)) {
       expected.set(
         `${capabilityKind(component.productKind)}:${component.packageId}`,
@@ -1197,7 +1308,7 @@ function componentConfigured(
     && setup.plan.pack.id === pack.id
     && setup.plan.packages.some((entry) => entry.id === component.packageId)
   ) return true;
-  if (component.productId === pack.recipe.provider_interface_id) {
+  if (component.productId === pack.recipe.provider_interface_id || providerChoiceComponent(pack, component)) {
     return false;
   }
   if (component.productKind === "driver") return false;
@@ -1499,6 +1610,7 @@ function parseWorkspacePack(value: unknown, index: number): WorkspacePack {
     components,
     extensions,
     setupProvider: row.setup_provider == null ? null : parseSetupProvider(row.setup_provider),
+    setupProviderChoices: array(row.setup_provider_choices ?? [], "setup provider choices").map(parseSetupProvider),
     recipe: {
       task: {
         worker_interface_id: id(task.worker_interface_id, "workspace Task worker"),
@@ -1508,6 +1620,9 @@ function parseWorkspacePack(value: unknown, index: number): WorkspacePack {
         selected_worker_environment_kinds: array(task.selected_worker_environment_kinds, "workspace Task environments").map((value) => id(value, "workspace Task environment")),
       },
       provider_interface_id: id(home.provider_interface_id, "workspace Home provider"),
+      ...(home.provider_choices === undefined ? {} : {
+        provider_choices: array(home.provider_choices, "workspace Home provider choices").map((value) => id(value, "workspace Home provider choice")),
+      }),
       worker_interface_id: id(home.worker_interface_id, "workspace Home worker"),
       ...(home.door_host_slots === undefined ? {} : { door_host_slots: home.door_host_slots as Record<string, Record<string, string>> }),
       context_artifact_bindings: contextArtifactBindings,
@@ -1519,9 +1634,10 @@ function parseWorkspacePack(value: unknown, index: number): WorkspacePack {
   };
 }
 
-function parseSetupProvider(value: unknown): OctopusProviderInterface {
+function parseSetupProvider(value: unknown): WorkspaceSetupProviderOption {
   const provider = record(value, "setup provider");
   return {
+    setupAccount: provider.setupAccount === "credentials" ? "credentials" : "chatgpt",
     id: id(provider.id, "setup provider id"), label: text(provider.label, "setup provider label"),
     descriptorPath: text(provider.descriptorPath, "setup provider path"), sourceNames: stringArray(provider.sourceNames, "provider sources"),
     model: text(provider.model, "provider selected model"), reasoningEffort: typeof provider.reasoningEffort === "string" ? provider.reasoningEffort : "",

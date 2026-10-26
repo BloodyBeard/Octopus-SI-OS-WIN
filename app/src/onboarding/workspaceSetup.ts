@@ -23,6 +23,7 @@ export type WorkspaceSetupCapability = {
 };
 
 export type WorkspaceSetupDraft = {
+  providerInterfaceId?: string;
   providerModel?: string;
   reasoningEffort?: string;
   serviceTier?: string;
@@ -71,6 +72,7 @@ export type WorkspaceSetupHomeRecipe = {
   agent_presets?: WorkspaceSetupAgentPreset[];
   task: WorkspaceSetupTaskRecipe;
   provider_interface_id: string;
+  provider_choices?: string[];
   worker_interface_id: string;
   door_host_slots?: Record<string, Record<string, string>>;
   context_artifact_bindings: Array<{ id: string }>;
@@ -231,6 +233,7 @@ export function replaceWorkspaceSetupPreset(
   return validateWorkspaceSetupDraft({
     ...next,
     operationId: draft.operationId,
+    ...(draft.providerInterfaceId !== undefined ? { providerInterfaceId: draft.providerInterfaceId } : {}),
     ...(draft.providerModel !== undefined ? { providerModel: draft.providerModel } : {}),
     ...(draft.serviceTier !== undefined ? { serviceTier: draft.serviceTier } : {}),
     ...(draft.reasoningEffort !== undefined ? { reasoningEffort: draft.reasoningEffort } : {}),
@@ -241,9 +244,9 @@ export function replaceWorkspaceSetupPreset(
 export function validateWorkspaceSetupDraft(value: unknown): WorkspaceSetupDraft {
   const record = exactRecord(
     value,
-    ["schemaVersion", "operationId", "preset", "step", "spaceName", "spaceGoal", "projects", "capabilities", "updatedAt", "providerModel", "reasoningEffort", "serviceTier"],
+    ["schemaVersion", "operationId", "preset", "step", "spaceName", "spaceGoal", "projects", "capabilities", "updatedAt", "providerInterfaceId", "providerModel", "reasoningEffort", "serviceTier"],
     "Workspace setup draft",
-    ["providerModel", "reasoningEffort", "serviceTier"],
+    ["providerInterfaceId", "providerModel", "reasoningEffort", "serviceTier"],
   );
   if (record.schemaVersion !== 1) throw new Error("Workspace setup draft has an unsupported schema version");
   const preset = requiredPreset(record.preset);
@@ -271,6 +274,7 @@ export function validateWorkspaceSetupDraft(value: unknown): WorkspaceSetupDraft
     projects,
     capabilities,
     updatedAt,
+    ...(record.providerInterfaceId !== undefined ? { providerInterfaceId: requiredId(record.providerInterfaceId, "Selected provider") } : {}),
     ...(record.providerModel !== undefined ? { providerModel: requiredText(record.providerModel, "Selected model", 256) } : {}),
     ...(record.serviceTier !== undefined ? { serviceTier: record.serviceTier as string } : {}),
     ...(record.reasoningEffort !== undefined ? { reasoningEffort: record.reasoningEffort as string } : {}),
@@ -322,6 +326,7 @@ export function compileWorkspaceInitializeRequest(
     recipeValue,
     [
       "provider_interface_id",
+      "provider_choices",
       "worker_interface_id",
       "door_host_slots",
       "context_artifact_bindings",
@@ -331,8 +336,9 @@ export function compileWorkspaceInitializeRequest(
       "task",
     ],
     "Workspace Home recipe",
-    ["agent_presets", "door_host_slots"],
+    ["agent_presets", "door_host_slots", "provider_choices"],
   );
+  const providerInterfaceId = workspaceSetupProviderId(value, recipeValue);
   if (!Array.isArray(recipe.context_artifact_bindings)) {
     throw new Error("Workspace Home recipe context bindings must be an array");
   }
@@ -390,7 +396,7 @@ export function compileWorkspaceInitializeRequest(
     const capability = value.capabilities.find((entry) => entry.id === preset.component_package_id && entry.selected);
     if (!capability?.projectKeys.length) return [];
     if (!pack || !/^[a-f0-9]{64}$/.test(pack.manifestDigest)) throw new Error("Agent presets require an exact pack snapshot");
-    return [{ packId: pack.id, expectedPackManifestDigest: pack.manifestDigest, presetId: preset.id, projectKeys: [...capability.projectKeys].sort(), providerInterfaceId: preset.provider_interface_id, providerModel: requiredText(value.providerModel, "Selected model", 256), serviceTier: value.serviceTier ?? "default", reasoningEffort: value.reasoningEffort ?? "" }];
+    return [{ packId: pack.id, expectedPackManifestDigest: pack.manifestDigest, presetId: preset.id, projectKeys: [...capability.projectKeys].sort(), providerInterfaceId, providerModel: requiredText(value.providerModel, "Selected model", 256), serviceTier: value.serviceTier ?? "default", reasoningEffort: value.reasoningEffort ?? "" }];
   }).sort((a, b) => `${a.packId}\0${a.presetId}`.localeCompare(`${b.packId}\0${b.presetId}`));
   return {
     action: "initialize_workspace",
@@ -398,7 +404,7 @@ export function compileWorkspaceInitializeRequest(
     root: intent.root,
     home: {
       name: "Home",
-      providerInterfaceId: requiredId(recipe.provider_interface_id, "Workspace Home provider"),
+      providerInterfaceId,
       providerModel: requiredText(value.providerModel, "Selected model", 256),
       serviceTier: value.serviceTier ?? "default", reasoningEffort: value.reasoningEffort ?? "",
       workerInterfaceId: requiredId(recipe.worker_interface_id, "Workspace Home worker"),
@@ -410,6 +416,17 @@ export function compileWorkspaceInitializeRequest(
     projects: intent.projects,
     ...(agentPresets.length ? { agentPresets } : {}),
   };
+}
+
+/** The provider Home will use: the chosen one when the pack offers it, else the pack default. */
+export function workspaceSetupProviderId(draft: WorkspaceSetupDraft, recipe: WorkspaceSetupHomeRecipe): string {
+  const fallback = requiredId(recipe.provider_interface_id, "Workspace Home provider");
+  const chosen = draft.providerInterfaceId;
+  if (chosen === undefined || chosen === fallback) return fallback;
+  if (!(recipe.provider_choices ?? []).includes(chosen)) {
+    throw new Error(`Workspace setup does not offer provider '${chosen}'`);
+  }
+  return chosen;
 }
 
 export async function workspaceInitializeRequestDigest(request: WorkspaceInitializeRequest): Promise<string> {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { providerServiceTiers, providerServiceTierAvailable } from "../chat/chatWorkspaceCapabilities";
-import type { OctopusProviderInterface } from "../../electron";
+import type { OctopusProviderConfiguration, OctopusProviderInterface } from "../../electron";
 import {
   compileWorkspaceSetupDraft,
   createWorkspaceSetupDraft,
@@ -40,15 +40,22 @@ export type WorkspaceSetupCatalogCapability = {
 };
 
 export type WorkspaceSetupApplyState = {
-  state: "idle" | "running" | "awaiting_sign_in" | "failed";
+  state: "idle" | "running" | "awaiting_sign_in" | "awaiting_provider" | "failed";
   label: string;
   detail: string;
   percent: number | null;
   error: string;
+  providerConfiguration?: OctopusProviderConfiguration;
+};
+
+/** A provider Home can use, and how setup connects to it. */
+export type WorkspaceSetupProviderOption = OctopusProviderInterface & {
+  setupAccount: "chatgpt" | "credentials";
 };
 
 type Props = {
-  provider: OctopusProviderInterface | null;
+  provider: WorkspaceSetupProviderOption | null;
+  providers: WorkspaceSetupProviderOption[];
   agentPresets: WorkspaceSetupAgentPreset[];
   draft: WorkspaceSetupDraft;
   catalog: WorkspaceSetupCatalogCapability[];
@@ -57,6 +64,7 @@ type Props = {
   applyState: WorkspaceSetupApplyState;
   onApply: (draft: WorkspaceSetupDraft) => Promise<void>;
   onSignIn: () => Promise<void>;
+  onProviderConfigured: (updates: Record<string, string>) => Promise<void>;
   onChange: (draft: WorkspaceSetupDraft) => void;
   onRetryCatalog: () => void;
 };
@@ -90,6 +98,7 @@ const KIND_LABELS: Record<WorkspaceSetupCapabilityKind, string> = {
 
 export function WorkspaceSetupOverlay({
   provider,
+  providers,
   agentPresets,
   draft,
   catalog,
@@ -98,6 +107,7 @@ export function WorkspaceSetupOverlay({
   applyState,
   onApply,
   onSignIn,
+  onProviderConfigured,
   onChange,
   onRetryCatalog,
 }: Props) {
@@ -110,9 +120,10 @@ export function WorkspaceSetupOverlay({
     && (!["capabilities", "review"].includes(activeStep) || Boolean(model && provider && providerServiceTierAvailable(provider, model.model, draft.serviceTier ?? "default")));
 
   useEffect(() => {
-    if (draft.providerModel !== undefined || draft.step === "applying" || !provider) return;
-    const selected = provider.models.find((candidate) => candidate.model === provider.model && candidate.showInPicker);
-    if (selected) onChange({ ...draft, providerModel: selected.model, reasoningEffort: provider.reasoningEffort ?? "", serviceTier: provider.serviceTier || selected.defaultServiceTier || "default" });
+    if (draft.step === "applying" || !provider) return;
+    const selected = defaultProviderModel(provider);
+    if (draft.providerInterfaceId === provider.id && (draft.providerModel !== undefined || !selected)) return;
+    onChange(withProvider(draft, provider));
   }, [draft, provider, onChange]);
 
   useEffect(() => {
@@ -159,7 +170,7 @@ export function WorkspaceSetupOverlay({
 
       <div className="welcome-stage setup-stage" key={applying ? "applying" : activeStep}>
         {applying ? (
-          <ApplyingStep applyState={applyState} draft={draft} />
+          <ApplyingStep applyState={applyState} draft={draft} onProviderConfigured={onProviderConfigured} />
         ) : (
           <section className="setup-step">
             <span className="welcome-tag">{step.tag}</span>
@@ -178,6 +189,7 @@ export function WorkspaceSetupOverlay({
                 onChange={onChange}
                 onRetry={onRetryCatalog}
                 provider={provider}
+                providers={providers}
               />
             ) : (
               <ReviewStep agentPresets={agentPresets} catalog={catalog} draft={draft} />
@@ -210,6 +222,8 @@ export function WorkspaceSetupOverlay({
             </button>
           ) : applyState.state === "awaiting_sign_in" ? (
             <button className="welcome-next" type="button" onClick={() => void onSignIn()}>Sign in with ChatGPT</button>
+          ) : applyState.state === "awaiting_provider" ? (
+            <button className="welcome-next" type="button" disabled>Waiting for connection details</button>
           ) : applyState.state === "failed" ? (
             <button className="welcome-next" type="button" onClick={() => void onApply(draft)}>Try again</button>
           ) : (
@@ -323,6 +337,7 @@ function CapabilitiesStep({
   onChange,
   onRetry,
   provider,
+  providers,
 }: {
   catalog: WorkspaceSetupCatalogCapability[];
   draft: WorkspaceSetupDraft;
@@ -330,7 +345,8 @@ function CapabilitiesStep({
   loading: boolean;
   onChange: (draft: WorkspaceSetupDraft) => void;
   onRetry: () => void;
-  provider: OctopusProviderInterface | null;
+  provider: WorkspaceSetupProviderOption | null;
+  providers: WorkspaceSetupProviderOption[];
 }) {
   if (loading) return <p className="setup-note">Loading available capabilities…</p>;
   if (!catalog.length) {
@@ -346,6 +362,28 @@ function CapabilitiesStep({
   const selections = new Map(draft.capabilities.map((capability) => [`${capability.kind}:${capability.id}`, capability]));
   return (
     <div className="setup-list">
+      {providers.length > 1 ? (
+        <div className="setup-row setup-row-static">
+          <span className="setup-row-name">Model provider</span>
+          <select
+            aria-label="Model provider"
+            className="setup-select"
+            onChange={(event) => {
+              const next = providers.find((entry) => entry.id === event.target.value);
+              if (next) onChange(withProvider(draft, next));
+            }}
+            value={provider?.id ?? ""}
+          >
+            {provider ? null : <option value="">Choose a provider</option>}
+            {providers.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}{entry.setupAccount === "chatgpt" ? " · ChatGPT sign-in" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+      {provider ? <p className="setup-note">{providerSetupNote(provider)}</p> : null}
       <div className="setup-row setup-row-static">
         <span className="setup-row-name">Model for Home</span>
         <select
@@ -502,7 +540,11 @@ function ReviewStep({ catalog, draft, agentPresets }: { catalog: WorkspaceSetupC
   );
 }
 
-function ApplyingStep({ applyState, draft }: { applyState: WorkspaceSetupApplyState; draft: WorkspaceSetupDraft }) {
+function ApplyingStep({ applyState, draft, onProviderConfigured }: {
+  applyState: WorkspaceSetupApplyState;
+  draft: WorkspaceSetupDraft;
+  onProviderConfigured: (updates: Record<string, string>) => Promise<void>;
+}) {
   const failed = applyState.state === "failed";
   const running = applyState.state === "running";
   const shown = useShownPercent(running, applyState.percent);
@@ -533,8 +575,94 @@ function ApplyingStep({ applyState, draft }: { applyState: WorkspaceSetupApplySt
         </div>
       ) : null}
       {waiting && running ? <p className="mt-4 text-sm text-token-description-foreground">Still waiting for this step. You can collect diagnostics from Help → Report a Problem.</p> : null}
+      {applyState.state === "awaiting_provider" && applyState.providerConfiguration ? (
+        <ProviderSetupForm configuration={applyState.providerConfiguration} onSubmit={onProviderConfigured} />
+      ) : null}
     </section>
   );
+}
+
+/** Collects the connection details a credential-based provider still needs. */
+export function ProviderSetupForm({ configuration, onSubmit }: {
+  configuration: OctopusProviderConfiguration;
+  onSubmit: (updates: Record<string, string>) => Promise<void>;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const updates = Object.fromEntries(Object.entries(values).map(([name, value]) => [name, value.trim()]).filter(([, value]) => value));
+  const ready = configuration.fields.every((field) => !field.required || field.configured || updates[field.name]);
+  async function submit() {
+    if (!ready || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onSubmit(updates);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <form className="setup-list" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+      {configuration.fields.map((field) => (
+        <label className="setup-row setup-row-static" key={field.name}>
+          <span className="setup-row-name">{field.label}{field.required ? "" : " (optional)"}</span>
+          <input
+            autoComplete="off"
+            className="setup-select"
+            disabled={saving}
+            onChange={(event) => setValues({ ...values, [field.name]: event.currentTarget.value })}
+            placeholder={field.configured ? "Already set — leave empty to keep" : providerFieldPlaceholder(configuration.interfaceId, field)}
+            type={field.kind === "secret" ? "password" : field.kind === "url" ? "url" : "text"}
+            value={values[field.name] ?? ""}
+          />
+        </label>
+      ))}
+      {error ? <InlineError detail={error} title="Connection details were not saved" /> : null}
+      <button className="welcome-next" type="submit" disabled={!ready || saving}>{saving ? "Saving…" : "Save and continue"}</button>
+    </form>
+  );
+}
+
+function providerFieldPlaceholder(interfaceId: string, field: OctopusProviderConfiguration["fields"][number]): string {
+  if (interfaceId === "world_provider_custom") {
+    if (field.kind === "url") return "http://localhost:8080/v1 (llama.cpp) or your server";
+    if (field.kind === "secret") return "Any value if your server has no key, e.g. local";
+    return "The model name your server expects";
+  }
+  return field.kind === "url" ? "https://…/v1" : "";
+}
+
+function providerSetupNote(provider: WorkspaceSetupProviderOption): string {
+  if (provider.setupAccount === "chatgpt") {
+    return provider.modelCatalogError
+      ? "Sign in with ChatGPT to see and use these models."
+      : "Uses your ChatGPT account.";
+  }
+  return provider.id === "world_provider_custom"
+    ? "Any OpenAI-compatible server: llama.cpp, LM Studio, vLLM, LiteLLM and others. You enter its address, key and model after the components install."
+    : "You enter its connection details after the components install. They stay on this device.";
+}
+
+function defaultProviderModel(provider: OctopusProviderInterface) {
+  return provider.models.find((candidate) => candidate.model === provider.model && candidate.showInPicker)
+    ?? provider.models.find((candidate) => candidate.showInPicker);
+}
+
+function withProvider(draft: WorkspaceSetupDraft, provider: OctopusProviderInterface): WorkspaceSetupDraft {
+  const selected = defaultProviderModel(provider);
+  const { providerModel: _model, reasoningEffort: _effort, serviceTier: _tier, ...rest } = draft;
+  return {
+    ...rest,
+    providerInterfaceId: provider.id,
+    ...(selected ? {
+      providerModel: selected.model,
+      reasoningEffort: provider.reasoningEffort || selected.defaultReasoningEffort || "",
+      serviceTier: provider.serviceTier || selected.defaultServiceTier || "default",
+    } : {}),
+  };
 }
 
 function useShownPercent(running: boolean, reported: number | null): number {

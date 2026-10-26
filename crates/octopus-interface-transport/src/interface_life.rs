@@ -2223,11 +2223,48 @@ fn validate_private_environment_directory_metadata(
     Ok(())
 }
 
+/// A copied interface (`copy_of`) inherits the private environment saved for
+/// its original; values saved for the copy itself take precedence.
 fn read_interface_private_environment(
     ctx: &InterfaceLiftContext,
+    descriptor: &octopus_interfaces::InterfaceDescriptor,
     declared_names: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>, String> {
     let var_dir = ctx.interface_var_dir();
+    let mut values = BTreeMap::new();
+    if let Some(original) = interface_private_environment_original(descriptor) {
+        let original_dir = var_dir
+            .parent()
+            .ok_or("interface private directory has no parent")?
+            .join(original.as_str());
+        values.extend(read_private_environment_file(
+            &original_dir,
+            original,
+            declared_names,
+        )?);
+    }
+    values.extend(read_private_environment_file(
+        &var_dir,
+        &ctx.interface,
+        declared_names,
+    )?);
+    Ok(values)
+}
+
+pub(crate) fn interface_private_environment_original(
+    descriptor: &octopus_interfaces::InterfaceDescriptor,
+) -> Option<&InterfaceId> {
+    descriptor
+        .copy_of
+        .as_ref()
+        .filter(|original| **original != descriptor.id)
+}
+
+fn read_private_environment_file(
+    var_dir: &Path,
+    interface: &InterfaceId,
+    declared_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>, String> {
     let path = var_dir.join(INTERFACE_PRIVATE_ENVIRONMENT_FILE);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -2237,49 +2274,49 @@ fn read_interface_private_environment(
         Err(error) => {
             return Err(format!(
                 "interface '{}' private environment cannot be inspected: {error}",
-                ctx.interface.as_str()
+                interface.as_str()
             ));
         }
     };
-    let var_dir_metadata = std::fs::symlink_metadata(&var_dir).map_err(|error| {
+    let var_dir_metadata = std::fs::symlink_metadata(var_dir).map_err(|error| {
         format!(
             "interface '{}' private directory cannot be inspected: {error}",
-            ctx.interface.as_str()
+            interface.as_str()
         )
     })?;
-    validate_private_environment_directory_metadata(&var_dir, &var_dir_metadata)?;
+    validate_private_environment_directory_metadata(var_dir, &var_dir_metadata)?;
     validate_private_environment_file_metadata(&path, &metadata)?;
     let bytes = std::fs::read(&path).map_err(|error| {
         format!(
             "interface '{}' private environment cannot be read: {error}",
-            ctx.interface.as_str()
+            interface.as_str()
         )
     })?;
     let document: InterfacePrivateEnvironmentDocument =
         serde_json::from_slice(&bytes).map_err(|error| {
             format!(
                 "interface '{}' private environment is malformed: {error}",
-                ctx.interface.as_str()
+                interface.as_str()
             )
         })?;
-    if document.schema_version != 1 || document.interface != ctx.interface.as_str() {
+    if document.schema_version != 1 || document.interface != interface.as_str() {
         return Err(format!(
             "interface '{}' private environment has invalid identity or schema",
-            ctx.interface.as_str()
+            interface.as_str()
         ));
     }
     for (name, value) in &document.values {
         if !declared_names.contains(name) {
             return Err(format!(
                 "interface '{}' private environment contains undeclared name '{}'",
-                ctx.interface.as_str(),
+                interface.as_str(),
                 name
             ));
         }
         if value.is_empty() || value.contains('\0') {
             return Err(format!(
                 "interface '{}' private environment contains an invalid value for '{}'",
-                ctx.interface.as_str(),
+                interface.as_str(),
                 name
             ));
         }
@@ -2515,6 +2552,7 @@ pub fn spawn_process_life(
             .collect::<BTreeSet<_>>();
         let private_environment = Arc::new(read_interface_private_environment(
             &ctx,
+            &descriptor,
             &declared_private_environment_names,
         )?);
         let missing = config
@@ -3649,6 +3687,39 @@ mod tests {
             cancel: CancellationToken::new(),
             readiness: InterfaceLifeReadiness::default(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_interface_inherits_its_originals_private_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let write = |interface: &str, values: serde_json::Value| {
+            let dir = root.path().join("home").join("interfaces").join(interface);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let file = dir.join(INTERFACE_PRIVATE_ENVIRONMENT_FILE);
+            std::fs::write(
+                &file,
+                serde_json::json!({"schema_version": 1, "interface": interface, "values": values}).to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write("world_original", serde_json::json!({"API_KEY": "original-key", "MODEL": "original-model"}));
+        write("world_original_chat", serde_json::json!({"MODEL": "copy-model"}));
+        let descriptor: octopus_interfaces::InterfaceDescriptor = serde_json::from_value(serde_json::json!({
+            "id": "world_original_chat", "copy_of": "world_original", "interface_type": "world",
+            "role": "provider", "interface_driver_ref": "audit", "direction": "bidirectional",
+            "source_names": ["probe"], "interface_policy": {"variables": {}, "values": {}}
+        }))
+        .unwrap();
+        let declared = BTreeSet::from(["API_KEY".to_string(), "MODEL".to_string()]);
+
+        let values = read_interface_private_environment(&ctx(root.path(), "world_original_chat"), &descriptor, &declared).unwrap();
+
+        assert_eq!(values.get("API_KEY").map(String::as_str), Some("original-key"));
+        assert_eq!(values.get("MODEL").map(String::as_str), Some("copy-model"));
     }
 
     #[test]

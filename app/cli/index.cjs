@@ -128,7 +128,7 @@ async function main(argv = process.argv.slice(2), io = process) {
         report(await environment.setup({
           ui, nonInteractive: flags["non-interactive"], packId: flags.pack,
           workspaceName: flags["workspace-name"], projectName: flags["project-name"],
-          model: flags.model, reasoningEffort: flags.effort, serviceTier: flags["service-tier"],
+          providerId: flags.provider, model: flags.model, reasoningEffort: flags.effort, serviceTier: flags["service-tier"],
           signIn: flags["non-interactive"] ? flags["sign-in"] : true, recommended: [],
         }));
       } finally { ui.close?.(); }
@@ -356,7 +356,7 @@ function safeText(text) { return require("./presentation.cjs").safeText(text); }
 function commandHelp(words) {
   if (words[0] === "project") return `Octopus Projects\n\n  octopus project create "Project name" [--project <parent-id>] [--policy <id>]\n  octopus project policies [--project <parent-id>] [--json]\n\nNew Projects use their parent's policy unless an allowed policy is selected.\nUse 'octopus projects' to find existing Project IDs.\n`;
   if (words[0] === "agent") return `Octopus Agents\n\n  octopus agent create "Agent name" --project <id> --provider <id> --model <id> --effort <level>\n\nUse 'octopus projects --json' for Project IDs and 'octopus models --project <id> --json'\nfor the exact permitted provider, model, and reasoning choices.\nThe Agent uses that Project's configured Applications and Drivers.\n`;
-  if (words[0] === "setup") return `Octopus setup\n\n  octopus setup [--home <path>]\n  octopus setup --home <path> --non-interactive --pack <id> --workspace-name <name>\n    --project-name <name> --model <id> --effort <level>\n\nInteractive setup lists installed choices and guides provider sign-in.\nNoninteractive setup requires existing provider sign-in. Configured Homes are preserved.\n`;
+  if (words[0] === "setup") return `Octopus setup\n\n  octopus setup [--home <path>]\n  octopus setup --home <path> --non-interactive --pack <id> --workspace-name <name>\n    --project-name <name> [--provider <id>] --model <id> --effort <level>\n\nInteractive setup lists the offered model providers, then guides ChatGPT sign-in or\nasks for the chosen provider's connection details (API key, server URL, model).\nNoninteractive setup requires existing sign-in, or the provider's settings in\n~/.octopus/.env. Configured Homes are preserved.\n`;
   return HELP;
 }
 

@@ -343,3 +343,38 @@ test("setup arms each selected pack trigger once through the template clone", as
   assert.ok(fs.existsSync(path.join(home, "state", "runs", "run_world_self_improvement.json")));
   fs.rmSync(home, { recursive: true, force: true });
 });
+
+test("setup triggers start their runs on Home's chosen provider", async () => {
+  const { setupTriggerEntries, setupTriggerProof, armSetupTriggers } = require("../electron/projection.cjs");
+  const os = require("node:os");
+  const repoRegistry = path.join(appRoot, "..", "registry");
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "octopus-setup-trigger-provider-")));
+  const registry = path.join(home, "registry");
+  for (const kind of ["interface", "tool"]) {
+    for (const entry of fs.readdirSync(path.join(repoRegistry, kind), { withFileTypes: true }).filter((row) => row.isDirectory())) {
+      for (const name of ["interface.json", "life.json", "policy.json", "activation.json", "tool.json"]) {
+        const source = path.join(repoRegistry, kind, entry.name, name);
+        if (!fs.existsSync(source)) continue;
+        fs.mkdirSync(path.join(registry, kind, entry.name), { recursive: true });
+        fs.copyFileSync(source, path.join(registry, kind, entry.name, name));
+      }
+    }
+  }
+  fs.mkdirSync(path.join(home, "state", "runs"), { recursive: true });
+  const pack = JSON.parse(fs.readFileSync(path.join(appRoot, "distribution", "local-packages", "packs", "codex.json"), "utf8"));
+  const entries = setupTriggerEntries(pack, ["world_system_review", "world_memory_cron"], "world_provider_custom");
+  assert.ok(entries.length >= 1 && entries.every((entry) => entry.provider_interface_id === "world_provider_custom"));
+  const hooks = { commitClientAuthoring: async (plan) => {
+    for (const write of plan.writes) {
+      fs.mkdirSync(path.dirname(write.file), { recursive: true });
+      fs.writeFileSync(write.file, `${JSON.stringify(write.next, null, 2)}\n`);
+    }
+  } };
+  await armSetupTriggers(registry, home, entries, hooks);
+  for (const entry of entries) {
+    const armed = JSON.parse(fs.readFileSync(path.join(registry, "interface", entry.interface_id, "activation.json"), "utf8")).activations[0];
+    if (armed.config.target?.provider_interface_id !== undefined) assert.equal(armed.config.target.provider_interface_id, "world_provider_custom");
+  }
+  assert.equal((await setupTriggerProof(registry, home, entries)).length, entries.length);
+  fs.rmSync(home, { recursive: true, force: true });
+});

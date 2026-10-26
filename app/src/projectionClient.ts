@@ -23,6 +23,7 @@ import type {
   OctopusInterfaceArtifactResponse,
   OctopusDictationRequest,
   OctopusDictationResponse,
+  OctopusProviderConfiguration,
   OctopusProviderInterfacesResponse,
   OctopusProviderModelsRefreshRequest,
   OctopusProviderModelsRefreshResponse,
@@ -150,6 +151,27 @@ export async function resumeClientSetup(operationId: string, options: { allowSig
   const host = window.octopusTransport;
   if (!host?.clientSetupResume) throw new Error("Client setup is available only in the live desktop client.");
   return host.clientSetupResume({ operationId, ...(options.allowSignIn ? {} : { stopBefore: "provider" as const }) });
+}
+
+export async function readSetupProviderConfiguration(interfaceId: string): Promise<OctopusProviderConfiguration> {
+  const host = window.octopusTransport;
+  if (!host?.clientSetupProviderConfiguration) throw new Error("Provider setup is available only in the live desktop client.");
+  return host.clientSetupProviderConfiguration({ interfaceId });
+}
+
+export async function saveSetupProviderConfiguration(
+  configuration: OctopusProviderConfiguration,
+  updates: Record<string, string>,
+): Promise<void> {
+  const host = window.octopusTransport;
+  if (!host?.mutateApplicationPrivateConfiguration) throw new Error("Provider setup is available only in the live desktop client.");
+  await host.mutateApplicationPrivateConfiguration({
+    applicationId: configuration.interfaceId,
+    interfaceId: configuration.interfaceId,
+    expectedDigest: configuration.documentDigest || null,
+    updates,
+    clears: [],
+  });
 }
 
 export function onApplicationLifecycleProgress(listener: (progress: OctopusApplicationLifecycleProgress) => void): () => void {

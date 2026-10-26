@@ -69,6 +69,13 @@
           ],
           "properties": {
             "provider_interface_id": { "$ref": "#/$defs/id" },
+            "provider_choices": {
+              "description": "Providers the person may choose for Home instead of provider_interface_id. Each must be a recommended component; only the chosen one is installed.",
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/id" }
+            },
             "worker_interface_id": { "$ref": "#/$defs/id" },
             "door_host_slots": {
               "type": "object",

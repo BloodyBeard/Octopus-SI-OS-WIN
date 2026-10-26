@@ -2060,8 +2060,7 @@ function applicationPackSetupVerified(
   return setup?.status === "complete"
     && Boolean(setup.receiptDigest)
     && setup.plan.pack.id === pack.id
-    && setup.plan.pack.manifest_digest === pack.manifest_digest
-    && setup.plan.provider.required_state === "account_readable";
+    && setup.plan.pack.manifest_digest === pack.manifest_digest;
 }
 
 function applicationPackComponentStatus(component: ApplicationPackComponent): { label: string; tone: "neutral" | "success" | "warning" | "danger" } {

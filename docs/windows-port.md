@@ -51,6 +51,11 @@ Still to do, roughly in dependency order:
   - build `octopus.exe` and the room and provider executables
   - fetch the Windows Codex CLI build (`managed-cli/bootstrap.cjs`)
   - produce an NSIS or zip artifact
+- Installing packages copies them with macOS `clonefile` (`app/electron/nativeFiles.cjs`)
+  and refuses on any other OS, so setup cannot install anything on Windows or
+  Linux yet. Windows needs a plain-copy fallback (or ReFS block cloning). This
+  also keeps several desktop test suites (`test-client-setup`,
+  `test-local-packages`, `test-cli-setup`) from running off macOS.
 - The launcher `./octopus` is a POSIX shell script. Windows needs an
   `octopus.cmd` equivalent.
 - `app/electron/main.cjs` already branches on `process.platform` for window
@@ -61,54 +66,73 @@ Still to do, roughly in dependency order:
 
 ## Using any LLM
 
-Every provider below already ships in `registry/interface/world_provider_*`.
-All of them run through the bundled Codex runtime and a local translation
-bridge (OpenAI Chat/Responses, Anthropic, Google, Azure). None of them needs a
-ChatGPT login.
+The model is chosen at first-run setup, and ChatGPT is not required.
 
-The providers are:
+1. On the ChatGPT screen, choose **Use another model provider** (or sign in if
+   you want ChatGPT/Codex).
+2. In **Capabilities**, pick the **Model provider** for Home. 29 providers are
+   offered, including:
+   - **Custom OpenAI-compatible**: llama.cpp `llama-server`, LM Studio, vLLM,
+     LiteLLM, or any `/v1` server
+   - **Ollama**, **LM Studio**, **vLLM**
+   - **Anthropic**, **Claude Code**, **OpenAI**, **OpenRouter**, **Gemini**,
+     **DeepSeek**, **Mistral**, **Groq**, **xAI**, and more
+3. After the components install, setup asks for that provider's connection
+   details (API key, server URL, model) and saves them only on this device.
+   Values already present in `~/.octopus/.env` are used without asking.
 
-- `custom`: any OpenAI-compatible server
-- `openai`, `anthropic`, `gemini`, `openrouter`
-- `ollama`, `lmstudio`, `vllm`
-- `groq`, `deepseek`, `mistral`, `xai`, `together`
-- and more
+Only the chosen provider is installed. Background runs created at setup (memory
+consolidation, system review) use the same provider, and Agents can use any
+installed provider later.
 
-Changes on this branch:
+Terminal setup works the same way:
 
-- The Home, Task, System Review, and Client Maintenance workers now allow
-  every bundled provider in their policy ceiling. Upstream allowed only
-  Codex/ChatGPT for these workers, so Home and task agents could not be
-  switched to another model.
+```sh
+./octopus setup                     # interactive: pick provider, then enter its details
+./octopus setup --non-interactive --pack codex --workspace-name "My space" \
+  --provider world_provider_custom --model custom-model --effort none
+```
 
-Configure a provider either way:
+### llama.cpp
 
-- **Applications** view → the provider → fill in its fields.
-- `~/.octopus/.env` (mode 0600), for example:
+```sh
+llama-server -m your-model.gguf --port 8080 --jinja   # --jinja enables tool calling
+```
 
-  ```sh
-  # Any OpenAI-compatible endpoint (also works for LM Studio, vLLM, LiteLLM, ...)
-  OCTOPUS_PROVIDER_CUSTOM_BASE_URL=http://localhost:8000/v1
-  OCTOPUS_PROVIDER_CUSTOM_API_KEY=sk-...
-  OCTOPUS_PROVIDER_CUSTOM_MODEL=my-model-id
+Then choose **Custom OpenAI-compatible** with:
 
-  # Anthropic
-  OCTOPUS_PROVIDER_ANTHROPIC_API_KEY=sk-ant-...
+- **Server URL:** `http://localhost:8080/v1`
+- **API key:** any value, e.g. `local` (llama-server ignores it unless started
+  with `--api-key`)
+- **Model id:** any name
 
-  # Ollama (base URL is http://localhost:11434/v1)
-  OCTOPUS_PROVIDER_OLLAMA_MODEL=llama3.1
-  ```
+Pick a model with solid tool calling, such as Qwen3, Qwen2.5-Coder, or Llama
+3.1/3.3 8B+. Octopus relies heavily on tools.
 
-Still to do:
+### Configuring by file
 
-1. **Make first-run sign-in optional.** `WorkspaceSetupGate.tsx` always
-   renders `ChatGptSignInGate`. The setup "provider" step
-   (`clientProviderMetadata.cjs` `setupOwner`, `app/cli/setup.cjs`
-   `ensureSignIn`) only knows the Codex account. Credential-based providers
-   need a setup owner that proves their env/config is present.
-2. **Let the user choose the Home provider at setup.** The setup pack
-   (`app/distribution/local-packages/packs/codex.json`) pins
-   `world_provider_codex`. Add a provider choice to the pack and the setup
-   overlay, plus a `--provider` flag to the CLI.
-3. **Background runs.** `registry/interface/world_memory_cron/activation.json`
-   targets `world_provider_codex`. It should follow the Home provider.
+The same values can live in `~/.octopus/.env` (mode 0600):
+
+```sh
+OCTOPUS_PROVIDER_CUSTOM_BASE_URL=http://localhost:8080/v1
+OCTOPUS_PROVIDER_CUSTOM_API_KEY=local
+OCTOPUS_PROVIDER_CUSTOM_MODEL=qwen3
+
+OCTOPUS_PROVIDER_ANTHROPIC_API_KEY=sk-ant-...
+OCTOPUS_PROVIDER_OLLAMA_MODEL=llama3.1
+```
+
+### What changed from upstream
+
+- **Setup pack:** it offers a provider choice (`home.provider_choices`).
+  Credential-based providers are verified by checking their required settings
+  (`credentials_configured`) instead of a ChatGPT account.
+- **Worker policy:** the Home, Task, System Review, and Client Maintenance
+  workers allow every bundled provider. Upstream allowed only Codex/ChatGPT for
+  these.
+- **Kernel fix:** Home and tasks run on per-run copies of a provider
+  (`copy_of`). Upstream never passed the settings saved for the provider to
+  those copies, so API keys entered in Applications did not reach Home. Copies
+  now inherit their original's saved settings, and their own values win.
+- **Status:** upstream has not live-tested the non-ChatGPT providers. Report
+  what works with your model.

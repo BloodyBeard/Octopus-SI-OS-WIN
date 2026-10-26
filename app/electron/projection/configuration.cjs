@@ -214,9 +214,15 @@ function configurationProjection(store) {
     for (const pack of localPackages.packs) {
       const id = pack.workspace_setup?.home?.provider_interface_id;
       if (!id) continue;
-      const owner = pack.components.find((component) => component.product_id === id);
-      const providers = owner?.materialized === true || owner?.partially_materialized === true ? setupInstalledProviders : setupSourceProviders;
-      pack.setup_provider = providers.find((provider) => provider.id === id) ?? null;
+      const setupProvider = (providerId) => {
+        const owner = pack.components.find((component) => component.product_id === providerId);
+        const providers = owner?.materialized === true || owner?.partially_materialized === true ? setupInstalledProviders : setupSourceProviders;
+        return providers.find((provider) => provider.id === providerId) ?? null;
+      };
+      pack.setup_provider = setupProvider(id);
+      pack.setup_provider_choices = (pack.workspace_setup.home.provider_choices ?? [])
+        .map(setupProvider)
+        .filter((provider) => provider !== null);
     }
     if (applicationRead.status === "rejected") throw applicationRead.reason;
     return { localPackages, applicationPackages: applicationRead.value, applicationWarnings };

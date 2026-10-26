@@ -170,6 +170,9 @@ async function createScheduledInterface(
   );
   activation.enabled = true;
   activation.config.run_template = runTemplate;
+  if (request?.targetProviderInterfaceId !== undefined && activation.config.target?.provider_interface_id !== undefined) {
+    activation.config.target.provider_interface_id = requiredSafeRegistryId(request.targetProviderInterfaceId, "target provider");
+  }
   activation.config.schedule.reminder_env = "";
   applyScheduledDraft(activation.config.schedule, request?.draft, true);
   const activationDocument = { schema_version: 1, interface: interfaceId, activations: [activation] };
@@ -246,7 +249,9 @@ async function createScheduledInterface(
   };
 }
 
-function setupTriggerEntries(pack, selectedRecommended) {
+// Setup triggers start their runs on Home's provider, so a workspace that does not
+// use the template's provider never needs that provider's account.
+function setupTriggerEntries(pack, selectedRecommended, providerInterfaceId) {
   const chosen = new Set(arrayValue(selectedRecommended));
   const selected = new Set(arrayValue(pack?.components)
     .filter((component) => component.selection !== "recommended" || chosen.has(component.package_id))
@@ -258,6 +263,7 @@ function setupTriggerEntries(pack, selectedRecommended) {
       template_interface_id: entry.template_interface_id,
       interface_id: entry.interface_id,
       quiet_period_seconds: entry.quiet_period_seconds,
+      ...(providerInterfaceId ? { provider_interface_id: requiredSafeRegistryId(providerInterfaceId, "setup trigger provider") } : {}),
     }))
     .sort((left, right) => left.interface_id.localeCompare(right.interface_id));
 }
@@ -271,7 +277,9 @@ async function setupTriggerState(interfaceRoot, octopusHomeRoot, entry) {
   const runId = `run_${interfaceId}`;
   const run = await readOptionalRegularJsonDocument(path.join(octopusHomeRoot, "state", "runs", `${runId}.json`), `setup trigger run ${runId}`);
   if (parsed.activation.enabled !== true || parsed.config.run_template.id !== runId || run?.document?.id !== runId
-    || parsed.config.schedule.inactivity?.seconds !== entry.quiet_period_seconds) {
+    || parsed.config.schedule.inactivity?.seconds !== entry.quiet_period_seconds
+    || (entry.provider_interface_id !== undefined && parsed.config.target?.provider_interface_id !== undefined
+      && parsed.config.target.provider_interface_id !== entry.provider_interface_id)) {
     throw new Error(`setup trigger ${interfaceId} exists but is not the enabled quiet-period trigger bound to ${runId}`);
   }
   return {
@@ -308,6 +316,7 @@ async function armSetupTriggers(registryRoot, octopusHomeRoot, entries, hooks = 
       sourceInterfaceId,
       sourceActivationDigest: source.digest,
       interfaceId: entry.interface_id,
+      ...(entry.provider_interface_id ? { targetProviderInterfaceId: entry.provider_interface_id } : {}),
       draft: {
         type: "inactivity",
         inactivity: {

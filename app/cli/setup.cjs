@@ -12,6 +12,7 @@ const { projectionReadRequest } = require("../electron/projectionReadContract.cj
 const { planClientAgentTemplate } = require("../electron/clientAgentCatalog.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { taskRetirementBarrier, projectionStore, requireDistribution } = require("./environment.cjs");
+const { mutateApplicationPrivateConfiguration } = require("../electron/projection/privateConfiguration.cjs");
 
 const DIGEST = /^[a-f0-9]{64}$/;
 
@@ -158,7 +159,8 @@ function createSetupOwners(environment, options = {}) {
 
   async function triggerEntries(plan) {
     const catalog = await verifySetupPlan(environment, plan);
-    return setupTriggerEntries(catalog.packs.find((row) => row.id === plan.pack.id), plan.pack.selected_recommended);
+    return setupTriggerEntries(catalog.packs.find((row) => row.id === plan.pack.id), plan.pack.selected_recommended,
+      plan.workspace.request.home.providerInterfaceId);
   }
 
   return {
@@ -242,6 +244,11 @@ function createSetupOwners(environment, options = {}) {
       probe: metadata.setupOwner.probe,
       async apply(plan) {
         checkCancelled(options.signal);
+        if (plan.provider.required_state === "credentials_configured") {
+          await ensureProviderConfiguration(environment, metadata, plan.provider.interface_id, options);
+          if (!await metadata.setupOwner.probe(plan)) await metadata.setupOwner.apply(plan);
+          return;
+        }
         await ensureSignIn(environment, options);
         if (!await metadata.setupOwner.probe(plan)) throw new Error("ChatGPT sign-in completed without a readable account.");
       },
@@ -298,9 +305,21 @@ async function choosePack(catalog, options) {
 
 async function collectChoices(environment, pack, options) {
   if (options.nonInteractive && !options.model) throw new Error("Noninteractive setup requires --model.");
+  const providerChoices = pack.workspace_setup.home.provider_choices ?? [];
   const recommended = uniqueStrings(options.recommended ?? [], "recommended packages");
-  const recommendedIds = new Set(pack.components.filter((row) => row.selection === "recommended").map((row) => row.package_id));
+  const recommendedIds = new Set(pack.components.filter((row) => row.selection === "recommended" && !providerChoices.includes(row.product_id)).map((row) => row.package_id));
   if (recommended.some((id) => !recommendedIds.has(id))) throw new Error("A selected optional package is not recommended by this Application Pack.");
+  const sourceProviders = await readProviderInterfaceDescriptors(environment.packageRoots.sourceRegistryRoot);
+  const offered = [pack.workspace_setup.home.provider_interface_id, ...providerChoices];
+  const providerId = await choose(options, "provider", "Choose a model provider for Home",
+    offered.map((id) => ({ value: id, label: sourceProviders.find((row) => row.id === id)?.label ?? id })),
+    options.providerId ?? (options.nonInteractive ? pack.workspace_setup.home.provider_interface_id : undefined),
+    pack.workspace_setup.home.provider_interface_id);
+  if (!offered.includes(providerId)) throw new Error(`Application Pack '${pack.id}' does not offer provider '${providerId}'.`);
+  const providerPackage = providerChoices.includes(providerId)
+    ? pack.components.find((row) => row.product_id === providerId)?.package_id
+    : undefined;
+  if (providerPackage) recommended.push(providerPackage);
   const selected = pack.components.filter((row) => row.selection === "included" || recommended.includes(row.package_id));
   for (const row of selected) if (!row.available || !DIGEST.test(row.source_digest)) throw new Error(`Package '${row.name}' is unavailable: ${row.error || "its source proof is missing"}`);
   const workspaceName = await ask(options, "workspace_name", "Name your workspace", options.workspaceName, "My space");
@@ -311,13 +330,13 @@ async function collectChoices(environment, pack, options) {
   }
   if (!Array.isArray(projects) || projects.length > 24) throw new Error("Setup accepts up to 24 Projects.");
   projects = projects.map((row) => typeof row === "string" ? { name: row, goal: row } : row);
-  const providers = await readProviderInterfaceDescriptors(environment.packageRoots.sourceRegistryRoot);
-  const provider = providers.find((row) => row.id === pack.workspace_setup.home.provider_interface_id);
-  if (!provider) throw new Error("The Application Pack's Home provider is absent from the source package registry.");
+  const provider = sourceProviders.find((row) => row.id === providerId);
+  if (!provider) throw new Error("The chosen Home provider is absent from the source package registry.");
   const metadata = createClientProviderMetadata({ registryRoot: () => environment.packageRoots.sourceRegistryRoot,
     sourceRegistryRoot: () => environment.packageRoots.sourceRegistryRoot,
     accountClient: () => environment.accountClient(), reference: setupReference });
   const [discovered] = await metadata.catalog([provider]);
+  const providerState = (await metadata.providerAccountKind(provider.id)) === "chatgpt" ? "account_readable" : "credentials_configured";
   if (discovered.modelCatalogError) throw new Error(discovered.modelCatalogError);
   const models = discovered.models.filter((row) => row.showInPicker);
   if (!models.length) throw new Error("Home's provider returned no selectable models.");
@@ -332,7 +351,7 @@ async function collectChoices(environment, pack, options) {
   const serviceTier = options.serviceTier;
   validateProviderModelSelection([discovered], { providerInterfaceId: provider.id, providerModel: model, reasoningEffort, serviceTier });
   return { operationId: options.operationId ?? randomUUID(), workspaceName, workspaceGoal: options.workspaceGoal ?? workspaceName,
-    projects, model, reasoningEffort, serviceTier, recommended, agentPresets: options.agentPresets };
+    projects, providerId, providerState, model, reasoningEffort, serviceTier, recommended, agentPresets: options.agentPresets };
 }
 
 function compileSetupPlan(pack, choices) {
@@ -342,6 +361,7 @@ function compileSetupPlan(pack, choices) {
   const recipe = pack.workspace_setup.home;
   const taskRecipe = pack.workspace_setup.task;
   if (!taskRecipe) throw new Error("The Application Pack has no declared Task recipe.");
+  const providerId = choices.providerId ?? recipe.provider_interface_id;
   const projects = choices.projects.map((row, index) => ({
     key: projectKeys[index], parentKey: row.parentKey ?? "root", templateName: "project",
     name: humanText(row.name, "Project name", 80), goal: humanText(row.goal ?? row.name, "Project goal", 240),
@@ -353,7 +373,7 @@ function compileSetupPlan(pack, choices) {
     if (!preset) throw new Error(`Agent preset '${id}' is not in this Application Pack.`);
     return !projects.length || !selected.some((row) => row.package_id === preset.component_package_id) ? [] : [{
       packId: pack.id, presetId: id, expectedPackManifestDigest: pack.manifest_digest,
-      projectKeys: [...projectKeys].sort(), providerInterfaceId: preset.provider_interface_id,
+      projectKeys: [...projectKeys].sort(), providerInterfaceId: providerId,
       providerModel: choices.model, reasoningEffort: choices.reasoningEffort,
       ...(choices.serviceTier ? { serviceTier: choices.serviceTier } : {}),
     }];
@@ -362,7 +382,7 @@ function compileSetupPlan(pack, choices) {
     action: "initialize_workspace",
     operationId: choices.operationId,
     root: { key: "root", templateName: "existence", name: humanText(choices.workspaceName, "Workspace name", 80), goal: humanText(choices.workspaceGoal, "Workspace goal", 240) },
-    home: { name: "Home", providerInterfaceId: recipe.provider_interface_id, providerModel: choices.model,
+    home: { name: "Home", providerInterfaceId: providerId, providerModel: choices.model,
       workerInterfaceId: recipe.worker_interface_id, reasoningEffort: choices.reasoningEffort,
       ...(choices.serviceTier ? { serviceTier: choices.serviceTier } : {}), doorHostSlots: structuredClone(recipe.door_host_slots ?? {}),
       contextArtifactBindings: recipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: recipe.selected_worker_environment_kinds },
@@ -380,7 +400,7 @@ function compileSetupPlan(pack, choices) {
   return {
     pack: { id: pack.id, manifest_digest: pack.manifest_digest, selected_recommended: [...choices.recommended].sort() },
     packages: selected.map((row) => ({ id: row.package_id, source_digest: row.source_digest, desired_state: "installed" })).sort(byId),
-    extensions: [], provider: { interface_id: recipe.provider_interface_id, required_state: "account_readable" },
+    extensions: [], provider: { interface_id: providerId, required_state: choices.providerState ?? "account_readable" },
     workspace: { request_digest: workspaceInitializeRequestDigest(request), request,
       project_defaults: defaults.sort((a, b) => a.package_id.localeCompare(b.package_id)) },
   };
@@ -394,11 +414,31 @@ async function verifySetupPlan(environment, plan) {
   const expected = compileSetupPlan(pack, {
     operationId: request.operationId, workspaceName: request.root.name, workspaceGoal: request.root.goal,
     projects: request.projects.map((row) => ({ ...row, ...row.presentation })),
+    providerId: request.home.providerInterfaceId, providerState: plan.provider.required_state,
     model: request.home.providerModel, reasoningEffort: request.home.reasoningEffort, serviceTier: request.home.serviceTier,
     recommended: plan.pack.selected_recommended, agentPresets: (request.agentPresets ?? []).map((row) => row.presetId),
   });
   if (stableJson(plan) !== stableJson(expected)) throw new Error("Saved setup choices no longer match the Application Pack's recipe and source files.");
   return catalog;
+}
+
+// Credential-based providers need connection details instead of a ChatGPT account.
+async function ensureProviderConfiguration(environment, metadata, interfaceId, options) {
+  const status = await metadata.providerConfiguration(interfaceId);
+  const missing = status.fields.filter((field) => field.required && !field.configured);
+  if (!missing.length) return;
+  if (options.nonInteractive || typeof options.ui?.ask !== "function") {
+    throw new Error(`${status.name} is not configured. Set ${missing.map((field) => field.name).join(", ")} in ~/.octopus/.env, then run setup again.`);
+  }
+  const updates = {};
+  for (const field of missing) {
+    const value = String(await ask(options, field.name.toLowerCase(), `${status.name}: ${field.label}`, undefined, "")).trim();
+    if (!value) throw new Error(`${field.label} is required.`);
+    updates[field.name] = value;
+  }
+  await mutateApplicationPrivateConfiguration(environment.packageRoots.activeRegistryRoot, environment.home, {
+    applicationId: interfaceId, interfaceId, expectedDigest: status.documentDigest || null, updates, clears: [],
+  });
 }
 
 async function ensureSignIn(environment, options) {
@@ -451,10 +491,11 @@ async function choose(options, id, prompt, choices, value, defaultValue) {
   return value;
 }
 
-function hasNewChoices(options) { return ["packId", "workspaceName", "workspaceGoal", "projectName", "projects", "model", "reasoningEffort", "serviceTier", "agentPresets"].some((key) => options[key] !== undefined) || options.recommended?.length > 0; }
+function hasNewChoices(options) { return ["packId", "workspaceName", "workspaceGoal", "projectName", "projects", "providerId", "model", "reasoningEffort", "serviceTier", "agentPresets"].some((key) => options[key] !== undefined) || options.recommended?.length > 0; }
 function assertSavedChoices(options, plan) {
   const expected = { packId: plan.pack.id, workspaceName: plan.workspace.request.root.name,
-    workspaceGoal: plan.workspace.request.root.goal, model: plan.workspace.request.home.providerModel,
+    workspaceGoal: plan.workspace.request.root.goal, providerId: plan.workspace.request.home.providerInterfaceId,
+    model: plan.workspace.request.home.providerModel,
     reasoningEffort: plan.workspace.request.home.reasoningEffort, serviceTier: plan.workspace.request.home.serviceTier };
   for (const [field, value] of Object.entries(expected)) {
     if (options[field] !== undefined && options[field] !== value) throw new Error(`Saved setup already chose ${field}. Rerun without replacement choices.`);

@@ -2,9 +2,9 @@
   "schema": "octopus.local_application_pack",
   "schema_version": 1,
   "id": "codex",
-  "version": "1.5.0",
-  "name": "Codex Pack",
-  "description": "Codex provider, agent working context, and local environments for browser, desktop, files, terminal, and git worktrees.",
+  "version": "1.6.0",
+  "name": "Octopus Pack",
+  "description": "Your choice of model provider (ChatGPT/Codex, any OpenAI-compatible server, local models, or a hosted API), agent working context, and local environments for browser, desktop, files, terminal, and git worktrees.",
   "components": [
     {
       "package_id": "world_cron",
@@ -30,6 +30,151 @@
       "package_id": "world_provider_codex",
       "selection": "included",
       "reason": "Provides the model interface with task-private state and the machine-wide Codex sign-in boundary."
+    },
+    {
+      "package_id": "world_provider_custom",
+      "selection": "recommended",
+      "reason": "Offers Custom OpenAI-compatible as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_ollama",
+      "selection": "recommended",
+      "reason": "Offers Ollama as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_lmstudio",
+      "selection": "recommended",
+      "reason": "Offers LM Studio as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_vllm",
+      "selection": "recommended",
+      "reason": "Offers vLLM as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_anthropic",
+      "selection": "recommended",
+      "reason": "Offers Anthropic API as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_claude_cli",
+      "selection": "recommended",
+      "reason": "Offers Claude Code as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_openai",
+      "selection": "recommended",
+      "reason": "Offers OpenAI API as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_openrouter",
+      "selection": "recommended",
+      "reason": "Offers OpenRouter as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_gemini",
+      "selection": "recommended",
+      "reason": "Offers Google Gemini as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_alibaba_coding_plan",
+      "selection": "recommended",
+      "reason": "Offers Alibaba Coding Plan as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_azure_openai",
+      "selection": "recommended",
+      "reason": "Offers Azure OpenAI as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_cerebras",
+      "selection": "recommended",
+      "reason": "Offers Cerebras as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_deepseek",
+      "selection": "recommended",
+      "reason": "Offers DeepSeek as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_groq",
+      "selection": "recommended",
+      "reason": "Offers Groq as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_huggingface",
+      "selection": "recommended",
+      "reason": "Offers Hugging Face as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_kilocode",
+      "selection": "recommended",
+      "reason": "Offers Kilo Gateway as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_kimi",
+      "selection": "recommended",
+      "reason": "Offers Moonshot Kimi as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_kimi_code",
+      "selection": "recommended",
+      "reason": "Offers Kimi Code as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_minimax",
+      "selection": "recommended",
+      "reason": "Offers MiniMax as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_minimax_cn",
+      "selection": "recommended",
+      "reason": "Offers MiniMax China as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_mistral",
+      "selection": "recommended",
+      "reason": "Offers Mistral as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_nvidia",
+      "selection": "recommended",
+      "reason": "Offers NVIDIA NIM as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_opencode_go",
+      "selection": "recommended",
+      "reason": "Offers OpenCode Go as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_opencode_zen",
+      "selection": "recommended",
+      "reason": "Offers OpenCode Zen as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_stepfun",
+      "selection": "recommended",
+      "reason": "Offers StepFun as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_together",
+      "selection": "recommended",
+      "reason": "Offers Together AI as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_xai",
+      "selection": "recommended",
+      "reason": "Offers xAI Grok as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_xiaomi",
+      "selection": "recommended",
+      "reason": "Offers Xiaomi MiMo as the model provider for Home and new tasks; installed only when chosen during setup."
+    },
+    {
+      "package_id": "world_provider_zai",
+      "selection": "recommended",
+      "reason": "Offers Z.AI GLM as the model provider for Home and new tasks; installed only when chosen during setup."
     },
     {
       "package_id": "artifact.codex_context",
@@ -103,6 +248,37 @@
     "selection": "included",
     "home": {
       "provider_interface_id": "world_provider_codex",
+      "provider_choices": [
+        "world_provider_custom",
+        "world_provider_ollama",
+        "world_provider_lmstudio",
+        "world_provider_vllm",
+        "world_provider_anthropic",
+        "world_provider_claude_cli",
+        "world_provider_openai",
+        "world_provider_openrouter",
+        "world_provider_gemini",
+        "world_provider_alibaba_coding_plan",
+        "world_provider_azure_openai",
+        "world_provider_cerebras",
+        "world_provider_deepseek",
+        "world_provider_groq",
+        "world_provider_huggingface",
+        "world_provider_kilocode",
+        "world_provider_kimi",
+        "world_provider_kimi_code",
+        "world_provider_minimax",
+        "world_provider_minimax_cn",
+        "world_provider_mistral",
+        "world_provider_nvidia",
+        "world_provider_opencode_go",
+        "world_provider_opencode_zen",
+        "world_provider_stepfun",
+        "world_provider_together",
+        "world_provider_xai",
+        "world_provider_xiaomi",
+        "world_provider_zai"
+      ],
       "worker_interface_id": "system_worker_operator_home",
       "door_host_slots": {
         "system_workspace_env": {

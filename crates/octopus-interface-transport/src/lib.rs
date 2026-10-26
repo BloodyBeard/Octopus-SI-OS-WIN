@@ -429,13 +429,25 @@ impl InterfaceActivationReconciler {
                     continue;
                 }
             };
+            let private_interfaces = self.octopus_home.join("interfaces");
             let fingerprint =
                 match interface_life::interface_private_environment_source_fingerprint(
-                    &self
-                        .octopus_home
-                        .join("interfaces")
-                        .join(interface.as_str()),
+                    &private_interfaces.join(interface.as_str()),
                 )
+                .and_then(|own| {
+                    // A copy also restarts when its original's saved environment changes.
+                    match interface_life::interface_private_environment_original(
+                        &resolved.interface_descriptor,
+                    ) {
+                        None => Ok(own),
+                        Some(original) => interface_life::interface_private_environment_source_fingerprint(
+                            &private_interfaces.join(original.as_str()),
+                        )
+                        .map(|inherited| {
+                            ContentHash::of_bytes(format!("{}:{}", own.to_hex(), inherited.to_hex()).as_bytes())
+                        }),
+                    }
+                })
                 .and_then(|private_environment| {
                     interface_lift_fingerprint(
                         resolved.fingerprint,

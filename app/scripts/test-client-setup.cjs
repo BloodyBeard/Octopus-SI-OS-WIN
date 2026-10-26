@@ -84,19 +84,26 @@ async function rendererPlanAdmission(root) {
   const components = native.components.map((entry) => ({
     packageId: entry.package_id, sourceDigest: entry.source_digest, productKind: entry.product_kind, productId: entry.product_id,
   }));
+  const providerChoices = native.workspace_setup.home.provider_choices ?? [];
+  assert.ok(providerChoices.includes("world_provider_custom"), "the setup pack offers a custom OpenAI-compatible provider");
   const pack = { id: native.id, manifestDigest: native.manifest_digest, components,
+    setupProvider: { id: native.workspace_setup.home.provider_interface_id, setupAccount: "chatgpt" },
+    setupProviderChoices: providerChoices.map((id) => ({ id, setupAccount: "credentials" })),
     recipe: { ...native.workspace_setup.home, task: native.workspace_setup.task,
       project_defaults: native.workspace_setup.project_defaults, agent_presets: native.workspace_setup.agent_presets } };
   const main = await source("electron/main.cjs");
   const stableClientSetupJson = extract(main, "stableClientSetupJson", {});
   const admit = extract(main, "requireClientSetupPack", { createHash: crypto.createHash, stableClientSetupJson });
-  const compile = extract(await source("src/components/onboarding/WorkspaceSetupGate.tsx"), "compileClientSetupPlanWithDigest", {
+  const gate = await source("src/components/onboarding/WorkspaceSetupGate.tsx");
+  const compile = extract(gate, "compileClientSetupPlanWithDigest", {
     compileWorkspaceInitializeRequest: renderer.compileWorkspaceInitializeRequest, DIGEST: /^[a-f0-9]{64}$/, ProductSetupError: Error,
+    setupProviderOptions: extract(gate, "setupProviderOptions", {}),
   });
   const draft = renderer.createWorkspaceSetupDraft("custom");
   Object.assign(draft, { providerModel: "gpt-6-astra", reasoningEffort: "high", serviceTier: "ultrafast" });
-  const selection = { packageIds: components.map((entry) => entry.packageId),
-    selectedRecommended: native.components.filter((entry) => entry.selection === "recommended").map((entry) => entry.package_id),
+  const providerChoice = (entry) => providerChoices.includes(entry.product_id);
+  const selection = { packageIds: native.components.filter((entry) => !providerChoice(entry)).map((entry) => entry.package_id),
+    selectedRecommended: native.components.filter((entry) => entry.selection === "recommended" && !providerChoice(entry)).map((entry) => entry.package_id),
     extensions: (native.extensions ?? []).map((entry) => ({ extensionId: entry.extension_id, version: "1.0.0", sourceDigest: "sha256:" + "3".repeat(64), desiredState: "available" })),
     projectKeysByPackage: Object.fromEntries(components.map((entry) => [entry.packageId, draft.projects.map((project) => project.key)])) };
   const request = renderer.compileWorkspaceInitializeRequest(draft, pack.recipe, pack);
@@ -108,7 +115,20 @@ async function rendererPlanAdmission(root) {
   assert.throws(() => renderer.compileWorkspaceInitializeRequest(draft, { ...pack.recipe, door_host_slots: { system_workspace_env: { host_filesystem_root: "relative" } } }, pack), /absolute path/);
   const requestDigest = await renderer.workspaceInitializeRequestDigest(request);
   const plan = compile(draft, pack, selection, requestDigest);
+  assert.equal(plan.provider.required_state, "account_readable");
   assert.equal(admit({ packs: [native] }, plan), native);
+  const customPackage = native.components.find((entry) => entry.product_id === "world_provider_custom").package_id;
+  const customDraft = { ...draft, providerInterfaceId: "world_provider_custom", providerModel: "custom-model", reasoningEffort: "none" };
+  const customSelection = { ...selection, packageIds: [...selection.packageIds, customPackage].sort(),
+    selectedRecommended: [...selection.selectedRecommended, customPackage].sort() };
+  const customRequest = renderer.compileWorkspaceInitializeRequest(customDraft, pack.recipe, pack);
+  assert.equal(customRequest.home.providerInterfaceId, "world_provider_custom");
+  assert.ok((customRequest.agentPresets ?? []).every((preset) => preset.providerInterfaceId === "world_provider_custom"));
+  const customPlan = compile(customDraft, pack, customSelection, await renderer.workspaceInitializeRequestDigest(customRequest));
+  assert.deepEqual(customPlan.provider, { interface_id: "world_provider_custom", required_state: "credentials_configured" });
+  assert.equal(admit({ packs: [native] }, customPlan), native);
+  assert.throws(() => admit({ packs: [native] }, compile(draft, pack, customSelection, requestDigest)), /exactly the chosen Home provider/);
+  assert.throws(() => renderer.compileWorkspaceInitializeRequest({ ...draft, providerInterfaceId: "world_provider_unknown" }, pack.recipe, pack), /does not offer provider/);
   for (const components of [
     pack.components.slice(1),
     [...pack.components, pack.components[0]],

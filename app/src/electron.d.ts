@@ -165,6 +165,7 @@ declare global {
       clientSetupReadCurrent(): Promise<OctopusClientSetupState | null>;
       clientSetupBegin(request: OctopusClientSetupBeginRequest): Promise<OctopusClientSetupState>;
       clientSetupResume(request: { operationId: string; stopBefore?: "provider" }): Promise<OctopusClientSetupState>;
+      clientSetupProviderConfiguration(request: { interfaceId: string }): Promise<OctopusProviderConfiguration>;
       mutateScheduledInterface(request: OctopusScheduledMutationRequest): Promise<OctopusScheduledMutationOutcome>;
       mutateApplicationPrivateConfiguration(request: OctopusApplicationPrivateConfigurationMutation): Promise<OctopusApplicationPrivateConfigurationOutcome>;
       mutateOctopusOsWorkspace(request: OctopusOsWorkspaceMutationRequest): Promise<OctopusOsWorkspaceMutationOutcome>;
@@ -1452,6 +1453,15 @@ export type OctopusScheduledMutationOutcome = {
   restored?: string[];
 };
 
+export type OctopusProviderConfiguration = {
+  interfaceId: string;
+  name: string;
+  documentDigest: string;
+  fields: Array<{ name: string; label: string; kind: "text" | "url" | "secret"; required: boolean; configured: boolean }>;
+  configured: string[];
+  missing: string[];
+};
+
 export type OctopusApplicationPrivateConfigurationMutation = {
   applicationId: string;
   interfaceId: string;
@@ -1795,7 +1805,7 @@ export type OctopusClientSetupPlan = {
   }>;
   provider: {
     interface_id: string;
-    required_state: "account_readable";
+    required_state: "account_readable" | "credentials_configured";
   };
   workspace: {
     request_digest: string;

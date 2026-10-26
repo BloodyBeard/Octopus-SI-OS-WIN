@@ -786,6 +786,14 @@ function validatePackWorkspaceSetup(pack, packageById) {
       throw new Error(`Application Pack '${pack.id}' workspace_setup.${field} is not supplied by a component`);
     }
   }
+  for (const choice of pack.workspace_setup.home.provider_choices ?? []) {
+    const owners = pack.components.filter((component) => (
+      packageById.get(component.package_id)?.members.some((member) => member.registry_kind === "interface" && member.owner === choice)
+    ));
+    if (choice === pack.workspace_setup.home.provider_interface_id || owners.length !== 1 || owners[0].selection !== "recommended") {
+      throw new Error(`Application Pack '${pack.id}' Home provider choice '${choice}' must be supplied by exactly one recommended component`);
+    }
+  }
   for (const binding of [...pack.workspace_setup.home.context_artifact_bindings, ...pack.workspace_setup.task.context_artifact_bindings]) {
     if (!artifactOwners.has(binding.id)) {
       throw new Error(`Application Pack '${pack.id}' workspace context artifact '${binding.id}' is not supplied by a component`);

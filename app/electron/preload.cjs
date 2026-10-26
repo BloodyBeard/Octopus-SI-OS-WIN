@@ -449,6 +449,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   clientSetupResume(request) {
     return invokeAccess("octopus:client-setup-resume", request);
   },
+  clientSetupProviderConfiguration(request) {
+    return invokeAccess("octopus:client-setup-provider-configuration", request);
+  },
   mutateScheduledInterface(request) {
     return invokeAccess("octopus:scheduled-interface-mutate", request);
   },

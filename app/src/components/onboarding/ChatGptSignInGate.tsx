@@ -4,7 +4,7 @@ import { OctopusLoadingState } from "../OctopusLoadingLogo";
 import openaiLogo from "../../assets/openai-logo.svg?raw";
 import "../account/account.css";
 
-export function ChatGptSignInGate() {
+export function ChatGptSignInGate({ onSkip }: { onSkip?: () => void } = {}) {
   const state = useChatgptAccount();
   const waiting = state.action === "waiting" || state.action === "cancelling";
   const busy = state.action !== "idle";
@@ -65,6 +65,7 @@ export function ChatGptSignInGate() {
         </> : <>
           <button className="chatgpt-signin-button" type="button" onClick={() => void state.signIn?.()} disabled={busy || state.loading || !state.signIn}>{state.action === "starting" ? "Opening browser…" : "Continue with ChatGPT"}</button>
           {state.error ? <button className="chatgpt-signin-button is-secondary" type="button" disabled={busy || state.loading || !state.refresh} onClick={() => void state.refresh?.()}>Retry account check</button> : null}
+          {onSkip ? <button className="chatgpt-signin-button is-secondary" type="button" disabled={busy} onClick={onSkip}>Use another model provider</button> : null}
         </>}
       </div>
     </section>
