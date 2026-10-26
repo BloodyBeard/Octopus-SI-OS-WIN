@@ -117,12 +117,21 @@ function atomicJson(file, value) {
     fs.renameSync(temporary, file);
   }
   finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
-  const directory = fs.openSync(path.dirname(file), "r");
-  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  syncDirectory(path.dirname(file));
 }
 
+// Windows flushes a directory only through a handle opened with backup
+// semantics and write access, which Node cannot open (fsync answers EPERM).
+// NTFS journals the rename itself, so there is nothing further to flush.
+function syncDirectory(directory) {
+  if (process.platform === "win32") return;
+  const fd = fs.openSync(directory, "r");
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+// Windows flushes a file only through a handle with write access.
 function syncFile(file) {
-  const fd = fs.openSync(file, "r");
+  const fd = fs.openSync(file, process.platform === "win32" ? "r+" : "r");
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
