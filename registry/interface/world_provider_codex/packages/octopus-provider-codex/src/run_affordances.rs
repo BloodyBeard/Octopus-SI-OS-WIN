@@ -1552,7 +1552,12 @@ fn validate_file_receipt(
         } else {
             serde_json::from_value(value).map_err(|error| error.to_string())?
         };
-        if observed != *expected {
+        // The path is matched by location: on Windows the receipt and the
+        // plan can spell one file as \\?\C:\…, C:/… or C:\….
+        if !octopus_private_fs::same_path(&observed.path, &expected.path)
+            || (&observed.before_hash, &observed.after_hash, observed.bytes)
+                != (&expected.before_hash, &expected.after_hash, expected.bytes)
+        {
             return Err(
                 "native authoring file receipt differs from its exact prospective bytes".into(),
             );
