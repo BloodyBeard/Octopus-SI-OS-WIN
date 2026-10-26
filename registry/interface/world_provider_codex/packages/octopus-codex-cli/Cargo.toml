@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "jso
 zstd = "0.13"
 
 octopus-app-server-transport = { path = "../octopus-app-server-transport" }
+octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 octopus-appserver-proto = { path = "../octopus-appserver-proto" }
 octopus-config = { path = "../octopus-codex-config" }
 octopus-core = { path = "../octopus-codex-core" }

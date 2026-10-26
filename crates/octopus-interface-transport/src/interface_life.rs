@@ -2334,6 +2334,59 @@ fn set_life_host_environment(
     );
 }
 
+/// Windows programs need a few system variables that Unix programs do not:
+/// without `SYSTEMROOT` even socket startup fails, and the profile folders
+/// stand in for `HOME`. These name system locations and carry no secrets, so
+/// every life process gets them, like the Unix loader needs no environment
+/// at all. `TEMP`/`TMP` point at the private var dir, as `TMPDIR` does. A
+/// descriptor that inherits `HOME` gets the profile folder when Windows has
+/// no `HOME` set.
+#[cfg(windows)]
+fn add_windows_process_baseline(
+    environment: &mut BTreeMap<String, std::ffi::OsString>,
+    inherit_env: &BTreeSet<String>,
+    var_dir: &Path,
+) {
+    const SYSTEM_VARIABLES: &[&str] = &[
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "USERNAME",
+        "USERDOMAIN",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "OS",
+    ];
+    for name in SYSTEM_VARIABLES {
+        if environment.keys().any(|held| held.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(name) {
+            environment.insert((*name).to_string(), value);
+        }
+    }
+    for name in ["TEMP", "TMP"] {
+        environment.insert(name.to_string(), var_dir.as_os_str().to_os_string());
+    }
+    if inherit_env.contains("HOME") && !environment.contains_key("HOME") {
+        if let Some(profile) = std::env::home_dir() {
+            environment.insert("HOME".to_string(), profile.into_os_string());
+        }
+    }
+}
+
 fn interface_config_env(
     ctx: &InterfaceLiftContext,
     pointers: &BTreeSet<String>,
@@ -2748,6 +2801,8 @@ fn spawn_process_command_life(
             environment.insert(name.clone(), std::ffi::OsString::from(value));
         }
         set_life_host_environment(&mut environment, &var_dir);
+        #[cfg(windows)]
+        add_windows_process_baseline(&mut environment, &command_config.inherit_env, &var_dir);
         let mut readable = vec![ctx.interface_registry_dir()];
         let mut arguments = Vec::with_capacity(command_config.args.len());
         for argument in &command_config.args {
@@ -2903,6 +2958,11 @@ fn spawn_process_command_life(
             command.process_group(0);
             child_ownership.inherit_into(&mut command);
         }
+        // Windows: the runtime holds the ownership for the child's whole life,
+        // and the child's job object kills it if the runtime goes away, so no
+        // child outlives the ownership it was started under.
+        #[cfg(not(unix))]
+        let _held_for_child_life = child_ownership;
         command
             .env_clear()
             .envs(prepared.environment)
@@ -3825,7 +3885,6 @@ mod tests {
         assert!(error.contains("reserved env 'OCTOPUS_INTERFACE_DIR'"));
     }
 
-    #[cfg(unix)]
     fn write_manifest(path: &Path, label: &str, payload_path: &Path, payload: &[u8]) {
         std::fs::write(payload_path, payload).unwrap();
         std::fs::write(
@@ -3840,7 +3899,6 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(unix)]
     fn output_limits() -> InterfaceHostIoLimits {
         InterfaceHostIoLimits {
             max_control_frame_bytes: 64 * 1024,
@@ -4593,7 +4651,6 @@ mod tests {
         assert!(capture_spawned_artifact(&linked_manifest, &[root], output_limits()).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn spawned_artifact_capture_pins_bytes_before_foreign_paths_change() {
         let dir = tempfile::tempdir().unwrap();

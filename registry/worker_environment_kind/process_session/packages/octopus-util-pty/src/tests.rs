@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
+// Only the Unix process-group tests use the short name.
+#[cfg(unix)]
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;

@@ -374,9 +374,12 @@ fn validate_private_path(path: &Path, directory: bool) -> Result<(), String> {
 
 fn validate_socket_path(path: &Path) -> Result<(), String> {
     validate_private_path(path.parent().ok_or("native browser socket has no parent")?, true)?;
+    #[cfg(unix)]
     if !private_fs::is_private(path, Kind::Socket).map_err(|_| "native browser socket is unavailable")? {
         return Err("native browser socket must be owner-only and must not be a symlink".into());
     }
+    // Windows: the socket is a named pipe with no file at `path`. Connecting
+    // refuses a pipe whose server is not running as the current user.
     Ok(())
 }
 

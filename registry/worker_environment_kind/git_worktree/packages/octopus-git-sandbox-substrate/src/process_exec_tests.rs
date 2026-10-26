@@ -40,6 +40,8 @@ fn worktree_wek_json() -> Vec<u8> {
     .unwrap()
 }
 
+// Used by the Unix-only workspace room tests, which need Unix symlinks.
+#[cfg(unix)]
 fn workspace_wek_json() -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "worker_environment_kind_id": "filesystem_workspace",

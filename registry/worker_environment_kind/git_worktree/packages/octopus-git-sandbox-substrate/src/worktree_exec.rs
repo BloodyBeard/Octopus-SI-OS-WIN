@@ -1,17 +1,24 @@
+#[cfg(unix)]
 use std::collections::VecDeque;
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::path::Path;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::process::Child;
+#[cfg(unix)]
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use octopus_descriptors::ProcessSandboxMode;
-use octopus_worker_env::{
-    AbsPath, CapturedExecFailure, ExecOutput, ProjectedSandbox, WorkerEnvError,
-};
+#[cfg(unix)]
+use octopus_worker_env::CapturedExecFailure;
+use octopus_worker_env::{AbsPath, ExecOutput, ProjectedSandbox, WorkerEnvError};
 
 #[cfg(target_os = "linux")]
 use octopus_worker_env::NetworkCeiling;
@@ -238,6 +245,10 @@ pub fn run_sandboxed_in_worktree(
     ))
 }
 
+// The bounded runner below serves the Linux (bubblewrap) and macOS (Seatbelt)
+// backends. Windows has no worktree sandbox backend yet, so it refuses above
+// (fail-closed) and never reaches this code.
+#[cfg(unix)]
 const COMMAND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[cfg(unix)]
@@ -440,6 +451,7 @@ fn run_bounded_command(
     Ok(output)
 }
 
+#[cfg(unix)]
 struct OwnedCommand {
     #[cfg(target_os = "macos")]
     group: octopus_util_pty::owned_process_group::OwnedProcessGroup,
@@ -450,6 +462,7 @@ struct OwnedCommand {
     cleaned: bool,
 }
 
+#[cfg(unix)]
 impl OwnedCommand {
     fn observe_exit(&mut self) -> std::io::Result<Option<ExitStatus>> {
         #[cfg(target_os = "macos")]
@@ -481,6 +494,7 @@ impl OwnedCommand {
     }
 }
 
+#[cfg(unix)]
 impl Drop for OwnedCommand {
     fn drop(&mut self) {
         if !self.cleaned {
@@ -491,11 +505,12 @@ impl Drop for OwnedCommand {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn kill_command_group(process_group: u32) -> std::io::Result<()> {
     octopus_util_pty::process_group::kill_process_group(process_group)
 }
 
+#[cfg(unix)]
 struct CommandCapture<R> {
     reader: Option<R>,
     output: RetainedOutput,
@@ -598,6 +613,7 @@ impl<R: Read + std::os::fd::AsRawFd> CommandCapture<R> {
     }
 }
 
+#[cfg(unix)]
 struct RetainedOutput {
     max_bytes: usize,
     head: Vec<u8>,
@@ -606,6 +622,7 @@ struct RetainedOutput {
     total_bytes: usize,
 }
 
+#[cfg(unix)]
 impl RetainedOutput {
     fn new(max_bytes: usize) -> Self {
         Self {
@@ -671,9 +688,6 @@ fn configure_process_group(command: &mut Command) {
 
     command.process_group(0);
 }
-
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {

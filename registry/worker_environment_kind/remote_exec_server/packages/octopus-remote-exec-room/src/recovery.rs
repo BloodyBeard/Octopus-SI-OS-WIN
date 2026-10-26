@@ -1,5 +1,9 @@
+// The durable record store below is Unix-only: on Windows every record
+// operation refuses until it has a Windows backend (docs/windows-port.md).
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -9,8 +13,11 @@ use serde::{Deserialize, Serialize};
 const SESSION_FILE: &str = "session.json";
 const PROCESSES_DIR: &str = "processes";
 const HISTORY_DIR: &str = "history";
+#[cfg(unix)]
 const STATE_LOCK_FILE: &str = ".state.lock";
+#[cfg(unix)]
 const MAX_RECORD_BYTES: u64 = 512 * 1024;
+#[cfg(unix)]
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -139,6 +146,8 @@ pub(crate) struct RecoveryStore {
 
 struct RecoveryStateGuard<'a> {
     _mutation: MutexGuard<'a, ()>,
+    // Unlocked on drop (Unix flock).
+    #[cfg(unix)]
     state_lock: &'a std::fs::File,
 }
 
@@ -778,6 +787,7 @@ impl RecoveryStore {
         lock_state_file(&self.state_lock)?;
         Ok(RecoveryStateGuard {
             _mutation: mutation,
+            #[cfg(unix)]
             state_lock: &self.state_lock,
         })
     }
@@ -1000,15 +1010,13 @@ fn ensure_owner_only_directory(path: &Path, metadata: &std::fs::Metadata) -> Res
                 path.display()
             ));
         }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = (path, metadata);
-        return Err(
-            "remote exec durable records require Unix owner-only filesystem semantics".to_string(),
-        );
+        Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
     }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -1233,13 +1241,6 @@ fn validate_private_record_metadata(
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn validate_private_record_metadata(
-    _path: &Path,
-    _metadata: &std::fs::Metadata,
-) -> Result<(), String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
-}
 
 #[cfg(unix)]
 fn record_object_identity(metadata: &std::fs::Metadata) -> (u64, u64, u32, u64, u32, u32) {
@@ -1254,8 +1255,6 @@ fn record_object_identity(metadata: &std::fs::Metadata) -> (u64, u64, u32, u64, 
     )
 }
 
-#[cfg(not(unix))]
-fn record_object_identity(_metadata: &std::fs::Metadata) -> () {}
 
 #[cfg(unix)]
 fn stable_record_identity(
@@ -1277,8 +1276,6 @@ fn stable_record_identity(
     )
 }
 
-#[cfg(not(unix))]
-fn stable_record_identity(_metadata: &std::fs::Metadata) -> () {}
 
 #[cfg(unix)]
 fn remove_record_at(
@@ -1390,10 +1387,6 @@ fn validate_held_directory(directory: &std::fs::File, display: &Path) -> Result<
     )
 }
 
-#[cfg(not(unix))]
-fn validate_held_directory(_directory: &std::fs::File, _display: &Path) -> Result<(), String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
-}
 
 #[cfg(unix)]
 fn open_state_lock(

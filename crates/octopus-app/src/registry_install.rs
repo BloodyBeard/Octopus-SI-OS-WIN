@@ -1196,11 +1196,12 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let previous = digest_file(&target).unwrap();
         let copy = prepare_copy(&source, &target, &expected).unwrap();
+        // A mode-only change needs Unix mode bits; Windows files have none.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let previous = digest_file(&target).unwrap();
             std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
             let mode_change =
                 prepare_copy(&source, &target, &digest_file(&source).unwrap()).unwrap();

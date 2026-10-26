@@ -679,14 +679,20 @@ fn shorten_path_prefix(value: &str) -> String {
 }
 
 fn home_shortened_path(path: &str) -> String {
-    let Some(home) = env::var_os("HOME").and_then(|home| home.into_string().ok()) else {
+    // Windows rarely sets HOME; its home folder is the profile folder.
+    #[cfg(windows)]
+    let home = env::home_dir().and_then(|home| home.into_os_string().into_string().ok());
+    #[cfg(not(windows))]
+    let home = env::var_os("HOME").and_then(|home| home.into_string().ok());
+    let Some(home) = home else {
         return path.to_string();
     };
+    let separator = std::path::MAIN_SEPARATOR;
     if path == home {
         "~".to_string()
     } else {
-        path.strip_prefix(&format!("{home}/"))
-            .map_or_else(|| path.to_string(), |tail| format!("~/{tail}"))
+        path.strip_prefix(&format!("{home}{separator}"))
+            .map_or_else(|| path.to_string(), |tail| format!("~{separator}{tail}"))
     }
 }
 

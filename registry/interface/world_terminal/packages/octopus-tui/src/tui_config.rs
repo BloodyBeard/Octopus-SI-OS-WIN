@@ -8,6 +8,7 @@ use crate::provider_config_runtime::ProviderSessionSnapshot;
 use crate::provider_config_runtime::WindowsSandboxRequirementPosture;
 use crate::session_posture::SessionFeatures;
 use crate::session_posture::SessionPermissions;
+#[cfg(any(windows, test))]
 use crate::session_posture::WindowsSandboxMode;
 use crate::session_vocab::config_types::ApprovalsReviewer;
 use crate::session_vocab::config_types::ForcedLoginMethod;
@@ -65,6 +66,7 @@ impl TuiConfig {
         Ok(Self::from_halves(snapshot, terminal))
     }
 
+    #[cfg(test)]
     pub fn with_default_terminal(snapshot: ProviderSessionSnapshot) -> Self {
         Self::from_halves(snapshot, TerminalConfig::default())
     }
@@ -155,6 +157,8 @@ impl TuiConfig {
         workspace_roots
     }
 
+    // The Windows sandbox picker (and tests) change these.
+    #[cfg(any(windows, test))]
     pub fn set_windows_sandbox_enabled(&mut self, value: bool) {
         self.permissions.windows_sandbox_mode = if value {
             Some(WindowsSandboxMode::Unelevated)
@@ -168,6 +172,7 @@ impl TuiConfig {
         };
     }
 
+    #[cfg(windows)]
     pub fn set_windows_elevated_sandbox_enabled(&mut self, value: bool) {
         self.permissions.windows_sandbox_mode = if value {
             Some(WindowsSandboxMode::Elevated)

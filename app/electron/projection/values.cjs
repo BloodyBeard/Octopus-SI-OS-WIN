@@ -4,6 +4,7 @@ const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const net = require("node:net");
+const { localSocketAddress } = require("../localSocket.cjs");
 const path = require("node:path");
 
 function validJsonPointer(value) {
@@ -490,17 +491,21 @@ function interfaceActivationRefs(sidecars) {
 
 async function unixSocketReadiness(socketPath) {
   try {
-    const stat = await fs.stat(socketPath);
-    if (!stat.isSocket()) {
-      return {
-        status: "unavailable",
-        path: socketPath,
-        reason: "artifact hand-in path exists but is not a Unix socket",
-      };
+    // Windows sockets are named pipes with no file at the path; connecting
+    // reports ENOENT when no pipe serves it.
+    if (process.platform !== "win32") {
+      const stat = await fs.stat(socketPath);
+      if (!stat.isSocket()) {
+        return {
+          status: "unavailable",
+          path: socketPath,
+          reason: "artifact hand-in path exists but is not a Unix socket",
+        };
+      }
+      await fs.access(socketPath, fsSync.constants.R_OK | fsSync.constants.W_OK);
     }
-    await fs.access(socketPath, fsSync.constants.R_OK | fsSync.constants.W_OK);
     await new Promise((resolve, reject) => {
-      const socket = net.createConnection(socketPath);
+      const socket = net.createConnection(localSocketAddress(socketPath));
       const finish = (error) => {
         socket.destroy();
         if (error) reject(error);

@@ -920,7 +920,7 @@ test('host key and root symlinks cannot become native browser authority', async 
 });
 
 test('native downloads arm without waiting, consume one response grant and import only terminal owned bytes', async () => {
-  const root = await fs.mkdtemp('/private/tmp/octopus-download-host-'); await fs.chmod(root, 0o700);
+  const root = await fs.mkdtemp(path.join(await fs.realpath(require('node:os').tmpdir()), 'octopus-download-host-')); await fs.chmod(root, 0o700);
   const electron = injectedElectron(), events = [], host = createBrowserEngineHost({ electron, hostRoot: root, onEvent: event => events.push(event) });
   const descriptor = await host.start(), key = await fs.readFile(`${root}/auth.key`), sockets = [];
   const formed = formation('download');

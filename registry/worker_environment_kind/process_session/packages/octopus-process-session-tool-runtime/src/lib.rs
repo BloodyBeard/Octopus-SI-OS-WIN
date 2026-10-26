@@ -61,15 +61,19 @@ pub use door_life::{
     LedgerTailReader, OwnOutboundMovement, run_spawned_interface_life,
 };
 pub use notify;
-#[cfg(test)]
-use process_authority::ProcessAuthority;
 use process_authority::{ProcessAuthoritySpecExecution, ProcessInvocationAuthorityError};
 
 const TOOL_PROCESS_DURABLE_VAR_DIR_ENV: &str = "OCTOPUS_TOOL_PROCESS_DURABLE_VAR_DIR";
 const TOOL_PROCESS_OWNER_FILE: &str = "owner.json";
+// Process-group owner leases are Unix-only. Windows refuses to spawn tool
+// processes until it has a job-object lease (docs/windows-port.md).
+#[cfg(unix)]
 const TOOL_PROCESS_OWNER_LOCK_FILE: &str = "owner.lock";
+#[cfg(unix)]
 const TOOL_PROCESS_OWNER_TERM_GRACE_MS: u64 = 2_000;
+#[cfg(unix)]
 const TOOL_PROCESS_OWNER_KILL_GRACE_MS: u64 = 2_000;
+#[cfg(unix)]
 const TOOL_PROCESS_OWNER_POLL_MS: u64 = 25;
 const INTERFACE_LOCAL_IPC_ROOT_SLOT: &str = "interface_local_ipc_root";
 
@@ -2057,8 +2061,12 @@ struct ToolProcessCompletion {
     generation: PathBuf,
 }
 
+// Windows cannot capture primary inputs yet (see its `capture` below), so
+// there is nothing to hold.
 struct ToolProcessPrimaryInput {
+    #[cfg(unix)]
     directory: std::fs::File,
+    #[cfg(unix)]
     files: Vec<(std::ffi::OsString, ContentHash, std::fs::Metadata)>,
 }
 
@@ -5840,6 +5848,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
 }
 
 static PRIVATE_READ_SNAPSHOT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+#[cfg(unix)]
 static TOOL_PROCESS_OWNER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 struct MaterializedPrivateGeneration {
@@ -5858,6 +5867,7 @@ struct ToolProcessOwnerRecord {
     process_group_id: i32,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolProcessOwnerState {
     Locked,
@@ -6226,12 +6236,6 @@ fn signal_tool_process_group(process_group_id: i32, signal: i32) -> Result<(), S
     }
 }
 
-#[cfg(not(unix))]
-fn signal_tool_process_group(process_group_id: i32, _signal: i32) -> Result<(), String> {
-    Err(format!(
-        "tool process group {process_group_id} cannot be signalled on this platform"
-    ))
-}
 
 async fn quiesce_orphaned_generation_owner(
     ctx: &InterfaceLiftContext,
@@ -6456,6 +6460,7 @@ fn publish_tool_process_owner(
     ))
 }
 
+#[cfg(unix)]
 fn write_tool_process_owner_record(
     generation: &Path,
     record: &ToolProcessOwnerRecord,
@@ -6746,13 +6751,7 @@ fn materialize_private_read_generation(
         std::process::id(),
         sequence
     ));
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(&temporary).map_err(|error| {
+    create_private_directory(&temporary).map_err(|error| {
         format!(
             "tool process private generation '{}' cannot be created: {error}",
             temporary.display()
@@ -6822,15 +6821,21 @@ fn materialize_private_read_generation(
     result
 }
 
-fn create_private_generation_subdir(root: &Path, name: &str) -> Result<PathBuf, String> {
-    let path = root.join(name);
-    let mut builder = std::fs::DirBuilder::new();
+/// Unix: mode 0700. Windows: a protected access list for the current user and
+/// SYSTEM, inherited by what is created inside.
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new().mode(0o700).create(path)
     }
-    builder.create(&path).map_err(|error| {
+    #[cfg(not(unix))]
+    octopus_private_fs::create_private_dir(path)
+}
+
+fn create_private_generation_subdir(root: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = root.join(name);
+    create_private_directory(&path).map_err(|error| {
         format!(
             "tool process private generation directory '{}' cannot be created: {error}",
             path.display()
@@ -9260,6 +9265,9 @@ mod tool_process_private_boundary_tests {
     mod contract_update_tests {
         include!("../tests/support/contract_update.rs");
     }
+    // These spawn tool processes under owner leases, which are Unix-only until
+    // Windows gets its job-object lease (spawning refuses there today).
+    #[cfg(unix)]
     mod completed_output_tests {
         include!("../tests/support/completed_output.rs");
 
@@ -9395,16 +9403,21 @@ mod tool_process_private_boundary_tests {
         BoundedJsonLineReader, TOOL_DOOR_EFFECT_JOURNAL_FILE, ToolDoorEffectJournal,
         ToolDoorJournalState, ToolProcessBrokerShards, ToolProcessBrokerState, ToolProcessClient,
         ToolProcessEnvelope, ToolProcessKey, WorkerEnvironmentReleaseRequest, canonical_hash,
-        configure_tool_process_owner_lease, default_tool_door_artifact_decoder,
+        default_tool_door_artifact_decoder,
         effective_tool_process_environment, empty_invocation_authority_hash,
         invocation_authority_hash, materialize_private_read_generation,
         materialize_tool_process_durable_dir, narrow_process_declaration,
-        prepare_tool_process_owner_lease, private_read_snapshot_hash, publish_tool_process_owner,
-        quiesce_worker_environment_owner_generations, reconcile_tool_process_generations,
-        refuse_released_worker_environment, remove_tool_process_generation,
-        signal_tool_process_group, tool_door_has_exact_admitted_result,
+        private_read_snapshot_hash, refuse_released_worker_environment, tool_door_has_exact_admitted_result,
         tool_process_environment_hash, tool_process_generation_key, tool_process_host_private_root,
         tool_process_interface_local_ipc_root, validate_tool_process_durable_var_dir,
+    };
+    // The owner-lease tests are Unix-only, like the leases themselves.
+    #[cfg(unix)]
+    use super::{
+        configure_tool_process_owner_lease, prepare_tool_process_owner_lease,
+        publish_tool_process_owner, quiesce_worker_environment_owner_generations,
+        reconcile_tool_process_generations, remove_tool_process_generation,
+        signal_tool_process_group,
     };
     use super::{
         INTERFACE_LOCAL_IPC_ROOT_SLOT, InterfaceActivationArrival, InterfaceHostIoLimits,
@@ -9428,8 +9441,10 @@ mod tool_process_private_boundary_tests {
     };
     use octopus_worker_env::{
         WorkerEnvKindRegistry, WorkerEnvKindSpec, WorkerEnvironmentFormationRequest,
-        WorkerEnvironmentId, WorkerEnvironmentLifecycle, WorkerEnvironmentRecordStore,
+        WorkerEnvironmentLifecycle, WorkerEnvironmentRecordStore,
     };
+    #[cfg(unix)]
+    use octopus_worker_env::WorkerEnvironmentId;
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 

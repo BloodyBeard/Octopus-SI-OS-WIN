@@ -639,8 +639,8 @@ mod socket {
         .await
     }
 
-    /// On Windows the socket file inherits the access control list of its
-    /// directory, which lives under the owner's Octopus home.
+    /// On Windows the socket is a named pipe that `octopus-local-socket`
+    /// creates with an owner-only access list, so there is no file to restrict.
     #[cfg(not(unix))]
     async fn set_control_socket_permissions(_socket_path: &std::path::Path) -> std::io::Result<()> {
         Ok(())

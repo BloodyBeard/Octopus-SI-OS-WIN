@@ -32,6 +32,10 @@ sha2 = "0.10"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.182"
 
+[target.'cfg(windows)'.dependencies]
+octopus-private-fs = { path = "../octopus-private-fs" }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
 octopus-util-pty = { path = "../../registry/worker_environment_kind/process_session/packages/octopus-util-pty" }

@@ -9,12 +9,13 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
+sha2 = "0.10"
 tokio = { workspace = true, features = ["fs", "io-util", "net", "rt"] }
 
 [target.'cfg(windows)'.dependencies]
-async-io = "2.6.0"
-tokio-util = { workspace = true, features = ["compat"] }
-uds_windows = "1.1.0"
+octopus-private-fs = { path = "../octopus-private-fs" }
+tokio = { workspace = true, features = ["time"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Pipes"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

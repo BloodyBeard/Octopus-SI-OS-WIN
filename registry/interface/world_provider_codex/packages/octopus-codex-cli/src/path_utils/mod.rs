@@ -1,5 +1,4 @@
 pub(crate) mod env;
-pub use env::is_wsl;
 
 use octopus_util_abspath::AbsolutePathBuf;
 use std::collections::HashSet;

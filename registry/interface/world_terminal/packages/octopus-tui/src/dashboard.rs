@@ -396,7 +396,7 @@ impl DashboardOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octopus_descriptors::{ArtifactId, EeId, InterfaceId, RunId};
+    use octopus_descriptors::{ArtifactId, EeId, RunId};
     use octopus_ledger::{ArtifactRef, ContentHash, Lamport, Seq, TraceId};
 
     fn mv(seq: u64, kind: MovementKind, run: &str, ee: &str) -> Movement {

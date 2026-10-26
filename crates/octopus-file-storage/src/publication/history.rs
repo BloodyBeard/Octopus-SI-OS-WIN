@@ -237,9 +237,7 @@ pub(super) fn find_reclaim(path: &Path, publication: &DirectoryMoveReceipt) -> i
 fn save(root: &Path, original: RetainedReceipt) -> io::Result<()> {
     validate_coordination_root(root)?;
     let directory = root.join("history");
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
-    match builder.create(&directory) {
+    match create_private_directory(&directory) {
         Ok(()) => sync_directory(root)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
         Err(error) => return Err(error),

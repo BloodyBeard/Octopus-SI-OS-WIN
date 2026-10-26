@@ -74,22 +74,40 @@ fn manifest_ceiling_refuses_before_opening_its_payload() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(unix)]
+/// Creates a file symlink. Windows allows that only with Developer Mode or
+/// the symlink privilege; without it there is nothing to refuse, so the test
+/// is skipped.
+fn symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    let result = std::os::windows::fs::symlink_file(target, link);
+    match result {
+        Ok(()) => true,
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(1314) => {
+            eprintln!("skipping: this Windows account may not create symlinks");
+            false
+        }
+        Err(error) => panic!("symlink cannot be created: {error}"),
+    }
+}
+
 #[test]
 fn bounded_carrier_reads_refuse_symlink_leaves() {
-    use std::os::unix::fs::symlink;
-
     let root = temp_root("symlink-carrier");
     std::fs::create_dir_all(&root).unwrap();
     let real = InterfaceArtifactFile::write(&root, "real", b"bytes").unwrap();
     let linked_manifest = root.join("linked.artifact.json");
-    symlink(real.manifest_path(), &linked_manifest).unwrap();
+    if !symlink(real.manifest_path(), &linked_manifest) {
+        return;
+    }
     let linked = InterfaceArtifactFile::new(linked_manifest).unwrap();
     assert!(linked.read_bounded(4096, 4096).is_err());
 
     let original = real.read_bounded(4096, 4096).unwrap();
     let linked_payload = root.join("linked.payload");
-    symlink(&original.manifest.payload_path, &linked_payload).unwrap();
+    assert!(symlink(&original.manifest.payload_path, &linked_payload));
     assert!(read_artifact_carrier_file_bounded(&linked_payload, 4096).is_err());
     let manifest_path = root.join("payload-link.artifact.json");
     std::fs::write(
@@ -114,7 +132,7 @@ fn bounded_carrier_reads_refuse_symlink_leaves() {
         "real-{}.artifact.json",
         blake3::hash(&original.manifest_bytes).to_hex()
     ));
-    symlink(&victim, &stored_manifest).unwrap();
+    assert!(symlink(&victim, &stored_manifest));
     let captured = InterfaceArtifactFile::store_manifest_bounded(
         &store_root,
         &original.manifest_bytes,

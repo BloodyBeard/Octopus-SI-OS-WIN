@@ -1,6 +1,7 @@
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs/promises");
 const net = require("node:net");
+const { localSocketAddress } = require("./localSocket.cjs");
 const path = require("node:path");
 
 const RUNTIME_INSTANCE_FIELDS = [
@@ -235,7 +236,7 @@ function normalizeRuntimePhase(phase) {
 function socketAccepts(socketPath, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
-    const socket = net.createConnection(socketPath);
+    const socket = net.createConnection(localSocketAddress(socketPath));
     const finish = (value) => {
       if (settled) return;
       settled = true;

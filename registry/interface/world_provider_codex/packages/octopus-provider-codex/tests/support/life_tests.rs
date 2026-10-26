@@ -1,6 +1,4 @@
     use super::*;
-    // These cases stand up a fake host on a Tokio Unix socket.
-    #[cfg(unix)]
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/native_terminal_handoff.rs"));
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/turn_deferral.rs"));
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/declared_input.rs"));

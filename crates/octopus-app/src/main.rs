@@ -99,12 +99,21 @@ fn runtime_installation_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(root)
 }
 
+/// The user's home folder: `HOME` on Unix. Windows rarely sets `HOME`, so
+/// there it is the profile folder (`USERPROFILE`).
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return std::env::home_dir();
+    #[cfg(not(windows))]
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 fn octopus_home_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("OCTOPUS_HOME") {
         return PathBuf::from(home);
     }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".octopus"))
+    user_home_dir()
+        .map(|h| h.join(".octopus"))
         .unwrap_or_else(|| PathBuf::from(".octopus"))
 }
 
@@ -112,8 +121,8 @@ fn spine_durable_root() -> PathBuf {
     if let Some(home) = std::env::var_os("OCTOPUS_HOME") {
         return PathBuf::from(home).join("ledger");
     }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".octopus"))
+    user_home_dir()
+        .map(|h| h.join(".octopus"))
         .unwrap_or_else(|| PathBuf::from(".octopus"))
         .join("ledger")
 }
@@ -382,7 +391,7 @@ async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn s
     });
     let mut runtime_instance = runtime_instance::RuntimeInstance::acquire(&octopus_home)?;
     survive_terminal_hangup(&octopus_home.join("state").join("runtime-instance").join("output.log"))?;
-    let runtime_control = runtime_control::RuntimeControl::bind(&octopus_home)?;
+    let runtime_control = runtime_control::RuntimeControl::bind(&octopus_home).await?;
     boot.stage("control", runtime_control.path().display());
     let _runtime_control_task = AbortOnDrop(tokio::spawn(runtime_control.serve(
         octopus_home.clone(),

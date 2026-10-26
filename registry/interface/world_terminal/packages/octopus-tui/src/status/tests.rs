@@ -142,7 +142,7 @@ fn test_status_account_display() -> Option<StatusAccountDisplay> {
     None
 }
 
-fn token_info_for(model_slug: &str, config: &TuiConfig, usage: &TokenUsage) -> TokenUsageInfo {
+fn token_info_for(model_slug: &str, usage: &TokenUsage) -> TokenUsageInfo {
     let context_window = construct_model_info_offline_for_tests(model_slug, &()).context_window;
     TokenUsageInfo {
         total_token_usage: usage.clone(),
@@ -283,7 +283,7 @@ async fn status_snapshot_includes_reasoning_details() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
 
     let reasoning_effort_override = Some(Some(ReasoningEffort::High));
     let composite = new_status_output(
@@ -598,7 +598,7 @@ async fn status_snapshot_shows_active_user_defined_profile() {
         .single()
         .expect("timestamp");
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
 
     let composite = new_status_output(
         &config,
@@ -751,7 +751,7 @@ async fn status_snapshot_shows_auto_review_permissions() {
         .single()
         .expect("timestamp");
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
 
     let composite = new_status_output(
         &config,
@@ -847,7 +847,7 @@ async fn status_snapshot_includes_forked_from() {
         .expect("valid time");
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let run_id = "0f0f3c13-6cf9-4aa4-8b80-7d49c2f1be2e".to_string();
     let forked_from = "e9f18a88-8081-4e51-9d4e-8af5cde2d8dd".to_string();
 
@@ -914,7 +914,7 @@ async fn status_snapshot_includes_monthly_limit() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -978,7 +978,7 @@ async fn status_snapshot_includes_enterprise_monthly_credit_limit() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1058,7 +1058,7 @@ async fn status_snapshot_uses_generic_limit_labels_for_unsupported_windows() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1110,7 +1110,7 @@ async fn status_snapshot_shows_unlimited_credits() {
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1161,7 +1161,7 @@ async fn status_snapshot_shows_positive_credits() {
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1212,7 +1212,7 @@ async fn status_snapshot_hides_zero_credits() {
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1261,7 +1261,7 @@ async fn status_snapshot_hides_when_has_no_credits_flag() {
     };
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1306,7 +1306,7 @@ async fn status_card_token_usage_excludes_cached_tokens() {
         .expect("timestamp");
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1369,7 +1369,7 @@ async fn status_snapshot_truncates_in_narrow_terminal() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let reasoning_effort_override = Some(Some(ReasoningEffort::High));
     let composite = new_status_output(
         &config,
@@ -1419,7 +1419,7 @@ async fn status_snapshot_shows_missing_limits_message() {
         .expect("timestamp");
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1471,7 +1471,7 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
     };
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let (composite, _) = new_status_output_with_rate_limits_handle(
         &config,
         None,
@@ -1540,7 +1540,7 @@ async fn status_snapshot_shows_refreshing_limits_notice() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output_with_rate_limits(
         &config,
         /*account_display*/ None,
@@ -1612,7 +1612,7 @@ async fn status_snapshot_includes_credits_and_limits() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1671,7 +1671,7 @@ async fn status_snapshot_shows_unavailable_limits_message() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1729,7 +1729,7 @@ async fn status_snapshot_treats_refreshing_empty_limits_as_unavailable() {
     let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output_with_rate_limits(
         &config,
         None,
@@ -1798,7 +1798,7 @@ async fn status_snapshot_shows_stale_limits_message() {
     let now = captured_at + ChronoDuration::minutes(20);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),
@@ -1870,7 +1870,7 @@ async fn status_snapshot_cached_limits_hide_credits_without_flag() {
     let now = captured_at + ChronoDuration::minutes(20);
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
+    let token_info = token_info_for(&model_slug, &usage);
     let composite = new_status_output(
         &config,
         account_display.as_ref(),

@@ -84,16 +84,18 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
         }));
         Some(append(ctx,scope))
     }
+    /// The fake host's control socket, shared by every pump of one case.
+    type FixtureListener = tokio::sync::Mutex<octopus_local_socket::UnixListener>;
     async fn pump(gate_ctx: &InterfaceLiftContext, root: &Path, path: &Path, authoring_id: &InterfaceId,
-        listener: &tokio::net::UnixListener, receiver: &mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
+        listener: &FixtureListener, receiver: &mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
         expected_source: &ArtifactRef, delivered_before: usize, count: usize, with_answer: bool, phase: usize, ack_bootstrap: bool,
     ) -> Vec<(String,ArtifactRef,u64)> {
             let mut delivered=Vec::new(); let mut writes=0;
             let mut transient_scope = None;
             let mut before_scope_refused = false;
             loop { tokio::select! {
-                accepted=listener.accept()=> {
-                    let mut ws=tokio_tungstenite::accept_async(accepted.unwrap().0).await.unwrap();
+                accepted=async { listener.lock().await.accept().await }=> {
+                    let mut ws=tokio_tungstenite::accept_async(accepted.unwrap()).await.unwrap();
                     let manifest:octopus_interfaces::InterfaceArtifactManifest=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
                     if phase==8 || (phase==20 && writes==1) { break; }
                     let file=std::fs::read_dir(root.join("hand-in").join(authoring_id.as_str())).unwrap().map(|e|e.unwrap().path()).filter(|p|p.to_string_lossy().ends_with(".artifact.json")).find_map(|p| { let f=InterfaceArtifactFile::new(p).unwrap(); (serde_json::to_value(f.read_manifest().unwrap()).unwrap()==serde_json::to_value(&manifest).unwrap()).then_some(f) }).unwrap();
@@ -312,7 +314,7 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
     async fn source_with_snapshot(
         ctx:&InterfaceLiftContext,root:&Path,run_path:&Path,descriptor:&InterfaceDescriptor,run:&RunId,
         first:octopus_run_authoring::ProviderOutputHandoff,input:InterfaceInvocationEnvelope,
-        authoring_id:&InterfaceId,listener:&tokio::net::UnixListener,
+        authoring_id:&InterfaceId,listener:&FixtureListener,
         receiver:&mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
     ) -> (octopus_run_authoring::ProviderOutputHandoff,InterfaceInvocationEnvelope,u64) {
     let prior=artifact(&ctx.interface_var_dir().join("prior-answer"),"interface.artifact.output",json!({"label":"interface.artifact.output","text":"prior completed reply"}));
@@ -337,7 +339,7 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
         descriptor:&'a InterfaceDescriptor,run:&'a RunId,record:&'a RunRecord,pinned:&'a [u8],
         input:&'a InterfaceInvocationEnvelope,state:&'a serde_json::Value,before_context:u64,
         operation:crate::run_affordances::NativePending,phase:usize,authoring_id:&'a InterfaceId,
-        listener:&'a tokio::net::UnixListener,
+        listener:&'a FixtureListener,
         receiver:&'a mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
         selected_file:Option<&'a InterfaceArtifactFile>,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output=()> + Send + 'a>> {
@@ -507,7 +509,7 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
         ctx:&'a InterfaceLiftContext,root:&'a Path,run_path:&'a Path,worker_interface_id:&'a str,
         descriptor:&'a InterfaceDescriptor,run:&'a RunId,record:&'a RunRecord,initial:&'a [u8],
         mut state:serde_json::Value,mut before_context:u64,native:serde_json::Value,phase:usize,
-        authoring_id:&'a InterfaceId,listener:&'a tokio::net::UnixListener,
+        authoring_id:&'a InterfaceId,listener:&'a FixtureListener,
         receiver:&'a mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
         selected_file:Option<&'a InterfaceArtifactFile>,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output=()> + Send + 'a>> {
@@ -953,7 +955,7 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
         let authoring=record.interface_state[&descriptor.id]["run_authoring_binding"]["authoring_source_interface"].as_str().unwrap();
         let authoring_id=InterfaceId::new(authoring);
         let socket=octopus_app_server_interface::interface_control_socket_path_from_root(&root.join("control"),&authoring_id);
-        std::fs::create_dir_all(socket.parent().unwrap()).unwrap(); let listener=tokio::net::UnixListener::bind(socket).unwrap();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap(); let listener=FixtureListener::new(octopus_local_socket::UnixListener::bind(socket).await.unwrap());
         let native=serde_json::to_value(octopus_appserver_proto::Turn { id:"turn-a".into(),items:if with_answer {vec![octopus_appserver_proto::ThreadItem::AgentMessage{id:"answer-a".into(),text:"Retained native answer".into(),phase:Some(octopus_protocol::models::MessagePhase::FinalAnswer)}]} else {vec![]},items_view:octopus_appserver_proto::TurnItemsView::Full,status:if with_answer {octopus_appserver_proto::TurnStatus::Completed} else if native_interrupted {octopus_appserver_proto::TurnStatus::Interrupted} else {octopus_appserver_proto::TurnStatus::Failed},error:None,started_at:Some(10),completed_at:Some(20),duration_ms:Some(10_000) }).unwrap();
         let before_context=record.interface_state[&descriptor.id]["context_generation"].as_u64().unwrap();
         let mut state=serde_json::to_value(continuity(before_context,Some(if with_stop {"interrupted_pending"}else{"pending"}))).unwrap();

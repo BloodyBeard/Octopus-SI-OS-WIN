@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const net = require("node:net");
+const { localSocketAddress } = require("./localSocket.cjs");
 const path = require("node:path");
 const WebSocket = require("ws");
 
@@ -22,7 +23,7 @@ function handInArtifact(request) {
     let dispatched = false;
     const socket = target.kind === "unix"
       ? new WebSocket("ws://localhost/", {
-        createConnection: () => net.createConnection(target.path),
+        createConnection: () => net.createConnection(localSocketAddress(target.path)),
         handshakeTimeout: timeoutMs,
         maxPayload: 1024 * 1024,
         perMessageDeflate: false,

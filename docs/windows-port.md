@@ -22,37 +22,50 @@ vendored Codex crates. That covers the process, PTY, and shell layers and the
 Windows sandbox shim. The `windows` CI workflow type-checks every crate on
 `windows-latest` and lists the ones that still fail.
 
-Already fixed:
+**Compiling is not running.** Every crate type-checks for Windows with no
+Windows-only warnings ([windows-warnings.md](windows-warnings.md) lists the
+rest). But several subsystems still refuse at run time on Windows, by
+design, until they get a Windows backend. See
+[Runtime gaps on Windows](#runtime-gaps-on-windows).
 
-- Runtime control (`octopus stop` / `octopus restart` / status) uses a named
-  pipe on Windows. The name is derived from the Octopus home, and the default
-  DACL makes it owner-only.
-- `octopus-file-system` has its Windows feature flags and handle types.
-- `octopus-remote-exec-room` had its dependencies declared under
-  `cfg(unix)` by mistake.
-- Test fixtures set the Windows-only `ProcessDriver::tty` field.
+Done:
 
-Still to do, roughly in dependency order:
+| Area | Crate(s) | Windows handling |
+| --- | --- | --- |
+| Local IPC | `crates/octopus-local-socket` and every socket user (activation transport, run authoring, git sandbox, provider-codex, `octopus-cli`, world-terminal client, process-room viewer, Codex doctor, runtime control) | **Named pipes.** Node, and so the desktop app, can reach local sockets on Windows only as named pipes. Each socket path maps to `\\.\pipe\octopus-<first 32 hex of sha256(path)>`; the path is normalized first (no `\\?\`, `\` separators, lower case). The Rust `pipe_name`, `app/electron/localSocket.cjs` and the browser host's `native/local-socket.cjs` share one test vector. Pipes get a protected access list for the current user and SYSTEM. A client refuses a pipe whose server runs as another user (`GetNamedPipeServerProcessId`), which stands in for the socket file's owner. Pipes leave no file, so "stale socket" cleanup is a no-op. |
+| Private files | `crates/octopus-private-fs` (shared) | "Owned by me, mode 0600/0700" means owned by the current user with an access list granting only that user, SYSTEM and Administrators. "No symlinks" means no reparse points. Entries it creates get a protected access list for the user and SYSTEM. It is used by the browser driver, process room, file storage, interface transport, git-sandbox records, tool-runtime generations and exec-server secrets. |
+| Interface processes | `octopus-interface-transport` | Each life process runs in a **job object** that kills its whole process tree when it is stopped or when the runtime exits for any reason. This is the counterpart of the macOS process group plus the inherited ownership lock. Windows programs also get the system variables they need (`SYSTEMROOT`, `USERPROFILE`, `APPDATA`, …), with `TEMP`/`TMP` pointing at their private var dir. A descriptor that inherits `HOME` gets the profile folder. |
+| Home folder | `octopus-app`, provider-codex, TUI, Codex doctor | Windows rarely sets `HOME`, so the profile folder (`USERPROFILE`) is used instead. Before this, the Octopus home fell back to a relative `.octopus`. |
+| Runtime control | `octopus-app` | `octopus stop` / `restart` / status use the owner-only pipe above, and the CLI checks that the runtime serving it is the same user. |
+| Process room viewer | `octopus-system-exec-env`, `app/electron/processViewer.cjs` | The live terminal view works on Windows: a pipe, an owner-only credential file and OS randomness (`getrandom`). Before this, every process room failed to form on Windows. |
+| Exec-server secrets | `octopus-exec-substrate` `direct_auth` | Loaded on Windows with the same rules (no reparse points, owner-only single-link file, size bounds). Before this, loading refused outright. |
+| Browser driver | `octopus-browser-session-env`, `native/electron-host.cjs` | The Rust door checks its private files with `octopus-private-fs`. The Electron host listens on the pipe, gives its host folder an owner-only access list (`icacls`), and the Rust door checks that list before trusting the folder. Node cannot set a pipe's access list, so the host's pipe keeps Windows' default list, which lets other users open it read-only. The HMAC challenge keyed by the owner-only `auth.key` still keeps them out. |
+| Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, pinned for `win32-x64` with its sandbox helpers. |
+| Desktop driver | `octopus-system-gui-env` | Compiles; its native paths report "desktop control requires macOS". A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
+| Voice | `octopus-realtime-webrtc` | Compiles on Windows (verified on a Windows machine). |
 
-| Area | Crate(s) | Problem | Plan |
-| --- | --- | --- | --- |
-| Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate`, `octopus-provider-codex`, `octopus-cli`, `octopus-world-terminal-client` | Interface control sockets used `tokio::net::Unix*` | Done: all use `crates/octopus-local-socket` (AF_UNIX on Windows 10 1803+ via `uds_windows`). Some test fixtures that drive fake hosts over Tokio Unix sockets are still Unix-only (`octopus-operator-chat-client` integration tests, realtime-signaling handoff tests, provider-codex native terminal handoff tests). |
-| Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream removed Codex's `windows-sandbox-rs` crate but kept its callers | Done: `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, now pinned for `win32-x64` with its sandbox helpers. Vendoring the real crate is optional. |
-| Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Done: the one shell-script test is Unix-only |
-| Browser driver | `octopus-browser-session-env` | Owner/mode/symlink checks on its private files and the Electron host socket | Done: `src/private_fs.rs` gives each check a Windows equivalent. On Windows "owned by me, mode 0600/0700" means owned by the current user with an access list granting only that user, SYSTEM and Administrators. "No symlinks" means no reparse points, and the host socket must be an AF_UNIX reparse point. Entries it creates get a protected owner+SYSTEM access list. |
-| Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Compiles on Windows: its native paths report "desktop control requires macOS". A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
-| Voice | `octopus-realtime-webrtc` | — | Compiles on Windows (verified on a Windows machine) |
-
-Status: every workspace crate, including tests, type-checks for
-`x86_64-pc-windows-gnu`. The `windows` CI job checks the MSVC target on real
-Windows. To cross-check from Linux, point V8's build at its MSVC bindings and a
+To cross-check from Linux, point V8's build at its MSVC bindings and a
 placeholder archive (`cargo check` does not link):
 `RUSTY_V8_SRC_BINDING_PATH=<v8>/gen/src_binding_release_x86_64-pc-windows-msvc.rs RUSTY_V8_ARCHIVE=<empty .gz>`.
 
-The Electron browser host must create its rendezvous folder (`host.json`,
-`auth.key`, the socket) owner-only. Under `%USERPROFILE%\.octopus` the
-inherited access list already qualifies. An Octopus home elsewhere needs an
-owner-only access list on that folder.
+#### Runtime gaps on Windows
+
+These compile, but refuse at run time on Windows ("fail-closed"), so the
+kernel cannot run real work on Windows yet. Most-blocking first:
+
+| # | Gap | Where | Effect today | Windows design |
+| --- | --- | --- | --- | --- |
+| 1 | **Process sandbox** | `octopus-verifiers` `ProcessAuthority::prepare` | Every interface whose descriptor keeps the default `sandbox_mode: enforced` (nearly all) is refused at launch. Linux has the same gap; only macOS has a backend. | An AppContainer backend: read, write and execute roots become access-list grants to the container, and network is a capability. Or an explicit, visible opt-out for users who accept running unsandboxed. **This needs your decision.** |
+| 2 | File identity and no-replace moves | `octopus-file-storage` (`FileIdentity`, `native.rs`, directory publication, reclaim), `octopus-interface-transport` `runtime_instance.rs` | File publication, registry install and runtime-instance ownership refuse. | Volume serial plus file ID (`FileIdInfo`), handle-relative opens (`NtCreateFile` with a root directory), no-replace rename (`SetFileInformationByHandle` with `FileRenameInfo`, `ReplaceIfExists = false`), and identity-checked delete. |
+| 3 | Spawned-life output capture | `interface_life.rs` and `door_life.rs` `read_regular_file_beneath` | Interface outputs cannot be captured. | A no-follow, beneath-root reader (per-component reparse checks). |
+| 4 | Tool-process owner lease | `octopus-process-session-tool-runtime` | Process-session tool processes refuse to spawn. | A job-object owner lease (as for interface processes). |
+| 5 | Directory fsync | `sync_directory` helpers (runtime instance, artifact writes, journals) | Opening a directory for fsync needs `FILE_FLAG_BACKUP_SEMANTICS` on Windows. Needs confirming on Windows. | One shared helper. |
+| 6 | Other stores | remote-exec room records, context collections (`SafeDir`), code-mode continuation (exclusive rename), memory `exchange` (`ReplaceFileW`), operator-chat task retirement, MCP OAuth randomness (`/dev/urandom`) | Each refuses its feature. | Mostly `octopus-private-fs` plus the identity and rename pieces from #2. |
+| 7 | Symlinks | registry validation snapshot, Codex auth boundary | Need Developer Mode or admin on Windows. | Copy or junction fallback. |
+| 8 | Git-worktree sandbox | `octopus-git-sandbox-substrate` `run_sandboxed_in_worktree` | Coder exec refuses ("no platform floor"). Linux uses bubblewrap, macOS Seatbelt. | Same decision as #1. |
+
+The Unix-only helpers behind these refusals are gated `#[cfg(unix)]` and say
+why, instead of being left as unused code on Windows.
 
 ### Desktop client (Electron)
 
@@ -62,6 +75,14 @@ owner-only access list on that folder.
   - build `octopus.exe` and the room and provider executables
   - fetch the Windows Codex CLI build (`managed-cli/bootstrap.cjs`)
   - produce an NSIS or zip artifact
+- Fixed: the app's local-socket connections (interface transport, readiness probes,
+  runtime host, process viewer) use the Windows pipe names (`app/electron/localSocket.cjs`).
+- Many app modules check privacy with POSIX mode bits (`stat.mode & 0o077`,
+  `process.getuid()`), for example `localPackages.cjs`, `workspaceSetup.cjs` and
+  `clientAttachments.cjs`. Node reports `0o666`/`0o777` on Windows and has no
+  uid, so these checks refuse on Windows. Each needs a Windows answer, such as
+  an access-list check through a native helper or relying on the owner-only
+  Octopus home.
 - Installing packages copies them with macOS `clonefile` (`app/electron/nativeFiles.cjs`)
   and refuses on any other OS, so setup cannot install anything on Windows or
   Linux yet. Windows needs a plain-copy fallback (or ReFS block cloning). This

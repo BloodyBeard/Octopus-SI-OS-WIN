@@ -344,6 +344,9 @@ fn path_like(value: &str) -> bool {
 
 fn expand_path(value: &str) -> Result<PathBuf> {
     if value == "~" || value.starts_with("~/") {
+        #[cfg(windows)]
+        let home = std::env::home_dir().context("the user profile folder is unknown")?;
+        #[cfg(not(windows))]
         let home = std::env::var_os("HOME").context("HOME is not set")?;
         if value == "~" {
             return Ok(PathBuf::from(home));

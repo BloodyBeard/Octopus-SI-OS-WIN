@@ -1348,13 +1348,14 @@ fn ensure_owner_only_directory(path: &Path, label: &str) -> Result<(), String> {
             ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let created = {
                 use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder.create(path).map_err(|error| {
+                std::fs::DirBuilder::new().mode(0o700).create(path)
+            };
+            #[cfg(not(unix))]
+            let created = octopus_private_fs::create_private_dir(path);
+            created.map_err(|error| {
                 format!("{label} '{}' cannot be created: {error}", path.display())
             })?;
         }
@@ -1390,6 +1391,15 @@ fn ensure_owner_only_directory(path: &Path, label: &str) -> Result<(), String> {
             },
         )?;
     }
+    // Windows: the same two steps, the owner check and an owner-only access
+    // list, in one call.
+    #[cfg(windows)]
+    octopus_private_fs::windows::make_dir_owner_only(path).map_err(|error| {
+        format!(
+            "{label} '{}' cannot be made owner-only: {error}",
+            path.display()
+        )
+    })?;
     Ok(())
 }
 

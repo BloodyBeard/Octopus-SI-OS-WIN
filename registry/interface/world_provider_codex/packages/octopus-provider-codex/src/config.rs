@@ -41,8 +41,12 @@ fn provider_home_from_env() -> PathBuf {
     if let Some(home) = std::env::var_os(ENV_CODEX_HOME).filter(|v| !v.is_empty()) {
         return PathBuf::from(home);
     }
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".codex"))
+    // Windows rarely sets HOME; its home folder is the profile (USERPROFILE).
+    #[cfg(windows)]
+    let home = std::env::home_dir();
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    home.map(|h| h.join(".codex"))
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 

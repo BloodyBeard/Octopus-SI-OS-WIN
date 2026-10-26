@@ -2768,7 +2768,6 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Mutex;
 
-    use clap::Parser;
     use octopus_protocol::config_types::SandboxMode;
     use pretty_assertions::assert_eq;
 

@@ -6154,8 +6154,10 @@ dependencies = [
  "octopus-ledger",
  "octopus-ledger-index",
  "octopus-ledger-store",
+ "octopus-local-socket",
  "octopus-marks",
  "octopus-policy",
+ "octopus-private-fs",
  "octopus-runtime",
  "octopus-tool-registry",
  "octopus-verifiers",
@@ -6365,12 +6367,12 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hmac",
- "libc",
  "octopus-app-server-interface",
  "octopus-descriptors",
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-local-socket",
+ "octopus-private-fs",
  "octopus-process-session-tool-runtime",
  "octopus-tool-handlers",
  "octopus-tool-registry",
@@ -6385,7 +6387,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6588,6 +6589,7 @@ dependencies = [
  "octopus-git-utils",
  "octopus-identity",
  "octopus-install-context",
+ "octopus-local-socket",
  "octopus-login",
  "octopus-protocol",
  "octopus-terminal-detection",
@@ -6905,6 +6907,7 @@ dependencies = [
  "http",
  "libc",
  "octopus-file-system",
+ "octopus-private-fs",
  "octopus-sandbox-substrate",
  "octopus-substrate-contract",
  "octopus-util-abspath",
@@ -6993,6 +6996,7 @@ dependencies = [
  "blake3",
  "fs2",
  "libc",
+ "octopus-private-fs",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -7049,6 +7053,7 @@ dependencies = [
  "octopus-file-system",
  "octopus-local-socket",
  "octopus-network-proxy",
+ "octopus-private-fs",
  "octopus-sandbox-substrate",
  "octopus-substrate-contract",
  "octopus-util-abspath",
@@ -7220,6 +7225,7 @@ dependencies = [
  "octopus-interface-projection",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-private-fs",
  "octopus-runtime",
  "octopus-util-pty",
  "octopus-verifiers",
@@ -7232,6 +7238,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7299,12 +7306,12 @@ dependencies = [
 name = "octopus-local-socket"
 version = "0.1.0"
 dependencies = [
- "async-io",
+ "octopus-private-fs",
  "pretty_assertions",
+ "sha2",
  "tempfile",
  "tokio",
- "tokio-util",
- "uds_windows",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7563,6 +7570,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "octopus-private-fs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "octopus-process-hardening"
 version = "0.1.0"
 dependencies = [
@@ -7581,6 +7597,7 @@ dependencies = [
  "octopus-file-storage",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-private-fs",
  "octopus-tool-handlers",
  "octopus-tool-registry",
  "octopus-verifiers",
@@ -7985,10 +8002,13 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
+ "getrandom 0.3.4",
  "octopus-descriptors",
  "octopus-exec-substrate",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-local-socket",
+ "octopus-private-fs",
  "octopus-process-session-tool-runtime",
  "octopus-tool-handlers",
  "octopus-tool-registry",

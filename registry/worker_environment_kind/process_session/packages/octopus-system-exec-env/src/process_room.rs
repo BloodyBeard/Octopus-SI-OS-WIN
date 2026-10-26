@@ -22,9 +22,8 @@ use octopus_worker_env::{
     WorkerEnvKindSpec, WorkerEnvironmentFormation, WorkerEnvironmentId, WorkerEnvironmentLifecycle,
 };
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-#[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
+use octopus_local_socket::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use super::{decode_exec_env_request, materialize_system_exec_emitted_artifact};
 
@@ -1638,13 +1637,12 @@ fn room_live_state(state: &RoomState) -> Value {
     })
 }
 
-#[cfg(unix)]
 async fn spawn_viewer_listener(
     room: Arc<tokio::sync::Mutex<RoomState>>,
 ) -> Result<tokio::task::JoinHandle<()>, String> {
     let socket = room.lock().await.viewer_socket.clone();
     remove_private_socket(&socket)?;
-    let listener = UnixListener::bind(&socket).map_err(|error| {
+    let mut listener = UnixListener::bind(&socket).await.map_err(|error| {
         format!(
             "process viewer socket '{}' cannot bind: {error}",
             socket.display()
@@ -1656,7 +1654,7 @@ async fn spawn_viewer_listener(
     }
     Ok(tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok(stream) = listener.accept().await else {
                 return;
             };
             tokio::spawn(serve_viewer_connection(Arc::clone(&room), stream));
@@ -1664,16 +1662,8 @@ async fn spawn_viewer_listener(
     }))
 }
 
-#[cfg(not(unix))]
-async fn spawn_viewer_listener(
-    _room: Arc<tokio::sync::Mutex<RoomState>>,
-) -> Result<tokio::task::JoinHandle<()>, String> {
-    Err("process_session direct viewer requires a local IPC transport on this platform".to_string())
-}
-
-#[cfg(unix)]
 async fn serve_viewer_connection(room: Arc<tokio::sync::Mutex<RoomState>>, stream: UnixStream) {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
     let Ok(Some(auth_line)) = lines.next_line().await else {
         return;
@@ -1786,7 +1776,6 @@ fn viewer_replay_notice(events: &octopus_exec::ExecProcessEventReceiver) -> Opti
     })
 }
 
-#[cfg(unix)]
 async fn recv_viewer_event(
     events: &mut Option<octopus_exec::ExecProcessEventReceiver>,
 ) -> Result<ExecProcessEvent, String> {
@@ -2101,9 +2090,8 @@ fn viewer_error(request_id: Option<&str>, error: String) -> Value {
     })
 }
 
-#[cfg(unix)]
 async fn write_viewer_message(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut (impl AsyncWrite + Unpin),
     value: &Value,
 ) -> Result<(), String> {
     let mut encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
@@ -2118,14 +2106,8 @@ async fn write_viewer_message(
 }
 
 fn write_private_text(path: &Path, value: &str) -> Result<(), String> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).map_err(|error| {
+    // Unix: mode 0600. Windows: an access list for the current user and SYSTEM.
+    let mut file = octopus_private_fs::create_private_file(path).map_err(|error| {
         format!(
             "private process viewer credential '{}' cannot be created: {error}",
             path.display()
@@ -2141,24 +2123,17 @@ fn write_private_text(path: &Path, value: &str) -> Result<(), String> {
 }
 
 fn viewer_token() -> Result<String, String> {
-    #[cfg(not(unix))]
-    {
-        return Err(
-            "process_session direct viewer has no secure entropy source on this platform"
-                .to_string(),
-        );
-    }
-    #[cfg(unix)]
-    {
-        let mut entropy = [0u8; 32];
-        let mut source = std::fs::File::open("/dev/urandom")
-            .map_err(|error| format!("process viewer entropy source is unavailable: {error}"))?;
-        std::io::Read::read_exact(&mut source, &mut entropy)
-            .map_err(|error| format!("process viewer entropy could not be read: {error}"))?;
-        Ok(BASE64_STANDARD.encode(entropy))
-    }
+    // The OS secure random source: /dev/urandom or getrandom(2) on Unix,
+    // ProcessPrng on Windows.
+    let mut entropy = [0u8; 32];
+    getrandom::fill(&mut entropy)
+        .map_err(|error| format!("process viewer entropy could not be read: {error}"))?;
+    Ok(BASE64_STANDARD.encode(entropy))
 }
 
+/// Unix: sets mode 0600. Windows: private files got their owner-only access
+/// list when they were created, so this checks it; the viewer socket is a
+/// named pipe, created owner-only by `octopus-local-socket`, with no file.
 fn set_owner_only(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -2171,6 +2146,23 @@ fn set_owner_only(path: &Path) -> Result<(), String> {
                 )
             },
         )?;
+    }
+    #[cfg(not(unix))]
+    match octopus_private_fs::is_owner_only(path) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "private process viewer path '{}' is not owner-only",
+                path.display()
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "private process viewer path '{}' cannot be inspected: {error}",
+                path.display()
+            ))
+        }
     }
     Ok(())
 }
@@ -2225,6 +2217,8 @@ fn is_socket_metadata(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_socket()
 }
 
+/// Windows sockets are named pipes, which leave no file at the socket path,
+/// so any file found there is not a socket.
 #[cfg(not(unix))]
 fn is_socket_metadata(_metadata: &std::fs::Metadata) -> bool {
     false

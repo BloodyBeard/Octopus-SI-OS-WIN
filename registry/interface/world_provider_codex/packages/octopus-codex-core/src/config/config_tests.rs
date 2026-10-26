@@ -79,7 +79,6 @@ use octopus_protocol::permissions::FileSystemSandboxPolicy;
 use octopus_protocol::permissions::FileSystemSpecialPath;
 use octopus_protocol::permissions::NetworkSandboxPolicy;
 use octopus_protocol::protocol::MultiAgentVersion;
-use octopus_protocol::protocol::NetworkAccess;
 use octopus_protocol::protocol::RealtimeVoice;
 use octopus_protocol::protocol::SandboxPolicy;
 use tempfile::tempdir;
@@ -8196,6 +8195,10 @@ async fn requirements_disallowing_default_sandbox_falls_back_to_required_default
         )
         .build()
         .await?;
+    assert!(matches!(
+        legacy_sandbox_policy_projection(&config),
+        SandboxPolicy::ReadOnly { .. }
+    ));
     Ok(())
 }
 
@@ -8218,6 +8221,16 @@ async fn explicit_sandbox_mode_falls_back_when_disallowed_by_requirements() -> s
         )
         .build()
         .await?;
+    assert!(matches!(
+        legacy_sandbox_policy_projection(&config),
+        SandboxPolicy::ReadOnly { .. }
+    ));
+    assert!(
+        config.startup_warnings.iter().any(|warning| warning
+            .contains("Configured value for `permission_profile` is disallowed by requirements")),
+        "{:?}",
+        config.startup_warnings
+    );
     Ok(())
 }
 

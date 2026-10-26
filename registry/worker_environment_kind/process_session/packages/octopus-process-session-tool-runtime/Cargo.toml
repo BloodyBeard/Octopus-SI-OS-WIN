@@ -39,5 +39,8 @@ octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.182"
 
+[target.'cfg(windows)'.dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
+
 [dev-dependencies]
 tempfile = "3.23.0"

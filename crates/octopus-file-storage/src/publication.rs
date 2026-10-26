@@ -831,20 +831,15 @@ pub fn create_dir_all(path: &Path) -> io::Result<()> {
     guard.verify()
 }
 
-#[cfg(test)]
+// Only the Unix-only test module uses it (see `mod tests` below).
+#[cfg(all(test, unix))]
 fn directory_lock(directory: &Path, exclusive: bool, wait: bool) -> io::Result<HeldFile> {
     HeldFile::existing(directory.to_path_buf(), exclusive, true, wait)
 }
 
 fn coordination_root(parent: &Path) -> io::Result<PathBuf> {
     let root = parent.join(COORDINATION_DIRECTORY);
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(&root) {
+    match create_private_directory(&root) {
         Ok(()) => {
             sync_directory(parent)?;
         }
@@ -855,17 +850,34 @@ fn coordination_root(parent: &Path) -> io::Result<PathBuf> {
     Ok(root)
 }
 
+/// Creates an owner-private directory: Unix mode 0700, Windows a protected
+/// access list for the current user and SYSTEM.
+fn create_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        octopus_private_fs::create_private_dir(path)
+    }
+}
+
 fn validate_coordination_root(root: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(root)?;
     if !metadata.is_dir() {
         return Err(invalid("publication metadata directory is not a real directory"));
     }
     #[cfg(unix)]
-    {
+    let private = {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(invalid("publication metadata directory must be private to its owner"));
-        }
+        metadata.permissions().mode() & 0o077 == 0
+    };
+    #[cfg(not(unix))]
+    let private = octopus_private_fs::is_owner_only(root)?;
+    if !private {
+        return Err(invalid("publication metadata directory must be private to its owner"));
     }
     Ok(())
 }
@@ -878,11 +890,21 @@ fn current_file(path: &Path) -> io::Result<Option<File>> {
     }
 }
 
+/// Never follows a final symlink. Unix also creates mode 0600 and never blocks
+/// on a FIFO; Windows has no FIFOs in the file namespace, and new files take
+/// the owner-only access list of the private directories they live in.
 fn secure_options(options: &mut OpenOptions) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open a symlink itself, which callers
+        // then refuse because it is not a regular file.
+        options.custom_flags(0x0020_0000);
     }
 }
 

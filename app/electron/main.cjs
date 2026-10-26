@@ -1,5 +1,6 @@
 const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeTheme, net: electronNet, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences } = require("electron");
 const net = require("node:net");
+const { localSocketAddress } = require("./localSocket.cjs");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -4390,7 +4391,7 @@ ipcMain.handle("octopus:runtime-status", async (_event, token, request) => {
   }
   const probe = await new Promise((resolve) => {
     const socket = target.kind === "unix"
-      ? net.createConnection(target.path)
+      ? net.createConnection(localSocketAddress(target.path))
       : net.createConnection({ host: target.host, port: target.port });
     let done = false;
     const finish = (up, error) => {

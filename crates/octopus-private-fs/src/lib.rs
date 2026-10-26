@@ -4,62 +4,66 @@
 //! (directories), and never reached through a symlink.
 //!
 //! Windows: owned by the current user (or the token's default owner), never a
-//! reparse point (except the AF_UNIX reparse point that *is* a socket), and
-//! the access list grants access only to that user, SYSTEM and
-//! Administrators, which are the Windows counterparts of root. Entries this
+//! reparse point, and the access list grants access only to that user, SYSTEM
+//! and Administrators, which are the Windows counterparts of root. Entries this
 //! module creates get a protected access list that grants only the current
-//! user and SYSTEM.
+//! user and SYSTEM. Local sockets are named pipes there (see
+//! `octopus-local-socket`), so they have no file to check; [`windows`] has the
+//! pieces that pipes use instead.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum Kind {
     File,
     Directory,
+    /// A Unix domain socket file. Windows local sockets are named pipes, which
+    /// are checked when they are connected to instead.
+    #[cfg(unix)]
     Socket,
 }
 
 /// Opens an existing file for reading without following a final symlink or
 /// reparse point.
-pub(crate) fn open_read_no_follow(path: &Path) -> io::Result<File> {
+pub fn open_read_no_follow(path: &Path) -> io::Result<File> {
     platform::open_read_no_follow(path)
 }
 
 /// Creates a new owner-private file for writing; fails if anything exists at
 /// `path`, including a symlink.
-pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
+pub fn create_private_file(path: &Path) -> io::Result<File> {
     platform::create_private_file(path)
 }
 
 /// Creates an owner-private directory; fails with `AlreadyExists` if `path`
 /// exists.
-pub(crate) fn create_private_dir(path: &Path) -> io::Result<()> {
+pub fn create_private_dir(path: &Path) -> io::Result<()> {
     platform::create_private_dir(path)
 }
 
 /// Whether `path` is an owner-private entry of `kind` with exactly the
 /// private permissions (Unix 0600/0700), and not a symlink.
-pub(crate) fn is_private(path: &Path, kind: Kind) -> io::Result<bool> {
+pub fn is_private(path: &Path, kind: Kind) -> io::Result<bool> {
     platform::is_private(path, kind)
 }
 
 /// Whether `path` is owned by the current user and grants nothing to group
 /// or others (Unix `mode & 0o077 == 0`), and is not a symlink.
-pub(crate) fn is_owner_only(path: &Path) -> io::Result<bool> {
+pub fn is_owner_only(path: &Path) -> io::Result<bool> {
     platform::is_owner_only(path)
 }
 
 /// Whether an open file is an owner-private (Unix 0600) regular file with a
 /// single link.
-pub(crate) fn is_private_single_link_file(file: &File) -> io::Result<bool> {
+pub fn is_private_single_link_file(file: &File) -> io::Result<bool> {
     platform::is_private_single_link_file(file)
 }
 
 /// Whether `path` is already canonical: absolute, without symlinks, `.` or
 /// `..`. On Windows the comparison ignores the `\\?\` prefix and letter case.
-pub(crate) fn is_canonical(path: &Path) -> io::Result<bool> {
+pub fn is_canonical(path: &Path) -> io::Result<bool> {
     let canonical = std::fs::canonicalize(path)?;
     Ok(platform::same_path(&canonical, path))
 }
@@ -128,18 +132,19 @@ mod platform {
     use windows_sys::Win32::Security::{
         GetAce, GetSecurityDescriptorDacl, GetTokenInformation, TokenOwner, TokenUser, ACCESS_ALLOWED_ACE,
         ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_OWNER, TOKEN_QUERY,
+        TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        FileAttributeTagInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
         READ_CONTROL, WRITE_DAC,
     };
-    use windows_sys::Win32::System::SystemServices::{
-        ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, IO_REPARSE_TAG_AF_UNIX,
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// SYSTEM, Administrators, OWNER RIGHTS and CREATOR OWNER may appear in a
     /// private access list next to the owner.
@@ -202,18 +207,13 @@ mod platform {
         let metadata = std::fs::symlink_metadata(path)?;
         let reparse = reparse_point(metadata.file_attributes());
         let shape = match kind {
-            Kind::File => !reparse && metadata.is_file(),
-            Kind::Directory => !reparse && metadata.is_dir(),
-            Kind::Socket => reparse && !metadata.file_type().is_symlink(),
+            Kind::File => metadata.is_file(),
+            Kind::Directory => metadata.is_dir(),
         };
-        if !shape {
+        if reparse || !shape {
             return Ok(false);
         }
-        let entry = open_entry(path, READ_CONTROL)?;
-        if kind == Kind::Socket && reparse_tag(&entry)? != IO_REPARSE_TAG_AF_UNIX {
-            return Ok(false);
-        }
-        owner_only(&entry)
+        owner_only(&open_entry(path, READ_CONTROL)?)
     }
 
     pub(super) fn is_owner_only(path: &Path) -> io::Result<bool> {
@@ -250,22 +250,6 @@ mod platform {
         }
     }
 
-    fn reparse_tag(file: &File) -> io::Result<u32> {
-        let mut information: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
-        // SAFETY: the buffer is a FILE_ATTRIBUTE_TAG_INFO of the size passed.
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle(file),
-                FileAttributeTagInfo,
-                (&mut information as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(information.ReparseTag)
-    }
 
     fn sid_string(sid: PSID) -> io::Result<String> {
         let mut text = std::ptr::null_mut();
@@ -378,9 +362,10 @@ mod platform {
         Ok(true)
     }
 
-    /// Replaces the entry's access list with a protected one that grants only
-    /// the current user and SYSTEM; directories pass it on to new children.
-    fn set_owner_only(entry: &File, directory: bool) -> io::Result<()> {
+    /// A self-relative security descriptor whose protected access list grants
+    /// full access only to the current user and SYSTEM. In a directory's list
+    /// the entries are inherited by new children.
+    fn owner_only_descriptor(directory: bool) -> io::Result<LocalMemory> {
         let user = &principals()?[0];
         let inherit = if directory { "OICI" } else { "" };
         let sddl: Vec<u16> = format!("D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)")
@@ -388,19 +373,25 @@ mod platform {
             .chain(std::iter::once(0))
             .collect();
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: `sddl` is NUL-terminated; the descriptor is freed below.
+        // SAFETY: `sddl` is NUL-terminated; the caller frees the descriptor.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut())
         } == 0
         {
             return Err(io::Error::last_os_error());
         }
-        let _free = LocalMemory(descriptor);
+        Ok(LocalMemory(descriptor))
+    }
+
+    /// Replaces the entry's access list with a protected one that grants only
+    /// the current user and SYSTEM; directories pass it on to new children.
+    fn set_owner_only(entry: &File, directory: bool) -> io::Result<()> {
+        let descriptor = owner_only_descriptor(directory)?;
         let mut present = 0;
         let mut defaulted = 0;
         let mut dacl: *mut ACL = std::ptr::null_mut();
         // SAFETY: `descriptor` is a valid self-relative security descriptor.
-        if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) } == 0 || present == 0 {
+        if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) } == 0 || present == 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: the handle was opened with WRITE_DAC; `dacl` lives in `descriptor`.
@@ -420,6 +411,114 @@ mod platform {
         }
         Ok(())
     }
+
+    /// Security attributes for a kernel object (such as a named pipe) that only
+    /// the current user and SYSTEM may open.
+    pub struct OwnerOnlySecurity {
+        _descriptor: LocalMemory,
+        attributes: SECURITY_ATTRIBUTES,
+    }
+
+    // SAFETY: the descriptor is never written after creation and is freed once.
+    unsafe impl Send for OwnerOnlySecurity {}
+    // SAFETY: as above; shared use only reads it.
+    unsafe impl Sync for OwnerOnlySecurity {}
+
+    impl OwnerOnlySecurity {
+        pub fn new() -> io::Result<Self> {
+            let descriptor = owner_only_descriptor(false)?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0,
+                bInheritHandle: 0,
+            };
+            Ok(Self { _descriptor: descriptor, attributes })
+        }
+
+        /// A `SECURITY_ATTRIBUTES` pointer that stays valid while `self` lives.
+        pub fn as_ptr(&self) -> *mut std::ffi::c_void {
+            std::ptr::addr_of!(self.attributes).cast_mut().cast()
+        }
+    }
+
+    /// Whether process `pid` runs as the current user. Used to check the other
+    /// end of a named pipe, which has no file owner to compare.
+    pub fn process_is_current_user(pid: u32) -> io::Result<bool> {
+        let user = &principals()?[0];
+        // SAFETY: OpenProcess has no memory preconditions; the handle is closed below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `process` is open with query rights; `token` is closed below.
+        let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+        // SAFETY: `process` was opened above.
+        unsafe { CloseHandle(process) };
+        if opened == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let result = token_information(token, TokenUser).and_then(|buffer| {
+            // SAFETY: the buffer holds TOKEN_USER as requested.
+            sid_string(unsafe { (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid })
+        });
+        // SAFETY: `token` was opened above.
+        unsafe { CloseHandle(token) };
+        Ok(&result? == user)
+    }
+
+    /// Gives an existing directory owned by the current user a protected
+    /// access list for that user and SYSTEM, inherited by its contents: the
+    /// counterpart of `chmod 0700` on a directory the user owns.
+    pub fn make_dir_owner_only(path: &Path) -> io::Result<()> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || reparse_point(metadata.file_attributes()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is not a real directory"));
+        }
+        let directory = open_entry(path, READ_CONTROL | WRITE_DAC)?;
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: the handle was opened with READ_CONTROL; `owner` points into `descriptor`.
+        let status = unsafe {
+            GetSecurityInfo(
+                handle(&directory),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let _free = LocalMemory(descriptor);
+        if owner.is_null() || !principals()?.contains(&sid_string(owner)?) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "directory is not owned by the current user"));
+        }
+        set_owner_only(&directory, true)
+    }
+
+    /// Whether the server end of a connected named pipe client runs as the
+    /// current user.
+    pub fn pipe_server_is_current_user(pipe: &File) -> io::Result<bool> {
+        let mut server = 0;
+        // SAFETY: the handle is an open pipe client; `server` is writable.
+        if unsafe { GetNamedPipeServerProcessId(handle(pipe), &mut server) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        process_is_current_user(server)
+    }
+}
+
+/// Windows-only pieces for objects that are not files.
+#[cfg(windows)]
+pub mod windows {
+    pub use super::platform::{
+        make_dir_owner_only, pipe_server_is_current_user, process_is_current_user, OwnerOnlySecurity,
+    };
 }
 
 #[cfg(test)]

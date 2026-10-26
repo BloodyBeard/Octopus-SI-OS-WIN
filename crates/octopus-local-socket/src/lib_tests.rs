@@ -56,6 +56,7 @@ async fn regular_file_path_is_not_stale_socket_path() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bound_listener_path_is_stale_socket_path() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
@@ -118,4 +119,30 @@ async fn stream_round_trips_data_between_listener_and_client() {
     assert_eq!(&response, b"response");
 
     server_task.await.expect("server task should join");
+}
+
+#[test]
+fn pipe_name_ignores_verbatim_prefix_separators_and_case() {
+    let expected = r"\\.\pipe\octopus-bd8b7f095da0d32b198bed7bb31f63c4";
+    for path in [
+        r"C:\Octopus\Home\app-server-control\abc.sock",
+        r"\\?\C:\Octopus\Home\app-server-control\abc.sock",
+        "c:/octopus/home/app-server-control/abc.sock",
+    ] {
+        assert_eq!(pipe_name(std::path::Path::new(path)), expected);
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn second_listener_on_a_path_is_refused() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = temp_dir.path().join("socket");
+    let _listener = UnixListener::bind(&socket_path).await.expect("first bind");
+    let error = UnixListener::bind(&socket_path)
+        .await
+        .err()
+        .expect("second bind must fail");
+    assert_eq!(error.kind(), ErrorKind::AddrInUse);
+    assert!(!is_stale_socket_path(&socket_path).await.unwrap());
 }

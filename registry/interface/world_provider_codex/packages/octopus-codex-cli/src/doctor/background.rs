@@ -29,6 +29,9 @@ pub(super) async fn background_server_check(config: &Config) -> DoctorCheck {
     details.push(format!("control socket: {}", socket_path.display()));
     let status = socket_status(socket_path.as_path()).await;
     details.push(format!("status: {}", status.detail_label()));
+    if let SocketStatus::StaleOrUnreachable(reason) = &status {
+        details.push(format!("error: {reason}"));
+    }
 
     let mut check = DoctorCheck::new(
         "app_server.status",
@@ -75,27 +78,24 @@ impl SocketStatus {
     }
 }
 
-#[cfg(unix)]
+/// Unix: the daemon's socket file. Windows: the named pipe that
+/// `octopus-local-socket` derives from the same path, which leaves no file, so
+/// a pipe that is not found means the daemon is not running.
 async fn socket_status(socket_path: &Path) -> SocketStatus {
+    #[cfg(unix)]
     if !socket_path.exists() {
         return SocketStatus::NotRunning;
     }
     match tokio::time::timeout(
         CONNECT_TIMEOUT,
-        tokio::net::UnixStream::connect(socket_path),
+        octopus_local_socket::UnixStream::connect(socket_path),
     )
     .await
     {
         Ok(Ok(_stream)) => SocketStatus::Running,
+        #[cfg(windows)]
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => SocketStatus::NotRunning,
         Ok(Err(err)) => SocketStatus::StaleOrUnreachable(err.to_string()),
         Err(_elapsed) => SocketStatus::StaleOrUnreachable("connect timed out".to_string()),
     }
-}
-
-#[cfg(not(unix))]
-async fn socket_status(socket_path: &Path) -> SocketStatus {
-    if !socket_path.exists() {
-        return SocketStatus::NotRunning;
-    }
-    SocketStatus::StaleOrUnreachable("unix-socket probe unsupported on this platform".to_string())
 }

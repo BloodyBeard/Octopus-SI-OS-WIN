@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, Read, Seek};
+use std::io::{BufRead, Seek};
+// The Unix output reader below; Windows refuses that read for now.
+#[cfg(unix)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

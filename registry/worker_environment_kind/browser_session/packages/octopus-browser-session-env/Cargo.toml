@@ -23,7 +23,6 @@ percent-encoding = "2"
 hmac = "0.12"
 sha2 = "0.10"
 getrandom = "0.3"
-libc = "0.2"
 
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
@@ -36,16 +35,7 @@ octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 
 octopus-app-server-interface = { path = "../../../../interface/world_operator_chat/packages/octopus-app-server-interface" }
 octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-    "Win32_Storage_FileSystem",
-    "Win32_System_SystemServices",
-    "Win32_System_Threading",
-] }
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 
 [dev-dependencies]
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }

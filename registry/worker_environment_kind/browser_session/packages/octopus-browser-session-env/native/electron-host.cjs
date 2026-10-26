@@ -18,8 +18,13 @@ const { createRoomHistory } = require('./browser-history-control.cjs');
 const { createBrowserPermissions } = require('./browser-permissions.cjs');
 const { engineInfo } = require('./engine-mode.cjs');
 const { createStandardEngine } = require('./standard-engine.cjs');
+const { localSocketAddress, restrictToOwner } = require('./local-socket.cjs');
 
 const PROTOCOL = 'browser.native.v1';
+// Windows has no uids or mode bits. There the host root gets an owner-only
+// access list (restrictToOwner), files inside inherit it, the Rust door checks
+// it, and the socket is a named pipe whose clients check its server's user.
+const WINDOWS = process.platform === 'win32';
 const PRESENTATION_FIELDS = ['attachmentId', 'hostGeneration', 'mountGeneration', 'viewportSequence', 'metricsRevision', 'stageBounds', 'pageBounds', 'visualBounds', 'scale', 'visible'];
 const LEASE_TIMEOUT = 60000;
 const LINE_LIMIT = 16 * 1024 * 1024;
@@ -115,15 +120,16 @@ async function privateRoot(root) {
     try { stat = await fs.lstat(current); } catch (error) {
       if (error.code !== 'ENOENT' || index !== parts.length - 1) throw error;
       await fs.mkdir(current, { mode: 0o700 }); stat = await fs.lstat(current);
+      if (WINDOWS) restrictToOwner(current);
     }
     assert(stat.isDirectory() && !stat.isSymbolicLink(), 'Host root traverses a non-directory or symlink', 'host_path_denied');
-    if (index === parts.length - 1) assert(stat.uid === process.getuid() && (stat.mode & 0o777) === 0o700, 'Host root must be owner-only mode 0700', 'host_path_denied');
+    if (index === parts.length - 1 && !WINDOWS) assert(stat.uid === process.getuid() && (stat.mode & 0o777) === 0o700, 'Host root must be owner-only mode 0700', 'host_path_denied');
   }
 }
 async function privateWrite(filename, bytes) {
   try {
     const stat = await fs.lstat(filename);
-    assert(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600, 'Existing host file is not a private regular file', 'host_path_denied');
+    assert(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && (WINDOWS || (stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600)), 'Existing host file is not a private regular file', 'host_path_denied');
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const temporary = `${filename}.${randomId()}`;
   const handle = await fs.open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
@@ -134,6 +140,16 @@ async function unlinkOwned(filename) {
   try { await fs.unlink(filename); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 async function removeStaleSocket(filename) {
+  if (WINDOWS) {
+    // A pipe vanishes with its server, so only a live host can hold the name.
+    await new Promise((resolve, reject) => {
+      const socket = net.createConnection(localSocketAddress(filename));
+      socket.setTimeout(1000, () => { socket.destroy(); reject(failure('host_already_present', 'Existing native browser pipe did not establish its state')); });
+      socket.once('connect', () => { socket.destroy(); reject(failure('host_already_present', 'Native browser host is already listening')); });
+      socket.once('error', error => { socket.destroy(); if (error.code === 'ENOENT') resolve(); else reject(error); });
+    });
+    return;
+  }
   let stat;
   try { stat = await fs.lstat(filename); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
   assert(stat.isSocket() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600, 'Existing native socket is not owned by this host', 'host_path_denied');
@@ -1269,11 +1285,11 @@ function createBrowserEngineHost({ electron, hostRoot, engineProof, engineMode =
       if (humanDownloads) await humanDownloads.initialize();
       generation = randomId(); key = crypto.randomBytes(32);
       socketPath = path.join(hostRoot, 'engine.sock');
-      assert(Buffer.byteLength(socketPath) < 104, 'Native browser socket path exceeds macOS UDS length');
+      assert(WINDOWS || Buffer.byteLength(socketPath) < 104, 'Native browser socket path exceeds macOS UDS length');
       await removeStaleSocket(socketPath);
       server = net.createServer(accept);
-      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, () => { server.removeListener('error', reject); resolve(); }); });
-      await fs.chmod(socketPath, 0o600);
+      await new Promise((resolve, reject) => { server.once('error', reject); server.listen(localSocketAddress(socketPath), () => { server.removeListener('error', reject); resolve(); }); });
+      if (!WINDOWS) await fs.chmod(socketPath, 0o600);
       try {
         await privateWrite(path.join(hostRoot, 'auth.key'), key);
         const descriptor = { schema_version: 1, host_generation: generation, socket_path: socketPath };

@@ -33,7 +33,6 @@ fn configure_open(_options: &mut tokio::fs::OpenOptions) {}
 
 #[cfg(windows)]
 pub(crate) fn is_disk_file(file: &impl std::os::windows::io::AsRawHandle) -> bool {
-    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::GetFileType;
     use windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK;

@@ -446,21 +446,138 @@ mod tests {
     }
 }
 
+/// Windows: the same rules as Unix with Windows checks. No component may be a
+/// symlink or other reparse point, and the secret must be a single-link
+/// regular file owned by the current user whose access list admits only that
+/// user, SYSTEM and Administrators (the Unix 0600 owner-only file).
 #[cfg(not(unix))]
 mod platform {
-    use std::path::Path;
+    use std::io::Read;
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, Path, PathBuf};
 
-    pub(super) fn load_private_file(_path: &Path) -> Result<Vec<u8>, std::io::Error> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "direct exec-server secret handles require a Unix host",
-        ))
+    use super::{MAX_SECRET_BYTES, MIN_SECRET_BYTES};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    pub(super) fn load_private_file(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+        if !path.is_absolute() {
+            return Err(invalid(
+                "direct exec-server secret handle must be an absolute path",
+            ));
+        }
+        let mut walked = PathBuf::new();
+        let mut components = path.components().peekable();
+        while let Some(component) = components.next() {
+            walked.push(component);
+            if matches!(component, Component::Normal(_)) && components.peek().is_some() {
+                require_real_directory(&walked)?;
+            }
+        }
+        load_leaf(path)
     }
 
-    pub(super) fn load_beneath(_root: &Path, _relative: &str) -> Result<Vec<u8>, std::io::Error> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "direct exec-server secret handles require a Unix host",
-        ))
+    pub(super) fn load_beneath(root: &Path, relative: &str) -> Result<Vec<u8>, std::io::Error> {
+        let relative = Path::new(relative);
+        if relative.is_absolute() {
+            return Err(invalid(
+                "direct exec-server secret handle must be relative to its private root",
+            ));
+        }
+        require_real_directory(root)?;
+        let mut path = root.to_path_buf();
+        let mut components = relative.components().peekable();
+        if components.peek().is_none() {
+            return Err(invalid("direct exec-server secret handle is empty"));
+        }
+        while let Some(component) = components.next() {
+            match component {
+                Component::Normal(value) if !value.is_empty() => path.push(value),
+                _ => {
+                    return Err(invalid(
+                        "direct exec-server secret handle contains a non-normal component",
+                    ));
+                }
+            }
+            if components.peek().is_some() {
+                require_real_directory(&path)?;
+            }
+        }
+        load_leaf(&path)
+    }
+
+    fn require_real_directory(path: &Path) -> Result<(), std::io::Error> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(invalid(
+                "direct exec-server secret handle crosses a symlink or non-directory",
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_leaf(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+        let mut file = octopus_private_fs::open_read_no_follow(path)?;
+        if !octopus_private_fs::is_private_single_link_file(&file)? {
+            return Err(invalid(
+                "direct exec-server secret handle must be an owner-only single-link file",
+            ));
+        }
+        let before = file.metadata()?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((MAX_SECRET_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if !(MIN_SECRET_BYTES..=MAX_SECRET_BYTES).contains(&bytes.len()) {
+            return Err(invalid(format!(
+                "direct exec-server secret handle must contain {MIN_SECRET_BYTES}..={MAX_SECRET_BYTES} bytes"
+            )));
+        }
+        let after = file.metadata()?;
+        if before.len() != after.len()
+            || before.last_write_time() != after.last_write_time()
+            || before.len() != bytes.len() as u64
+        {
+            return Err(invalid(
+                "direct exec-server secret handle changed while it was read",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn invalid(message: impl Into<String>) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn secret_handles_load_only_owner_only_files_beneath_their_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("private");
+        octopus_private_fs::create_private_dir(&root).unwrap();
+        let secret = root.join("secret");
+        std::io::Write::write_all(
+            &mut octopus_private_fs::create_private_file(&secret).unwrap(),
+            &[7u8; MIN_SECRET_BYTES],
+        )
+        .unwrap();
+        DirectExecServerAuth::load_beneath(&root, "secret").unwrap();
+        DirectExecServerAuth::load_private_file(&secret).unwrap();
+        assert!(DirectExecServerAuth::load_beneath(&root, "../private/secret").is_err());
+        assert!(DirectExecServerAuth::load_beneath(&root, "missing").is_err());
+
+        let short = root.join("short");
+        std::io::Write::write_all(&mut octopus_private_fs::create_private_file(&short).unwrap(), b"x").unwrap();
+        assert!(DirectExecServerAuth::load_beneath(&root, "short").is_err());
+
+        // A file that inherits an ordinary access list is not owner-only.
+        let shared = temporary.path().join("shared");
+        std::fs::write(&shared, [7u8; MIN_SECRET_BYTES]).unwrap();
+        let inherits_private = octopus_private_fs::is_owner_only(temporary.path()).unwrap();
+        assert_eq!(DirectExecServerAuth::load_private_file(&shared).is_ok(), inherits_private);
     }
 }

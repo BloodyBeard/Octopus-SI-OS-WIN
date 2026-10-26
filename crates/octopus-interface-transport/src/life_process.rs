@@ -5,6 +5,7 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio_util::task::AbortOnDropHandle;
 
 pub(crate) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(unix)]
 const OBSERVATION_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(crate) struct LifeProcess {
@@ -18,6 +19,8 @@ pub(crate) struct LifeProcess {
     child: tokio::process::Child,
     #[cfg(all(unix, not(target_os = "macos")))]
     closed: bool,
+    #[cfg(windows)]
+    job: job::Job,
 }
 
 #[cfg(target_os = "macos")]
@@ -70,6 +73,17 @@ impl LifeProcess {
         #[cfg(not(target_os = "macos"))]
         {
             let mut child = command.spawn().map_err(|e| e.to_string())?;
+            #[cfg(windows)]
+            let job = match child.raw_handle().map(job::Job::containing) {
+                Some(Ok(job)) => job,
+                failed => {
+                    let _ = child.kill().await;
+                    return Err(match failed {
+                        Some(Err(error)) => format!("life process job cannot hold the child: {error}"),
+                        _ => "life child exited before its job could hold it".to_string(),
+                    });
+                }
+            };
             Ok(Self {
                 pid: child.id().ok_or("life child has no owned PID")?,
                 stdin: child.stdin.take(),
@@ -78,6 +92,8 @@ impl LifeProcess {
                 child,
                 #[cfg(unix)]
                 closed: false,
+                #[cfg(windows)]
+                job,
             })
         }
     }
@@ -155,11 +171,12 @@ impl LifeProcess {
                 tokio::time::sleep(OBSERVATION_INTERVAL).await;
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            if self.child.id().is_some() {
-                self.child.kill().await?;
-            }
+            // The job holds the child and everything it started, like the
+            // Unix process group.
+            self.job.terminate()?;
+            self.child.wait().await?;
             Ok(())
         }
     }
@@ -200,6 +217,76 @@ impl LifeProcess {
             }
         };
         Ok(Some(ExitStatus::from_raw(raw)))
+    }
+}
+
+/// Windows counterpart of the owned process group: a job object that holds
+/// the life process and every process it starts. Closing the job (dropping
+/// it, or the runtime exiting in any way) kills them all, so no descendant
+/// outlives the runtime that owns it.
+#[cfg(windows)]
+mod job {
+    use std::io;
+    use std::os::windows::io::RawHandle;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    pub(crate) struct Job(HANDLE);
+
+    // SAFETY: a job handle may be used and closed from any thread.
+    unsafe impl Send for Job {}
+    // SAFETY: as above; the methods only pass the handle to thread-safe calls.
+    unsafe impl Sync for Job {}
+
+    impl Job {
+        pub(crate) fn containing(process: RawHandle) -> io::Result<Self> {
+            // SAFETY: null attributes and name create an anonymous job.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let job = Self(handle);
+            // SAFETY: an all-zero limit structure is valid; one flag is set below.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `limits` is the structure this information class expects.
+            if unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(limits).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `process` is the live child's process handle.
+            if unsafe { AssignProcessToJobObject(job.0, process) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(job)
+        }
+
+        pub(crate) fn terminate(&self) -> io::Result<()> {
+            // SAFETY: the job handle is open until drop.
+            if unsafe { TerminateJobObject(self.0, 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the handle was created by CreateJobObjectW and is closed once.
+            unsafe { CloseHandle(self.0) };
+        }
     }
 }
 

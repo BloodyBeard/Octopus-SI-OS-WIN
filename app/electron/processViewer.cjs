@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const net = require("node:net");
+const { localSocketAddress } = require("./localSocket.cjs");
 const path = require("node:path");
 
 const CONNECT_TIMEOUT_MS = 7_000;
@@ -34,10 +35,14 @@ function createProcessViewerManager(options) {
       }
     }
     const credential = await readViewerCredential(descriptor.data.auth_file);
-    const socketMetadata = await fs.lstat(descriptor.viewerUrl);
-    if (!socketMetadata.isSocket() || socketMetadata.isSymbolicLink()
-      || (socketMetadata.mode & 0o077) !== 0) {
-      throw new Error("Process viewer endpoint is not a private local socket");
+    // Windows: the endpoint is a named pipe with no file to inspect. The room
+    // creates the pipe with an owner-only access list.
+    if (process.platform !== "win32") {
+      const socketMetadata = await fs.lstat(descriptor.viewerUrl);
+      if (!socketMetadata.isSocket() || socketMetadata.isSymbolicLink()
+        || (socketMetadata.mode & 0o077) !== 0) {
+        throw new Error("Process viewer endpoint is not a private local socket");
+      }
     }
     const sessionId = crypto.randomBytes(18).toString("base64url");
     const session = new ProcessViewerSession({
@@ -146,7 +151,7 @@ class ProcessViewerSession {
         resolve: () => { clearTimeout(timeout); resolve(); },
         reject: (error) => { clearTimeout(timeout); reject(error); },
       };
-      const socket = net.createConnection({ path: this.descriptor.viewerUrl });
+      const socket = net.createConnection({ path: localSocketAddress(this.descriptor.viewerUrl) });
       this.socket = socket;
       socket.setNoDelay(true);
       socket.on("connect", () => {
@@ -413,8 +418,10 @@ class ProcessViewerSession {
 async function readViewerCredential(file) {
   if (!path.isAbsolute(file)) throw new Error("Process viewer credential path is unavailable");
   const metadata = await fs.lstat(file);
+  // Windows has no mode bits (Node reports 0o666). The room creates the file
+  // with an owner-only access list and checks it before publishing it.
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 16 || metadata.size > 256
-    || (metadata.mode & 0o077) !== 0) {
+    || (process.platform !== "win32" && (metadata.mode & 0o077) !== 0)) {
     throw new Error("Process viewer credential is invalid");
   }
   const value = (await fs.readFile(file, "utf8")).trim();

@@ -12,7 +12,7 @@ pub(crate) use browser_session::history as browser_history;
 mod browser_wait_completion;
 pub use browser_wait_completion::run_browser_wait_completion_tool_process;
 mod native_transport;
-mod private_fs;
+pub(crate) use octopus_private_fs as private_fs;
 pub use native_transport::prepare_private_native_host;
 pub use browser_session::decode_filechooser_door_artifact;
 #[cfg(test)]

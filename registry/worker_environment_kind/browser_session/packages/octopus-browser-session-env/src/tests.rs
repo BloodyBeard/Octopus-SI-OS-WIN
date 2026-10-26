@@ -24,7 +24,6 @@ use octopus_worker_env::{
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener as TokioTcpListener;
-use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::browser_session::{safe_control_body_evidence, BrowserRoom};
@@ -1708,6 +1707,7 @@ fn restrict_fixture_socket(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
+    // Windows: the fixture listener is a named pipe, created owner-only.
     #[cfg(not(unix))]
     let _ = path;
 }

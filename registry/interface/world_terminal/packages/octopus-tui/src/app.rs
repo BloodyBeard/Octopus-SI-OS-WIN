@@ -11,9 +11,6 @@ use crate::app_event_sender::AppEventSender;
 use crate::app_server_session::AppServerBootstrap;
 use crate::app_server_session::AppServerSession;
 use crate::bottom_pane::ApprovalRequest;
-use crate::bottom_pane::SelectionItem;
-use crate::bottom_pane::SelectionViewParams;
-use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ExternalEditorState;
 use crate::diff_render::DiffSummary;
@@ -46,8 +43,6 @@ use crate::session_vocab::openai_models::ReasoningEffort as ReasoningEffortConfi
 use crate::test_support::PathBufExt;
 #[cfg(test)]
 use crate::test_support::test_path_buf;
-#[cfg(test)]
-use crate::test_support::test_path_display;
 use crate::token_usage::TokenUsage;
 use crate::transcript_reflow::TranscriptReflowState;
 use crate::tui;
@@ -93,7 +88,6 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::select;
-use toml::Value as TomlValue;
 mod agent_message_consolidation;
 mod app_server_events;
 mod background_requests;

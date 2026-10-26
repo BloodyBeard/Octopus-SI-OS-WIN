@@ -42,7 +42,9 @@ enum ResponseFrame {
     Refused { error: String },
 }
 
-#[cfg(not(windows))]
+/// On Windows the path names a named pipe (see `octopus_local_socket`). The
+/// pipe admits only the current user and SYSTEM, which stands in for the Unix
+/// socket's mode 0600 and peer uid check.
 pub fn socket_path(octopus_home: &Path) -> PathBuf {
     octopus_home
         .join("state")
@@ -50,39 +52,24 @@ pub fn socket_path(octopus_home: &Path) -> PathBuf {
         .join(SOCKET_FILE)
 }
 
-/// On Windows the control channel is a named pipe. Its name is derived from the
-/// Octopus home so that separate homes never answer for each other.
-#[cfg(windows)]
-pub fn socket_path(octopus_home: &Path) -> PathBuf {
-    use sha2::{Digest, Sha256};
-    let home = std::path::absolute(octopus_home).unwrap_or_else(|_| octopus_home.to_path_buf());
-    let digest = Sha256::digest(home.to_string_lossy().to_lowercase().as_bytes());
-    let suffix: String = digest[..12].iter().map(|byte| format!("{byte:02x}")).collect();
-    PathBuf::from(format!(r"\\.\pipe\octopus-runtime-control-{suffix}"))
-}
-
 pub struct RuntimeControl {
     path: PathBuf,
     #[cfg(unix)]
     listener: tokio::net::UnixListener,
     #[cfg(windows)]
-    listener: tokio::net::windows::named_pipe::NamedPipeServer,
+    listener: octopus_local_socket::UnixListener,
     stopping: Arc<std::sync::Mutex<Option<RuntimeControlRequest>>>,
 }
 
 impl RuntimeControl {
     #[cfg(windows)]
-    pub fn bind(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn bind(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let path = socket_path(octopus_home);
-        // The default pipe DACL grants write access only to the creating owner,
-        // LocalSystem, and administrators, which matches the Unix 0600 socket.
-        let listener = tokio::net::windows::named_pipe::ServerOptions::new()
-            .first_pipe_instance(true)
-            .reject_remote_clients(true)
-            .create(&path)
+        let listener = octopus_local_socket::UnixListener::bind(&path)
+            .await
             .map_err(|error| {
                 format!(
-                    "runtime control pipe '{}' cannot be created: {error}",
+                    "runtime control pipe for '{}' cannot be created: {error}",
                     path.display()
                 )
             })?;
@@ -94,7 +81,7 @@ impl RuntimeControl {
     }
 
     #[cfg(unix)]
-    pub fn bind(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn bind(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let path = socket_path(octopus_home);
         match std::fs::symlink_metadata(&path) {
             Ok(_) => std::fs::remove_file(&path)?,
@@ -137,14 +124,11 @@ impl RuntimeControl {
         Ok(Connection { stream, refusal })
     }
 
+    /// The pipe's access list already refuses other users' clients.
     #[cfg(windows)]
     async fn accept(&mut self) -> std::io::Result<Connection> {
-        self.listener.connect().await?;
-        let next = tokio::net::windows::named_pipe::ServerOptions::new()
-            .reject_remote_clients(true)
-            .create(&self.path)?;
         Ok(Connection {
-            stream: std::mem::replace(&mut self.listener, next),
+            stream: self.listener.accept().await?,
             refusal: None,
         })
     }
@@ -189,7 +173,7 @@ impl RuntimeControl {
 #[cfg(unix)]
 type ControlStream = tokio::net::UnixStream;
 #[cfg(windows)]
-type ControlStream = tokio::net::windows::named_pipe::NamedPipeServer;
+type ControlStream = octopus_local_socket::UnixStream;
 
 struct Connection {
     stream: ControlStream,
@@ -316,18 +300,28 @@ fn connect(path: &Path) -> std::io::Result<std::os::unix::net::UnixStream> {
 /// Opens the control pipe. A busy pipe means the runtime is between instances,
 /// so it is retried until the connection timeout. The server bounds every
 /// exchange with the same timeout, so a stalled exchange cannot hang forever.
+/// A pipe served by another user is refused, like a Unix socket file that
+/// another user owns.
 #[cfg(windows)]
 fn connect(path: &Path) -> std::io::Result<std::fs::File> {
     const ERROR_PIPE_BUSY: i32 = 231;
+    let pipe = octopus_local_socket::pipe_name(path);
     let deadline = Instant::now() + CONNECTION_TIMEOUT;
-    loop {
-        match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+    let stream = loop {
+        match std::fs::OpenOptions::new().read(true).write(true).open(&pipe) {
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            result => return result,
+            result => break result?,
         }
+    };
+    if !octopus_private_fs::windows::pipe_server_is_current_user(&stream)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the runtime control pipe is served by another user",
+        ));
     }
+    Ok(stream)
 }
 
 fn exchange<S>(stream: S, request: RuntimeControlRequest) -> Result<Answer, String>
@@ -421,7 +415,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(temporary.path()).unwrap();
         let instance = crate::runtime_instance::RuntimeInstance::acquire(&home).unwrap();
-        let control = RuntimeControl::bind(&home).unwrap();
+        let control = RuntimeControl::bind(&home).await.unwrap();
         assert_eq!(control.path(), socket_path(&home));
         let cancel = CancellationToken::new();
         let restart = Arc::new(AtomicBool::new(false));

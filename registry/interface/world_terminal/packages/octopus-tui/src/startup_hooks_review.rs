@@ -272,8 +272,6 @@ mod tests {
     use crate::app_event_sender::AppEventSender;
     use crate::keymap::RuntimeKeymap;
     use crate::render::renderable::Renderable;
-    use crate::test_support::PathBufExt;
-    use crate::test_support::test_path_buf;
     use insta::assert_snapshot;
     use octopus_world_terminal_client::HookCatalog;
     use octopus_world_terminal_client::HookCatalogItem;

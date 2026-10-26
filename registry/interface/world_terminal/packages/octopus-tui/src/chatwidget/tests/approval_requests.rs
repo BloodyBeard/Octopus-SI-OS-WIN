@@ -1,5 +1,4 @@
 use super::*;
-use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn exec_approval_emits_proposed_command_and_decision_history() {

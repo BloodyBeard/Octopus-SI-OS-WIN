@@ -222,7 +222,7 @@ async fn queued_slash_review_with_args_restores_for_edit() {
 
 #[tokio::test]
 async fn queued_bang_shell_dispatches_after_active_turn() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(uuid::Uuid::now_v7().to_string());
     handle_turn_started(&mut chat, "turn-1");
 
@@ -287,7 +287,7 @@ async fn queued_empty_bang_shell_reports_help_when_dequeued_and_drains_next_inpu
 
 #[tokio::test]
 async fn queued_bang_shell_waits_for_user_shell_completion_before_next_input() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(uuid::Uuid::now_v7().to_string());
     handle_turn_started(&mut chat, "turn-1");
 

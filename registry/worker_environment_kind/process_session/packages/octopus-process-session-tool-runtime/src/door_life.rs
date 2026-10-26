@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::io::{BufRead, Read, Seek};
+use std::io::{BufRead, Seek};
+// The Unix output reader; Windows refuses that read for now (see below).
+#[cfg(unix)]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -898,14 +898,18 @@ fn retire_spec(path: &Path, spec: &KeeperSpec) -> Result<(), String> {
         .and_then(|directory| directory.sync_all()).map_err(|error| error.to_string())
 }
 
+/// Unix: mode 0600. Windows: records take the owner-only access list of the
+/// private registry directory they are created in (see `private_directory`).
 fn private_options() -> std::fs::OpenOptions {
-    let mut options = std::fs::OpenOptions::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
         options.mode(0o600);
+        options
     }
-    options
+    #[cfg(not(unix))]
+    std::fs::OpenOptions::new()
 }
 
 fn write_private_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -973,14 +977,24 @@ fn duration_ms(duration: Duration) -> Result<u64, String> {
 }
 
 fn private_directory(path: &Path) -> Result<(), String> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
-    {
+    let created = {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path).map_err(|error| {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+    };
+    // Windows: like the Unix builder, every level created here is owner-only.
+    #[cfg(not(unix))]
+    let created = (|| {
+        let missing: Vec<&Path> = path.ancestors().take_while(|level| !level.exists()).collect();
+        for level in missing.into_iter().rev() {
+            match octopus_private_fs::create_private_dir(level) {
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+    created.map_err(|error| {
         format!(
             "persistent process registry '{}' cannot be created: {error}",
             path.display()

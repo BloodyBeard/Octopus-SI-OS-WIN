@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,6 +30,7 @@ use crate::render::renderable::Renderable;
 #[cfg(test)]
 use crate::app_command::AppCommand as Op;
 use octopus_world_terminal_client::TextElement;
+#[cfg(test)]
 use octopus_world_terminal_client::UserInputOption;
 use octopus_world_terminal_client::UserInputQuestion;
 use octopus_world_terminal_client::UserInputRequest;
@@ -1449,7 +1449,6 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
-    use std::collections::HashMap;
     use std::time::Instant;
     use tokio::sync::mpsc::unbounded_channel;
     use unicode_width::UnicodeWidthStr;

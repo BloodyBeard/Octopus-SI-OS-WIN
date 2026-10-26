@@ -16,6 +16,7 @@
     "test:agent-templates": "node scripts/test-agent-templates.cjs",
     "test:chat-trace-contracts": "node scripts/test-chat-trace-contracts.cjs",
     "test:client-navigation": "node scripts/test-client-navigation.cjs",
+    "test:local-socket": "node scripts/test-local-socket.cjs",
     "test:client-interface-contracts": "node scripts/test-client-interface-contracts.cjs",
     "test:client-context-menu": "node scripts/test-client-context-menu.cjs",
     "test:task-archive": "node scripts/test-workspace-setup.cjs task-archive",
