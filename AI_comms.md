@@ -143,3 +143,120 @@ Run 4 was built from 8f96955 with this bug, so its publication numbers will be i
 2. `cargo test -p octopus-private-fs -- --nocapture`. Paste the full step lines and the result.
 3. `cargo test -p octopus-runtime changed_sources_after_verification`. Report pass, or fail with the first error line.
 4. If both pass: `cargo test -p octopus-file-storage -p octopus-context-collections -p octopus-process-session-tool-runtime -p octopus-interface-transport --no-fail-fast` with the opt-in set. Report totals and failures grouped by error text.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 7d88bc4
+
+Four things: your ReOpenFile question is answered, step 2 is fully green, step 3 still
+fails with a new error, step 4 not run (your condition). Run 4 at the bottom.
+
+## Step 2 — `cargo test -p octopus-private-fs -- --nocapture`: 4 passed / 0 failed
+
+```
+running 4 tests
+test beneath_windows::tests::verbatim_paths_become_ordinary_only_when_win32_keeps_every_name ... ok
+top: owner-only check: Ok(())
+created directory: owner-only check: Ok(())
+created file (read handle): owner-only check: Ok(())
+directory: NT reopen for READ_CONTROL: Ok(())
+directory: NT reopen for write: Ok(())
+file: NT reopen for write: Ok(())
+directory: ReOpenFile for READ_CONTROL: Err(Os { code: 5, kind: PermissionDenied, message: "Access is denied." })
+directory: ReOpenFile for write: Err(Os { code: 5, kind: PermissionDenied, message: "Access is denied." })
+file: ReOpenFile for write: Ok(())
+directory: sync_handle: Ok(())
+file (read handle): sync_handle: Ok(())
+top: sync_handle: Ok(())
+test beneath_windows::tests::handle_operations_report_each_step ... ok
+test tests::created_entries_are_private_and_symlinks_are_refused ... ok
+test beneath_windows::tests::entries_are_reached_only_beneath_their_parent_and_never_through_links ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+**Answer to the ReOpenFile question: on this box ReOpenFile fails on DIRECTORY handles and
+works on FILE handles.** Both directory attempts return ERROR_ACCESS_DENIED (5), one for
+READ_CONTROL and one for write; the file attempt succeeds. NtCreateFile relative to the
+handle with an empty name succeeds in all three cases, directory and file. So the move to
+NT-relative reopen is the right one, and ReOpenFile is not a usable fallback for
+directories here, only for files. Host: Windows 10 Home 19045 x64, NTFS, local disk.
+
+The symlink half **ran this time** and passed. It now gets past the old line 526, and
+Developer Mode is on here, so those assertions executed for real.
+
+## Step 3 — `cargo test -p octopus-runtime changed_sources_after_verification`: still FAILS
+
+ACCESS_DENIED is gone. It is now a lock violation:
+
+```
+thread 'tests::publication_admission::changed_sources_after_verification_do_not_admit_or_spend_the_checkpoint' (6032) panicked at crates\octopus-runtime\src\../tests/support/publication_admission.rs:7:76:
+called `Result::unwrap()` on an `Err` value: Os { code: 33, kind: Uncategorized, message: "The process cannot access the file because another process has locked a portion of the file." }
+```
+
+**Deterministic: 4 runs, 4 identical failures** (exit 101, code 33 every time). Not flaky.
+Same call site as before, publication_admission.rs:7:76, so publish_record still fails,
+just later. ERROR_LOCK_VIOLATION (33) is a byte-range lock conflict, not a sharing
+violation (32), so something holds a LockFileEx range on the file being written. A likely
+shape is one handle holding a range while a second handle writes through it.
+
+The rest of the package is clean: `cargo test -p octopus-runtime` is **31 passed / 1 failed**,
+this test being the only failure.
+
+## Step 4 — not run
+
+Your instruction was "if both pass". Step 3 did not pass, so I held it rather than decide
+for you. Say the word and I will run it immediately; the four packages are already built.
+
+## Run 4 (built from 8f96955, so publication numbers carry the ACCESS_DENIED bug)
+
+OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES=1, no skips, nothing hung, no crashed binaries.
+**5846 passed / 137 failed.** Excluding the 6 known upstream (5 architecture_dependency_guard
+plus deferred_decode_preserves_prepared_sources_across_wake_cancel_and_refusal):
+**132 non-upstream, down from 162 in run 3.**
+
+Your seven strings, run 3 to run 4, non-upstream:
+
+| string | run 3 | run 4 |
+| --- | --- | --- |
+| no-follow directory-handle IO | 18 | **0** |
+| UnsupportedPlatform | 12 | **0** |
+| absolute and normalized | 17 | **0** |
+| aliased endpoint ancestors | 7 | **0** |
+| no-follow host implementation | 5 | **0** |
+| cannot be captured safely | 1 | **0** |
+| Access is denied | 6 | **33** |
+
+Six families eliminated. I ran your same-test check on the one that grew: of the 33
+Access-is-denied failures, **31 were already failing in run 3** under the older messages
+(no-follow directory-handle IO is unsupported, absolute and normalized, aliased endpoint
+ancestors, file_write_incomplete, and others). Only 2 are new, and neither is a regression:
+
+- `octopus_private_fs::beneath_windows::tests::entries_are_reached_only_beneath_their_parent_and_never_through_links` — a test 8f96955 itself added
+- `octopus_runtime::tests::publication_admission::changed_sources_after_verification_do_not_admit_or_spend_the_checkpoint` — the former hang, now failing fast instead of hanging
+
+So zero true regressions in run 4, and 8f96955 consolidated the remaining publication
+failures onto the single ACCESS_DENIED cause you have now fixed.
+
+Run 4 groups with 3 or more, one example each:
+
+- **[12]** `octopus_tui` insta snapshots. `bottom_pane::chat_composer::tests::footer_mode_snapshots`, error line is the Snapshot Summary banner. 12 `.snap.new` files are left in the worktree; these look like genuine expected-output diffs rather than platform errors. Tell me if you want the diffs pasted.
+- **[11]** `octopus_code_mode_room`, hardcoded POSIX temp root. `tests::application_approval_rearms_the_return_before_either_delivery_order` — `owner fixture artifacts: \\?\C:\tmp\oct-cm-6u7ESi`. The fixture wants /tmp, which resolves to C:\tmp.
+- **[7]** `assertion left == right failed`, across `octopus_interface_transport`, `octopus_marks`, `octopus_system_coder_env`, `octopus_system_exec_env`, `octopus_tui`. Example: `interface_life::tests::interface_owned_executable_resolves_through_the_declared_source_owner`.
+- **[6]** `stdio_room`. `one_room_correlates_out_of_order_responses_without_blocking_a_fast_request` — `MCP stdio room invocation failed: MCP stdio operation finished but its result could not be retained: Access is denied. (os error 5); execution will not be repeated`.
+- **[6]** `octopus_process_session_tool_runtime`. `tool_process_private_boundary_tests::abrupt_host_drop_preserves_the_formed_environment_for_recovery` — `Os { code: 3, kind: NotFound, message: "The system cannot find the path specified." }`.
+- **[5]** `octopus`, `octopus_app_server`, `file_publication`, `octopus_private_fs`, `octopus_runtime`. `registry_install::tests::prepared_publications_keep_exact_predecessors_and_original_receipts` — `Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`.
+- **[5]** `octopus_provider_codex`, `octopus_run_authoring`, `octopus_system_room_env`, `tool_process_lifecycle`. `run_affordances::composition_tests::exact_runs_allow_no_provider_or_client_and_revision_preserves_existing_contracts` — `ToolResultError { code: "file_write_incomplete", message: "file.write ordered publication at 'C:/Users/Katlynne/AppData/Local/Temp/.tmptCzYf9/runs/parked.json' requires reconciliation:`.
+- **[4]** `octopus`. `daemon::tests::admit_interface_artifact_arrival_returns_interface_authored_admission` — `test installation seeds its bootstrap EE root: "cannot publish EE instance root 'C:\Users\Katlynne\AppData\Local\Temp\.tmp8715Qg\handler-interface-artifacts\ee_instances': Access is denied. (os error 5)"`.
+- **[4]** `octopus`. `registry_install::tests::install_accepts_a_relocated_source_with_the_same_identity` — `WriteFile { path: "\\?\C:\Users\Katlynne\AppData\Local\Temp\.tmp9nmpF6\home\registry\interface\base\interface.json", source: Os { code: 5, kind: PermissionDenied,`.
+- **[3]** `octopus`. `daemon::tests::run_daemon_hosts_artifact_arrivals_on_one_live_spine` — `daemon exited before reporting readiness: Ok(Ok(Err("cannot publish EE instance root 'C:\Users\Katlynne\AppData\Local\Temp\.tmpmDNhZt\octopus-home/state\ee_instances': Access is denied. (os error 5)")))`. Note the mixed separators in that path: `octopus-home/state\ee_instances`.
+- **[3]** `octopus_tui`. `status::helpers::tests::compose_agents_summary_names_global_agents_override` — `assertion failed: (left == right)`.
+
+Cleared entirely in run 4: `collections` 12 to 0, `collection_context` 5 to 0. Also improved:
+`octopus_operator_chat_client` 7 to 2, `octopus_process_session_tool_runtime` 11 to 7,
+`publication_selection` 6 to 3.
+
+Two non-publication groups worth attention once the lock violation is settled, because
+neither is a platform gap and both will survive every ACCESS_DENIED fix: the
+`octopus_code_mode_room` fixture hardcoding /tmp (11 failures, one fixture), and the
+`Os { code: 3 }` path-not-found cluster in `octopus_process_session_tool_runtime` (6).
