@@ -8052,6 +8052,7 @@ dependencies = [
  "octopus-descriptors",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-private-fs",
  "octopus-process-session-tool-runtime",
  "octopus-tool-handlers",
  "octopus-tool-registry",

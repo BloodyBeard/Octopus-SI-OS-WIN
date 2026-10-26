@@ -23,6 +23,7 @@ url = "2"
 blake3.workspace = true
 
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-app-server-interface = { path = "../../../../interface/world_operator_chat/packages/octopus-app-server-interface" }

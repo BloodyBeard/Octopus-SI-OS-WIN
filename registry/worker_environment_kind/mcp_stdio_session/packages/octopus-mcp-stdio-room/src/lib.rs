@@ -1558,11 +1558,13 @@ fn materialize_completed_result(
         let manifest = artifact
             .read_manifest()
             .map_err(|error| error.to_string())?;
+        // A read-only handle; Windows flushes only with write access, which
+        // sync_handle takes care of.
         std::fs::File::open(&manifest.payload_path)
-            .and_then(|file| file.sync_all())
+            .and_then(|file| octopus_private_fs::sync_handle(&file))
             .map_err(|error| error.to_string())?;
         std::fs::File::open(artifact.manifest_path())
-            .and_then(|file| file.sync_all())
+            .and_then(|file| octopus_private_fs::sync_handle(&file))
             .map_err(|error| error.to_string())?;
         std::fs::hard_link(artifact.manifest_path(), completed.manifest_path())
             .map_err(|error| error.to_string())?;

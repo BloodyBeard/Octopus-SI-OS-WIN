@@ -702,7 +702,7 @@ pub(crate) fn remember_permission(private: &Path, shared: Option<&Path>, request
     let temporary = root.join(format!(".application-permission-{nonce}.json"));
     create_record(&temporary, &record)?;
     let result = std::fs::rename(&temporary, &path)
-        .and_then(|_| std::fs::File::open(root)?.sync_all()).map_err(|error| error.to_string());
+        .and_then(|_| octopus_private_fs::sync_directory(root)).map_err(|error| error.to_string());
     if result.is_err() { let _ = std::fs::remove_file(&temporary); }
     result
 }
@@ -753,7 +753,7 @@ pub(crate) fn application_preferences(root: &Path, bundle: Option<&str>) -> Resu
     }
     let removed = if let Some(path) = remove {
         std::fs::remove_file(path).map_err(|error| error.to_string())?;
-        std::fs::File::open(root).and_then(|file| file.sync_all())
+        octopus_private_fs::sync_directory(root)
             .map_err(|error| format!("application preference removed but directory sync failed: {error}"))?;
         true
     } else { false };
