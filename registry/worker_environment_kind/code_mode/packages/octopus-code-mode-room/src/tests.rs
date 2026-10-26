@@ -2020,7 +2020,7 @@ fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) -> Pin
         provider_descriptor.interface_driver_config.as_mut().unwrap().private_config["context_output_labels"] = json!(["provider.fixture.snapshot", "tool.call"]);
     }
     let control = root.join("control");std::fs::create_dir_all(&control).unwrap();
-    let listener = tokio::net::UnixListener::bind(octopus_interface_activation_app_server_transport::interface_control_socket_path_from_root(&control,&InterfaceId::new("system_provider_author_test"))).unwrap();
+    let listener = octopus_local_socket::UnixListener::bind(octopus_interface_activation_app_server_transport::interface_control_socket_path_from_root(&control,&InterfaceId::new("system_provider_author_test"))).await.unwrap();
     let (provider_arrivals,mut provider_transport) = tokio::sync::mpsc::channel(8);
     let mut provider_context = octopus_interface_transport::InterfaceLiftContext::unprivileged(InterfaceId::new("world_provider_test"),provider_directory,Some(provider_descriptor.clone()),root.join("provider-var"),root.join("movements.jsonl"),root.join("blobs"),root.join("ledger-index.sqlite"),BTreeMap::from([("run_records_root".into(),records.clone()),("interface_hand_in_root".into(),root.join("provider-hand-in")),("app_server_control_root".into(),control)]),provider_arrivals,tokio_util::sync::CancellationToken::new());
     std::fs::create_dir_all(&provider_context.var_dir).unwrap();
@@ -3211,6 +3211,7 @@ async fn actual_gui_decision_preserves_the_original_promise(
 ) {
     use octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose as Purpose;
     use sha2::{Digest, Sha256};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let source = envelope(
         root,
@@ -3275,12 +3276,14 @@ async fn actual_gui_decision_preserves_the_original_promise(
     let private = root.join(format!("gui-private/{digest}/system_gui_test"));
     let host = private.join("desktop-host");
     std::fs::create_dir_all(&host).unwrap();
+    #[cfg(unix)]
     for path in [&private, &host] {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let write_private = |name: &str, value: Value| {
         let p = host.join(name);
         std::fs::write(&p, serde_json::to_vec(&value).unwrap()).unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         p
     };
@@ -3900,11 +3903,11 @@ impl FrontierAdmission {
 
 async fn actual_provider_authoring_socket(
     admission: std::sync::Arc<FrontierAdmission>,
-    listener: tokio::net::UnixListener,
+    mut listener: octopus_local_socket::UnixListener,
 ) -> Result<(),String> {
     use futures::{SinkExt,StreamExt};
     loop {
-        let (stream,_) = listener.accept().await.map_err(|e| e.to_string())?;
+        let stream = listener.accept().await.map_err(|e| e.to_string())?;
         let mut socket = tokio_tungstenite::accept_async(stream).await.map_err(|e| e.to_string())?;
         let bytes = socket.next().await.ok_or("provider socket closed before its manifest")?.map_err(|e| e.to_string())?.into_text().map_err(|e| e.to_string())?;
         let directory=admission.root.join("provider-call-carriers");std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;

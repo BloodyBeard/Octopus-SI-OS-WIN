@@ -1839,17 +1839,14 @@ impl BrowserRoom {
             decoded.source_movement_seq, extension
         ));
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW).open(&path)
-            {
+            match crate::private_fs::create_private_file(&path) {
                 Ok(mut file) => file.write_all(bytes).and_then(|()| file.sync_all())
                     .map_err(|error| format!("browser screenshot cannot be persisted: {error}"))?,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let existing = octopus_interfaces::read_artifact_carrier_file_bounded(&path, bytes.len() as u64)
                         .map_err(|error| error.to_string())?;
                     if existing != bytes { return Err("browser screenshot conflicts with its existing immutable capture".into()); }
-                    std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path)
+                    crate::private_fs::open_read_no_follow(&path)
                         .and_then(|file| file.sync_all()).map_err(|error| format!("browser screenshot cannot be synced: {error}"))?;
                 }
                 Err(error) => return Err(format!("browser screenshot cannot be created: {error}")),

@@ -6370,6 +6370,7 @@ dependencies = [
  "octopus-descriptors",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-local-socket",
  "octopus-process-session-tool-runtime",
  "octopus-tool-handlers",
  "octopus-tool-registry",
@@ -6384,6 +6385,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6527,6 +6529,7 @@ dependencies = [
  "octopus-ledger",
  "octopus-ledger-index",
  "octopus-ledger-store",
+ "octopus-local-socket",
  "octopus-marks",
  "octopus-policy",
  "octopus-process-session-tool-runtime",

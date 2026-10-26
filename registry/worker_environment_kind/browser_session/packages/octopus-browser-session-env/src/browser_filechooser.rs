@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use crate::private_fs::{self, Kind};
 use std::path::{Path, PathBuf};
 
 pub(crate) const RESPONSE: &str = "operator.approval.response";
@@ -91,7 +91,7 @@ pub(crate) fn decoded_response(envelope: &InterfaceInvocationEnvelope, tool: &st
 }
 pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::InterfaceLiftContext, envelope: &InterfaceInvocationEnvelope, purpose: octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose) -> Result<Option<ToolCallArtifact>, octopus_tool_door_runtime::ToolDoorArtifactDecodeError> {
     let file = ctx.interface_registry_dir().join("interface.json");
-    let mut input = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&file).map_err(|error| error.to_string())?;
+    let mut input = private_fs::open_read_no_follow(&file).map_err(|error| error.to_string())?;
     let stat = input.metadata().map_err(|error| error.to_string())?;
     if !stat.is_file() || stat.len() > RECORD_LIMIT as u64 { return Err("Browser decoder descriptor is not a bounded regular file".into()); }
     let mut bytes = Vec::new(); Read::by_ref(&mut input).take(RECORD_LIMIT as u64 + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
@@ -110,8 +110,8 @@ pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::Interfa
         let parent = ctx.interface_var_dir().join(".tool-process-host-state/worker-environment-state");
         for path in [ctx.interface_var_dir(),ctx.interface_var_dir().join(".tool-process-host-state"),parent.clone()] {
             let stat=std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-            if !stat.is_dir() || stat.file_type().is_symlink() || path != ctx.interface_var_dir() && (stat.uid()!=unsafe{libc::geteuid()} || stat.mode() & 0o077 != 0)
-                || path.canonicalize().map_err(|error| error.to_string())? != path {return Err("Browser pending parent is not an exact private directory".into());}
+            if !stat.is_dir() || stat.file_type().is_symlink() || path != ctx.interface_var_dir() && !private_fs::is_owner_only(&path).map_err(|error| error.to_string())?
+                || !private_fs::is_canonical(&path).map_err(|error| error.to_string())? {return Err("Browser pending parent is not an exact private directory".into());}
         }
         let mut matched = None;
         let entries = std::fs::read_dir(&parent).map_err(|error| error.to_string())?;
@@ -120,7 +120,7 @@ pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::Interfa
             let path = entry.map_err(|error| error.to_string())?.path();
             count += 1; if count > 65536 { return Err("Browser pending lookup exceeds its finite owner inventory".into()); }
             let stat = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-            if !stat.is_dir() || stat.file_type().is_symlink() || stat.uid()!=unsafe{libc::geteuid()} || stat.mode() & 0o077 != 0 || path.canonicalize().map_err(|error| error.to_string())? != path { return Err("Browser pending owner path is not canonical".into()); }
+            if !stat.is_dir() || stat.file_type().is_symlink() || !private_fs::is_owner_only(&path).map_err(|error| error.to_string())? || !private_fs::is_canonical(&path).map_err(|error| error.to_string())? { return Err("Browser pending owner path is not canonical".into()); }
             for (directory, expected_scope, config) in [
                 ("upload-pending","browser_file_upload",approval.as_ref().map(|c| (&c.request_tools,&c.resume_tool,&c.operator_interface))),
                 ("history-pending","browser_history_read",history.as_ref().map(|c| (&c.request_tools,&c.resume_tool,&c.operator_interface)))
@@ -128,8 +128,8 @@ pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::Interfa
                 let Some((tools,resume,operator)) = config else { continue; };
                 let pending_dir=path.join(directory);
                 match std::fs::symlink_metadata(&pending_dir) {
-                    Ok(stat) if stat.is_dir() && !stat.file_type().is_symlink() && stat.uid()==unsafe{libc::geteuid()} && stat.mode() & 0o777 == 0o700
-                        && pending_dir.canonicalize().map_err(|error| error.to_string())? == pending_dir => {},
+                    Ok(stat) if stat.is_dir() && !stat.file_type().is_symlink() && private_fs::is_private(&pending_dir, Kind::Directory).map_err(|error| error.to_string())?
+                        && private_fs::is_canonical(&pending_dir).map_err(|error| error.to_string())? => {},
                     Err(error) if error.kind()==std::io::ErrorKind::NotFound => continue,
                     _ => return Err("Browser pending request directory changed its private owner".into())
                 }
@@ -168,9 +168,8 @@ fn admitted_bytes<'a>(envelope: &'a InterfaceInvocationEnvelope, selected: &File
 pub(crate) fn private_directory(root: &Path, parts: &[&str]) -> Result<PathBuf, String> {
     let mut path = root.to_path_buf();
     for part in std::iter::once(&"").chain(parts) {
-        if !part.is_empty() { path.push(part); match std::fs::create_dir(&path) { Ok(()) => std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?, Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}, Err(error) => return Err(error.to_string()) } }
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o700 || path.canonicalize().map_err(|error| error.to_string())? != path { return Err("Browser pending storage must be canonical owned mode0700 directories".into()); }
+        if !part.is_empty() { path.push(part); match private_fs::create_private_dir(&path) { Ok(()) => {}, Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}, Err(error) => return Err(error.to_string()) } }
+        if !private_fs::is_private(&path, Kind::Directory).map_err(|error| error.to_string())? || !private_fs::is_canonical(&path).map_err(|error| error.to_string())? { return Err("Browser pending storage must be canonical owned mode0700 directories".into()); }
     }
     Ok(path)
 }
@@ -178,9 +177,9 @@ pub(crate) fn read_record<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T
     read_record_bounded(path, RECORD_LIMIT)
 }
 pub(crate) fn read_record_bounded<T: for<'de> Deserialize<'de>>(path: &Path, limit: usize) -> Result<T, String> {
-    let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).map_err(|error| error.to_string())?;
+    let mut file = private_fs::open_read_no_follow(path).map_err(|error| error.to_string())?;
     let stat = file.metadata().map_err(|error| error.to_string())?;
-    if !stat.is_file() || stat.uid() != unsafe { libc::geteuid() } || stat.mode() & 0o777 != 0o600 || stat.nlink() != 1 || stat.len() > limit as u64 { return Err("Browser pending record ownership or byte bound is invalid".into()); }
+    if !private_fs::is_private_single_link_file(&file).map_err(|error| error.to_string())? || stat.len() > limit as u64 { return Err("Browser pending record ownership or byte bound is invalid".into()); }
     let mut bytes = Vec::new(); Read::by_ref(&mut file).take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
     if bytes.len() > limit { return Err("Browser pending record exceeds its bound".into()); }
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
@@ -191,7 +190,7 @@ pub(crate) fn create_record(path: &Path, value: &impl Serialize) -> Result<(), S
 pub(crate) fn create_record_bounded(path: &Path, value: &impl Serialize, limit: usize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     if bytes.len() > limit { return Err("Browser pending record exceeds its bound".into()); }
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path).map_err(|error| error.to_string())?;
+    let mut file = private_fs::create_private_file(path).map_err(|error| error.to_string())?;
     file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|error| error.to_string())?;
     std::fs::File::open(path.parent().ok_or("Browser pending record has no parent")?).and_then(|file| file.sync_all()).map_err(|error| error.to_string())
 }

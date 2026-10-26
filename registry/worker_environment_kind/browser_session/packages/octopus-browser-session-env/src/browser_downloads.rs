@@ -1,7 +1,7 @@
 use super::*;
 use octopus_tool_handlers::ToolResultArtifact;
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::OpenOptionsExt;
+use crate::private_fs;
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -17,7 +17,7 @@ struct DownloadImport {
 
 impl DownloadImport {
     fn read(path: &Path, maximum: u64) -> Result<Option<Self>, String> {
-        let file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+        let file = match private_fs::open_read_no_follow(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("download import record cannot be opened: {error}")),
@@ -35,8 +35,7 @@ impl DownloadImport {
     fn persist(&self, path: &Path, maximum: u64) -> Result<(), String> {
         let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
         if bytes.len() as u64 > maximum { return Err("download import record exceeds the declared manifest bound".into()); }
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW).open(path).map_err(|error| format!("download import record cannot be created: {error}"))?;
+        let mut file = private_fs::create_private_file(path).map_err(|error| format!("download import record cannot be created: {error}"))?;
         file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|error| format!("download import record cannot be synced: {error}"))?;
         std::fs::File::open(path.parent().ok_or("download import record has no owner directory")?)
             .and_then(|file| file.sync_all()).map_err(|error| format!("download import directory cannot be synced: {error}"))
@@ -66,7 +65,7 @@ impl DownloadImport {
             || manifest.manifest.label != "browser.download" || manifest.manifest.payload_path != expected_path {
             return Err("download import changed its original manifest".into());
         }
-        let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&expected_path)
+        let mut file = private_fs::open_read_no_follow(&expected_path)
             .map_err(|error| format!("download imported payload is unavailable: {error}"))?;
         let metadata = file.metadata().map_err(|error| error.to_string())?;
         let total = current["bytes"].as_u64().ok_or("download import has no byte count")?;
@@ -242,7 +241,7 @@ impl BrowserRoom {
             std::fs::create_dir_all(&root).map_err(|error| format!("download import directory: {error}"))?;
             let root = root.canonicalize().map_err(|error| format!("download import path: {error}"))?;
             let filename = root.join(format!("{}-{}", download_id, decoded.source_movement_seq));
-            let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&filename).map_err(|error| format!("download import cannot create its file: {error}"))?;
+            let mut output = private_fs::create_private_file(&filename).map_err(|error| format!("download import cannot create its file: {error}"))?;
             let mut sha256 = Sha256::new(); let mut content = blake3::Hasher::new(); let mut offset = 0u64;
             while offset < total {
                 let length = (total - offset).min(8 * 1024 * 1024);
@@ -266,8 +265,7 @@ impl BrowserRoom {
             let artifact_root = root.join("artifacts");
             std::fs::create_dir_all(&artifact_root).map_err(|error| format!("download artifact directory: {error}"))?;
             let manifest_path = artifact_root.join(format!("{}.artifact.json", blake3::hash(&manifest).to_hex()));
-            let mut manifest_file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW)
-                .open(&manifest_path).map_err(|error| format!("download artifact cannot create its manifest: {error}"))?;
+            let mut manifest_file = private_fs::create_private_file(&manifest_path).map_err(|error| format!("download artifact cannot create its manifest: {error}"))?;
             manifest_file.write_all(&manifest).and_then(|()| manifest_file.sync_all())
                 .map_err(|error| format!("download artifact manifest cannot be persisted: {error}"))?;
             drop(manifest_file);

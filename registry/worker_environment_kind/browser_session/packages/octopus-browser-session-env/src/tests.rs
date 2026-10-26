@@ -1251,21 +1251,18 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    use std::os::unix::fs::PermissionsExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use crate::native_transport::{NativeHostConfig, NativeTransport, PRIVATE_CREDENTIAL, HOST_ROOT_SLOT};
     let root = tempfile::tempdir().unwrap();
-    let root = root.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = private_fixture_root(&root.path().canonicalize().unwrap());
     let socket_path = root.join("host.sock");
-    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut listener = octopus_local_socket::UnixListener::bind(&socket_path).await.unwrap();
+    restrict_fixture_socket(&socket_path);
     let key = [71u8; 32];
     let generation = "00112233445566778899aabbccddeeff";
     let challenge = "11223344556677889900aabbccddeeff";
     let credential = root.join("credential");
-    std::fs::write(&credential, serde_json::to_vec(&json!({"schema_version":1,"host_root_slot":HOST_ROOT_SLOT,"host_generation":generation,"socket_path":socket_path,"auth_key":base64::engine::general_purpose::STANDARD.encode(key)})).unwrap()).unwrap();
-    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    write_private_fixture(&credential, &serde_json::to_vec(&json!({"schema_version":1,"host_root_slot":HOST_ROOT_SLOT,"host_generation":generation,"socket_path":socket_path,"auth_key":base64::engine::general_purpose::STANDARD.encode(key)})).unwrap());
     let interface_dir = root.join("registry/interface").join(DOOR);
     write_browser_interface(&interface_dir, "http://127.0.0.1:1");
     let environment = ToolProcessEnvironment {
@@ -1337,7 +1334,7 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
     let waiter = json!({"wait_id":"c".repeat(32),"host_generation":generation,"worker_environment_id":formation.worker_environment_id,"formation_pin":formation.formation_pin,"browser_context_id":"CONTEXT1","target_id":"TARGET1","debugger_epoch":0,"start_source_movement_seq":15,"start_artifact_content_hash":"d".repeat(64),"condition_digest":"e".repeat(64)});
     let expected_waiter = waiter.clone();
     let server = tokio::spawn(async move {
-        let (owner_read, mut owner_write) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (owner_read, mut owner_write) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let mut owner_reader = BufReader::new(owner_read);
         let begin = native_fixture_body(&mut owner_reader, &key).await;
         assert_eq!(begin["schema_version"], 2); assert_eq!(begin["request_kind"], "invocation");
@@ -1348,7 +1345,7 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
         assert_eq!(blake3::hash(&descriptor_bytes).to_hex().as_str(), begin["formation"]["tool_descriptor_hashes"]["browser.navigate"].as_str().unwrap());
         assert_eq!(serde_json::from_slice::<Value>(&descriptor_bytes).unwrap()["id"], "browser.navigate");
         owner_write.write_all(format!("{}\n",json!({"id":1,"result":{"invocation_handle":"a".repeat(32)}})).as_bytes()).await.unwrap();
-        let (read, mut write) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (read, mut write) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let mut reader = BufReader::new(read);
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
@@ -1381,13 +1378,13 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
         assert_eq!(ended["invocation_handle"], "a".repeat(32));
         owner_write.write_all(b"{\"id\":2,\"result\":{\"ended\":true}}\n").await.unwrap();
         drop(write);
-        let (observer_read, mut observer_write) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (observer_read, mut observer_write) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let mut observer_reader = BufReader::new(observer_read);
         let admitted = native_fixture_body(&mut observer_reader, &key).await;
         assert_eq!(admitted["tool"]["operation"], "wait_complete"); assert_eq!(admitted["effective_allow_network"], false);
         assert_eq!(admitted["operation"]["method"], "OctopusBrowser.beginInvocation");
         observer_write.write_all(format!("{}\n",json!({"id":1,"result":{"invocation_handle":"f".repeat(32)}})).as_bytes()).await.unwrap();
-        let (observer_member, mut observer_result) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (observer_member, mut observer_result) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let mut observer_member = BufReader::new(observer_member);
         let request = native_fixture_body(&mut observer_member, &key).await;
         assert_eq!(request["arguments"],json!({"waiter":expected_waiter}));
@@ -1400,7 +1397,7 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
         use sha2::Digest;
         assert_eq!(captured["operation"]["params"]["captured_wait"]["outcome_digest"],format!("{:x}",Sha256::digest(octopus_descriptors::canonical_bytes(&outcome))));
         observer_write.write_all(b"{\"id\":2,\"result\":{\"ended\":true}}\n").await.unwrap();
-        let (release_read, mut release_write) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (release_read, mut release_write) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let release = native_fixture_body(&mut BufReader::new(release_read), &key).await;
         assert_eq!(release["request_kind"],"release_formation"); assert_eq!(release["release_mode"],"cold_recovery");
         assert_eq!(release["formation"],expected_formation); assert!(release.get("tool").is_none());
@@ -1437,16 +1434,14 @@ async fn native_transport_authenticates_admitted_body_and_preserves_partial_and_
 async fn native_download_import_outlives_process_generation_and_closed_origin() {
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
-    use std::os::unix::fs::PermissionsExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use crate::native_transport::{PRIVATE_CREDENTIAL, HOST_ROOT_SLOT};
 
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = private_fixture_root(&directory.path().canonicalize().unwrap());
     let socket = root.join("host.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut listener = octopus_local_socket::UnixListener::bind(&socket).await.unwrap();
+    restrict_fixture_socket(&socket);
     let key = [73u8; 32];
     let generation = "00112233445566778899aabbccddeeff";
     let challenge = "11223344556677889900aabbccddeeff";
@@ -1454,8 +1449,7 @@ async fn native_download_import_outlives_process_generation_and_closed_origin() 
     let payload = b"download from the closed origin page";
     let sha256 = format!("{:x}", Sha256::digest(payload));
     let credential = root.join("credential");
-    std::fs::write(&credential, serde_json::to_vec(&json!({"schema_version":1,"host_root_slot":HOST_ROOT_SLOT,"host_generation":generation,"socket_path":socket,"auth_key":base64::engine::general_purpose::STANDARD.encode(key)})).unwrap()).unwrap();
-    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    write_private_fixture(&credential, &serde_json::to_vec(&json!({"schema_version":1,"host_root_slot":HOST_ROOT_SLOT,"host_generation":generation,"socket_path":socket,"auth_key":base64::engine::general_purpose::STANDARD.encode(key)})).unwrap());
     let interface_dir = root.join("registry/interface").join(DOOR);
     write_browser_interface(&interface_dir, "http://127.0.0.1:1");
     let mut config: Value = serde_json::from_slice(&std::fs::read(interface_dir.join("interface.json")).unwrap()).unwrap();
@@ -1479,13 +1473,13 @@ async fn native_download_import_outlives_process_generation_and_closed_origin() 
     let original_pin = formation.formation_pin.clone();
     let expected_formation = serde_json::to_value(&formation).unwrap();
     let server = tokio::spawn(async move {
-        let (owner_read, mut owner_write) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (owner_read, mut owner_write) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let mut owner_reader = BufReader::new(owner_read);
         let begin = native_fixture_body(&mut owner_reader, &key).await;
         assert_eq!(begin["operation"]["method"], "OctopusBrowser.beginInvocation");
         assert_eq!(begin["formation"], expected_formation);
         owner_write.write_all(format!("{}\n",json!({"id":1,"result":{"invocation_handle":"b".repeat(32)}})).as_bytes()).await.unwrap();
-        let (read, mut write) = native_fixture_open(&listener, &key, generation, challenge).await;
+        let (read, mut write) = native_fixture_open(&mut listener, &key, generation, challenge).await;
         let sign = |bytes: &[u8]| {
             let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap(); mac.update(bytes);
             mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>()
@@ -1547,7 +1541,7 @@ async fn native_download_import_outlives_process_generation_and_closed_origin() 
     let imported = PathBuf::from(result["body"]["artifact"]["payload_path"].as_str().unwrap());
     let manifests = imported.parent().unwrap().join("artifacts");
     let manifest = std::fs::read_dir(manifests).unwrap().next().unwrap().unwrap().path();
-    drop(room); let listener = server.await.unwrap();
+    drop(room); let mut listener = server.await.unwrap();
     std::fs::remove_dir_all(process_var).unwrap();
     assert_eq!(std::fs::read(&imported).unwrap(), payload);
     assert_eq!(InterfaceArtifactFile::new(manifest).unwrap().read_payload_bytes().unwrap(), payload);
@@ -1557,7 +1551,7 @@ async fn native_download_import_outlives_process_generation_and_closed_origin() 
     let server = tokio::spawn(async move {
         let mut tasks = Vec::new();
         for _ in 0..3 {
-            let (read, mut write) = native_fixture_open(&listener, &key, next_generation, challenge).await;
+            let (read, mut write) = native_fixture_open(&mut listener, &key, next_generation, challenge).await;
             tasks.push(tokio::spawn(async move {
                 let mut reader = BufReader::new(read); let mut created = false;
                 while !reader.fill_buf().await.unwrap().is_empty() {
@@ -1598,22 +1592,19 @@ async fn upload_resume_requires_exact_verified_current_file_binding_and_never_re
     use crate::native_transport::PRIVATE_CREDENTIAL;
     use octopus_interfaces::{ArtifactBindingPayload, CheckpointAdmissionMetadata};
     use sha2::{Digest, Sha256};
-    use std::os::unix::fs::PermissionsExt;
-    let temporary = tempfile::tempdir().unwrap(); let root = temporary.path().canonicalize().unwrap();
-    std::fs::set_permissions(&root,std::fs::Permissions::from_mode(0o700)).unwrap();
+    let temporary = tempfile::tempdir().unwrap(); let root = private_fixture_root(&temporary.path().canonicalize().unwrap());
     let private = root.join("generation"); let durable = root.join("durable"); let pending_root = durable.join("upload-pending");
-    for directory in [&private,&durable,&pending_root] { std::fs::create_dir(directory).unwrap(); std::fs::set_permissions(directory,std::fs::Permissions::from_mode(0o700)).unwrap(); }
+    for directory in [&private,&durable,&pending_root] { crate::private_fs::create_private_dir(directory).unwrap(); }
     use tokio::io::{AsyncWriteExt, BufReader};
-    let socket_path = root.join("host.sock"); let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-    std::fs::set_permissions(&socket_path,std::fs::Permissions::from_mode(0o600)).unwrap();
+    let socket_path = root.join("host.sock"); let mut listener = octopus_local_socket::UnixListener::bind(&socket_path).await.unwrap();
+    restrict_fixture_socket(&socket_path);
     let key = [91u8;32]; let generation = "4".repeat(32);
     let credential = root.join("credential");
-    std::fs::write(&credential,serde_json::to_vec(&json!({"schema_version":1,"host_root_slot":crate::native_transport::HOST_ROOT_SLOT,"host_generation":generation,"socket_path":socket_path,"auth_key":base64::engine::general_purpose::STANDARD.encode(key)})).unwrap()).unwrap();
-    std::fs::set_permissions(&credential,std::fs::Permissions::from_mode(0o600)).unwrap();
+    write_private_fixture(&credential, &serde_json::to_vec(&json!({"schema_version":1,"host_root_slot":crate::native_transport::HOST_ROOT_SLOT,"host_generation":generation,"socket_path":socket_path,"auth_key":base64::engine::general_purpose::STANDARD.encode(key)})).unwrap());
     let server = tokio::spawn(async move {
         let mut previous_instance = None;
         for sequences in [vec![2u64,3],vec![4u64]] {
-            let (read,mut write) = native_fixture_open(&listener,&key,&generation,&"5".repeat(32)).await;
+            let (read,mut write) = native_fixture_open(&mut listener,&key,&generation,&"5".repeat(32)).await;
             let mut reader = BufReader::new(read); let mut instance = None; let mut next_id = 1u64;
             for sequence in sequences {
                 let begin = native_fixture_body(&mut reader,&key).await;
@@ -1658,7 +1649,7 @@ async fn upload_resume_requires_exact_verified_current_file_binding_and_never_re
     let request_id = format!("sha256:{digest}");
     let request = json!({"schema_version":1,"request_id":request_id,"call_id":"upload-call","original":original,"scope":scope,"approval_scope":"browser_file_upload","upload":upload,"permission_offer":permission_offer,"resume":{"tool":"browser.filechooser_resume","correlation_id":format!("browser-upload-resume:{digest}")}});
     let pending_path = pending_root.join(format!("{digest}.request.json"));
-    std::fs::write(&pending_path,serde_json::to_vec(&json!({"request":request,"formation":formed,"operator_interface":"world_operator_upload_test","provider_interface":"world_provider_upload_test"})).unwrap()).unwrap(); std::fs::set_permissions(&pending_path,std::fs::Permissions::from_mode(0o600)).unwrap();
+    write_private_fixture(&pending_path,&serde_json::to_vec(&json!({"request":request,"formation":formed,"operator_interface":"world_operator_upload_test","provider_interface":"world_provider_upload_test"})).unwrap());
     let copy_call = |call: &ToolProcessInvocation| ToolProcessInvocation { request_id:call.request_id,descriptor:call.descriptor.clone(),envelope:call.envelope.clone(),source_movement_seq:call.source_movement_seq,worker_environment:call.worker_environment.clone(),worker_environment_kind:call.worker_environment_kind.clone() };
     let mut call = invocation(&root,2,"browser.filechooser_resume",json!({"request_id":request_id}),&tools,&formed,&kind);
     assert!(crate::decode_room_invocation(&environment,copy_call(&call),"browser").is_err(),"model tool.call cannot enter private resume");
@@ -1694,15 +1685,42 @@ async fn upload_resume_requires_exact_verified_current_file_binding_and_never_re
     assert_eq!(std::fs::read(&pending_path).unwrap(),serde_json::to_vec(&json!({"request":request,"formation":formed,"operator_interface":"world_operator_upload_test","provider_interface":"world_provider_upload_test"})).unwrap());
 }
 
-async fn native_fixture_open(listener: &tokio::net::UnixListener, key: &[u8;32], generation: &str, challenge: &str) -> (tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf) {
+type FixtureRead = tokio::io::ReadHalf<octopus_local_socket::UnixStream>;
+type FixtureWrite = tokio::io::WriteHalf<octopus_local_socket::UnixStream>;
+
+/// A fresh owner-private directory, as the native host's root must be.
+fn private_fixture_root(base: &std::path::Path) -> std::path::PathBuf {
+    let root = base.join("private");
+    crate::private_fs::create_private_dir(&root).unwrap();
+    root
+}
+
+fn write_private_fixture(path: &std::path::Path, bytes: &[u8]) {
+    let mut file = crate::private_fs::create_private_file(path).unwrap();
+    std::io::Write::write_all(&mut file, bytes).unwrap();
+}
+
+/// On Unix the bound socket takes the umask; the host narrows it to 0600.
+/// On Windows it inherits its private directory's access list.
+fn restrict_fixture_socket(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+async fn native_fixture_open(listener: &mut octopus_local_socket::UnixListener, key: &[u8;32], generation: &str, challenge: &str) -> (FixtureRead, FixtureWrite) {
     use hmac::{Hmac, Mac}; use sha2::Sha256; use tokio::io::AsyncWriteExt;
-    let (stream,_) = listener.accept().await.unwrap(); let (read,mut write) = stream.into_split();
+    let stream = listener.accept().await.unwrap(); let (read,mut write) = tokio::io::split(stream);
     let mut mac=Hmac::<Sha256>::new_from_slice(key).unwrap(); mac.update(format!("browser.native.v1.challenge\n{generation}\n{challenge}").as_bytes());
     let signature=mac.finalize().into_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>();
     write.write_all(format!("{}\n",json!({"type":"challenge","schema_version":1,"host_generation":generation,"challenge":challenge,"mac":signature})).as_bytes()).await.unwrap();
     (read,write)
 }
-async fn native_fixture_body(reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>, key: &[u8;32]) -> Value {
+async fn native_fixture_body(reader: &mut tokio::io::BufReader<FixtureRead>, key: &[u8;32]) -> Value {
     use hmac::{Hmac,Mac}; use sha2::Sha256; use tokio::io::AsyncBufReadExt;
     let mut line=String::new();assert!(reader.read_line(&mut line).await.unwrap()>0);
     let frame:Value=serde_json::from_str(&line).unwrap();let bytes=base64::engine::general_purpose::STANDARD.decode(frame["payload"].as_str().unwrap()).unwrap();

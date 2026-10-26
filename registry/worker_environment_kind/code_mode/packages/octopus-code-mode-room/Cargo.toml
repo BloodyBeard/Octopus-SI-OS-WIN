@@ -30,6 +30,7 @@ octopus-app-server-interface = { path = "../../../../interface/world_operator_ch
 
 
 [dev-dependencies]
+octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
 octopus-app-server = { path = "../../../../../crates/octopus-app-server", features = ["owner-contract-tests"] }
 octopus-ledger-index = { path = "../../../../../crates/octopus-ledger-index" }
 octopus-file-storage = { path = "../../../../../crates/octopus-file-storage" }

@@ -39,17 +39,20 @@ Still to do, roughly in dependency order:
 | Local IPC | `octopus-interface-activation-app-server-transport`, `octopus-run-authoring`, `octopus-git-sandbox-substrate`, `octopus-provider-codex`, `octopus-cli`, `octopus-world-terminal-client` | Interface control sockets used `tokio::net::Unix*` | Done: all use `crates/octopus-local-socket` (AF_UNIX on Windows 10 1803+ via `uds_windows`). Some test fixtures that drive fake hosts over Tokio Unix sockets are still Unix-only (`octopus-operator-chat-client` integration tests, realtime-signaling handoff tests, provider-codex native terminal handoff tests). |
 | Windows sandbox | `octopus-codex-core`, `octopus-tui`, `octopus-codex-sandbox-launcher` | Upstream removed Codex's `windows-sandbox-rs` crate but kept its callers | Done: `octopus-windows-sandbox` is a stand-in that reports the sandbox unavailable to the terminal client and debug launcher. Agent tools get the real Windows sandbox from the managed Codex CLI, now pinned for `win32-x64` with its sandbox helpers. Vendoring the real crate is optional. |
 | Verifiers | `octopus-verifiers` (tests) | Unix permission and inode checks | Done: the one shell-script test is Unix-only |
-| Browser driver | `octopus-browser-session-env` | Unix sockets, `O_NOFOLLOW`, uid/mode checks against the Electron browser host | Port the transport to the shared IPC crate and use Windows ACL checks |
+| Browser driver | `octopus-browser-session-env` | Owner/mode/symlink checks on its private files and the Electron host socket | Done: `src/private_fs.rs` gives each check a Windows equivalent. On Windows "owned by me, mode 0600/0700" means owned by the current user with an access list granting only that user, SYSTEM and Administrators. "No symlinks" means no reparse points, and the host socket must be an AF_UNIX reparse point. Entries it creates get a protected owner+SYSTEM access list. |
 | Desktop driver | `octopus-system-gui-env` | Built on Swift / Accessibility / ScreenCaptureKit | Compiles on Windows: its native paths report "desktop control requires macOS". A Windows backend needs UI Automation plus `Windows.Graphics.Capture`. |
 | Voice | `octopus-realtime-webrtc` | — | Compiles on Windows (verified on a Windows machine) |
 
-First measurement on a real Windows machine: 6 crates fail with 254 errors
-(`octopus-browser-session-env` 126, `octopus-system-gui-env` 79,
-`octopus-run-authoring` 19, `octopus-git-sandbox-substrate` 13, `octopus-core` 12,
-`octopus-verifiers` 5). `--keep-going` does not check crates that depend on a
-failing one, so `octopus-tui`, `octopus-codex-sandbox-launcher` (behind
-`octopus-core`) and `octopus-interface-activation-app-server-transport` are not
-measured yet.
+Status: every workspace crate, including tests, type-checks for
+`x86_64-pc-windows-gnu`. The `windows` CI job checks the MSVC target on real
+Windows. To cross-check from Linux, point V8's build at its MSVC bindings and a
+placeholder archive (`cargo check` does not link):
+`RUSTY_V8_SRC_BINDING_PATH=<v8>/gen/src_binding_release_x86_64-pc-windows-msvc.rs RUSTY_V8_ARCHIVE=<empty .gz>`.
+
+The Electron browser host must create its rendezvous folder (`host.json`,
+`auth.key`, the socket) owner-only. Under `%USERPROFILE%\.octopus` the
+inherited access list already qualifies. An Octopus home elsewhere needs an
+owner-only access list on that folder.
 
 ### Desktop client (Electron)
 

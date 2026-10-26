@@ -9,8 +9,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use octopus_local_socket::UnixStream;
+use tokio::io::{ReadHalf, WriteHalf};
+
+use crate::private_fs::{self, Kind};
 use tokio::time::Instant;
 
 use crate::DecodedRoomInvocation;
@@ -53,8 +55,8 @@ pub(crate) struct NativeTransport {
 }
 
 pub(crate) struct NativeConnection {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<ReadHalf<UnixStream>>,
+    writer: WriteHalf<UnixStream>,
     key: [u8; 32],
     pub generation: String,
     challenge: String,
@@ -194,7 +196,7 @@ impl NativeTransport {
         let stream = tokio::time::timeout_at(deadline, UnixStream::connect(&manifest.socket_path)).await
             .map_err(|_| "native browser host connection timed out")?
             .map_err(|_| "native browser host connection failed")?;
-        let (reader, writer) = stream.into_split();
+        let (reader, writer) = tokio::io::split(stream);
         let mut reader = BufReader::new(reader);
         let bytes = tokio::time::timeout_at(deadline, read_line(&mut reader, &mut Vec::new())).await
             .map_err(|_| "native browser host challenge timed out")??;
@@ -345,7 +347,7 @@ impl NativeConnection {
     pub async fn close(&mut self) { self.poisoned = true; let _ = self.writer.shutdown().await; }
 }
 
-async fn read_line(reader: &mut BufReader<OwnedReadHalf>, bytes: &mut Vec<u8>) -> Result<Vec<u8>, String> {
+async fn read_line(reader: &mut BufReader<ReadHalf<UnixStream>>, bytes: &mut Vec<u8>) -> Result<Vec<u8>, String> {
     loop {
         let available = reader.fill_buf().await.map_err(|_| "native browser read failed; sent effects were not replayed")?;
         if available.is_empty() { return Err("native browser host disconnected; a sent effect may have executed and was not replayed".into()); }
@@ -359,25 +361,20 @@ async fn read_line(reader: &mut BufReader<OwnedReadHalf>, bytes: &mut Vec<u8>) -
 }
 
 fn validate_private_path(path: &Path, directory: bool) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
     if !path.is_absolute() { return Err("native browser private path must be absolute".into()); }
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| "native browser private path is unavailable")?;
-    let mode = if directory { 0o700 } else { 0o600 };
-    if metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != mode || (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+    let kind = if directory { Kind::Directory } else { Kind::File };
+    if !private_fs::is_private(path, kind).map_err(|_| "native browser private path is unavailable")? {
         return Err("native browser path must be an owner-only regular file or directory".into());
     }
-    if std::fs::canonicalize(path).map_err(|_| "native browser private path cannot be resolved")? != path {
+    if !private_fs::is_canonical(path).map_err(|_| "native browser private path cannot be resolved")? {
         return Err("native browser private path must not contain symlinks".into());
     }
     Ok(())
 }
 
 fn validate_socket_path(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     validate_private_path(path.parent().ok_or("native browser socket has no parent")?, true)?;
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| "native browser socket is unavailable")?;
-    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o600 {
+    if !private_fs::is_private(path, Kind::Socket).map_err(|_| "native browser socket is unavailable")? {
         return Err("native browser socket must be owner-only and must not be a symlink".into());
     }
     Ok(())
@@ -401,9 +398,8 @@ fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).
 
 fn read_private_file(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
     validate_private_path(path, false)?;
-    let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).map_err(|_| "native browser private file cannot be opened")?;
+    let file = private_fs::open_read_no_follow(path).map_err(|_| "native browser private file cannot be opened")?;
     let mut bytes = Vec::new();
     file.take(max + 1).read_to_end(&mut bytes).map_err(|_| "native browser private file cannot be read")?;
     if bytes.len() as u64 > max { return Err("native browser private file exceeds its byte limit".into()); }
@@ -412,7 +408,6 @@ fn read_private_file(path: &Path, max: u64) -> Result<Vec<u8>, String> {
 
 pub fn prepare_private_native_host(roots: &std::collections::BTreeMap<String, PathBuf>) -> Result<std::collections::BTreeMap<String, PathBuf>, String> {
     use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let root = roots.get(HOST_ROOT_SLOT).ok_or("browser door has no native host slot")?;
     validate_private_path(root, true)?;
     let interface = roots.get("activation_secrets_home").ok_or("browser door has no host-formed private interface root")?;
@@ -437,7 +432,7 @@ pub fn prepare_private_native_host(roots: &std::collections::BTreeMap<String, Pa
     if bundle.len() > 4096 { return Err("native browser private bundle exceeds owning door limit".into()); }
     let secrets = interface.join("secrets");
     if !secrets.try_exists().map_err(|_| "browser door secret directory cannot be inspected")? {
-        match std::fs::DirBuilder::new().mode(0o700).create(&secrets) {
+        match private_fs::create_private_dir(&secrets) {
             Ok(()) => {}, Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}, Err(_) => return Err("browser door secret directory cannot be created".into()),
         }
     }
@@ -447,7 +442,7 @@ pub fn prepare_private_native_host(roots: &std::collections::BTreeMap<String, Pa
     let mut nonce = [0u8;16];
     getrandom::fill(&mut nonce).map_err(|_| "browser private publication nonce is unavailable")?;
     let temporary = secrets.join(format!(".browser-native-host-{}", hex(&nonce)));
-    let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temporary).map_err(|_| "browser private publication cannot open")?;
+    let mut file = private_fs::create_private_file(&temporary).map_err(|_| "browser private publication cannot open")?;
     let result = (|| {
         file.write_all(&bundle).map_err(|_| "browser private publication cannot write")?;
         file.sync_all().map_err(|_| "browser private publication cannot sync")?;
