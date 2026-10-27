@@ -21,17 +21,23 @@ async fn a_turn_cut_by_process_death_continues_from_its_late_result() {
         "id":"turn-1","items":[],"itemsView":"notLoaded","status":"interrupted","error":null,
     }],"nextCursor":null,"backwardsCursor":null}).to_string();
     let requests = temp.path().join("app-server-requests.jsonl");
+    // Replies reach the script as files in its working directory, not as
+    // arguments: Git for Windows' sh rebuilds argv from the Windows command
+    // line by its own rules, and JSON with Windows paths does not survive.
+    for (name, reply) in [("thread-read.json", &read), ("thread-turns.json", &turns), ("thread-resume.json", &resume)] {
+        std::fs::write(temp.path().join(name), reply).unwrap();
+    }
     let script = temp.path().join("app-server.sh");
     std::fs::write(&script, r#"#!/bin/sh
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$1"
+  printf '%s\n' "$line" >> app-server-requests.jsonl
   id=$(printf '%s\n' "$line" | sed -n 's/^{"id":\([^,]*\),.*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"codex/test","codexHome":"/tmp"}}\n' "$id" ;;
-    *'"method":"thread/read"'*) printf '{"id":%s,"result":%s}\n' "$id" "$2" ;;
-    *'"method":"thread/turns/list"'*) printf '{"id":%s,"result":%s}\n' "$id" "$3" ;;
+    *'"method":"thread/read"'*) printf '{"id":%s,"result":%s}\n' "$id" "$(cat thread-read.json)" ;;
+    *'"method":"thread/turns/list"'*) printf '{"id":%s,"result":%s}\n' "$id" "$(cat thread-turns.json)" ;;
     *'"method":"thread/items/list"'*) printf '{"id":%s,"result":{"data":[],"nextCursor":null,"backwardsCursor":null}}\n' "$id" ;;
-    *'"method":"thread/resume"'*) printf '{"id":%s,"result":%s}\n' "$id" "$4" ;;
+    *'"method":"thread/resume"'*) printf '{"id":%s,"result":%s}\n' "$id" "$(cat thread-resume.json)" ;;
     *'"method":"hooks/list"'*) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-continued","items":[],"itemsView":"notLoaded","status":"inProgress","error":null}}}\n' "$id"
@@ -42,7 +48,7 @@ done
 "#).unwrap();
     let spawned = crate::SpawnAppServerClient::connect(crate::spawn::SpawnConfig {
         bin: test_shell(),
-        args: vec![script.display().to_string(), requests.display().to_string(), read, turns, resume],
+        args: vec![script.display().to_string()],
         cwd: Some(temp.path().to_path_buf()), codex_home: None,
         initialize_params: serde_json::from_value(serde_json::json!({
             "clientInfo": {"name": "octopus-test", "version": "0"}, "capabilities": {},

@@ -2917,20 +2917,32 @@
         pending_thread.turns.clear();
         let terminal_probe = serde_json::json!({"id":1,"result":{"thread":pending_thread}}).to_string();
         let next_terminal_probe = serde_json::json!({"id":8,"result":{"thread":pending_thread}}).to_string();
+        // Replies reach the script as files in its working directory, not as
+        // arguments: Git for Windows' sh rebuilds argv from the Windows command
+        // line by its own rules, and JSON with Windows paths does not survive.
+        for (name, reply) in [
+            ("resume.json", &resume_response), ("read.json", &read_response),
+            ("terminal-probe.json", &terminal_probe), ("next-terminal-probe.json", &next_terminal_probe),
+            ("first-turns.json", &first_turns), ("next-turns.json", &next_turns),
+        ] {
+            std::fs::write(temp.path().join(name), reply).unwrap();
+        }
         let script_path = temp.path().join("app-server.sh");
         std::fs::write(
             &script_path,
             r#"#!/bin/sh
 # OCTOPUS_FIXTURE_TRACE=<file> records each read: where the script waits and what arrives.
 if [ -n "${OCTOPUS_FIXTURE_TRACE:-}" ]; then
+  # Every read here is `read -r NAME`; reading into our own variable first
+  # keeps the line visible even when NAME is `_`.
   read() {
-    printf 'waiting\n' >> "$OCTOPUS_FIXTURE_TRACE"
-    command read "$@"
-    status=$?
-    eval "name=\${$#}"
-    eval "line=\${$name}"
-    printf 'read (%s): %s\n' "$status" "$line" >> "$OCTOPUS_FIXTURE_TRACE"
-    return $status
+    eval "trace_name=\${$#}"
+    printf 'waiting for %s\n' "$trace_name" >> "$OCTOPUS_FIXTURE_TRACE"
+    command read -r trace_line
+    trace_status=$?
+    printf 'read (%s): %s\n' "$trace_status" "$trace_line" >> "$OCTOPUS_FIXTURE_TRACE"
+    [ "$trace_name" = _ ] || eval "$trace_name=\$trace_line"
+    return $trace_status
   }
 fi
 IFS= read -r _
@@ -2938,16 +2950,16 @@ printf '%s\n' '{"id":"initialize","result":{"userAgent":"codex/test","codexHome"
 IFS= read -r _
 IFS= read -r probe
 case "$probe" in *'"method":"thread/read"'*) ;; *) exit 1;; esac
-printf '%s\n' "$5"
+printf '%s\n' "$(cat terminal-probe.json)"
 IFS= read -r turns
 case "$turns" in *'"method":"thread/turns/list"'*) ;; *) exit 1;; esac
-printf '%s\n' "$7"
+printf '%s\n' "$(cat first-turns.json)"
 IFS= read -r _
-printf '%s\n' "$3"
+printf '%s\n' "$(cat resume.json)"
 IFS= read -r _
-printf '%s\n' "$4"
+printf '%s\n' "$(cat read.json)"
 IFS= read -r inject
-printf '%s\n' "$inject" > "$1"
+printf '%s\n' "$inject" > inject-request.json
 printf '%s\n' '{"id":5,"result":{}}'
 IFS= read -r turn
 case "$turn" in *'"input":[]'*) ;; *) exit 1;; esac
@@ -2961,32 +2973,19 @@ IFS= read -r _
 printf '%s\n' '{"id":7,"result":{"data":[]}}'
 IFS= read -r probe
 case "$probe" in *'"method":"thread/read"'*) ;; *) exit 1;; esac
-printf '%s\n' "$6"
+printf '%s\n' "$(cat next-terminal-probe.json)"
 IFS= read -r turns
 case "$turns" in *'"method":"thread/turns/list"'*) ;; *) exit 1;; esac
-printf '%s\n' "$8"
+printf '%s\n' "$(cat next-turns.json)"
 IFS= read -r response
-printf '%s\n' "$response" > "$2"
+printf '%s\n' "$response" > queued-native-response.json
 while IFS= read -r _; do :; done
 "#,
         )
         .unwrap();
         let spawned = crate::SpawnAppServerClient::connect(crate::spawn::SpawnConfig {
             bin: test_shell(),
-            args: vec![
-                script_path.display().to_string(),
-                captured_inject.display().to_string(),
-                temp.path()
-                    .join("queued-native-response.json")
-                    .display()
-                    .to_string(),
-                resume_response,
-                read_response,
-                terminal_probe,
-                next_terminal_probe,
-                first_turns,
-                next_turns,
-            ],
+            args: vec![script_path.display().to_string()],
             cwd: Some(temp.path().to_path_buf()),
             codex_home: None,
             initialize_params: serde_json::from_value(serde_json::json!({
