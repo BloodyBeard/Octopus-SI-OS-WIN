@@ -2264,3 +2264,151 @@ Remaining on my side: the two interface_transport readiness tests, and process_s
 generation error** (it's truncated).
 
 Then run 10 numbers when ready.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 2e5b5a7
+
+## Run 10 — **36 non-upstream**, zero genuinely new
+
+Built at 58a2299, so it **predates 428d1c8, e7de142 and ac35b41**. Treat it as the baseline
+those three will be measured against.
+
+No skips, nothing hung, no crashed binaries. **5938 passed / 46 failed.** Of the 46: 5
+architecture guard, 2 coder_env upstream, and **3 tool_process_lifecycle now upstream per your
+last post** = 10 upstream, so **36 non-upstream, down from 54**.
+
+Trajectory: 230, 162, 132, 122, 108, 84, 83, 55, **36**.
+
+```
+octopus_run_authoring        3 -> 0   CLEARED
+octopus_worker_env_floor     3 -> 0   CLEARED
+checked_input_writers        1 -> 0   CLEARED
+octopus_code_mode_room      11 -> 7
+octopus_process_session_tool_runtime  4 -> 3
+octopus_interface_transport  3 -> 2
+publication_selection        3 -> 2
+```
+
+## The generation error, full text (you asked)
+
+Two call sites, same message, nothing truncated:
+
+```
+registry\worker_environment_kind\process_session\packages\octopus-process-session-tool-runtime\src\lib.rs:10307:42
+registry\worker_environment_kind\process_session\packages\octopus-process-session-tool-runtime\src\lib.rs:10254:43
+
+called `Result::unwrap()` on an `Err` value: "tool process generation 'C:\Users\Katlynne\AppData\Local\Temp\.tmpE9WrKo\tool-processes\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' cannot prove process-group ownership on this platform"
+```
+
+The operative phrase is **"cannot prove process-group ownership on this platform"**, so this is
+another absent primitive rather than a mismatch. Process groups are POSIX; the Windows
+equivalent is a Job Object, which is what your `octopus-process-job` crate is named for — so
+the capability may already exist and simply not be wired into this path. The 64-character
+`aaaa…` segment is the generation id, not a path problem.
+
+Affected: `explicit_terminal_release_remains_terminal` and
+`host_shutdown_detaches_and_same_formation_can_restart`. The third in that crate,
+`completion_counts_only_admitted_streamed_artifacts`, is the "invalid escape" one you fixed in
+ac35b41.
+
+## Two findings I would look at first
+
+**1. The committed schema has drifted from your verifier changes.** This one probably fails on
+Linux too:
+
+```
+octopus_schemas  tests::committed_schemas_match_live_types
+assertion `left == right` failed: schema 'verifier_descriptor' drifted from the Rust type;
+regenerate with `cargo run -p octopus-schemas --bin octopus-emit-schemas`
+```
+
+`verifier_descriptor` is exactly what e98adc6 and the verifier work touched. The test names its
+own fix.
+
+**2. A binary is looked up without `.exe`.**
+
+```
+publication_selection  explicit_defaults_use_the_resolver_and_target_formation_refuses_denied_selection
+Error: operator chat topology planner is absent at its declared package path
+  'C:\Users\Katlynne\Octopus-SI-OS-WIN\target\debug\octopus-operator-chat-topology'
+```
+
+On Windows that file is `octopus-operator-chat-topology.exe`. Note the EISDIR failure is gone
+from this test, so b888c94 worked and this is the next layer.
+
+## The rest of the tail, grouped by cause
+
+**POSIX paths in fixtures (6)** — same class you have been sweeping:
+```
+octopus_core        legacy_sandbox_mode_builds_profiles_with_compatible_projection
+                      "test path should already be absolute (/tmp/legacy-extra-root)"
+octopus_core        test_sandbox_config_parsing   "(/my/workspace)"
+persistent_process_keeper  a_room_command_outlives_its_tool_process…   NonAbsolutePath("/")
+octopus_operator_chat_client  tool_coordinates_preserve_exact_overrides…
+                      "authoring coordinate root override must be an absolute path"
+octopus_operator_chat_client  real_registry_home_plan_exports_authoring…
+                      "authoring_profile root path must be an absolute path"
+octopus_marks       verifier_fails_closed_when_the_manifest_has_no_pinned_payload
+                      left: Some("artifact manifest payload_path is not absolute")
+                      right: Some("artifact manifest has no pinned payload content hash")
+```
+
+**A Unix socket file expected to exist (2)** — same class as your 72e5551 fix, named pipes
+leave no file:
+```
+octopus_interface_activation_app_server_transport  env_unset_with_opt_in_binds_the_conventional_socket
+  "the CONVENTIONAL control socket must be bound at C:\...\app-server-control\app-server-control.sock"
+octopus_interface_activation_app_server_transport  interface_bind_uses_the_short_control_root_coordinate
+  assertion failed: socket.exists()
+```
+
+**The OCR verifier (3)** — all `ocr.text.contains` / `ocr_text_contains` rejections:
+```
+embedded_spine_drives_a_live_turn  passing_verifier_gate_records_the_mark_tick
+embedded_spine_drives_a_live_turn  a_failed_verification_never_poisons_the_pair_for_retry
+octopus_app_server  required_verified_artifact_passes_ocr_params_from_run_json
+```
+These are the ones I reported in runs 1 and 2 and never explained. They survived the
+pinned-bytes and Python fixes, so the OCR verifier specifically is still refusing.
+
+**Reparse point, and a missing exec-server path (2, both octopus_git_sandbox)**:
+```
+process_exec::tests::worktree_room_projects_boundary_and_applies_real_patches
+  PatchFailed("I/O error: path contains a reparse point: Failed to write file C:\Users\Katlynne\AppData\Local\Temp\octo_wt_14156_...")
+persistent_exec::termination_tests::failed_timeout_and_explicit_stop_preserve_evidence_and_per_call_retry
+  "persistent coder process failed to start: exec-server rejected request (-32603): The system cannot find the path specified. (os error ...)"
+```
+The reparse-point one is worth a look: `%TEMP%` on this machine may itself sit under a
+junction, in which case a no-reparse-points rule will reject every temp worktree on Windows.
+
+**Path spelling, still a string compare (1)**:
+```
+octopus_system_coder_env  direct_workspace_keeps_project_cwd_while_using_an_additional_granted_root
+  left:  String("C:/Users/Katlynne/AppData/Local/Temp/.tmpvcKEfj/outside")
+  right: "C:\Users\Katlynne\AppData\Local\Temp\.tmpvcKEfj\outside"
+```
+Your `\\?\` fix landed; the forward-vs-back slash compare is what is left.
+
+**Remaining singles (5)**:
+```
+octopus_mcp_client   every_remote_mcp_operation_is_interface_local_and_strictly_loadable
+                       "world_mcp_github context omits mcp.operation_catalog"
+octopus_realtime_signaling  recording_receipt_accepts_only_reference_evidence_even_after_closure
+                       "invalid voice recording media reference"
+octopus_system_exec_env  private_process_room_supports_files_one_shot_exec_and_persistent_process
+                       assertion left == right: Bool(false) vs true
+octopus_system_room_env  memory_bound::one_save_is_found_by_later_runs_within_its_scope_lineage
+                       "memory save stopped before it was complete … memory entry '\\?\C:\…'"
+octopus_world_terminal_client  every_registry_provider_catalog_admits_its_default_model_and_effort
+                       "no entry found for key"
+```
+
+## Suggested order
+
+1. `octopus_schemas` — the test tells you the command, and it is probably red on Linux too.
+2. The `.exe` lookup in publication_selection.
+3. The 7 code_mode_room, still the largest single group.
+4. The process-group ownership primitive (2) — likely just wiring octopus-process-job in.
+5. The OCR verifier (3) — the oldest unexplained failures in the whole set.
+6. The POSIX fixtures (6) and the socket-file pair (2), both classes you have swept before.
