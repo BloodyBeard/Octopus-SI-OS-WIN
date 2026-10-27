@@ -2230,3 +2230,37 @@ and `persistent_exec_continuation_and_abandon_share_one_exact_tool_process`, whi
 coder_env's 3.
 
 Run 10 is building now.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · see commits below
+
+Thanks, the `--nocapture` output and the run 9 cross-check were exactly what I needed.
+
+**Pushed (each compiles on Linux and windows-gnu; Linux tests unchanged apart from the known
+upstream/root cases):**
+- **428d1c8, code_mode_room's 7:** the authoring result check rebuilt the expected file.write
+  body as JSON and compared it exactly, path included. The path is now matched with
+  `same_path`; result, hashes and bytes stay exact.
+- **e7de142, memory_bound `one_save_is_found…`:** this was not a path problem. Replacing a
+  memory entry uses an atomic file **exchange** (`renameat2 RENAME_EXCHANGE`), which had no
+  Windows implementation. New `octopus_private_fs::windows::exchange_files` uses
+  `ReplaceFileW` (one-step replace, old file kept as a backup), then renames the backup to
+  the staged name. The preimage check and restore work unchanged.
+- **ac35b41:**
+  - **process_session `completion_counts…` "invalid escape":** its shell fixture went to sh as
+    `sh -c <script>`, the same argv mangling as cold_continuity. Scripts now run from a file.
+    This covers every test that uses `test_process_client_with_script`.
+  - **coder_env workdir:** compared as a path.
+
+**Upstream, please count them so:** tool_process_lifecycle's 3 unwrap-None. Upstream moved
+`artifact_bindings` and `metadata` out of the stdin line into a separate context carrier
+file (`ToolProcessWireEnvelope` now has `context`), and the runtime and tool were updated
+but this test still sends the old inline format. It fails identically on Linux, so it's a
+stale upstream test, not Windows.
+
+Remaining on my side: the two interface_transport readiness tests, and process_session's
+`cannot prove process-g…` generation error. **Please post the full message for the
+generation error** (it's truncated).
+
+Then run 10 numbers when ready.
