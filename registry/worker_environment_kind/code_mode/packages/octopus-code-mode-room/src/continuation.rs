@@ -1391,7 +1391,21 @@ fn rename_record_exclusive(source: &Path, target: &Path) -> std::io::Result<()> 
         let status = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, target.as_ptr(), libc::RENAME_NOREPLACE) };
         if status == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    // Windows: a rename that fails with AlreadyExists when the name is taken,
+    // made beneath the parent directory's handle without following links.
+    #[cfg(windows)]
+    {
+        use octopus_private_fs::windows::beneath;
+        let (Some(parent), Some(source_name), Some(target_name)) = (source.parent(), source.file_name(), target.file_name()) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "code mode record path has no parent or name"));
+        };
+        if target.parent() != Some(parent) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "code mode record is published within its own directory"));
+        }
+        let directory = beneath::open_directory_path(parent)?;
+        beneath::rename_no_replace(&directory, source_name, &directory, target_name)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (source, target);
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "atomic exclusive installation publication is unsupported on this platform"))
