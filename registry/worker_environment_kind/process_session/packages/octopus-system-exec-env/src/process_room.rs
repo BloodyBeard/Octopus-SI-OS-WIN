@@ -2564,6 +2564,39 @@ mod tests {
         serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap()
     }
 
+    /// A POSIX shell for the room's command tests. Windows has none built in:
+    /// `OCTOPUS_TEST_SH`, then Git for Windows' `sh.exe`, then `sh.exe` on
+    /// `PATH`. Without one the test fails saying so, rather than passing
+    /// without running.
+    fn test_shell() -> String {
+        #[cfg(unix)]
+        return "/bin/sh".to_string();
+        #[cfg(windows)]
+        {
+            let configured = std::env::var_os("OCTOPUS_TEST_SH").map(PathBuf::from);
+            let git = ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"]
+                .iter()
+                .filter_map(std::env::var_os)
+                .flat_map(|root| {
+                    let root = PathBuf::from(root);
+                    [root.join(r"Git\bin\sh.exe"), root.join(r"Programs\Git\bin\sh.exe")]
+                });
+            let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
+                std::env::split_paths(&path)
+                    .map(|directory| directory.join("sh.exe"))
+                    .collect::<Vec<_>>()
+            });
+            configured
+                .into_iter()
+                .chain(git)
+                .chain(on_path)
+                .find(|candidate| candidate.is_file())
+                .expect("this test runs a POSIX sh; install Git for Windows or set OCTOPUS_TEST_SH to an sh.exe")
+                .display()
+                .to_string()
+        }
+    }
+
     #[tokio::test]
     async fn private_process_room_supports_files_one_shot_exec_and_persistent_process() {
         let root = tempfile::tempdir().unwrap();
@@ -2629,7 +2662,7 @@ mod tests {
             3,
             "exec.run",
             json!({
-                "command": ["/bin/sh", "-lc", "printf OCTOPUS-ONESHOT"],
+                "command": [test_shell(), "-lc", "printf OCTOPUS-ONESHOT"],
                 "timeout_ms": 5000
             }),
             &formation,
@@ -2647,7 +2680,7 @@ mod tests {
             root.path(),
             4,
             "process.start",
-            json!({ "argv": ["/bin/sh"], "tty": false }),
+            json!({ "argv": [test_shell()], "tty": false }),
             &formation,
             &kind,
         )

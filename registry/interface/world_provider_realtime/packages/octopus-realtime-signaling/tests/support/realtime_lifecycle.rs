@@ -848,9 +848,10 @@ fn recording_receipt_accepts_only_reference_evidence_even_after_closure() {
     let mut call = call();
     call.status = "closed".into();
     store.state.calls.insert("offer".into(), call);
+    let media_path = if cfg!(windows) { r"C:\not-opened\recording.webm" } else { "/not-opened/recording.webm" };
     let mut recording: SessionRecording = serde_json::from_value(json!({
         "schema":"octopus.voice_recording","schema_version":1,"correlation_id":"offer",
-        "started_at":"2026-10-04T00:00:00.000Z","media":{"path":"/not-opened/recording.webm","mime_type":"audio/webm;codecs=opus","content_hash":"a".repeat(64),"size":128}
+        "started_at":"2026-10-04T00:00:00.000Z","media":{"path":media_path,"mime_type":"audio/webm;codecs=opus","content_hash":"a".repeat(64),"size":128}
     })).unwrap();
     let receipt = recording_receipt(&store, &recording).unwrap();
     assert_eq!(receipt["evidence_only"], true);
