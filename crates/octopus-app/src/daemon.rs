@@ -201,8 +201,7 @@ pub(crate) fn ensure_host_manifest(
     let repo_root = std::fs::canonicalize(source_root)?;
     let worktree_root = octopus_home.join("state").join("worker-worktrees");
     let roots = load_or_initialize_host_roots(octopus_home, registry_root, || {
-        Ok(HostFactSeed {
-            root_refs: std::collections::BTreeMap::from([
+        let root_refs = std::collections::BTreeMap::from([
                 (REPO_ROOT_SLOT.to_string(), repo_root),
                 (WORKTREE_ROOT_SLOT.to_string(), worktree_root),
                 (
@@ -213,10 +212,48 @@ pub(crate) fn ensure_host_manifest(
                     EE_INSTANCES_ROOT_SLOT.to_string(),
                     ee_instances_root.to_path_buf(),
                 ),
-            ]),
-        })
+            ]);
+        // Interfaces declare the Unix time-zone database; Windows has none,
+        // so the machine binds the slot to Python's `tzdata` package.
+        #[cfg(windows)]
+        let root_refs = {
+            let mut root_refs = root_refs;
+            if let Some(zoneinfo) = windows_timezone_database() {
+                root_refs.insert(TIMEZONE_DATABASE_ROOT_SLOT.to_string(), zoneinfo);
+            }
+            root_refs
+        };
+        Ok(HostFactSeed { root_refs })
     })?;
     Ok(roots)
+}
+
+#[cfg(windows)]
+const TIMEZONE_DATABASE_ROOT_SLOT: &str = "timezone_database_root";
+
+/// The `zoneinfo` folder of Python's `tzdata` package, the IANA database that
+/// Python itself uses on Windows. None when no Python 3 has `tzdata`.
+#[cfg(windows)]
+fn windows_timezone_database() -> Option<std::path::PathBuf> {
+    const PROBE: &str =
+        "import os, tzdata; print(os.path.join(os.path.dirname(tzdata.__file__), 'zoneinfo'))";
+    for (program, args) in [("python3", &[][..]), ("python", &[][..]), ("py", &["-3"][..])] {
+        let Ok(output) = std::process::Command::new(program)
+            .args(args)
+            .args(["-I", "-c", PROBE])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let path = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if path.is_absolute() && path.is_dir() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn required_host_root<'a>(

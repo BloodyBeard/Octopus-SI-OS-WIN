@@ -65,7 +65,12 @@ pub struct InterfaceDriverConfig {
     /// machine `host.json` defaults for THIS door instance. A typed first-class
     /// field (schema-contract), never fished out of the amorphous
     /// `residual_ambient` blob by a string pointer path.
-    #[serde(default)]
+    ///
+    /// A path written POSIX-style (`/usr/share/zoneinfo`) names a Unix
+    /// location. Windows has no such folder, so there the override is dropped
+    /// as it is read and the machine's `host.json` binding for the slot
+    /// applies instead.
+    #[serde(default, deserialize_with = "platform_host_slots")]
     pub host_slots: BTreeMap<String, HostSlotOverride>,
     #[serde(default)]
     pub transport: Option<InterfaceTransportConfig>,
@@ -82,6 +87,28 @@ pub struct HostSlotOverride {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_paths: Vec<PathBuf>,
+}
+
+fn platform_host_slots<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, HostSlotOverride>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let slots = BTreeMap::<String, HostSlotOverride>::deserialize(deserializer)?;
+    #[cfg(windows)]
+    let slots = slots
+        .into_iter()
+        .filter(|(_, slot)| !posix_only_path(&slot.path))
+        .collect();
+    Ok(slots)
+}
+
+/// A path that is absolute only as a POSIX path: it starts with `/` but has
+/// no drive or UNC prefix, so on Windows it is not absolute.
+pub fn posix_only_path(path: &std::path::Path) -> bool {
+    path.to_str().is_some_and(|text| text.starts_with('/') && !text.starts_with("//"))
+        && !path.is_absolute()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1470,6 +1497,24 @@ impl InterfaceRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_posix_host_slot_applies_only_where_it_is_absolute() {
+        let config: super::InterfaceDriverConfig = serde_json::from_value(serde_json::json!({
+            "host_slots": {"timezone_database_root": {"path": "/usr/share/zoneinfo"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            config.host_slots.contains_key("timezone_database_root"),
+            cfg!(unix),
+            "a POSIX path binds the slot on Unix and leaves it to host.json on Windows"
+        );
+        assert!(!super::posix_only_path(std::path::Path::new(if cfg!(windows) {
+            r"C:\zoneinfo"
+        } else {
+            "/usr/share/zoneinfo"
+        })));
+    }
+
     use super::*;
     use octopus_descriptors::parse_strict;
 
