@@ -165,6 +165,13 @@ fn node_surface_plan(root: &Path, request: &OperatorChatPlanRequest) -> Value {
         .join("../../../../..")
         .canonicalize()
         .unwrap();
+    // Node's require cannot resolve the \\?\C:\... form canonicalize returns
+    // on Windows (its realpath walk reaches a bare "C:"); give it C:\...
+    #[cfg(windows)]
+    let repository = match repository.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(plain) if !plain.starts_with(r"UNC\") => std::path::PathBuf::from(plain),
+        _ => repository,
+    };
     composition::write(
         root,
         "host.json",
@@ -335,8 +342,11 @@ fn ordinary_component_ids_and_a_new_dotted_tool_reach_real_authoring() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
     let (mut request, mut pin, mut entry) = fixture(&root);
-    let source_id = format!("bibliothèque.procedure:{}", "x".repeat(100));
-    let entry_id = format!("procédure.reuse:{}", "y".repeat(100));
+    // Ids may contain ':', but these ids also name folders and files, and
+    // Windows reserves ':' in names (alternate data streams).
+    let separator = if cfg!(windows) { "-" } else { ":" };
+    let source_id = format!("bibliothèque.procedure{separator}{}", "x".repeat(100));
+    let entry_id = format!("procédure.reuse{separator}{}", "y".repeat(100));
     let owner = root.join("registry/artifact").join(&source_id);
     std::fs::rename(root.join("registry/artifact/library"), &owner).unwrap();
     let mut source: Value =

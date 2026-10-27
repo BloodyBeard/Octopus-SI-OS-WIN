@@ -34,6 +34,13 @@ fn native_canonical(path: &Path) -> PathBuf {
     canonical
 }
 
+/// A file.write target spelled as the room canonicalizes it before hashing
+/// a batch (`C:/...` on Windows, unchanged on Unix), so a test's expected
+/// batch hash matches the recorded one.
+fn declared(path: &Path) -> String {
+    octopus_worker_env::AbsPath::new(path).unwrap().as_str().to_string()
+}
+
 fn canonical_hash(value: &impl Serialize) -> String {
     let value = serde_json::to_value(value).unwrap();
     ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&value)).to_hex()
@@ -104,7 +111,7 @@ fn ordered_patch_journal_preserves_replay_and_bounds_storage() {
     for generation in 1..=100 {
         value["generation"] = json!(generation);
         let after = String::from_utf8(if generation == 1 { JsonFormat::Pretty } else { JsonFormat::Compact }.encode(&value).unwrap()).unwrap();
-        let mut args = json!({"ordered":true,"writes":[{"path":target,"expected_before_content":before,
+        let mut args = json!({"ordered":true,"writes":[{"path":declared(&target),"expected_before_content":before,
             "expected_before_hash":hash(&before),"patch":[{"op":"replace","path":"/generation","value":generation}],"expected_after_hash":hash(&after)}]});
         if generation > 1 {
             args["writes"][0]["expected_before_content"] = serde_json::to_value(Preimage::encode(before.as_bytes()).unwrap()).unwrap();
@@ -150,10 +157,10 @@ fn ordered_patch_journal_preserves_replay_and_bounds_storage() {
     let after = pretty(&value);
     std::fs::write(&peer, "independent edit").unwrap();
     let args = json!({"ordered":true,"writes":[
-        {"path":target,"expected_before_content":before,"expected_before_hash":hash(&before),
+        {"path":declared(&target),"expected_before_content":before,"expected_before_hash":hash(&before),
             "patch":[{"op":"replace","path":"/generation","value":101}],"expected_after_hash":hash(&after)},
-        {"path":peer,"content":"stale postimage","expected_before_content":"prior","expected_before_hash":hash("prior")},
-        {"path":root.join("unattempted"),"content":"new","expected_before_content":null,"expected_before_hash":null}
+        {"path":declared(&peer),"content":"stale postimage","expected_before_content":"prior","expected_before_hash":hash("prior")},
+        {"path":declared(&root.join("unattempted")),"content":"new","expected_before_content":null,"expected_before_hash":null}
     ]});
     schema.validate(&args).unwrap();
     let envelope = input(&args);
