@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use octopus_descriptors::ProcessSandboxMode;
@@ -23,7 +23,7 @@ async fn a_room_command_outlives_its_tool_process_and_the_next_one_receives_its_
     let sandbox = ProjectedSandbox::from_parts(
         vec![cwd.clone()],
         Vec::new(),
-        vec![AbsPath::new(Path::new("/")).unwrap()],
+        vec![AbsPath::new(root.ancestors().last().unwrap()).unwrap()],
         NetworkCeiling::Denied,
     );
     let room = WorkerEnvironmentId::derive(b"keeper-contract");

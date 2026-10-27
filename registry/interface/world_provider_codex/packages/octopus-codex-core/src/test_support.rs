@@ -62,7 +62,14 @@ impl TempDirExt for TempDir {
     }
 }
 
+/// An absolute test path. A Unix-style fixture (`/tmp/x`) is absolute only on
+/// Unix; on Windows it becomes `C:\tmp\x`, as other crates' fixtures do.
 pub fn test_absolute_path(path: &str) -> AbsolutePathBuf {
-    AbsolutePathBuf::from_absolute_path_checked(Path::new(path))
+    let native = if path.starts_with('/') {
+        octopus_util_abspath::test_support::test_path_buf(path)
+    } else {
+        Path::new(path).to_path_buf()
+    };
+    AbsolutePathBuf::from_absolute_path_checked(&native)
         .unwrap_or_else(|err| panic!("test path should already be absolute ({path}): {err}"))
 }

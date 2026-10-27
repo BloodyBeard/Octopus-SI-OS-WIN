@@ -653,6 +653,16 @@ pub use socket::spawn_transport_arrivals;
 mod tests {
     use super::*;
 
+    /// A home short enough for a Unix socket path. Windows pipe names do
+    /// not depend on the path's length, and `/tmp` is not a Windows folder.
+    fn short_temp_home() -> tempfile::TempDir {
+        #[cfg(unix)]
+        let home = tempfile::tempdir_in("/tmp");
+        #[cfg(not(unix))]
+        let home = tempfile::tempdir();
+        home.expect("temp octopus home")
+    }
+
     fn test_limits() -> InterfaceHostIoLimits {
         InterfaceHostIoLimits {
             max_control_frame_bytes: 1024,
@@ -712,6 +722,8 @@ mod tests {
             "the conventional default must START the transport, not stay dormant"
         );
         let socket = conventional_control_socket_path(home.path());
+        // A Windows named pipe leaves no file; the connect below proves it.
+        #[cfg(unix)]
         assert!(
             socket.exists(),
             "the CONVENTIONAL control socket must be bound at {} (the terminal \
@@ -744,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn interface_bind_uses_the_short_control_root_coordinate() {
-        let home = tempfile::tempdir_in("/tmp").expect("temp octopus home");
+        let home = short_temp_home();
         let cancel = CancellationToken::new();
         let config = serde_json::json!({
             "listen_env": unset_env_name("INTERFACE"),
@@ -756,6 +768,7 @@ mod tests {
         let socket =
             interface_control_socket_path(home.path(), &InterfaceId::new("world_terminal"));
 
+        #[cfg(unix)]
         assert!(socket.exists());
         assert_eq!(
             socket.parent(),
@@ -772,7 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn declared_missing_client_bundle_refuses_before_socket_activation() {
-        let home = tempfile::tempdir_in("/tmp").expect("temp octopus home");
+        let home = short_temp_home();
         let cancel = CancellationToken::new();
         let config = serde_json::json!({
             "listen_env": unset_env_name("MISSING_BUNDLE"),

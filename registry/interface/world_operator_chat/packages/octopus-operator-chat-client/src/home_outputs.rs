@@ -393,13 +393,14 @@ mod tests {
     #[test]
     fn tool_coordinates_preserve_exact_overrides_and_unresolved_machine_slots() {
         let tool: ToolDescriptor = serde_json::from_str(include_str!("../../../../../tool/file.read/tool.json")).unwrap();
+        let declared = if cfg!(windows) { r"C:\declared\tools" } else { "/declared/tools" };
         let mut door: InterfaceDescriptor = serde_json::from_value(json!({
             "id":"system_room","interface_type":"system","role":"system",
             "direction":"bidirectional","source_names":["room"],"interface_driver_ref":"system_room",
-            "interface_driver_config":{"host_slots":{"registry_tool_root":{"path":"/declared/tools"}}},
+            "interface_driver_config":{"host_slots":{"registry_tool_root":{"path":declared}}},
         })).unwrap();
         let value = tool_path_scope("file.read", &tool, &door).unwrap().unwrap();
-        assert_eq!(value["root_slots"]["registry_tool_root"], json!({"status":"exact_interface_override","path":"/declared/tools"}));
+        assert_eq!(value["root_slots"]["registry_tool_root"], json!({"status":"exact_interface_override","path":declared}));
         assert_eq!(value["root_slots"]["run_records_root"], json!({"status":"host_binding_not_supplied"}));
         assert_eq!(value["read"]["argument_paths"], json!(tool.process.authority.read_argument_paths));
         assert_eq!(value["write"]["argument_paths"], json!([]));

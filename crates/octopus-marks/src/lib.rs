@@ -360,9 +360,16 @@ mod tests {
     #[test]
     fn verifier_fails_closed_when_the_manifest_has_no_pinned_payload() {
         let mut blobs = InMemoryBlobs::new();
+        // An absolute payload path on this platform, so the manifest fails only
+        // for its missing pinned hash.
+        let payload_path = if cfg!(windows) {
+            r"C:\source\still-not-authority.json"
+        } else {
+            "/source/still-not-authority.json"
+        };
         let manifest = serde_json::to_vec(&serde_json::json!({
             "label": "test.payload",
-            "payload_path": "/source/still-not-authority.json"
+            "payload_path": payload_path
         }))
         .unwrap();
         let manifest_hash = blobs.put(&manifest);
