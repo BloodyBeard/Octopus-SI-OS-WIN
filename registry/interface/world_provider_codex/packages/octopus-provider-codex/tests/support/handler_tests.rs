@@ -2921,6 +2921,18 @@
         std::fs::write(
             &script_path,
             r#"#!/bin/sh
+# OCTOPUS_FIXTURE_TRACE=<file> records each read: where the script waits and what arrives.
+if [ -n "${OCTOPUS_FIXTURE_TRACE:-}" ]; then
+  read() {
+    printf 'waiting\n' >> "$OCTOPUS_FIXTURE_TRACE"
+    command read "$@"
+    status=$?
+    eval "name=\${$#}"
+    eval "line=\${$name}"
+    printf 'read (%s): %s\n' "$status" "$line" >> "$OCTOPUS_FIXTURE_TRACE"
+    return $status
+  }
+fi
 IFS= read -r _
 printf '%s\n' '{"id":"initialize","result":{"userAgent":"codex/test","codexHome":"/tmp"}}'
 IFS= read -r _
