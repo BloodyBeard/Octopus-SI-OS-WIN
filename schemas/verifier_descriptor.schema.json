@@ -88,6 +88,9 @@
         "allow_network": {
           "type": "boolean"
         },
+        "allow_process_signals": {
+          "type": "boolean"
+        },
         "allow_sandbox_delegation": {
           "default": false,
           "type": "boolean"
