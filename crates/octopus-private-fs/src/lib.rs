@@ -784,6 +784,39 @@ mod platform {
         Ok(&result? == user)
     }
 
+    /// Exchanges two files the way `renameat2(RENAME_EXCHANGE)` and
+    /// `renamex_np(RENAME_SWAP)` do for their callers: afterwards `target`
+    /// holds what `replacement` held and `replacement` holds what `target`
+    /// held. Windows has no single exchange; `ReplaceFileW` replaces `target`
+    /// in one step (keeping its identity, attributes and access list) and
+    /// moves the old file to a backup beside `replacement`, which is then
+    /// renamed to `replacement`'s name. Both must be on one volume.
+    pub fn exchange_files(replacement: &Path, target: &Path) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+        let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        let mut backup = replacement.as_os_str().to_os_string();
+        backup.push(".exchange");
+        let backup = std::path::PathBuf::from(backup);
+        let (target_wide, replacement_wide, backup_wide) = (wide(target), wide(replacement), wide(&backup));
+        // SAFETY: the three names are NUL-terminated wide strings that live
+        // across the call; the exclude and reserved pointers must be null.
+        let replaced = unsafe {
+            ReplaceFileW(
+                target_wide.as_ptr(),
+                replacement_wide.as_ptr(),
+                backup_wide.as_ptr(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if replaced == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        std::fs::rename(&backup, replacement)
+    }
+
     /// Gives an existing directory owned by the current user a protected
     /// access list for that user and SYSTEM, inherited by its contents: the
     /// counterpart of `chmod 0700` on a directory the user owns.
@@ -838,8 +871,8 @@ mod beneath_windows;
 #[cfg(windows)]
 pub mod windows {
     pub use super::platform::{
-        make_dir_owner_only, open_entry_handle, pipe_server_is_current_user, process_is_current_user,
-        OwnerOnlySecurity,
+        exchange_files, make_dir_owner_only, open_entry_handle, pipe_server_is_current_user,
+        process_is_current_user, OwnerOnlySecurity,
     };
 
     /// Entries opened by name beneath an open directory, never through a

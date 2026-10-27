@@ -720,7 +720,12 @@ fn exchange(left: &Path, right: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+#[cfg(windows)]
+fn exchange(left: &Path, right: &Path) -> std::io::Result<()> {
+    octopus_private_fs::windows::exchange_files(left, right)
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
 fn exchange(_left: &Path, _right: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "atomic exchange is unavailable on this platform"))
 }

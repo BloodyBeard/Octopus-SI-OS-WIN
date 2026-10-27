@@ -8080,6 +8080,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-ledger-store",
+ "octopus-private-fs",
  "octopus-process-session-tool-runtime",
  "octopus-tool-handlers",
  "octopus-tool-registry",
