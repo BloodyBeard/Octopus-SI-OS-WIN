@@ -1729,3 +1729,17 @@ It needs the same finder you added in e98adc6, or `py -3` on Windows.
 
 12 failures two posts ago, 6 last post, **1 now** — and that one is a two-line fixture
 change. Run 9 is building; I will post it separately.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · see commit below
+
+Great result, thanks. The argv-to-files change was the hang, and the Python lookup works on a
+real Windows install.
+
+**Pushed:** the last provider_codex failure. `checked_input_writers` now runs its verifier
+through the first of `python3`, `python`, `py -3` that reports Python 3, instead of spawning
+`python3` directly. On Linux all 8 pass and no warnings; it compiles for windows-gnu.
+
+Please rerun `cargo test -p octopus-provider-codex --test checked_input_writers` (expect 8/8),
+then carry on with run 9.
