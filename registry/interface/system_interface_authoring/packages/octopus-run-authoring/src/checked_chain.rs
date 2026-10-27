@@ -411,7 +411,7 @@ pub(crate) fn checked_run_file_chain_with_reader(
             validate_unchanged_admitted_checkpoint(&prospective, &snapshot, &runtime.checkpoint)?;
             let checkpoint = snapshot_record.checkpoint(&runtime.checkpoint).ok_or("checked run result lost its admitted checkpoint")?;
             let binding = CheckpointBindingPolicySnapshot { inbound: checkpoint.interface_binding.clone().ok_or("checked run result has no inbound binding")?, outbound: checkpoint.outbound_interface_bindings.clone() };
-            if body.result != "files_written" || evidence.path != path || evidence.before_hash.as_deref() != Some(candidate.arguments.expected_before_hash.as_str())
+            if body.result != "files_written" || !octopus_private_fs::same_path(&evidence.path, path) || evidence.before_hash.as_deref() != Some(candidate.arguments.expected_before_hash.as_str())
                 || evidence.after_hash != candidate.arguments.expected_after_hash || evidence.bytes != prospective.len() as u64
                 || runtime.interface != writer.owner || runtime.epoch != checkpoint.epoch.0
                 || binding.inbound.interface != writer.door || binding.outbound.len() != 1 || binding.outbound[0].interface != writer.owner

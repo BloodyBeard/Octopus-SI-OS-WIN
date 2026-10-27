@@ -196,7 +196,9 @@ pub(crate) fn validate_file_write_evidence(
         return Err("checked file.write did not report one file".into());
     }
     let evidence = &body.writes[0];
-    if evidence.path != path
+    // file.write reports the path in its own spelling (C:/... on Windows,
+    // where the plan may hold \\?\C:\...); compare by location, the rest exactly.
+    if !octopus_private_fs::same_path(&evidence.path, path)
         || evidence.before_hash.as_deref() != Some(before)
         || evidence.after_hash != after
         || evidence.bytes != bytes as u64
