@@ -1648,6 +1648,10 @@ fn downloaded_artifact_is_admitted_bound_and_read_in_the_same_cell() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "drives the desktop driver's application approval, which is macOS-only"
+)]
 fn application_approval_rearms_the_return_before_either_delivery_order() {
     std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
@@ -2800,7 +2804,11 @@ fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) -> Pin
         let kind = kind.clone();
         let root = root.clone();
         tokio::spawn(async move {
-            for (sequence, result_before_decision) in [(304, true), (310, false)] {
+            // The GUI door's owner decoder is the macOS desktop driver; the
+            // other scenarios run everywhere.
+            let gui_sequences: &[(u64, bool)] =
+                if cfg!(target_os = "macos") { &[(304, true), (310, false)] } else { &[] };
+            for &(sequence, result_before_decision) in gui_sequences {
                 actual_gui_decision_preserves_the_original_promise(
                     &admission,
                     &room,
