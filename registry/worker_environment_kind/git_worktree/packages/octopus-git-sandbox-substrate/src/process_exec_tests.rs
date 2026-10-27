@@ -425,7 +425,7 @@ async fn worktree_room_projects_boundary_and_applies_real_patches() {
         outcome
             .changed_paths
             .iter()
-            .any(|p| p.as_str() == edited.to_str().unwrap()),
+            .any(|p| Path::new(p.as_str()) == edited),
         "the changed path is reported"
     );
 

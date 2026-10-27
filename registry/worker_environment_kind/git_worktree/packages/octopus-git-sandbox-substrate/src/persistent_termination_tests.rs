@@ -32,13 +32,24 @@ impl ExecProcess for FirstStopFails {
     }
 }
 
+/// A process that runs for about ten seconds unless stopped.
+fn long_running_argv() -> Vec<String> {
+    if cfg!(windows) {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let ping = Path::new(&root).join("System32").join("PING.EXE");
+        vec![ping.to_string_lossy().into_owned(), "-n".into(), "11".into(), "127.0.0.1".into()]
+    } else {
+        vec!["/bin/sleep".into(), "10".into()]
+    }
+}
+
 #[tokio::test]
 async fn failed_timeout_and_explicit_stop_preserve_evidence_and_per_call_retry() {
     for (denied, timer) in [(true, false), (true, true), (false, true)] {
         let temp = tempfile::tempdir().unwrap();
         let cwd = AbsPath::new(temp.path()).unwrap();
         let process = start_exec_process(
-            "coder-process-0123456789abcdef", vec!["/bin/sleep".into(), "10".into()],
+            "coder-process-0123456789abcdef", long_running_argv(),
             &cwd, BTreeMap::new(), false,
         ).await.unwrap();
         let injected = Arc::new(FirstStopFails { inner: process, attempts: AtomicUsize::new(0), denied });

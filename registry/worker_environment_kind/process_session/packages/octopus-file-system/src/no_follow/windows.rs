@@ -1,6 +1,5 @@
 use crate::regular_file;
 use std::ffi::c_void;
-use std::ffi::OsStr;
 use std::io;
 use std::io::Write;
 use std::mem::size_of;
@@ -31,6 +30,9 @@ use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+use windows_sys::Win32::Storage::FileSystem::FILE_TRAVERSE;
+use windows_sys::Win32::Storage::FileSystem::FILE_TYPE_DISK;
+use windows_sys::Win32::Storage::FileSystem::GetFileType;
 use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
 use windows_sys::Win32::System::Kernel::OBJ_CASE_INSENSITIVE;
 use windows_sys::Win32::System::Kernel::OBJ_DONT_REPARSE;
@@ -75,7 +77,14 @@ unsafe extern "system" {
     ) -> NTSTATUS;
 }
 
-fn nt_path(path: &Path) -> io::Result<Vec<u16>> {
+/// Splits an absolute path into the NT name of its volume root and the
+/// components below it.
+///
+/// `OBJ_DONT_REPARSE` refuses object-manager links as well as filesystem
+/// reparse points, and the drive letter in `\??\C:` is such a link. So the
+/// root is opened with normal name parsing, and only the part below it is
+/// opened strictly, relative to the root's handle.
+fn split_volume_root(path: &Path) -> io::Result<(Vec<u16>, Vec<u16>)> {
     if !path.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -83,12 +92,28 @@ fn nt_path(path: &Path) -> io::Result<Vec<u16>> {
         ));
     }
 
-    let (prefix, source_offset) = match path.components().next() {
+    let mut components = path.components();
+    let root = match components.next() {
         Some(Component::Prefix(prefix)) => match prefix.kind() {
-            Prefix::Disk(_) => ("\\??\\", 0),
-            Prefix::VerbatimDisk(_) => ("\\??\\", 4),
-            Prefix::UNC(_, _) => ("\\??\\UNC\\", 2),
-            Prefix::VerbatimUNC(_, _) => ("\\??\\UNC\\", 8),
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                format!("\\??\\{}:\\", char::from(drive)).into()
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                // Named pipes and mailslots are reached as these UNC shares;
+                // refuse them by name so nothing connects to one.
+                if share.eq_ignore_ascii_case("pipe") || share.eq_ignore_ascii_case("mailslot") {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "path names a named pipe or mailslot, not a file",
+                    ));
+                }
+                let mut root = std::ffi::OsString::from("\\??\\UNC\\");
+                root.push(server);
+                root.push("\\");
+                root.push(share);
+                root.push("\\");
+                root
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -104,21 +129,31 @@ fn nt_path(path: &Path) -> io::Result<Vec<u16>> {
         }
     };
 
-    let mut result: Vec<u16> = OsStr::new(prefix).encode_wide().collect();
-    result.extend(
-        path.as_os_str()
-            .encode_wide()
-            .skip(source_offset)
-            .map(|unit| {
-                if unit == b'/' as u16 {
-                    b'\\' as u16
-                } else {
-                    unit
+    let mut below: Vec<u16> = Vec::new();
+    for component in components {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                if !below.is_empty() {
+                    below.push(b'\\' as u16);
                 }
-            }),
-    );
-    result.push(0);
-    Ok(result)
+                below.extend(name.encode_wide());
+            }
+            Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no-follow filesystem operations refuse `..` components",
+                ));
+            }
+            Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "filesystem path has a second prefix",
+                ));
+            }
+        }
+    }
+    Ok((root.encode_wide().collect(), below))
 }
 
 fn open_handle(
@@ -127,15 +162,48 @@ fn open_handle(
     create_disposition: u32,
     create_options: u32,
 ) -> io::Result<OwnedHandle> {
-    let mut path = nt_path(path)?;
-    let name_length = u16::try_from((path.len() - 1) * size_of::<u16>())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filesystem path is too long"))?;
-    let maximum_length = u16::try_from(path.len() * size_of::<u16>())
+    let (mut root_name, mut below) = split_volume_root(path)?;
+    let root = nt_create_file(
+        0,
+        &mut root_name,
+        OBJ_CASE_INSENSITIVE as u32,
+        FILE_TRAVERSE | FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE,
+    )?;
+    // SAFETY: `root` is a live handle this function owns.
+    if unsafe { GetFileType(root.as_raw_handle() as HANDLE) } != FILE_TYPE_DISK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not on a disk volume",
+        ));
+    }
+    nt_create_file(
+        root.as_raw_handle() as HANDLE,
+        &mut below,
+        OBJ_CASE_INSENSITIVE as u32 | OBJ_DONT_REPARSE as u32,
+        desired_access,
+        create_disposition,
+        create_options,
+    )
+}
+
+/// One `NtCreateFile` of `name`, relative to `root_directory` when it is not
+/// zero. An empty `name` with a root reopens the root itself.
+fn nt_create_file(
+    root_directory: HANDLE,
+    name: &mut [u16],
+    attributes: u32,
+    desired_access: u32,
+    create_disposition: u32,
+    create_options: u32,
+) -> io::Result<OwnedHandle> {
+    let length = u16::try_from(name.len() * size_of::<u16>())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "filesystem path is too long"))?;
     let object_name = UNICODE_STRING {
-        Length: name_length,
-        MaximumLength: maximum_length,
-        Buffer: path.as_mut_ptr(),
+        Length: length,
+        MaximumLength: length,
+        Buffer: name.as_mut_ptr(),
     };
     let security_quality_of_service = SECURITY_QUALITY_OF_SERVICE {
         Length: size_of::<SECURITY_QUALITY_OF_SERVICE>() as u32,
@@ -145,9 +213,9 @@ fn open_handle(
     };
     let object_attributes = ObjectAttributes {
         length: size_of::<ObjectAttributes>() as u32,
-        root_directory: 0,
+        root_directory,
         object_name: &object_name,
-        attributes: OBJ_CASE_INSENSITIVE as u32 | OBJ_DONT_REPARSE as u32,
+        attributes,
         security_descriptor: ptr::null(),
         security_quality_of_service: (&raw const security_quality_of_service).cast(),
     };
