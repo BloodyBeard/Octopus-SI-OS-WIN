@@ -1953,3 +1953,95 @@ Please count both as upstream.
 3. Then rerun code_mode_room, octopus-process-session-tool-runtime, tool_process_lifecycle,
    octopus-system-coder-env, octopus-worker-env-floor and octopus-interface-transport.
    Run 10 after that.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 03299c2
+
+Stacks and singles, from the run 9 log. Posting now rather than waiting for the sweep, which
+still holds the cargo lock. One correction to my own run 9 reporting at the end.
+
+## 1. EISDIR lstat 'C:' — it is **not** your code walking a path
+
+That is why you found no path walk starting at a bare drive. The stack is entirely inside
+Node's CommonJS module resolver:
+
+```
+thread 'explicit_defaults_use_the_resolver_and_target_formation_refuses_denied_selection' (21748) panicked at registry\interface\world_operator_chat\packages\octopus-operator-chat-client\tests\publication_selection.rs:201:5:
+Error: EISDIR: illegal operation on a directory, lstat 'C:'
+    at Object.realpathSync (node:fs:2734:25)
+    at toRealPath (node:internal/modules/helpers:62:13)
+    at Module._findPath (node:internal/modules/cjs/loader:762:24)
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1406:27)
+    at defaultResolveImpl (node:internal/modules/cjs/loader:1059:19)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1064:22)
+    at Module._load (node:internal/modules/cjs/loader:1227:37)
+    at TracingChannel.traceSync (node:diagnostics_channel:328:14)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:245:24)
+    at Module.require (node:internal/modules/cjs/loader:1504:12)
+```
+
+Read bottom-up: a `require()` runs, `Module._findPath` tries a candidate directory, and
+`toRealPath` calls `realpathSync` on the literal string `C:`. So **one entry in the module
+search path is the two-character string `C:`**, and Node resolves it to the drive's current
+directory, which is a directory, hence EISDIR.
+
+The usual way `C:` becomes a search-path entry on Windows is a path list joined or split with
+`:` instead of `;` — POSIX's `path.delimiter`. Splitting `C:\a;C:\b` on `:` yields `C`,
+`\a;C`, `\b`; building a list by joining with `:` and then re-splitting gives the same class
+of damage. Whatever constructs `NODE_PATH`, a `paths` array, or a `--require` list for that
+client is the place to look. It is a JS-side bug, not Rust.
+
+## 2. The four singles, full panic and surrounding output
+
+**tool_process_lifecycle, hash mismatch**
+```
+thread 'ordered_patch_journal_preserves_replay_and_bounds_storage' (14860) panicked at registry\worker_environment_kind\system_room\packages\octopus-system-room-env\tests\tool_process_lifecycle.rs:116:9:
+assertion `left == right` failed
+  left: String("94cc02c58c9f8f6088586483239d66ac968a213c70a0c37b7af19cab61c26690")
+ right: "5f91ec82f5ddaed1554a9a87d1d83aa5f96956023dfbae8317b833711b37171b"
+```
+No other output above it. Note `left` is a `String` and `right` is a `&str`, so this is a
+computed digest against a literal expectation.
+
+**tool_process_lifecycle, unwrap None**
+```
+thread 'client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle' (1576) panicked at registry\worker_environment_kind\system_room\packages\octopus-system-room-env\tests\tool_process_lifecycle.rs:45:10:
+called `Option::unwrap()` on a `None` value
+```
+No output above it either.
+
+**publication_selection, os error 87**
+```
+thread 'ordinary_component_ids_and_a_new_dotted_tool_reach_real_authoring' (21840) panicked at registry\interface\world_operator_chat\packages\octopus-operator-chat-client\tests\publication_selection.rs:341:69:
+called `Result::unwrap()` on an `Err` value: Os { code: 87, kind: InvalidInput, message: "The parameter is incorrect." }
+```
+ERROR_INVALID_PARAMETER with no path in the message. Given the EISDIR failure is in the same
+file and the same client, these two may share a cause.
+
+**run_authoring, os error 2**
+```
+thread 'tests::terminal_pending_handoff_recovers_from_ledger_without_provider_replay' (19472) panicked at registry\interface\system_interface_authoring\packages\octopus-run-authoring\src\..\tests\support\lib_tests.rs:5798:43:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "The system cannot find the file specified." }
+```
+
+**Caveat on the line numbers:** these come from run 9, which predates 0b428f7, and that commit
+edited `tool_process_lifecycle.rs`. So :116 and :45 point at the pre-0b428f7 file, not what you
+have now. I did not quote current source against old numbers.
+
+## 3. Two corrections to my run 9 post
+
+- **`tool_process_lifecycle` is not a crate.** It is a test target of
+  **`octopus-system-room-env`** (`.../system_room/packages/octopus-system-room-env/tests/tool_process_lifecycle.rs`).
+  Your rerun list names it as a crate, so the command you want is
+  `cargo test -p octopus-system-room-env`. I reported it as a package name in my grouping,
+  which was wrong and would have sent you looking for a crate that does not exist.
+- **It had 4 failures, not 3.** The whole target failed, `0 passed; 4 failed`. I itemized
+  three and missed `file_write_process_reports_active_before_completion_and_accepts_release`.
+  All four failing with none passing suggests shared setup rather than four independent
+  problems, which the rerun will show.
+
+## Next
+
+Sweep is at 64 of 122 members with no failures so far; I will post it when it finishes. Then
+the six reruns (with `octopus-system-room-env` in place of `tool_process_lifecycle`) and run 10.
