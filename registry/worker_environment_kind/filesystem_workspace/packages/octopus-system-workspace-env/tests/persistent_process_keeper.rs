@@ -113,12 +113,12 @@ async fn start(
             sandbox,
             ProcessSandboxMode::Disabled,
             vec![
-                "/bin/sh".to_string(),
+                test_shell(),
                 "-c".to_string(),
                 "printf started; IFS= read line; sleep 1; printf ' %s' \"$line\"; exit 7".to_string(),
             ],
             cwd.as_path().to_path_buf(),
-            BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
+            test_environment(),
             false,
             300,
             1024,
@@ -126,6 +126,53 @@ async fn start(
             Some("movement:10"),
         )
         .await
+}
+
+/// A POSIX shell for the command. Windows has none built in:
+/// `OCTOPUS_TEST_SH`, then Git for Windows' `sh.exe`, then `sh.exe` on
+/// `PATH`. Without one the test fails saying so, rather than passing without
+/// running.
+fn test_shell() -> String {
+    #[cfg(unix)]
+    return "/bin/sh".to_string();
+    #[cfg(windows)]
+    {
+        let configured = std::env::var_os("OCTOPUS_TEST_SH").map(PathBuf::from);
+        let git = ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .flat_map(|root| {
+                let root = PathBuf::from(root);
+                [root.join(r"Git\bin\sh.exe"), root.join(r"Programs\Git\bin\sh.exe")]
+            });
+        let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join("sh.exe"))
+                .collect::<Vec<_>>()
+        });
+        configured
+            .into_iter()
+            .chain(git)
+            .chain(on_path)
+            .find(|candidate| candidate.is_file())
+            .expect("this test runs a POSIX sh; install Git for Windows or set OCTOPUS_TEST_SH to an sh.exe")
+            .display()
+            .to_string()
+    }
+}
+
+/// The command's environment: the POSIX tool folders, or on Windows the
+/// caller's `PATH` (where Git's `sleep` lives) and `SystemRoot`.
+fn test_environment() -> BTreeMap<String, String> {
+    #[cfg(unix)]
+    return BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+    #[cfg(windows)]
+    {
+        ["PATH", "SystemRoot"]
+            .into_iter()
+            .filter_map(|name| std::env::var(name).ok().map(|value| (name.to_string(), value)))
+            .collect()
+    }
 }
 
 #[cfg(target_os = "macos")]

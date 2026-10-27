@@ -336,9 +336,15 @@ mod tests {
         let mut blobs = InMemoryBlobs::new();
         let payload = b"immutable verifier input";
         let payload_hash = blobs.put(payload);
+        // Absolute on this platform, so only the missing file is at issue.
+        let payload_path = if cfg!(windows) {
+            r"C:\source\no-longer-exists.json"
+        } else {
+            "/source/no-longer-exists.json"
+        };
         let manifest = serde_json::to_vec(&serde_json::json!({
             "label": "test.payload",
-            "payload_path": "/source/no-longer-exists.json",
+            "payload_path": payload_path,
             "payload_content_hash": payload_hash.to_hex()
         }))
         .unwrap();

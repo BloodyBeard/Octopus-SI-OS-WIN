@@ -603,9 +603,11 @@ async fn direct_workspace_keeps_project_cwd_while_using_an_additional_granted_ro
         };
         let result = CoderFsHandler.execute(&context, &call).await.unwrap();
         let matched = &result.body["matches"][0];
+        // Outside the worktree the match is spelled as an absolute room path
+        // (`C:/…` on Windows); it names the same file.
         assert_eq!(
-            matched.get("path").unwrap_or(matched),
-            outside_file.to_str().unwrap()
+            Path::new(matched.get("path").unwrap_or(matched).as_str().unwrap()),
+            outside_file.as_path()
         );
         let restricted = ToolHandlerContext {
             sandbox: workspace_sandbox(&workspace_root),

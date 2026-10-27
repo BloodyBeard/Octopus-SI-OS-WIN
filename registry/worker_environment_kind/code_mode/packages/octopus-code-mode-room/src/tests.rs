@@ -3278,7 +3278,7 @@ async fn actual_gui_decision_preserves_the_original_promise(
         .run(room, handoff, formation, kind, input)
         .await
         .unwrap();
-    assert_eq!(pending["body"]["state"], "application_approval_pending");
+    assert_eq!(pending["body"]["state"], "application_approval_pending", "room reply: {pending}");
     admission.provider_progress(sequence).await.unwrap();
     let private = root.join(format!("gui-private/{digest}/system_gui_test"));
     let host = private.join("desktop-host");

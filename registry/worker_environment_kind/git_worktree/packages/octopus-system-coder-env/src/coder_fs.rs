@@ -1003,7 +1003,11 @@ pub(crate) fn relative_worktree_path(
 
 fn display_worktree_path(worktree_root: &Path, path: &Path) -> String {
     let Ok(relative) = path.strip_prefix(worktree_root) else {
-        return path.to_string_lossy().to_string();
+        // A path outside the worktree is spelled as the room spells absolute
+        // paths (`C:/…` on Windows), not half that and half native.
+        return AbsPath::new(path)
+            .map(|path| path.as_str().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
     };
     if relative.as_os_str().is_empty() {
         ".".to_string()

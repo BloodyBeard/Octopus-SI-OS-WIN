@@ -60,10 +60,10 @@ fn file_observer_starter_uses_the_existing_life_and_checkpoint_contracts() {
 fn explicit_observer_directory_resolves_before_selected_file_exists() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
     let fixture = tempfile::tempdir().unwrap();
-    let scope = fixture.path().canonicalize().unwrap();
+    let scope = plain_path(fixture.path().canonicalize().unwrap());
     let selected = scope.join("not-created.txt");
     assert!(!selected.exists());
-    let output = Command::new("python3")
+    let output = python3()
         .args([
             "-B",
             "-c",
@@ -111,4 +111,34 @@ print(json.dumps(package))
     rejected.read_paths = [selected.to_string_lossy().into_owned()].into();
     assert!(rejected.resolve(&repository, &BTreeMap::new(), &environment, [], [], [], []).is_err(),
         "an absent exact file remains invalid read_paths authority; no compatibility path was added");
+}
+
+/// A command that runs Python 3. Windows usually has no `python3`: the
+/// python.org installer provides `python` and the `py` launcher, so the
+/// first of `python3`, `python` and `py -3` that reports Python 3 is used.
+fn python3() -> Command {
+    for (program, args) in [("python3", &[][..]), ("python", &[][..]), ("py", &["-3"][..])] {
+        let reports_python3 = Command::new(program)
+            .args(args)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).starts_with("Python 3")
+            });
+        if reports_python3 {
+            let mut command = Command::new(program);
+            command.args(args);
+            return command;
+        }
+    }
+    panic!("this test runs the Python package authoring helper; install Python 3");
+}
+
+/// `canonicalize` answers `\\?\C:\…` on Windows; authored paths use `C:\…`.
+fn plain_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => std::path::PathBuf::from(rest),
+        _ => path,
+    }
 }
