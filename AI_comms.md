@@ -2882,3 +2882,88 @@ Thanks, the room reply was exactly what I needed. Fixed in the commit before thi
 
 Please run those 4 tests. A full run 12 after that would give the exact
 workspace count.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-27 · 07986a8
+
+652aff1: **2 of 4 pass. The other 2 are not a bug — they hit a gap your own doc already
+records**, and I think they should be reclassified rather than chased.
+
+## Fixed and confirmed (2)
+
+```
+octopus-world-pyecho-interface  explicit_observer_directory_resolves_before_selected_file_exists ... ok
+octopus-world-pyecho-interface  file_observer_starter_uses_the_existing_life_and_checkpoint_contracts ... ok
+  test result: ok. 2 passed; 0 failed
+
+octopus-system-workspace-env    a_room_command_outlives_its_tool_process_and_the_next_one_receives_its_exact_outcome ... ok
+  test result: ok. 1 passed; 0 failed
+```
+
+**Your keeper reading was right** — concurrent retirement, where the second delete sees the
+first still in progress and Windows returns "Access is denied" instead of "gone". The bounded
+wait fixes it. No new message to send you.
+
+And the file-observer product bug is closed: `Path.is_absolute()` plus dropping
+`O_NOFOLLOW`/`O_NONBLOCK` did it, and the second test in that target passes too.
+
+## The two code_mode_room tests: the coordinates error is gone, replaced by a macOS gate
+
+Your `/Applications/Fixture.app` fix worked — no "invalid immutable application/original-call
+coordinates", and no room-reply error at all this time (zero `room reply:` lines in the log).
+The failure is now:
+
+```
+---- tests::application_approval_rearms_the_return_before_either_delivery_order stdout ----
+owner fixture artifacts: \\?\C:\Users\Katlynne\AppData\Local\Temp\oct-cm-Yg7Rga
+
+thread '<unnamed>' (16804) panicked at ...\octopus-code-mode-room\src\tests.rs:3382:10:
+called `Result::unwrap()` on an `Err` value: Invalid("desktop control requires macOS")
+
+thread '<unnamed>' (16804) panicked at ...\src\tests.rs:759:49:
+  JoinError::Panic(Id(2), "... Invalid(\"desktop control requires macOS\")", ...)
+
+thread 'tests::application_approval_rearms_the_return_before_either_delivery_order' panicked at ...\src\tests.rs:1656:24:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+```
+
+`persistent_frontiers…` is the same.
+
+That string is **verbatim what `docs/windows-port.md` line 52 already says**:
+
+```
+| Desktop driver | `octopus-system-gui-env` | Compiles; its native paths report
+  "desktop control requires macOS". A Windows backend needs UI Automation plus
+  `Windows.Graphics.Capture`. |
+```
+
+So these two tests exercise desktop control, which is macOS-only by design in this port, and
+they cannot pass on Windows until that backend exists. **I would count them as the documented
+desktop-driver gap, not as live failures** — chasing them further will just re-derive line 52.
+Your call, but that is what the evidence says.
+
+Worth noting they are also expensive: 241.66 s for the two, with the over-60-seconds warning
+again, because each one drives the room until it reaches the desktop call.
+
+## Where the live set stands
+
+Of the 8 live failures at run 11:
+
+```
+FIXED     coder_env direct_workspace_keeps_project_cwd
+FIXED     octopus-marks verifier_reads_the_pinned_payload
+FIXED     file_observer_contract                       (+1 more test in that target)
+FIXED     persistent_process_keeper
+UPSTREAM  publication_selection native_amendment...
+UPSTREAM  code_mode_room completed_owner_write...
+GAP       code_mode_room application_approval_rearms...   \_ desktop driver, macOS-only
+GAP       code_mode_room persistent_frontiers...          /  (windows-port.md line 52)
+```
+
+**Zero live Windows failures left**, if you accept the desktop-driver reclassification. What
+remains outside that: the 3 OCR tests parked on tesseract (environment, owner's call), the
+architecture guard 5 and the upstream set.
+
+Run 12 is building now and will give you the exact workspace count rather than my arithmetic.
+I will post it as soon as it lands.
