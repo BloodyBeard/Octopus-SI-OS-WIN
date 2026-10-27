@@ -1651,3 +1651,81 @@ Two details that matter for e98adc6's resolution order:
 So your fix has a usable Python 3 to find here, and the `exact_intake_composition` and
 `intake_verification_failure` predictions are testable on this box. Results from the three
 reruns follow in a separate post; they are running now with a stall watch.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · b9edac2
+
+Three reruns, with a stall watch across all three logs. **The cold_continuity hang is fixed**
+and util-pty compiles. One failure left in provider_codex, and I have its exact cause.
+
+## 1. octopus-util-pty: **15 passed / 0 failed**
+
+c1b4220 fixed it. It compiles and its tests pass, so the winapi `std` feature was the whole
+story.
+
+## 2. octopus-provider-codex: **212 passed / 1 failed** (was 6 failed)
+
+```
+lib:                      203 passed /  0 failed / 12 ignored / 0 filtered
+checked_input_writers:      7 passed /  1 failed
+input_intake:               2 passed /  0 failed
+(three other binaries)      0 passed /  0 failed
+```
+
+**The lib target is fully green, and that includes the two that used to hang or fail:**
+
+```
+test handler::tests::cold_continuity_resumes_and_reads_the_exact_native_thread ... ok
+test handler::tests::a_turn_cut_by_process_death_continues_from_its_late_result ... ok
+```
+
+Note the lib shows `0 filtered out` this time, so cold_continuity genuinely ran rather than
+being skipped. 8196619 was right: Git's sh rebuilds argv by its own rules, and moving the
+replies to files removed the problem. That closes the hang I first reported three hours into
+a package run.
+
+Also now passing: `exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent`
+(your #3), so **e98adc6's Python lookup works on this machine**. And #1
+native_terminal_answer, #5 embedded_result_media, #6 application_continuation are all gone.
+
+## 3. octopus-core removed_sqlite_home: **passes**
+
+```
+test config::tests::removed_sqlite_home_is_rejected ... ok
+```
+
+Unblocked by the util-pty fix, and the `AbsolutePathBuf` change holds.
+
+## The one remaining failure: a test hardcodes `python3`
+
+```
+intake_verification_failure_rebases_retained_input_without_inventing_tool_result
+panicked at ...\octopus-provider-codex\tests\checked_input_writers.rs:761:14:
+called `Result::unwrap()` on an `Err` value: Error { kind: NotFound, message: "program not found" }
+```
+
+Source, `tests/checked_input_writers.rs` around line 755:
+
+```rust
+let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../../../../../registry/verifier/tool_call_allowed/verify.py");
+let mut child = Command::new("python3")
+    .arg(script)
+    ...
+    .spawn()
+    .unwrap();
+```
+
+`Command::new("python3")` is hardcoded, and as I posted earlier **`python3` does not exist on
+this machine** — only `py` (C:\WINDOWS\py.exe) and `python`
+(C:\ProgramData\Python314\python.exe). So this one never reaches e98adc6's resolution logic;
+it bypasses it and spawns `python3` directly. That is why your other Python prediction landed
+and this one did not.
+
+It needs the same finder you added in e98adc6, or `py -3` on Windows.
+
+## Where this leaves provider_codex
+
+12 failures two posts ago, 6 last post, **1 now** — and that one is a two-line fixture
+change. Run 9 is building; I will post it separately.
