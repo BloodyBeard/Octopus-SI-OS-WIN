@@ -559,9 +559,11 @@ async fn direct_workspace_keeps_project_cwd_while_using_an_additional_granted_ro
         )
         .await
         .unwrap();
+    // The reported workdir is spelled as the room canonicalizes it (C:/... on
+    // Windows); it names the same directory.
     assert_eq!(
-        result.body["workdir"],
-        outside_root.to_string_lossy().as_ref()
+        Path::new(result.body["workdir"].as_str().unwrap()),
+        outside_root.as_path()
     );
     assert_eq!(
         exec.request

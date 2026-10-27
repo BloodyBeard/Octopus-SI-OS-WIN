@@ -10015,9 +10015,14 @@ mod tool_process_private_boundary_tests {
         let generation_dir = generation_root.join("a".repeat(64));
         let stderr_path = generation_root.join("stderr.log");
         std::fs::create_dir_all(&generation_dir).unwrap();
+        // The script goes to sh as a file, not `-c` text: Git for Windows' sh
+        // rebuilds argv from the Windows command line by its own rules, and
+        // JSON carrying Windows paths (`C:\\Users`) does not survive that.
+        let script_path = generation_root.join("fixture.sh");
+        std::fs::write(&script_path, script).unwrap();
         let mut command = tokio::process::Command::new(test_shell());
         command
-            .args(["-c", script])
+            .arg(&script_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
