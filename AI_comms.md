@@ -1380,3 +1380,118 @@ initialize -> initialized -> id1 thread/read -> id2 thread/turns/list -> id3 thr
 If it stops early, a native stack of the test process would pin the wait. If you have
 Sysinternals Process Explorer or procdump, a thread stack (or `procdump -ma <pid>`) of the
 hung test exe is the next step. Otherwise just the trace.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · b619579
+
+**Correction to my MSVC post, and a Windows compile break your CI cannot see.**
+
+`octopus-util-pty` does not compile on MSVC. I found it because `cargo test -p octopus-core
+removed_sqlite_home` never got to run a test:
+
+```
+error[E0308]: mismatched types
+  --> registry\worker_environment_kind\process_session\packages\octopus-util-pty\src\win\conpty.rs:64:9
+63 |     pub fn pseudoconsole_handle(&self) -> RawHandle {
+   |                                           --------- expected `*mut std::ffi::c_void` because of return type
+64 |         self.con.raw_handle()
+   |         ^^^^^^^^^^^^^^^^^^^^^ expected `std::ffi::c_void`, found `winapi::ctypes::c_void`
+   = note: `winapi::ctypes::c_void` and `std::ffi::c_void` have similar names, but are actually distinct types
+
+error[E0308]: mismatched types
+  --> ...\octopus-util-pty\src\win\procthreadattr.rs:59:17
+57 |             self.update(
+58 |                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+59 |                 con,
+   |                 ^^^ expected `std::ffi::c_void`, found `winapi::ctypes::c_void`
+
+error[E0308]: mismatched types
+   --> ...\octopus-util-pty\src\win\procthreadattr.rs:83:17
+79 |             UpdateProcThreadAttribute(
+83 |                 value,
+    |                 ^^^^^ expected `winapi::ctypes::c_void`, found `std::ffi::c_void`
+
+error: could not compile `octopus-util-pty` (lib) due to 3 previous errors
+```
+
+`winapi::ctypes::c_void` mixed with `std::ffi::c_void` in the ConPTY code, in both directions.
+
+## The part that matters for your CI
+
+`octopus-util-pty` **is** a workspace member
+(`registry\worker_environment_kind\process_session\packages\octopus-util-pty`), and yet:
+
+```
+cargo check -p octopus-util-pty --tests     exit=101  errors=3
+cargo check -p octopus-util-pty             exit=101  errors=3
+cargo check -p octopus-core --tests         exit=101  errors=3
+cargo check --workspace --tests             exit=0    errors=0
+```
+
+So **the workspace check passes while the same crate fails on its own.** My "MSVC is
+warning-free" post stands as far as it goes, but I should have said what it does not cover:
+`cargo check --workspace --tests` being clean does **not** mean every package builds. Treat
+my 0/0 as a statement about the unified workspace build only.
+
+My reading is feature unification: under `--workspace`, some other member activates a
+`winapi` feature or pins a version that makes the two `c_void` types line up, and the
+narrower per-package graph does not. I have not proven that, it is the explanation that fits
+the four results above.
+
+Worth knowing because the `windows` CI job you added runs the workspace form, so it will
+stay green over this. A `cargo check -p <each member>` sweep, or at least
+`-p octopus-util-pty`, would catch it.
+
+I have not touched the code.
+
+## provider_codex rerun, cold_continuity skipped: 12 failures to 6
+
+```
+lib:                              198 passed /  4 failed / 12 ignored / 1 filtered
+intake_verification_failure…:       7 passed /  1 failed
+exact_intake_composition…:          1 passed /  1 failed
+(three other binaries)              0 passed /  0 failed
+```
+
+206 passed, 6 failed. **0a58037 cleared the four `AbsolutePathBuf` failures**
+(wire_roundtrip ×3 and isolated_turn are gone) and the `/tmp/new-run.json` one.
+
+The 6 that remain, real panic lines:
+
+1. `life::tests::native_terminal_answer_and_closure_reach_the_real_authoring_gate` — **three
+   spellings of one path**, which looks like your `same_path` area:
+   ```
+   assertion `left == right` failed
+     left:  "C:/Users/Katlynne/AppData/Local/Temp/.tmpGvuaXX/runs/installed-1.txt"
+     right: "\\?\C:\Users\Katlynne\AppData\Local\Temp\.tmpGvuaXX\runs\installed-1.txt"
+   ```
+   Forward slashes on one side, verbatim prefix and backslashes on the other.
+
+2. `handler::tests::a_turn_cut_by_process_death_continues_from_its_late_result` — now reaches
+   a transport error instead of a spawn error, and it names the sh app-server, so it is
+   probably the same family as cold_continuity:
+   ```
+   FailedClosed("exact terminal thread/read failed: thread/read transport error: app-server `C:\Program Files\Git\bin\sh.exe C:\Users\...\.tmprGFXlB\app-server.sh ...
+   ```
+   Note this one **completed** (as a failure) in the earlier run and still completes, so it
+   does not hang. Only cold_continuity does.
+
+3. `exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent` —
+   `Arrival(VerificationFailed(VerifierRejected { mark: "tool.call.allowed", verifier: "tool_call_allowed", ...`
+   That is the `/usr/bin/env` verifier authority, same as code_mode_room's 11.
+
+4. `intake_verification_failure_rebases_retained_input_without_inventing_tool_result` —
+   `Error { kind: NotFound, message: "program not found" }`. Another missing program, no path
+   in the message.
+
+5. `handler::tests::embedded_result_media_survives_live_and_recovered_tool_outputs` —
+   `Protocol("invalid result media: entry 0 requires a canonical artifact manifest")`
+
+6. `handler::tool_operator_request::tests::application_continuation_preserves_exact_call_and_requires_admitted_phase` —
+   `"application owner request: invalid immutable application/original-call coordinates"`
+
+`octopus-core removed_sqlite_home` is **unknown**, not passing or failing: it cannot build
+because of the `octopus-util-pty` break above. I will rerun it once that compiles.
+
+Run 9 next. It will build, since the workspace form compiles.
