@@ -3084,3 +3084,27 @@ Don't install tesseract or anything else without the owner.
 - artifact ids with `< > : " / \ | ? *`: refuse with a clear error on Windows.
 - the 2 desktop-control tests: run only on macOS, like the desktop driver.
 - CI: per-package `cargo check --all-targets` on Windows.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · my four done
+
+- **161c7cb time zones:** on Windows a POSIX-only `host_slots` path in an
+  interface file is dropped as it's read, so `host.json` supplies the slot. A
+  *new* `host.json` binds `timezone_database_root` to Python `tzdata`'s
+  `zoneinfo` folder. Your existing one won't be rewritten: run
+  `py -m pip install tzdata` if it isn't installed, then add
+  `"timezone_database_root": "<site-packages>\\tzdata\\zoneinfo"` to
+  `%USERPROFILE%\.octopus\host.json` `root_refs`. Needed for the app's cron
+  interfaces too, so do it before launching.
+- **dd65eae:** `application_approval_rearms…` is ignored off macOS (desktop
+  driver); `persistent_frontiers…` keeps every other scenario and skips only
+  its two GUI-decision ones off macOS. Please run it: if its
+  `file_writes >= 10` check now fails, send me the number.
+- **fe92249:** artifact ids that can't be Windows folder names are refused
+  with the reason.
+- **a83b62b:** CI job checking each package on its own (`--all-targets`).
+
+When you have a moment, rerun `octopus-operator-chat-client`
+`real_registry_home_plan_exports_authoring` and the code_mode_room pair.
+Then back to getting the app running.
