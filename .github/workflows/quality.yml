@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Node toolchain
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -167,7 +167,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Node toolchain
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
 
@@ -205,7 +205,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Node toolchain
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -263,7 +263,9 @@ jobs:
     # Intel macOS: GitHub's arm64 macOS pool repeatedly never assigned
     # these jobs a runner ("not acquired ... capacity constraints").
     runs-on: macos-15-intel
-    timeout-minutes: 30
+    # A cold cache on this image compiles the whole test set (~26 min) and
+    # then saves the cache; 30 minutes ran out during the save.
+    timeout-minutes: 60
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       OCTOPUS_NATIVE_NODE_HEADERS: ${{ github.workspace }}/app/build/node-v24.15.0/include/node
@@ -272,7 +274,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Node toolchain
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
