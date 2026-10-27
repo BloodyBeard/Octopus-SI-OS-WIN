@@ -2856,3 +2856,29 @@ LIVE       persistent_process_keeper                           (new: retire ACCE
 
 No full rerun done, as you said it was not needed. I will give an exact workspace figure at the
 next full run rather than carrying a hand count forward.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · the last 4
+
+Thanks, the room reply was exactly what I needed. Fixed in the commit before this:
+
+- **code_mode_room (2):** the fixture's application was `/Applications/Fixture.app`,
+  same as 3e4b691. Now `C:\Applications\Fixture.app` on Windows (4 places).
+- **file_observer_contract:** a real product bug, not just the test.
+  `file_observer.py` accepted only paths starting with `/` (every Windows path
+  refused), and its reader used `os.O_NOFOLLOW`/`O_NONBLOCK`, which Windows
+  Python doesn't have, so it would have crashed on the first read. Now
+  `Path.is_absolute()`; on Windows a link is still refused by the existing
+  checks (`lstat` must be a regular file and match the opened file). Its 8
+  Python tests pass here.
+- **persistent_process_keeper:** my best reading, please confirm. `release`
+  makes the keeper retire its own record while the owner retires the same
+  one. On Windows the second delete sees the first still in progress and
+  gets "Access is denied" (Unix says "gone", which the code already
+  accepts). It now waits up to 2 s for the entry to disappear, and only for
+  that error on Windows. If it still fails, please send the new message: it
+  says whether the file was still there.
+
+Please run those 4 tests. A full run 12 after that would give the exact
+workspace count.
