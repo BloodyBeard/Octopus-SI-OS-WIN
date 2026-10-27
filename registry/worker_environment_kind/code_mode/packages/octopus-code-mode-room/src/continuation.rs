@@ -1713,7 +1713,16 @@ fn consume_authoring_result_with_source(
         );
     }
     let expected = json!({"result":"files_written","writes":[{"path":pending.path,"before_hash":pending.before,"after_hash":pending.after,"bytes":pending.bytes}]});
-    if result.error.is_some() || result.body.as_ref() != Some(&expected) {
+    // file.write reports the path in its own spelling (C:/... on Windows); the
+    // path is matched by location and every other field exactly.
+    let matches = result.body.as_ref().is_some_and(|body| {
+        let mut body = body.clone();
+        let same_location = body.pointer("/writes/0/path").and_then(serde_json::Value::as_str)
+            .is_some_and(|path| octopus_private_fs::same_path(Path::new(path), &pending.path));
+        if let Some(path) = body.pointer_mut("/writes/0/path") { *path = json!(pending.path); }
+        same_location && body == expected
+    });
+    if result.error.is_some() || !matches {
         return Err("authoring result differs from exact checked write evidence".into());
     }
     Ok(true)
