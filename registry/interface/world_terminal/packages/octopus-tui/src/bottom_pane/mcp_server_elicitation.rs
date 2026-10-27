@@ -141,7 +141,6 @@ impl FooterTip {
 }
 
 impl McpServerElicitationFormRequest {
-    #[allow(dead_code)]
     pub(crate) fn from_elicitation_request(request: ElicitationRequest) -> Option<Self> {
         Self::from_parts(
             String::new(),
@@ -150,10 +149,6 @@ impl McpServerElicitationFormRequest {
             request.message,
             request.requested_schema,
         )
-    }
-
-    pub(crate) fn request_id(&self) -> &str {
-        &self.request_id
     }
 
     fn from_parts(

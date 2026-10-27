@@ -102,7 +102,6 @@ impl App {
             };
             let target = SessionTarget {
                 run: parent.clone(),
-                record_path: app_server.run_record_path(&parent).unwrap_or_default(),
                 cwd: Some(self.config.cwd.to_path_buf()),
             };
             match self.resume_target_session(tui, app_server, target).await {

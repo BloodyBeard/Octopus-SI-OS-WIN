@@ -13,6 +13,7 @@ pub(super) struct GoalStatusState {
 }
 
 impl GoalStatusState {
+    #[cfg(test)]
     pub(super) fn new(goal: GoalStatusItem, observed_at: Instant) -> Self {
         Self { goal, observed_at }
     }

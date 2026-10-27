@@ -383,10 +383,6 @@ pub(super) fn handle_token_count(chat: &mut ChatWidget, info: Option<TokenUsageI
     chat.set_token_info(info);
 }
 
-pub(super) fn handle_error(chat: &mut ChatWidget, message: impl Into<String>) {
-    chat.on_error(message.into());
-}
-
 pub(super) fn handle_stream_error(
     chat: &mut ChatWidget,
     message: impl Into<String>,
@@ -413,10 +409,6 @@ pub(super) fn handle_agent_reasoning_final(chat: &mut ChatWidget) {
 
 pub(super) fn handle_entered_review_mode(chat: &mut ChatWidget, review: impl Into<String>) {
     chat.enter_review_mode_with_hint(review.into(), false);
-}
-
-pub(super) fn replay_entered_review_mode(chat: &mut ChatWidget, review: impl Into<String>) {
-    chat.enter_review_mode_with_hint(review.into(), true);
 }
 
 pub(super) fn handle_exited_review_mode(chat: &mut ChatWidget) {
@@ -713,23 +705,9 @@ pub(super) fn active_hook_blob(chat: &ChatWidget) -> String {
     lines_to_single_string(&lines)
 }
 
-pub(super) fn expire_quiet_hook_linger(chat: &mut ChatWidget) {
-    if let Some(cell) = chat.active_hook_cell.as_mut() {
-        cell.expire_quiet_runs_now_for_test();
-    }
-    chat.pre_draw_tick();
-}
-
 pub(super) fn reveal_running_hooks(chat: &mut ChatWidget) {
     if let Some(cell) = chat.active_hook_cell.as_mut() {
         cell.reveal_running_runs_now_for_test();
-    }
-    chat.pre_draw_tick();
-}
-
-pub(super) fn reveal_running_hooks_after_delayed_redraw(chat: &mut ChatWidget) {
-    if let Some(cell) = chat.active_hook_cell.as_mut() {
-        cell.reveal_running_runs_after_delayed_redraw_for_test();
     }
     chat.pre_draw_tick();
 }

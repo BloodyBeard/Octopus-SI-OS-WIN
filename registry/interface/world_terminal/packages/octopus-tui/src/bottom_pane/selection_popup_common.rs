@@ -32,7 +32,6 @@ pub(crate) struct GenericDisplayRow {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum ColumnWidthMode {
     #[default]
     AutoVisible,

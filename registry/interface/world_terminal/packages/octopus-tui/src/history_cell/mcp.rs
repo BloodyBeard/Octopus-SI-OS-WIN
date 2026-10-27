@@ -70,6 +70,7 @@ impl McpToolCallCell {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_failed(&mut self) {
         let elapsed = self.start_time.elapsed();
         self.duration = Some(elapsed);

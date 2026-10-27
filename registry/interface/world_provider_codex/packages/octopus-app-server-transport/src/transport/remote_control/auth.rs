@@ -79,11 +79,6 @@ impl AuthProvider for UnauthenticatedAuthProvider {
     fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
 }
 
-#[cfg(test)]
-pub(super) fn unauthenticated_auth_provider() -> SharedAuthProvider {
-    Arc::new(UnauthenticatedAuthProvider)
-}
-
 fn auth_provider_from_auth(auth: &CodexAuth) -> SharedAuthProvider {
     match auth {
         CodexAuth::AgentIdentity(agent_identity) => Arc::new(AgentIdentityAuthProvider {

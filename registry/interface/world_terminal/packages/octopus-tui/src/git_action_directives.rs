@@ -27,6 +27,7 @@ pub(crate) enum GitActionDirective {
 }
 
 impl GitActionDirective {
+    #[cfg(test)]
     pub(crate) fn created_branch_cwd(&self) -> Option<&str> {
         match self {
             Self::CreateBranch { cwd, .. } => Some(cwd),
@@ -42,6 +43,7 @@ pub(crate) struct ParsedAssistantMarkdown {
 }
 
 impl ParsedAssistantMarkdown {
+    #[cfg(test)]
     pub(crate) fn last_created_branch_cwd(&self) -> Option<&str> {
         self.git_actions
             .iter()

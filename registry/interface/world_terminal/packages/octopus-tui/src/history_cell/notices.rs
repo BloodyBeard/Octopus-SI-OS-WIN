@@ -5,15 +5,19 @@ pub(crate) fn new_warning_event(message: String) -> PrefixedWrappedHistoryCell {
     PrefixedWrappedHistoryCell::new(message.yellow(), "⚠ ".yellow(), "  ")
 }
 
+#[cfg(test)]
 const TRUSTED_ACCESS_FOR_CYBER_URL: &str = "https://chatgpt.com/cyber";
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct CyberPolicyNoticeCell;
 
+#[cfg(test)]
 pub(crate) fn new_cyber_policy_error_event() -> CyberPolicyNoticeCell {
     CyberPolicyNoticeCell
 }
 
+#[cfg(test)]
 impl HistoryCell for CyberPolicyNoticeCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -67,12 +71,14 @@ impl HistoryCell for CyberPolicyNoticeCell {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct DeprecationNoticeCell {
     summary: String,
     details: Option<String>,
 }
 
+#[cfg(test)]
 pub(crate) fn new_deprecation_notice(
     summary: String,
     details: Option<String>,
@@ -80,6 +86,7 @@ pub(crate) fn new_deprecation_notice(
     DeprecationNoticeCell { summary, details }
 }
 
+#[cfg(test)]
 impl HistoryCell for DeprecationNoticeCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();

@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::approval_events::ApplyPatchApprovalRequestEvent;
+#[cfg(test)]
 use crate::approval_events::ExecApprovalRequestEvent;
-use crate::approval_events::RequestPermissionsEvent;
 use octopus_world_terminal_client::ApprovalRequest as OperatorApprovalRequest;
 use octopus_world_terminal_client::ElicitationRequest;
 use octopus_world_terminal_client::ExecCommandItem;
@@ -13,11 +13,11 @@ use super::ChatWidget;
 
 #[derive(Debug)]
 pub(crate) enum QueuedInterrupt {
+    #[cfg(test)]
     ExecApproval(ExecApprovalRequestEvent),
     OperatorApproval(OperatorApprovalRequest),
     ApplyPatchApproval(ApplyPatchApprovalRequestEvent),
     Elicitation(ElicitationRequest),
-    RequestPermissions(RequestPermissionsEvent),
     RequestUserInput(UserInputRequest),
     ExecStarted(ExecCommandItem),
     ExecCompleted(ExecCommandItem),
@@ -45,19 +45,20 @@ impl InterruptManager {
     }
 
     pub(crate) fn has_pending_prompt(&self) -> bool {
-        self.queue.iter().any(|queued| {
-            matches!(
-                queued,
-                QueuedInterrupt::ExecApproval(_)
-                    | QueuedInterrupt::OperatorApproval(_)
-                    | QueuedInterrupt::ApplyPatchApproval(_)
-                    | QueuedInterrupt::Elicitation(_)
-                    | QueuedInterrupt::RequestPermissions(_)
-                    | QueuedInterrupt::RequestUserInput(_)
-            )
+        self.queue.iter().any(|queued| match queued {
+            #[cfg(test)]
+            QueuedInterrupt::ExecApproval(_) => true,
+            QueuedInterrupt::OperatorApproval(_)
+            | QueuedInterrupt::ApplyPatchApproval(_)
+            | QueuedInterrupt::Elicitation(_)
+            | QueuedInterrupt::RequestUserInput(_) => true,
+            QueuedInterrupt::ExecStarted(_)
+            | QueuedInterrupt::ExecCompleted(_)
+            | QueuedInterrupt::ToolActivity { .. } => false,
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn push_exec_approval(&mut self, ev: ExecApprovalRequestEvent) {
         self.queue.push_back(QueuedInterrupt::ExecApproval(ev));
     }
@@ -74,11 +75,6 @@ impl InterruptManager {
 
     pub(crate) fn push_elicitation(&mut self, request: ElicitationRequest) {
         self.queue.push_back(QueuedInterrupt::Elicitation(request));
-    }
-
-    pub(crate) fn push_request_permissions(&mut self, ev: RequestPermissionsEvent) {
-        self.queue
-            .push_back(QueuedInterrupt::RequestPermissions(ev));
     }
 
     pub(crate) fn push_user_input(&mut self, request: UserInputRequest) {
@@ -107,11 +103,11 @@ impl InterruptManager {
         }
         let len = self.queue.len();
         self.queue.retain(|queued| match queued {
+            #[cfg(test)]
             QueuedInterrupt::ExecApproval(event) => event.request_id != request_id,
             QueuedInterrupt::OperatorApproval(request) => request.request_id != request_id,
             QueuedInterrupt::ApplyPatchApproval(event) => event.request_id != request_id,
             QueuedInterrupt::Elicitation(request) => request.request_id != request_id,
-            QueuedInterrupt::RequestPermissions(event) => event.call_id != request_id,
             QueuedInterrupt::RequestUserInput(request) => request.request_id != request_id,
             QueuedInterrupt::ExecStarted(_)
             | QueuedInterrupt::ExecCompleted(_)
@@ -123,6 +119,7 @@ impl InterruptManager {
     pub(crate) fn flush_all(&mut self, chat: &mut ChatWidget) {
         while let Some(q) = self.queue.pop_front() {
             match q {
+                #[cfg(test)]
                 QueuedInterrupt::ExecApproval(ev) => chat.handle_exec_approval_now(ev),
                 QueuedInterrupt::OperatorApproval(request) => {
                     chat.handle_operator_approval_now(request);
@@ -131,7 +128,6 @@ impl InterruptManager {
                 QueuedInterrupt::Elicitation(request) => {
                     chat.handle_elicitation_request_now(request);
                 }
-                QueuedInterrupt::RequestPermissions(ev) => chat.handle_request_permissions_now(ev),
                 QueuedInterrupt::RequestUserInput(request) => {
                     chat.handle_request_user_input_now(request);
                 }

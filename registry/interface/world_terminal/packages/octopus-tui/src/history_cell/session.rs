@@ -64,10 +64,6 @@ fn with_border_internal(
     out
 }
 
-pub(crate) fn padded_emoji(emoji: &str) -> String {
-    format!("{emoji}\u{200A}")
-}
-
 #[derive(Debug)]
 struct TooltipHistoryCell {
     tip: String,

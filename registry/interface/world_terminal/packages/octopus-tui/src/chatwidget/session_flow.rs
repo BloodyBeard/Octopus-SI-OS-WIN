@@ -130,6 +130,7 @@ impl ChatWidget {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_thread_session(&mut self, session: ThreadSessionState) {
         self.instruction_source_paths = session.instruction_source_paths.clone();
         let fork_parent_title = session.fork_parent_title.clone();
@@ -146,16 +147,6 @@ impl ChatWidget {
             session,
             SessionConfiguredDisplay::Quiet,
             None,
-        );
-    }
-
-    pub(crate) fn handle_side_thread_session(&mut self, session: ThreadSessionState) {
-        self.instruction_source_paths = session.instruction_source_paths.clone();
-        let fork_parent_title = session.fork_parent_title.clone();
-        self.on_session_configured_with_display_and_fork_parent_title(
-            session,
-            SessionConfiguredDisplay::SideConversation,
-            fork_parent_title,
         );
     }
 

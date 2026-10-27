@@ -254,6 +254,8 @@ fn restore_common(
     }
 }
 
+// Only job control (suspend/resume on Unix) needs a full restore.
+#[cfg(unix)]
 pub fn restore() -> Result<()> {
     restore_common(RawModeRestore::Disable, KeyboardRestore::PopStack)
 }
@@ -283,15 +285,12 @@ pub fn restore_keep_raw() -> Result<()> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoreMode {
-    #[allow(dead_code)]
-    Full,
     KeepRaw,
 }
 
 impl RestoreMode {
     fn restore(self) -> Result<()> {
         match self {
-            RestoreMode::Full => restore(),
             RestoreMode::KeepRaw => restore_keep_raw(),
         }
     }

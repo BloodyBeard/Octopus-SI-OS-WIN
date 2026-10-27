@@ -799,7 +799,6 @@ fn unified_exec_interaction_cell_height_matches_wrapped_rendering() {
 fn web_search_history_cell_snapshot() {
     let query = "example search query with several generic words to exercise wrapping".to_string();
     let cell = new_web_search_call(
-        "call-1".to_string(),
         query.clone(),
         WebSearchActionItem::Search {
             query: Some(query),
@@ -814,7 +813,6 @@ fn web_search_history_cell_snapshot() {
 #[test]
 fn web_search_history_cell_without_detail_snapshot() {
     let cell = new_web_search_call(
-        "call-1".to_string(),
         String::new(),
         WebSearchActionItem::Other,
     );
@@ -827,7 +825,6 @@ fn web_search_history_cell_without_detail_snapshot() {
 fn web_search_history_cell_wraps_with_indented_continuation() {
     let query = "example search query with several generic words to exercise wrapping".to_string();
     let cell = new_web_search_call(
-        "call-1".to_string(),
         query.clone(),
         WebSearchActionItem::Search {
             query: Some(query),
@@ -849,7 +846,6 @@ fn web_search_history_cell_wraps_with_indented_continuation() {
 fn web_search_history_cell_short_query_does_not_wrap() {
     let query = "short query".to_string();
     let cell = new_web_search_call(
-        "call-1".to_string(),
         query.clone(),
         WebSearchActionItem::Search {
             query: Some(query),
@@ -868,7 +864,6 @@ fn web_search_history_cell_short_query_does_not_wrap() {
 fn web_search_history_cell_transcript_snapshot() {
     let query = "example search query with several generic words to exercise wrapping".to_string();
     let cell = new_web_search_call(
-        "call-1".to_string(),
         query.clone(),
         WebSearchActionItem::Search {
             query: Some(query),

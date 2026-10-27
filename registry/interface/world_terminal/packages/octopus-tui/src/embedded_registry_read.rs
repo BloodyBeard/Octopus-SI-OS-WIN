@@ -129,11 +129,6 @@ impl RegistryRead {
         self
     }
 
-    pub(crate) fn with_account(mut self, account: AccountIdentity) -> Self {
-        self.account = Some(account);
-        self
-    }
-
     pub(crate) fn account(&self) -> Option<&AccountIdentity> {
         self.account.as_ref()
     }

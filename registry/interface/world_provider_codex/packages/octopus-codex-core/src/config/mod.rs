@@ -83,6 +83,7 @@ use octopus_protocol::openai_models::ReasoningEffort;
 use octopus_protocol::permissions::FileSystemSandboxPolicy;
 use octopus_protocol::permissions::NetworkSandboxPolicy;
 use octopus_protocol::protocol::AskForApproval;
+#[cfg(test)]
 use octopus_protocol::protocol::MultiAgentVersion;
 use octopus_protocol::protocol::SandboxPolicy;
 use octopus_util_abspath::AbsolutePathBuf;
@@ -163,6 +164,7 @@ impl Default for GhostSnapshotConfig {
 }
 
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES;
+#[cfg(test)]
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 4;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
@@ -281,18 +283,6 @@ fn with_test_model_provider_if_absent(mut cfg: ConfigToml) -> ConfigToml {
     cfg
 }
 
-#[cfg(test)]
-pub(crate) async fn test_config() -> Config {
-    let codex_home = tempfile::tempdir().expect("create temp dir");
-    Config::load_from_base_config_with_overrides(
-        with_test_model_provider_if_absent(ConfigToml::default()),
-        ConfigOverrides::default(),
-        AbsolutePathBuf::from_absolute_path(codex_home.path()).expect("temp dir should resolve"),
-    )
-    .await
-    .expect("load default test config")
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Permissions {
     pub approval_policy: Constrained<AskForApproval>,
@@ -322,17 +312,6 @@ impl Permissions {
             windows_sandbox_mode: None,
             windows_sandbox_private_desktop: true,
         })
-    }
-
-    pub(crate) fn permission_profile_state(&self) -> &PermissionProfileState {
-        &self.permission_profile_state
-    }
-
-    pub(crate) fn set_permission_profile_state(
-        &mut self,
-        permission_profile_state: PermissionProfileState,
-    ) {
-        self.permission_profile_state = permission_profile_state;
     }
 
     pub fn set_permission_profile_from_session_snapshot(
@@ -966,16 +945,7 @@ impl ConfigBuilder {
 }
 
 impl Config {
-    pub(crate) fn multi_agent_version_from_features(&self) -> MultiAgentVersion {
-        if self.features.enabled(Feature::MultiAgentV2) {
-            MultiAgentVersion::V2
-        } else if self.features.enabled(Feature::Collab) {
-            MultiAgentVersion::V1
-        } else {
-            MultiAgentVersion::Disabled
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) fn validate_multi_agent_v2_config(&self) -> std::io::Result<()> {
         if self.features.enabled(Feature::MultiAgentV2) && self.agent_max_threads.is_some() {
             Err(std::io::Error::new(
@@ -987,6 +957,7 @@ impl Config {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn effective_agent_max_threads(
         &self,
         multi_agent_version: MultiAgentVersion,
@@ -1502,17 +1473,6 @@ fn resolve_tool_suggest_config(
     resolve_tool_suggest_config_from_config(config_toml.tool_suggest.as_ref(), config_layer_stack)
 }
 
-pub(crate) fn resolve_tool_suggest_config_from_layer_stack(
-    config_layer_stack: &ConfigLayerStack,
-) -> ToolSuggestConfig {
-    let tool_suggest = config_layer_stack
-        .effective_config()
-        .get("tool_suggest")
-        .cloned()
-        .and_then(|value| value.try_into::<ToolSuggestConfig>().ok());
-    resolve_tool_suggest_config_from_config(tool_suggest.as_ref(), config_layer_stack)
-}
-
 fn resolve_tool_suggest_config_from_config(
     tool_suggest: Option<&ToolSuggestConfig>,
     config_layer_stack: &ConfigLayerStack,
@@ -1998,6 +1958,7 @@ pub fn resolve_bootstrap_respect_system_proxy(
     Ok(features.get().enabled(Feature::RespectSystemProxy))
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_web_search_mode_for_turn(
     web_search_mode: &Constrained<WebSearchMode>,
     permission_profile: &PermissionProfile,
@@ -3199,53 +3160,6 @@ impl Config {
             .requirements_toml()
             .network
             .is_some()
-    }
-
-    pub(crate) fn network_proxy_spec_for_active_permission_profile(
-        &self,
-        active_permission_profile: &ActivePermissionProfile,
-        permission_profile: &PermissionProfile,
-    ) -> std::io::Result<Option<NetworkProxySpec>> {
-        let profile_allows_network_proxy =
-            profile_allows_configured_network_proxy(permission_profile);
-        let configured_network_proxy_config = if profile_allows_network_proxy {
-            let cfg: ConfigToml = self
-                .config_layer_stack
-                .effective_config()
-                .try_into()
-                .map_err(|err| {
-                    std::io::Error::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "failed to read effective config for selected permission profile: {err}"
-                        ),
-                    )
-                })?;
-            let mut configured_network_proxy_config = network_proxy_config_for_profile_selection(
-                cfg.permissions.as_ref(),
-                active_permission_profile.id.as_str(),
-            )?;
-            if self.features.enabled(Feature::NetworkProxy)
-                && permission_profile.network_sandbox_policy().is_enabled()
-            {
-                if let Some(network_proxy) = network_proxy_toml_config(cfg.features.as_ref()) {
-                    apply_network_proxy_feature_config(
-                        &mut configured_network_proxy_config,
-                        network_proxy,
-                    );
-                }
-                configured_network_proxy_config.network.enabled = true;
-            }
-            configured_network_proxy_config
-        } else {
-            NetworkProxyConfig::default()
-        };
-
-        build_network_proxy_spec(
-            configured_network_proxy_config,
-            self.config_layer_stack.requirements().network.clone(),
-            permission_profile,
-        )
     }
 }
 

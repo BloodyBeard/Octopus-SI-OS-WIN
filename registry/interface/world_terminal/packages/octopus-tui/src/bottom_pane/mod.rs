@@ -29,6 +29,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 mod action_required_title;
+// Only its own tests build this view; nothing in the client opens it.
+#[cfg(test)]
 mod app_link_view;
 mod approval_overlay;
 mod mcp_server_elicitation;
@@ -40,8 +42,6 @@ mod status_surface_preview;
 mod title_setup;
 pub(crate) use action_required_title::ACTION_REQUIRED_PREVIEW_PREFIX;
 pub(crate) use action_required_title::build_action_required_title_text;
-pub(crate) use app_link_view::AppLinkView;
-pub(crate) use app_link_view::AppLinkViewParams;
 pub(crate) use approval_overlay::ApprovalOverlay;
 pub(crate) use approval_overlay::ApprovalRequest;
 pub(crate) use approval_overlay::format_requested_permissions_rule;
@@ -639,7 +639,6 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_composer_input_enabled(
         &mut self,
         enabled: bool,
@@ -669,6 +668,7 @@ impl BottomPane {
         self.composer.cursor()
     }
 
+    #[cfg(test)]
     pub(crate) fn composer_draft_snapshot(&self) -> chat_composer::ComposerDraftSnapshot {
         self.composer.draft_snapshot()
     }
@@ -910,30 +910,6 @@ impl BottomPane {
         }
     }
 
-    pub(crate) fn replace_selection_view_if_active(
-        &mut self,
-        view_id: &'static str,
-        mut params: list_selection_view::SelectionViewParams,
-    ) -> bool {
-        let is_match = self
-            .view_stack
-            .last()
-            .is_some_and(|view| view.view_id() == Some(view_id));
-        if !is_match {
-            return false;
-        }
-
-        self.view_stack.pop();
-        self.apply_standard_popup_hint(&mut params);
-        let view = list_selection_view::ListSelectionView::new(
-            params,
-            self.app_event_tx.clone(),
-            self.keymap.list.clone(),
-        );
-        self.push_view(Box::new(view));
-        true
-    }
-
     pub(crate) fn replace_selection_view_if_present(
         &mut self,
         view_id: &'static str,
@@ -1008,13 +984,6 @@ impl BottomPane {
             .and_then(|view| view.selected_index())
     }
 
-    pub(crate) fn active_tab_id_for_active_view(&self, view_id: &'static str) -> Option<&str> {
-        self.view_stack
-            .last()
-            .filter(|view| view.view_id() == Some(view_id))
-            .and_then(|view| view.active_tab_id())
-    }
-
     pub(crate) fn dismiss_active_view_if_id(&mut self, view_id: &'static str) -> bool {
         let is_match = self
             .view_stack
@@ -1029,6 +998,7 @@ impl BottomPane {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn dismiss_view_by_id(&mut self, view_id: &'static str) -> bool {
         let Some(index) = self
             .view_stack
@@ -1084,17 +1054,6 @@ impl BottomPane {
         self.pending_input_preview.rejected_steers = rejected_steers;
         self.pending_input_preview.queued_messages = queued;
         self.request_redraw();
-    }
-
-    pub(crate) fn set_pending_thread_approvals(&mut self, threads: Vec<String>) {
-        if self.pending_thread_approvals.set_threads(threads) {
-            self.request_redraw();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_thread_approvals(&self) -> &[String] {
-        self.pending_thread_approvals.threads()
     }
 
     pub(crate) fn set_unified_exec_processes(&mut self, processes: Vec<String>) {
@@ -1471,12 +1430,6 @@ impl BottomPane {
 
     pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {
         if self.composer.set_status_line_enabled(enabled) {
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
-        if self.composer.set_active_agent_label(active_agent_label) {
             self.request_redraw();
         }
     }

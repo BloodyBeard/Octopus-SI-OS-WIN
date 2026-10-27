@@ -13,21 +13,24 @@ use crate::app_command::AppCommand;
 use crate::app_command::ReviewTargetSpec;
 use crate::app_event::HistoryLookupResponse;
 use crate::approval_events::ApplyPatchApprovalRequestEvent;
+#[cfg(test)]
 use crate::approval_events::ExecApprovalRequestEvent;
-use crate::approval_events::RequestPermissionsEvent;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::StatusSurfacePreviewData;
 use crate::bottom_pane::StatusSurfacePreviewItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::bottom_pane::TerminalTitleSetupView;
+#[cfg(test)]
 use crate::diff_model::FileChange;
 use crate::git_action_directives::parse_assistant_markdown;
+#[cfg(test)]
 use crate::guardian_events::GuardianAssessmentAction;
+#[cfg(test)]
 use crate::guardian_events::GuardianAssessmentEvent;
+#[cfg(test)]
 use crate::guardian_events::GuardianAssessmentStatus;
 use crate::model_catalog::ModelCatalog;
-use crate::multi_agents::AgentMetadata;
 use crate::plan_type::PlanType;
 use crate::provider_config_runtime::ProviderConfigRuntime;
 use crate::session_posture::ConstrainedValue;
@@ -58,8 +61,11 @@ use crate::text_formatting::proper_join;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
 use crate::tui_config::TuiConfig;
+#[cfg(test)]
 use crate::turn_items::AgentMessageContent;
+#[cfg(test)]
 use crate::turn_items::AgentMessageItem;
+#[cfg(test)]
 use crate::turn_items::MessagePhase;
 use crate::version::CODEX_CLI_VERSION;
 use crossterm::event::KeyCode;
@@ -103,13 +109,18 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
+#[cfg(test)]
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 
 const DEFAULT_MODEL_DISPLAY_NAME: &str = "loading";
+#[cfg(test)]
 const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
+#[cfg(test)]
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
+#[cfg(test)]
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
+#[cfg(test)]
 const MULTI_AGENT_ENABLE_NOTICE: &str = "Subagents will be enabled in the next session.";
 const MEMORIES_DOC_URL: &str = "https://developers.openai.com/codex/memories";
 const MEMORIES_ENABLE_TITLE: &str = "Enable memories?";
@@ -212,7 +223,6 @@ use crate::history_cell::HookCell;
 use crate::history_cell::McpInvocation;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
-use crate::history_cell::WebSearchCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::KeyBindingListExt;
@@ -258,8 +268,6 @@ mod input_submission;
 mod interrupts;
 use self::interrupts::InterruptManager;
 mod keymap_picker;
-mod tool_interface_startup;
-use self::tool_interface_startup::ToolInterfaceStartupStatus;
 mod pets;
 mod session_flow;
 mod session_header;
@@ -276,6 +284,7 @@ use self::notifications::Notification;
 mod permission_popups;
 mod permissions_menu;
 mod rate_limits;
+#[cfg(test)]
 use self::rate_limits::RateLimitErrorKind;
 use self::rate_limits::RateLimitSwitchPromptState;
 use self::rate_limits::RateLimitWarningState;
@@ -315,11 +324,13 @@ use self::turn_lifecycle::TurnLifecycleState;
 mod usage;
 mod user_messages;
 use self::user_messages::PendingSteer;
+#[cfg(test)]
 use self::user_messages::PendingSteerCompareKey;
 use self::user_messages::QueueDrain;
 use self::user_messages::QueuedUserMessage;
 use self::user_messages::ShellEscapePolicy;
 use self::user_messages::ThreadComposerState;
+#[cfg(test)]
 pub(crate) use self::user_messages::ThreadInputState;
 pub(crate) use self::user_messages::UserMessage;
 use self::user_messages::UserMessageDisplay;
@@ -328,6 +339,7 @@ use self::user_messages::UserMessageHistoryOverride;
 use self::user_messages::UserMessageHistoryRecord;
 pub(crate) use self::user_messages::create_initial_user_message;
 use self::user_messages::mention_bindings_from_inputs;
+#[cfg(test)]
 use self::user_messages::merge_user_messages;
 use self::user_messages::merge_user_messages_with_history_record;
 #[cfg(test)]
@@ -351,7 +363,9 @@ use crate::approval_presets::builtin_approval_presets;
 use crate::session_vocab::openai_models::InputModality;
 use crate::session_vocab::openai_models::ModelPreset;
 use crate::session_vocab::openai_models::ReasoningEffort as ReasoningEffortConfig;
+#[cfg(test)]
 use crate::turn_items::StepStatus;
+#[cfg(test)]
 use crate::turn_items::UpdatePlanArgs;
 use chrono::Local;
 use octopus_file_search::FileMatch;
@@ -436,6 +450,7 @@ pub(crate) struct ChatWidget {
     rate_limit_warnings: RateLimitWarningState,
     warning_display_state: WarningDisplayState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
+    #[cfg(test)]
     add_credits_nudge_email_in_flight: Option<String>,
     adaptive_chunking: AdaptiveChunkingPolicy,
     stream_controller: Option<StreamController>,
@@ -444,19 +459,12 @@ pub(crate) struct ChatWidget {
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
     copy_last_response_binding: Vec<KeyBinding>,
     running_commands: HashMap<String, RunningCommand>,
-    collab_agent_metadata: HashMap<String, AgentMetadata>,
     suppressed_exec_calls: HashSet<String>,
     last_unified_wait: Option<UnifiedExecWaitState>,
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
     turn_lifecycle: TurnLifecycleState,
     task_complete_pending: bool,
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,
-    tool_interface_startup_status: Option<HashMap<String, ToolInterfaceStartupStatus>>,
-    tool_interface_startup_expected_endpoints: Option<HashSet<String>>,
-    tool_interface_startup_ignore_updates_until_next_start: bool,
-    tool_interface_startup_allow_terminal_only_next_round: bool,
-    tool_interface_startup_pending_next_round: HashMap<String, ToolInterfaceStartupStatus>,
-    tool_interface_startup_pending_next_round_saw_starting: bool,
     ide_context: IdeContextState,
     interrupts: InterruptManager,
     reasoning_buffer: String,
@@ -481,6 +489,7 @@ pub(crate) struct ChatWidget {
     normal_placeholder_text: String,
     side_placeholder_text: String,
     forked_from: Option<String>,
+    #[cfg(test)]
     interrupted_turn_notice_mode: InterruptedTurnNoticeMode,
     frame_requester: FrameRequester,
     show_welcome_banner: bool,
@@ -520,11 +529,10 @@ pub(crate) struct ChatWidget {
     current_goal_status: Option<GoalStatusState>,
     external_editor_state: ExternalEditorState,
     last_rendered_user_message_display: Option<UserMessageDisplay>,
-    last_non_retry_error: Option<(String, String)>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 enum CodexOpTarget {
+    #[cfg(test)]
     Direct(UnboundedSender<AppCommand>),
     AppEvent,
 }
@@ -536,6 +544,7 @@ pub(crate) struct ActiveCellTranscriptKey {
     pub(crate) animation_tick: Option<u64>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum InterruptedTurnNoticeMode {
     #[default]
@@ -550,9 +559,9 @@ struct CancelEditState {
     armed: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayKind {
-    ResumeInitialMessages,
     ThreadSnapshot,
 }
 
@@ -560,7 +569,6 @@ pub(crate) enum ReplayKind {
 enum SessionConfiguredDisplay {
     Normal,
     Quiet,
-    SideConversation,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -569,6 +577,7 @@ enum PlanModeNudgeScope {
     Thread(String),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TurnAbortReason {
     Interrupted,
@@ -598,34 +607,6 @@ fn token_usage_info_from_item(
 }
 
 impl ChatWidget {
-    pub(crate) fn set_collab_agent_metadata(
-        &mut self,
-        thread_id: String,
-        agent_nickname: Option<String>,
-        agent_role: Option<String>,
-    ) {
-        self.collab_agent_metadata.insert(
-            thread_id,
-            AgentMetadata {
-                agent_nickname,
-                agent_role,
-            },
-        );
-    }
-
-    fn collab_agent_metadata(&self, thread_id: String) -> AgentMetadata {
-        self.collab_agent_metadata
-            .get(&thread_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    fn restore_retry_status_header_if_present(&mut self) {
-        if let Some(header) = self.status_state.take_retry_status_header() {
-            self.set_status_header(header);
-        }
-    }
-
     fn record_agent_markdown(&mut self, message: &str) {
         if !message.is_empty() {
             self.transcript.record_agent_markdown(message.to_string());
@@ -636,16 +617,7 @@ impl ChatWidget {
         self.transcript.record_visible_user_turn();
     }
 
-    pub(crate) fn open_app_link_view(&mut self, params: crate::bottom_pane::AppLinkViewParams) {
-        let view = crate::bottom_pane::AppLinkView::new_with_keymap(
-            params,
-            self.app_event_tx.clone(),
-            self.bottom_pane.list_keymap(),
-        );
-        self.bottom_pane.show_view(Box::new(view));
-        self.request_redraw();
-    }
-
+    #[cfg(test)]
     pub(crate) fn open_multi_agent_enable_prompt(&mut self) {
         let items = vec![
             SelectionItem {
@@ -769,6 +741,7 @@ impl ChatWidget {
         Some(info.total_token_usage.tokens_in_context_window())
     }
 
+    #[cfg(test)]
     fn restore_pre_review_token_info(&mut self) {
         if let Some(saved) = self.review.pre_review_token_info.take() {
             match saved {
@@ -842,6 +815,7 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
 
+    #[cfg(test)]
     fn enter_review_mode_with_hint(&mut self, hint: String, from_replay: bool) {
         if self.review.pre_review_token_info.is_none() {
             self.review.pre_review_token_info = Some(self.token_info.clone());
@@ -855,6 +829,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     fn exit_review_mode_after_item(&mut self) {
         self.flush_answer_stream_with_separator();
         self.flush_interrupt_queue();
@@ -935,10 +910,6 @@ impl ChatWidget {
         self.transcript.needs_final_message_separator = false;
     }
 
-    fn request_immediate_exit(&self) {
-        self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
-    }
-
     fn request_quit_without_confirmation(&self) {
         self.app_event_tx
             .send(AppEvent::Exit(ExitMode::ShutdownFirst));
@@ -956,6 +927,7 @@ impl ChatWidget {
         self.transcript.bump_active_cell_revision();
     }
 
+    #[cfg(test)]
     fn finalize_active_cell_as_failed(&mut self) {
         if let Some(mut cell) = self.transcript.active_cell.take() {
             if let Some(exec) = cell.as_any_mut().downcast_mut::<ExecCell>() {
@@ -968,18 +940,12 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn set_pending_thread_approvals(&mut self, threads: Vec<String>) {
-        self.bottom_pane.set_pending_thread_approvals(threads);
-    }
-
-    pub(crate) fn clear_thread_rename_block(&mut self) {
-        self.thread_rename_block_message = None;
-    }
-
+    #[cfg(test)]
     pub(crate) fn set_thread_rename_block_message(&mut self, message: impl Into<String>) {
         self.thread_rename_block_message = Some(message.into());
     }
 
+    #[cfg(test)]
     pub(crate) fn set_interrupted_turn_notice_mode(&mut self, mode: InterruptedTurnNoticeMode) {
         self.interrupted_turn_notice_mode = mode;
     }
@@ -1331,11 +1297,6 @@ impl ChatWidget {
         self.bottom_pane.is_task_running()
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_task_running_for_test(&self) -> bool {
-        self.is_task_running()
-    }
-
     pub(crate) fn toggle_vim_mode_and_notify(&mut self) {
         let enabled = self.bottom_pane.toggle_vim_enabled();
         let message = if enabled {
@@ -1390,16 +1351,6 @@ impl ChatWidget {
         self.bottom_pane.remote_image_urls()
     }
 
-    #[cfg(test)]
-    pub(crate) fn pending_thread_approvals(&self) -> &[String] {
-        self.bottom_pane.pending_thread_approvals()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_active_view(&self) -> bool {
-        self.bottom_pane.has_active_view()
-    }
-
     pub(crate) fn show_esc_backtrack_hint(&mut self) {
         self.bottom_pane.show_esc_backtrack_hint();
     }
@@ -1418,6 +1369,7 @@ impl ChatWidget {
             self.bottom_pane.set_task_running(true);
         }
         match &self.codex_op_target {
+            #[cfg(test)]
             CodexOpTarget::Direct(codex_op_tx) => {
                 crate::session_log::log_outbound_op(&op);
                 if let Err(e) = codex_op_tx.send(op) {

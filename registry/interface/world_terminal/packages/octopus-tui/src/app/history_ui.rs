@@ -59,6 +59,7 @@ impl App {
         self.insert_pending_usage_output(tui);
     }
 
+    #[cfg(test)]
     pub(super) fn open_url_in_browser(&mut self, url: String) {
         if let Err(err) = webbrowser::open(&url) {
             self.chat_widget

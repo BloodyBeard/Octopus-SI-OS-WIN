@@ -423,6 +423,7 @@ pub(crate) struct PlanStreamController {
 }
 
 impl PlanStreamController {
+    #[cfg(test)]
     pub(crate) fn new(width: Option<usize>, cwd: &Path, render_mode: HistoryRenderMode) -> Self {
         Self {
             core: StreamCore::new(width, cwd, render_mode),
@@ -431,6 +432,7 @@ impl PlanStreamController {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn push(&mut self, delta: &str) -> bool {
         self.core.push_delta(delta)
     }

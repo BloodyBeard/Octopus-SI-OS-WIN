@@ -3,7 +3,6 @@ use super::*;
 fn test_run_target(run: &str, cwd: Option<&str>) -> crate::resume_picker::SessionTarget {
     crate::resume_picker::SessionTarget {
         run: octopus_descriptors::RunId::new(run),
-        record_path: PathBuf::from(format!("/tmp/runs/{run}.json")),
         cwd: cwd.map(PathBuf::from),
     }
 }

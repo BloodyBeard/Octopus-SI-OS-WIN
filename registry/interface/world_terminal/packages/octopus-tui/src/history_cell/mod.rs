@@ -1,11 +1,17 @@
 use crate::approval_events::ExecPolicyAmendment;
 use crate::approval_events::NetworkPolicyAmendment;
+#[cfg(test)]
 use crate::diff_model::FileChange;
+#[cfg(test)]
 use crate::diff_render::create_diff_summary;
+#[cfg(test)]
 use crate::diff_render::display_path_for;
+#[cfg(test)]
 use crate::exec_cell::CommandOutput;
+#[cfg(test)]
 use crate::exec_cell::OutputLinesParams;
 use crate::exec_cell::TOOL_CALL_MAX_LINES;
+#[cfg(test)]
 use crate::exec_cell::output_lines;
 use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
@@ -36,8 +42,11 @@ use crate::test_support::test_path_buf;
 use crate::text_formatting::format_and_truncate_tool_result;
 use crate::text_formatting::truncate_text;
 use crate::tooltips;
+#[cfg(test)]
 use crate::turn_items::PlanItemArg;
+#[cfg(test)]
 use crate::turn_items::StepStatus;
+#[cfg(test)]
 use crate::turn_items::UpdatePlanArgs;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::version::CODEX_CLI_VERSION;
@@ -51,9 +60,11 @@ use octopus_substrate_contract::approvals_substrate::AskForApproval;
 use octopus_substrate_contract::permission_profile::ManagedFileSystemPermissions;
 use octopus_substrate_contract::permission_profile::PermissionProfile;
 use octopus_substrate_contract::permissions::NetworkSandboxPolicy;
+#[cfg(test)]
 use octopus_util_abspath::AbsolutePathBuf;
 use octopus_world_terminal_client::TextElement;
 use octopus_world_terminal_client::UserInputQuestion;
+#[cfg(test)]
 use octopus_world_terminal_client::WebSearchActionItem;
 use octopus_world_terminal_client::local_image_label_text;
 use ratatui::prelude::*;
@@ -75,8 +86,10 @@ use std::time::Instant;
 use tracing::error;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+#[cfg(test)]
 use url::Url;
 
+#[cfg(test)]
 const RAW_DIFF_SUMMARY_WIDTH: usize = 10_000;
 const RAW_TOOL_OUTPUT_WIDTH: usize = 10_000;
 
@@ -103,9 +116,11 @@ pub(crate) use hook_cell::new_completed_hook_cell;
 pub(crate) use mcp::*;
 pub(crate) use messages::*;
 pub(crate) use notices::*;
+#[cfg(test)]
 pub(crate) use patches::*;
 pub(crate) use plans::*;
 pub(crate) use request_user_input::*;
+#[cfg(test)]
 pub(crate) use search::*;
 pub(crate) use separators::*;
 pub(crate) use session::*;

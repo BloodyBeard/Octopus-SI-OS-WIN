@@ -54,12 +54,6 @@ impl ChatWidget {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    #[allow(dead_code)]
-    pub(crate) fn world_writable_warning_details(&self) -> Option<(Vec<String>, usize, bool)> {
-        None
-    }
-
     #[cfg(target_os = "windows")]
     pub(crate) fn open_world_writable_warning_confirmation(
         &mut self,
@@ -449,10 +443,6 @@ impl ChatWidget {
         );
         self.request_redraw();
     }
-
-    #[cfg(not(target_os = "windows"))]
-    #[allow(dead_code)]
-    pub(crate) fn show_windows_sandbox_setup_status(&mut self) {}
 
     #[cfg(target_os = "windows")]
     pub(crate) fn clear_windows_sandbox_setup_status(&mut self) {

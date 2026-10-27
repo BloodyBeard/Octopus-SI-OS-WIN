@@ -81,6 +81,7 @@ impl ChatWidget {
         self.status_state.pending_status_indicator_restore = false;
     }
 
+    #[cfg(test)]
     pub(super) fn finalize_completed_assistant_message(&mut self, message: Option<&str>) {
         if self.stream_controller.is_none()
             && let Some(message) = message
@@ -97,6 +98,7 @@ impl ChatWidget {
         self.handle_streaming_delta(delta);
     }
 
+    #[cfg(test)]
     pub(super) fn on_plan_delta(&mut self, delta: String) {
         if self.active_mode_kind() != ModeKind::Plan {
             return;
@@ -128,6 +130,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     pub(super) fn on_plan_item_completed(&mut self, text: String) {
         let streamed_plan = self.transcript.plan_delta_buffer.trim().to_string();
         let plan_text = if text.trim().is_empty() {
@@ -177,6 +180,7 @@ impl ChatWidget {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn on_agent_reasoning_delta(&mut self, delta: String) {
         self.reasoning_buffer.push_str(&delta);
 
@@ -193,6 +197,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     pub(super) fn on_agent_reasoning_final(&mut self) {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         if !self.full_reasoning_buffer.is_empty() {
@@ -207,12 +212,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(super) fn on_reasoning_section_break(&mut self) {
-        self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
-        self.full_reasoning_buffer.push_str("\n\n");
-        self.reasoning_buffer.clear();
-    }
-
+    #[cfg(test)]
     pub(super) fn on_stream_error(&mut self, message: String, additional_details: Option<String>) {
         self.status_state.remember_retry_status_header();
         self.bottom_pane.ensure_status_indicator();
@@ -225,6 +225,7 @@ impl ChatWidget {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn on_agent_message_item_completed(
         &mut self,
         item: AgentMessageItem,

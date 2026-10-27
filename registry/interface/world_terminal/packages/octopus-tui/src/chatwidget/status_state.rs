@@ -16,6 +16,7 @@ impl StatusIndicatorState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn is_guardian_review(&self) -> bool {
         self.header == "Reviewing approval request" || self.header.starts_with("Reviewing ")
     }
@@ -24,23 +25,28 @@ impl StatusIndicatorState {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum TerminalTitleStatusKind {
     Working,
+    #[cfg(test)]
     WaitingForBackgroundTerminal,
     #[default]
     Thinking,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct PendingGuardianReviewStatus {
     entries: Vec<PendingGuardianReviewStatusEntry>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingGuardianReviewStatusEntry {
     id: String,
     detail: String,
 }
 
+#[cfg(test)]
 impl PendingGuardianReviewStatus {
+    #[cfg(test)]
     pub(super) fn start_or_update(&mut self, id: String, detail: String) {
         if let Some(existing) = self.entries.iter_mut().find(|entry| entry.id == id) {
             existing.detail = detail;
@@ -50,16 +56,19 @@ impl PendingGuardianReviewStatus {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn finish(&mut self, id: &str) -> bool {
         let original_len = self.entries.len();
         self.entries.retain(|entry| entry.id != id);
         self.entries.len() != original_len
     }
 
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[cfg(test)]
     pub(super) fn status_indicator_state(&self) -> Option<StatusIndicatorState> {
         let details = if self.entries.len() == 1 {
             self.entries.first().map(|entry| entry.detail.clone())
@@ -96,6 +105,7 @@ impl PendingGuardianReviewStatus {
 #[derive(Debug)]
 pub(super) struct StatusState {
     pub(super) current_status: StatusIndicatorState,
+    #[cfg(test)]
     pub(super) pending_guardian_review_status: PendingGuardianReviewStatus,
     pub(super) terminal_title_status_kind: TerminalTitleStatusKind,
     pub(super) retry_status_header: Option<String>,
@@ -106,6 +116,7 @@ impl Default for StatusState {
     fn default() -> Self {
         Self {
             current_status: StatusIndicatorState::working(),
+            #[cfg(test)]
             pending_guardian_review_status: PendingGuardianReviewStatus::default(),
             terminal_title_status_kind: TerminalTitleStatusKind::Working,
             retry_status_header: None,
@@ -119,10 +130,12 @@ impl StatusState {
         self.current_status = status;
     }
 
+    #[cfg(test)]
     pub(super) fn take_retry_status_header(&mut self) -> Option<String> {
         self.retry_status_header.take()
     }
 
+    #[cfg(test)]
     pub(super) fn remember_retry_status_header(&mut self) {
         if self.retry_status_header.is_none() {
             self.retry_status_header = Some(self.current_status.header.clone());

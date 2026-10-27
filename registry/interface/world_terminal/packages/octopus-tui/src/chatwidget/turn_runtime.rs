@@ -2,9 +2,8 @@ use super::*;
 
 impl ChatWidget {
     pub(super) fn update_task_running_state(&mut self) {
-        self.bottom_pane.set_task_running(
-            self.turn_lifecycle.agent_turn_running || self.tool_interface_startup_status.is_some(),
-        );
+        self.bottom_pane
+            .set_task_running(self.turn_lifecycle.agent_turn_running);
         self.refresh_plan_mode_nudge();
         self.refresh_status_surfaces();
     }
@@ -54,11 +53,7 @@ impl ChatWidget {
         self.status_state.pending_status_indicator_restore = false;
         self.bottom_pane.set_interrupt_hint_visible(true);
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-        if self.tool_interface_startup_status.is_none()
-            || !self.status_header_is_tool_interface_startup_owned()
-        {
-            self.set_status_header(String::from("Working"));
-        }
+        self.set_status_header(String::from("Working"));
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Running, None);
@@ -247,6 +242,7 @@ impl ChatWidget {
         self.input_queue.has_queued_follow_up_messages()
     }
 
+    #[cfg(test)]
     pub(super) fn finalize_turn(&mut self) {
         self.clear_active_stream_tail();
         self.finalize_active_cell_as_failed();
@@ -269,22 +265,7 @@ impl ChatWidget {
         self.maybe_show_pending_rate_limit_prompt();
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn on_server_overloaded_error(&mut self, message: String) {
-        self.input_queue.submit_pending_steers_after_interrupt = false;
-        self.finalize_turn();
-
-        let message = if message.trim().is_empty() {
-            "Codex is currently experiencing high load.".to_string()
-        } else {
-            message
-        };
-
-        self.add_to_history(history_cell::new_warning_event(message));
-        self.request_redraw();
-        self.maybe_send_next_queued_input();
-    }
-
+    #[cfg(test)]
     pub(super) fn on_error(&mut self, message: String) {
         self.input_queue.submit_pending_steers_after_interrupt = false;
         self.flush_answer_stream_with_separator();
@@ -296,17 +277,7 @@ impl ChatWidget {
         self.maybe_send_next_queued_input();
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn on_cyber_policy_error(&mut self) {
-        self.input_queue.submit_pending_steers_after_interrupt = false;
-        self.finalize_turn();
-        self.add_to_history(history_cell::new_cyber_policy_error_event());
-        self.request_redraw();
-
-        self.maybe_send_next_queued_input();
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(super) fn on_rate_limit_error(&mut self, error_kind: RateLimitErrorKind, message: String) {
         let usage_limit_error = matches!(error_kind, RateLimitErrorKind::UsageLimit);
         let rate_limit_reached_type = self.codex_rate_limit_reached_type.map(|kind| {
@@ -361,6 +332,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     pub(super) fn on_plan_update(&mut self, update: UpdatePlanArgs) {
         self.transcript.saw_plan_update_this_turn = true;
         let total = update.plan.len();
@@ -377,6 +349,7 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_plan_update(update));
     }
 
+    #[cfg(test)]
     pub(super) fn interrupted_turn_message(&self, reason: TurnAbortReason) -> String {
         if reason == TurnAbortReason::BudgetLimited {
             return "Goal budget reached - the turn was stopped.".to_string();

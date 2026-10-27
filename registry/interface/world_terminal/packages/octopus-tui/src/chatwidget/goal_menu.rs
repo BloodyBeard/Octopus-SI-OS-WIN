@@ -65,17 +65,6 @@ impl ChatWidget {
             ..Default::default()
         });
     }
-
-    pub(crate) fn on_thread_goal_cleared(&mut self, thread_id: &str) {
-        if self
-            .thread_id
-            .as_deref()
-            .is_some_and(|active_thread_id| active_thread_id == thread_id)
-        {
-            self.current_goal_status = None;
-            self.update_collaboration_mode_indicator();
-        }
-    }
 }
 
 fn goal_summary_lines(goal: &GoalStatusItem) -> Vec<Line<'static>> {

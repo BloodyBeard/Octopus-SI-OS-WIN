@@ -30,6 +30,7 @@ pub(crate) enum ReviewDecision {
         network_policy_amendment: NetworkPolicyAmendment,
     },
     Denied,
+    #[cfg(test)]
     TimedOut,
     Abort,
 }
@@ -165,6 +166,7 @@ pub fn new_approval_decision_cell(
                             " codex to run ".into(),
                             snippet,
                         ],
+                        #[cfg(test)]
                         ApprovalDecisionActor::Guardian => vec![
                             "Request ".into(),
                             "denied".bold(),
@@ -179,6 +181,7 @@ pub fn new_approval_decision_cell(
                             "did not approve".bold(),
                             " this request".into(),
                         ],
+                        #[cfg(test)]
                         ApprovalDecisionActor::Guardian => {
                             vec!["Request ".into(), "denied".bold()]
                         }
@@ -196,6 +199,7 @@ pub fn new_approval_decision_cell(
                 ],
             ),
         },
+        #[cfg(test)]
         TimedOut => match subject {
             ApprovalDecisionSubject::Command(command) => {
                 let summary = if let Some(snippet) = non_empty_exec_snippet(&command) {
@@ -264,6 +268,7 @@ pub fn new_approval_decision_cell(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalDecisionActor {
     User,
+    #[cfg(test)]
     Guardian,
 }
 
@@ -271,11 +276,13 @@ impl ApprovalDecisionActor {
     fn subject(self) -> &'static str {
         match self {
             Self::User => "You ",
+            #[cfg(test)]
             Self::Guardian => "Auto-reviewer ",
         }
     }
 }
 
+#[cfg(test)]
 pub fn new_guardian_denied_patch_request(files: Vec<String>) -> Box<dyn HistoryCell> {
     let mut summary = vec![
         "Request ".into(),
@@ -298,6 +305,7 @@ pub fn new_guardian_denied_patch_request(files: Vec<String>) -> Box<dyn HistoryC
     ))
 }
 
+#[cfg(test)]
 pub fn new_guardian_denied_action_request(summary: String) -> Box<dyn HistoryCell> {
     let line = Line::from(vec![
         "Request ".into(),
@@ -308,6 +316,7 @@ pub fn new_guardian_denied_action_request(summary: String) -> Box<dyn HistoryCel
     Box::new(PrefixedWrappedHistoryCell::new(line, "✗ ".red(), "  "))
 }
 
+#[cfg(test)]
 pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryCell> {
     let line = Line::from(vec![
         "Request ".into(),
@@ -318,6 +327,7 @@ pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryC
     Box::new(PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  "))
 }
 
+#[cfg(test)]
 pub fn new_guardian_timed_out_patch_request(files: Vec<String>) -> Box<dyn HistoryCell> {
     let mut summary = vec![
         "Review ".into(),
@@ -340,6 +350,7 @@ pub fn new_guardian_timed_out_patch_request(files: Vec<String>) -> Box<dyn Histo
     ))
 }
 
+#[cfg(test)]
 pub fn new_guardian_timed_out_action_request(summary: String) -> Box<dyn HistoryCell> {
     let line = Line::from(vec![
         "Review ".into(),
@@ -350,6 +361,7 @@ pub fn new_guardian_timed_out_action_request(summary: String) -> Box<dyn History
     Box::new(PrefixedWrappedHistoryCell::new(line, "✗ ".red(), "  "))
 }
 
+#[cfg(test)]
 pub(crate) fn new_review_status_line(message: String) -> PlainHistoryCell {
     PlainHistoryCell {
         lines: vec![Line::from(message.cyan())],

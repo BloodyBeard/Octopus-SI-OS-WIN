@@ -4,8 +4,6 @@ use crate::config_update::format_config_error;
 #[cfg(any(target_os = "windows", test))]
 use crate::session_posture::WindowsSandboxMode;
 
-const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
-
 impl App {
     pub(super) async fn handle_event(
         &mut self,
@@ -364,17 +362,8 @@ impl App {
                 );
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::BeginInitialHistoryReplayBuffer => {
-                self.begin_initial_history_replay_buffer();
-            }
-            AppEvent::BeginThreadSwitchHistoryReplayBuffer => {
-                self.begin_thread_switch_history_replay_buffer();
-            }
             AppEvent::InsertHistoryCell(cell) => {
                 self.insert_history_cell(tui, cell);
-            }
-            AppEvent::EndInitialHistoryReplayBuffer => {
-                self.finish_initial_history_replay_buffer(tui);
             }
             AppEvent::ConsolidateAgentMessage {
                 source,
@@ -527,9 +516,6 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
-            AppEvent::FatalExitRequest(message) => {
-                return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
-            }
             AppEvent::CodexOp(op) => {
                 self.chat_widget.prepare_local_op_submission(&op);
                 self.submit_op(app_server, op).await?;
@@ -539,9 +525,11 @@ impl App {
                     .handle_command_execution_completed_now(item);
                 tui.frame_requester().schedule_frame();
             }
+            #[cfg(test)]
             AppEvent::RestoreCancelledTurn(prompt) => {
                 self.apply_cancelled_turn_edit(prompt);
             }
+            #[cfg(test)]
             AppEvent::SyncThreadGitBranch { thread_id, branch } => {
                 tracing::debug!(%thread_id, branch, "thread git branch noted without mutating run metadata");
             }
@@ -570,6 +558,7 @@ impl App {
                 ));
                 tui.frame_requester().schedule_frame();
             }
+            #[cfg(test)]
             AppEvent::OpenUrlInBrowser { url } => {
                 self.open_url_in_browser(url);
             }
@@ -642,6 +631,7 @@ impl App {
             AppEvent::ClearThreadGoal { thread_id } => {
                 self.clear_thread_goal(app_server, thread_id).await;
             }
+            #[cfg(test)]
             AppEvent::SendAddCreditsNudgeEmail { credit_type } => {
                 if self
                     .chat_widget
@@ -650,6 +640,7 @@ impl App {
                     self.send_add_credits_nudge_email(app_server, credit_type);
                 }
             }
+            #[cfg(test)]
             AppEvent::AddCreditsNudgeEmailFinished { result } => {
                 self.chat_widget
                     .finish_add_credits_nudge_email_request(result);
@@ -796,9 +787,6 @@ impl App {
             AppEvent::OpenPlanReasoningScopePrompt { model, effort } => {
                 self.chat_widget
                     .open_plan_reasoning_scope_prompt(model, effort);
-            }
-            AppEvent::OpenAllModelsPopup { models } => {
-                self.chat_widget.open_all_models_popup(models);
             }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
@@ -2117,9 +2105,7 @@ impl App {
     pub(super) async fn handle_exit_mode(&mut self, mode: ExitMode) -> AppRunControl {
         match mode {
             ExitMode::Detach { run_id } => AppRunControl::Detached { run_id },
-            ExitMode::ShutdownFirst | ExitMode::Immediate => {
-                AppRunControl::Exit(ExitReason::UserRequested)
-            }
+            ExitMode::ShutdownFirst => AppRunControl::Exit(ExitReason::UserRequested),
         }
     }
 

@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StepStatus {
@@ -9,6 +10,7 @@ pub(crate) enum StepStatus {
     Completed,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PlanItemArg {
@@ -16,6 +18,7 @@ pub(crate) struct PlanItemArg {
     pub status: StepStatus,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdatePlanArgs {
@@ -24,6 +27,7 @@ pub(crate) struct UpdatePlanArgs {
     pub plan: Vec<PlanItemArg>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MessagePhase {
@@ -32,12 +36,14 @@ pub(crate) enum MessagePhase {
     FinalAnswer,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub(crate) enum AgentMessageContent {
     Text { text: String },
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct AgentMessageItem {
     pub id: String,

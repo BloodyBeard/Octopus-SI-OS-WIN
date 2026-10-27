@@ -36,7 +36,6 @@ const PICKER_CHROME_HEIGHT: u16 = 6;
 #[derive(Debug, Clone)]
 pub struct SessionTarget {
     pub run: RunId,
-    pub record_path: PathBuf,
     pub cwd: Option<PathBuf>,
 }
 
@@ -111,7 +110,6 @@ fn record_cwd(record_path: &Path) -> Option<PathBuf> {
 pub fn session_target_from_run(entry: &RunEntry) -> SessionTarget {
     SessionTarget {
         run: entry.run.clone(),
-        record_path: entry.record_path.clone(),
         cwd: record_cwd(&entry.record_path),
     }
 }
@@ -287,7 +285,6 @@ fn picker_runtime_keymap(config: &TuiConfig) -> Result<RuntimeKeymap> {
 #[derive(Clone)]
 struct Row {
     run: RunId,
-    record_path: PathBuf,
     ee: String,
     worker: String,
     title: String,
@@ -301,7 +298,6 @@ impl Row {
     fn from_entry(entry: &TaskEntry) -> Self {
         Self {
             run: entry.run.clone(),
-            record_path: entry.record_path.clone(),
             ee: entry.ee.clone(),
             worker: entry.worker.clone(),
             title: entry.title.clone(),
@@ -315,7 +311,6 @@ impl Row {
     fn target(&self) -> SessionTarget {
         SessionTarget {
             run: self.run.clone(),
-            record_path: self.record_path.clone(),
             cwd: self.cwd.clone(),
         }
     }
@@ -836,7 +831,6 @@ mod tests {
     fn row_matches_query_over_run_worker_and_preview() {
         let row = Row {
             run: RunId::new("run_alpha"),
-            record_path: PathBuf::from("/x/run_alpha.json"),
             ee: "ee_operator".to_string(),
             worker: "system_worker_flash".to_string(),
             title: "Alpha build".to_string(),

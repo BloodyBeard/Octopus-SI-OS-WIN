@@ -26,6 +26,7 @@ const PET_COMPOSER_GAP_PX: u16 = 10;
 const TERMINAL_ROW_HEIGHT_PX: u16 = 15;
 
 const RUNNING_LIFETIME: Duration = Duration::from_secs(3 * 60);
+#[cfg(test)]
 const FAILED_LIFETIME: Duration = Duration::from_secs(60 * 60);
 const WAITING_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const REVIEW_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -35,6 +36,7 @@ pub(crate) enum PetNotificationKind {
     Running,
     Waiting,
     Review,
+    #[cfg(test)]
     Failed,
 }
 
@@ -44,6 +46,7 @@ impl PetNotificationKind {
             Self::Running => "running",
             Self::Waiting => "waiting",
             Self::Review => "review",
+            #[cfg(test)]
             Self::Failed => "failed",
         }
     }
@@ -53,6 +56,7 @@ impl PetNotificationKind {
             Self::Running => "Running",
             Self::Waiting => "Needs input",
             Self::Review => "Ready",
+            #[cfg(test)]
             Self::Failed => "Blocked",
         }
     }
@@ -62,6 +66,7 @@ impl PetNotificationKind {
             Self::Running => "Thinking",
             Self::Waiting => "Needs input",
             Self::Review => "Ready",
+            #[cfg(test)]
             Self::Failed => "Blocked",
         }
     }
@@ -71,6 +76,7 @@ impl PetNotificationKind {
             Self::Running => RUNNING_LIFETIME,
             Self::Waiting => WAITING_LIFETIME,
             Self::Review => REVIEW_LIFETIME,
+            #[cfg(test)]
             Self::Failed => FAILED_LIFETIME,
         }
     }

@@ -134,6 +134,7 @@ impl ChatWidget {
             rate_limit_warnings: RateLimitWarningState::default(),
             warning_display_state: WarningDisplayState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
+            #[cfg(test)]
             add_credits_nudge_email_in_flight: None,
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
@@ -142,19 +143,12 @@ impl ChatWidget {
             clipboard_lease: None,
             copy_last_response_binding,
             running_commands: HashMap::new(),
-            collab_agent_metadata: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
             turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
             task_complete_pending: false,
             unified_exec_processes: Vec::new(),
-            tool_interface_startup_status: None,
-            tool_interface_startup_expected_endpoints: None,
-            tool_interface_startup_ignore_updates_until_next_start: false,
-            tool_interface_startup_allow_terminal_only_next_round: false,
-            tool_interface_startup_pending_next_round: HashMap::new(),
-            tool_interface_startup_pending_next_round_saw_starting: false,
             ide_context: IdeContextState::default(),
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
@@ -179,6 +173,7 @@ impl ChatWidget {
             normal_placeholder_text: placeholder,
             side_placeholder_text: side_placeholder,
             forked_from: None,
+            #[cfg(test)]
             interrupted_turn_notice_mode: InterruptedTurnNoticeMode::Default,
             input_queue: InputQueueState::default(),
             cancel_edit: CancelEditState::default(),
@@ -217,7 +212,6 @@ impl ChatWidget {
             current_goal_status: None,
             external_editor_state: ExternalEditorState::Closed,
             last_rendered_user_message_display: None,
-            last_non_retry_error: None,
         };
 
         widget.prefetch_rate_limits();

@@ -1,17 +1,20 @@
 pub(crate) mod env;
 
+#[cfg(all(test, unix))]
 use octopus_util_abspath::AbsolutePathBuf;
+#[cfg(all(test, unix))]
 use std::collections::HashSet;
+#[cfg(all(test, unix))]
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use tempfile::NamedTempFile;
 
 pub fn normalize_for_path_comparison(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let canonical = path.as_ref().canonicalize()?;
     Ok(normalize_for_wsl(canonical))
 }
 
+#[cfg(test)]
 pub fn paths_match_after_normalization(left: impl AsRef<Path>, right: impl AsRef<Path>) -> bool {
     if let (Ok(left), Ok(right)) = (
         normalize_for_path_comparison(left.as_ref()),
@@ -22,15 +25,14 @@ pub fn paths_match_after_normalization(left: impl AsRef<Path>, right: impl AsRef
     left.as_ref() == right.as_ref()
 }
 
-pub fn normalize_for_native_workdir(path: impl AsRef<Path>) -> PathBuf {
-    normalize_for_native_workdir_with_flag(path.as_ref().to_path_buf(), cfg!(windows))
-}
-
+// Only the Unix symlink tests use these.
+#[cfg(all(test, unix))]
 pub struct SymlinkWritePaths {
     pub read_path: Option<PathBuf>,
     pub write_path: PathBuf,
 }
 
+#[cfg(all(test, unix))]
 pub fn resolve_symlink_write_paths(path: &Path) -> io::Result<SymlinkWritePaths> {
     let root = AbsolutePathBuf::from_absolute_path(path)
         .map(AbsolutePathBuf::into_path_buf)
@@ -104,24 +106,11 @@ pub fn resolve_symlink_write_paths(path: &Path) -> io::Result<SymlinkWritePaths>
     }
 }
 
-pub fn write_atomically(write_path: &Path, contents: &str) -> io::Result<()> {
-    let parent = write_path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path {} has no parent directory", write_path.display()),
-        )
-    })?;
-    std::fs::create_dir_all(parent)?;
-    let tmp = NamedTempFile::new_in(parent)?;
-    std::fs::write(tmp.path(), contents)?;
-    tmp.persist(write_path)?;
-    Ok(())
-}
-
 fn normalize_for_wsl(path: PathBuf) -> PathBuf {
     normalize_for_wsl_with_flag(path, env::is_wsl())
 }
 
+#[cfg(test)]
 fn normalize_for_native_workdir_with_flag(path: PathBuf, is_windows: bool) -> PathBuf {
     if is_windows {
         dunce::simplified(&path).to_path_buf()

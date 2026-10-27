@@ -1301,19 +1301,6 @@ async fn streaming_final_answer_keeps_task_running_state() {
     assert!(!chat.bottom_pane.quit_shortcut_hint_visible());
 }
 
-fn assert_goal_paused_event(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    thread_id: String,
-) {
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SetThreadGoalStatus {
-            thread_id: event_thread_id,
-            status: GoalState::Paused,
-        }) if event_thread_id == thread_id
-    );
-}
-
 #[tokio::test]
 async fn idle_commit_ticks_do_not_restore_status_without_commentary_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
@@ -2405,18 +2392,6 @@ async fn session_start_hook_events_render_snapshot() {
         "session_start_hook_events_render_snapshot",
     )
     .await;
-}
-
-fn hook_live_and_history_snapshot(chat: &ChatWidget, phase: &str, history: &str) -> String {
-    let history = if history.is_empty() {
-        "<empty>"
-    } else {
-        history
-    };
-    format!(
-        "{phase}\nlive hooks:\n{}history:\n{history}",
-        active_hook_blob(chat),
-    )
 }
 
 #[tokio::test]

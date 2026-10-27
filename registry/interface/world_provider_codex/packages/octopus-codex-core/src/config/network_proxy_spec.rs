@@ -1,5 +1,4 @@
 use octopus_config::NetworkConstraints;
-use octopus_execpolicy::Policy;
 use octopus_network_proxy::BlockedRequestObserver;
 use octopus_network_proxy::ConfigReloader;
 use octopus_network_proxy::ConfigReloaderFuture;
@@ -14,10 +13,10 @@ use octopus_network_proxy::NetworkProxyHandle;
 use octopus_network_proxy::NetworkProxyState;
 use octopus_network_proxy::build_config_state;
 use octopus_network_proxy::host_and_port_from_network_addr;
+#[cfg(test)]
 use octopus_network_proxy::normalize_host;
 use octopus_network_proxy::validate_policy_against_constraints;
 use octopus_protocol::models::PermissionProfile;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,46 +147,6 @@ impl NetworkProxySpec {
             .await
             .map_err(|err| std::io::Error::other(format!("failed to run network proxy: {err}")))?;
         Ok(StartedNetworkProxy::new(proxy, handle))
-    }
-
-    pub(crate) fn recompute_for_permission_profile(
-        &self,
-        permission_profile: &PermissionProfile,
-    ) -> std::io::Result<Self> {
-        Self::from_config_and_constraints(
-            self.base_config.clone(),
-            self.requirements.clone(),
-            permission_profile,
-        )
-    }
-
-    pub(crate) fn with_exec_policy_network_rules(
-        &self,
-        exec_policy: &Policy,
-    ) -> std::io::Result<Self> {
-        let mut spec = self.clone();
-        apply_exec_policy_network_rules(&mut spec.config, exec_policy);
-        validate_policy_against_constraints(&spec.config, &spec.constraints).map_err(|err| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("network proxy constraints are invalid: {err}"),
-            )
-        })?;
-        Ok(spec)
-    }
-
-    pub(crate) async fn apply_to_started_proxy(
-        &self,
-        started_proxy: &StartedNetworkProxy,
-    ) -> std::io::Result<()> {
-        let state = self.build_config_state_for_spec()?;
-        started_proxy
-            .proxy()
-            .replace_config_state(state)
-            .await
-            .map_err(|err| {
-                std::io::Error::other(format!("failed to update network proxy state: {err}"))
-            })
     }
 
     fn build_state_with_audit_metadata(
@@ -343,29 +302,6 @@ impl NetworkProxySpec {
             }
         }
         managed
-    }
-}
-
-fn apply_exec_policy_network_rules(config: &mut NetworkProxyConfig, exec_policy: &Policy) {
-    let (allowed_domains, denied_domains) = exec_policy.compiled_network_domains();
-    upsert_network_domains(config, allowed_domains, true);
-    upsert_network_domains(config, denied_domains, false);
-}
-
-fn upsert_network_domains(config: &mut NetworkProxyConfig, hosts: Vec<String>, allow: bool) {
-    let mut incoming = HashSet::new();
-    for host in hosts {
-        if incoming.insert(host.clone()) {
-            config.network.upsert_domain_permission(
-                host,
-                if allow {
-                    octopus_network_proxy::NetworkDomainPermission::Allow
-                } else {
-                    octopus_network_proxy::NetworkDomainPermission::Deny
-                },
-                normalize_host,
-            );
-        }
     }
 }
 

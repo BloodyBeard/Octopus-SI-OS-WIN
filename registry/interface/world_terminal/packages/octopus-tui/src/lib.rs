@@ -11,15 +11,19 @@ use app::AppRunExit;
 use app::DetachReceipt;
 pub use app::ExitReason;
 use app_server_session::AppServerSession;
+#[cfg(test)]
 use app_server_session::ThreadParamsMode;
 use color_eyre::eyre::WrapErr;
+#[cfg(test)]
 use octopus_exec::EnvironmentManager;
+#[cfg(test)]
 use octopus_exec::ExecServerRuntimePaths;
 use octopus_substrate_contract::approvals_substrate::AskForApproval;
 use octopus_substrate_contract::sandbox_policy::SandboxMode;
 #[cfg(target_os = "windows")]
 use octopus_substrate_contract::shell_env_config::WindowsSandboxLevel;
 use octopus_util_abspath::AbsolutePathBuf;
+#[cfg(test)]
 use octopus_util_abspath::canonicalize_existing_preserving_symlinks;
 use octopus_utils_home_dir::find_octopus_home as find_codex_home;
 pub use octopus_world_terminal_client::DaemonEndpoint;
@@ -60,6 +64,8 @@ pub use octopus_world_terminal_render::custom_terminal;
 mod pets;
 pub use custom_terminal::Terminal;
 mod auto_review_denials;
+// Nothing in the client opens this prompt; only its own tests build it.
+#[cfg(test)]
 mod cwd_prompt;
 mod dashboard;
 mod debug_config;
@@ -81,7 +87,6 @@ mod hooks_surface;
 mod ide_context;
 pub use insert_history::insert_history_lines;
 pub use octopus_world_terminal_render::insert_history;
-#[allow(dead_code)]
 pub use octopus_world_terminal_render::key_hint;
 mod keymap;
 mod keymap_setup;
@@ -96,7 +101,6 @@ mod mention_codec;
 mod metrics;
 mod model_catalog;
 pub use octopus_world_terminal_render::motion;
-mod multi_agents;
 mod notifications;
 pub(crate) mod onboarding;
 mod oss_selection;
@@ -195,6 +199,7 @@ impl AppServerTarget {
         }
     }
 
+    #[cfg(test)]
     fn thread_params_mode(&self) -> ThreadParamsMode {
         if self.uses_remote_workspace() {
             ThreadParamsMode::Remote
@@ -343,10 +348,9 @@ async fn resolve_private_run_topology(
 #[cfg(test)]
 pub(crate) async fn start_app_server_for_picker(
     _config: &TuiConfig,
-    target: &AppServerTarget,
     _environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerSession> {
-    Ok(AppServerSession::new(target.thread_params_mode()))
+    Ok(AppServerSession::new())
 }
 
 #[cfg(test)]
@@ -355,7 +359,6 @@ pub(crate) async fn start_embedded_app_server_for_picker(
 ) -> color_eyre::Result<AppServerSession> {
     start_app_server_for_picker(
         config,
-        &AppServerTarget::Embedded,
         Arc::new(EnvironmentManager::default_for_tests()),
     )
     .await
@@ -387,6 +390,7 @@ fn lookup_latest_session_target(
     Ok(runs.first().map(resume_picker::session_target_from_run))
 }
 
+#[cfg(test)]
 fn config_cwd_for_app_server_target(
     cwd: Option<&Path>,
     app_server_target: &AppServerTarget,
@@ -407,13 +411,6 @@ fn config_cwd_for_app_server_target(
         None => AbsolutePathBuf::current_dir(),
     }?;
     Ok(Some(cwd))
-}
-
-fn should_load_configured_environments(
-    non_default_config_loading: bool,
-    app_server_target: &AppServerTarget,
-) -> bool {
-    !non_default_config_loading && !app_server_target.uses_remote_workspace()
 }
 
 #[cfg(test)]
@@ -580,20 +577,6 @@ pub async fn run_main(
         .clone()
         .filter(|_| app_server_target.uses_remote_workspace());
 
-    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
-        runtime_paths.self_exe.clone(),
-        runtime_paths.linux_sandbox_exe.clone(),
-    )?;
-    let environment_manager = if should_load_configured_environments(
-        launcher_hooks.non_default_config_loading,
-        &app_server_target,
-    ) {
-        EnvironmentManager::from_codex_home(codex_home.clone(), Some(local_runtime_paths)).await
-    } else {
-        EnvironmentManager::from_env(Some(local_runtime_paths)).await
-    }
-    .map(Arc::new)
-    .map_err(std::io::Error::other)?;
     let cwd = cli.cwd.clone();
 
     let cwd_override = if app_server_target.uses_remote_workspace() {
@@ -771,7 +754,6 @@ pub async fn run_main(
         manually_selected_oss_provider,
         config_runtime,
         load_request,
-        environment_manager,
         launcher_hooks,
     )
     .await
@@ -788,7 +770,6 @@ async fn run_ratatui_app(
     manually_selected_oss_provider: Option<String>,
     config_runtime: Arc<dyn ProviderConfigRuntime>,
     load_request: SessionLoadRequest,
-    environment_manager: Arc<EnvironmentManager>,
     launcher_hooks: LauncherProviderHooks,
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
@@ -813,7 +794,7 @@ async fn run_ratatui_app(
 
     session_log::maybe_init(&initial_config);
 
-    let app_server_session = AppServerSession::new(app_server_target.thread_params_mode())
+    let app_server_session = AppServerSession::new()
         .with_remote_cwd_override(remote_cwd_override.clone());
     let spine_attach_notice = None;
     if let Some(provider) = manually_selected_oss_provider.as_deref()
@@ -1116,7 +1097,6 @@ async fn run_ratatui_app(
         should_show_trust_screen,
         should_prompt_windows_sandbox_nux_at_startup,
         app_server_target,
-        environment_manager,
         startup_elapsed_before_app,
         startup_bootstrap,
         startup_hooks_browser,
@@ -1174,15 +1154,6 @@ struct TerminalRestoreGuard {
 impl TerminalRestoreGuard {
     fn new() -> Self {
         Self { active: true }
-    }
-
-    #[cfg_attr(debug_assertions, allow(dead_code))]
-    fn restore(&mut self) -> color_eyre::Result<()> {
-        if self.active {
-            crate::tui::restore_after_exit()?;
-            self.active = false;
-        }
-        Ok(())
     }
 
     fn restore_silently(&mut self) {
@@ -1397,7 +1368,6 @@ mod tests {
     fn session_target_display_label_is_the_run_id() {
         let target = crate::resume_picker::SessionTarget {
             run: octopus_descriptors::RunId::new("run_alpha"),
-            record_path: std::path::PathBuf::from("/x/run_alpha.json"),
             cwd: None,
         };
 
@@ -1576,16 +1546,6 @@ mod tests {
             false,
             true,
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn should_load_configured_environments_for_local_daemon() -> color_eyre::Result<()> {
-        let target = AppServerTarget::LocalDaemon {
-            endpoint: DaemonEndpoint::local_default(Path::new("/octo/home")),
-        };
-
-        assert!(should_load_configured_environments(false, &target));
         Ok(())
     }
 

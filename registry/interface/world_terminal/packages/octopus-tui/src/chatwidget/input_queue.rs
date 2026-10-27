@@ -30,6 +30,7 @@ impl InputQueueState {
         !self.rejected_steers_queue.is_empty() || !self.queued_user_messages.is_empty()
     }
 
+    #[cfg(test)]
     pub(super) fn clear(&mut self) {
         self.queued_user_messages.clear();
         self.queued_user_message_history_records.clear();

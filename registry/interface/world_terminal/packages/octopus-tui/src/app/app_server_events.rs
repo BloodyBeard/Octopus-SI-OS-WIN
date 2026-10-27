@@ -2,12 +2,6 @@ use super::App;
 use crate::app_server_session::AppServerSession;
 
 impl App {
-    pub(super) fn refresh_tool_interface_startup_expected_endpoints_from_config(&mut self) {
-        let enabled_config_tool_endpoints: Vec<String> = self.config.enabled_mcp_servers.clone();
-        self.chat_widget
-            .set_tool_interface_startup_expected_endpoints(enabled_config_tool_endpoints);
-    }
-
     pub(super) fn handle_embedded_reply_lane(
         &mut self,
         app_server_client: &AppServerSession,

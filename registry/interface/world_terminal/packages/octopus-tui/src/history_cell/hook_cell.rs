@@ -206,25 +206,10 @@ impl HookCell {
     }
 
     #[cfg(test)]
-    pub(crate) fn expire_quiet_runs_now_for_test(&mut self) {
-        for run in &mut self.runs {
-            run.expire_quiet_linger_now_for_test();
-        }
-    }
-
-    #[cfg(test)]
     pub(crate) fn reveal_running_runs_now_for_test(&mut self) {
         let now = Instant::now();
         for run in &mut self.runs {
             run.reveal_running_now_for_test(now);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reveal_running_runs_after_delayed_redraw_for_test(&mut self) {
-        let now = Instant::now();
-        for run in &mut self.runs {
-            run.reveal_running_after_delayed_redraw_for_test(now);
         }
     }
 }
@@ -303,35 +288,12 @@ impl Renderable for HookCell {
 
 impl HookRunCell {
     #[cfg(test)]
-    fn expire_quiet_linger_now_for_test(&mut self) {
-        if let HookRunState::QuietLinger {
-            removal_deadline, ..
-        } = &mut self.state
-        {
-            *removal_deadline = Instant::now();
-        }
-    }
-
-    #[cfg(test)]
     fn reveal_running_now_for_test(&mut self, now: Instant) {
         if let HookRunState::PendingReveal {
             reveal_deadline, ..
         } = &mut self.state
         {
             *reveal_deadline = now;
-        }
-    }
-
-    #[cfg(test)]
-    fn reveal_running_after_delayed_redraw_for_test(&mut self, now: Instant) {
-        if let HookRunState::PendingReveal {
-            reveal_deadline, ..
-        } = &mut self.state
-        {
-            let delayed_deadline = now
-                .checked_sub(QUIET_HOOK_MIN_VISIBLE + Duration::from_millis(100))
-                .unwrap_or(now);
-            *reveal_deadline = delayed_deadline;
         }
     }
 

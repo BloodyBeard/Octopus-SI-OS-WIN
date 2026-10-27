@@ -126,9 +126,9 @@ pub(super) enum RateLimitSwitchPromptState {
     Shown,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) enum RateLimitErrorKind {
-    ServerOverloaded,
     UsageLimit,
     Generic,
 }
@@ -235,12 +235,10 @@ impl ChatWidget {
 
     pub(super) fn stop_rate_limit_poller(&mut self) {}
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn prefetch_rate_limits(&mut self) {
         self.stop_rate_limit_poller();
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn should_prefetch_rate_limits(&self) -> bool {
         self.config.model_provider.requires_openai_auth && self.has_chatgpt_account
     }
@@ -357,6 +355,7 @@ impl ChatWidget {
         });
     }
 
+    #[cfg(test)]
     pub(super) fn open_workspace_owner_nudge_prompt(&mut self, credit_type: &str) {
         if self.add_credits_nudge_email_in_flight.is_some() {
             return;
@@ -406,11 +405,13 @@ impl ChatWidget {
         });
     }
 
+    #[cfg(test)]
     pub(crate) fn start_add_credits_nudge_email_request(&mut self, credit_type: String) -> bool {
         self.add_credits_nudge_email_in_flight = Some(credit_type);
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn finish_add_credits_nudge_email_request(
         &mut self,
         result: Result<String, String>,

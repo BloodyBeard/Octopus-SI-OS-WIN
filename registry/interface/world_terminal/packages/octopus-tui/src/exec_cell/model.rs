@@ -85,6 +85,7 @@ impl ExecCell {
         !self.is_exploring_cell() && self.calls.iter().all(|c| c.output.is_some())
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_failed(&mut self) {
         for call in self.calls.iter_mut() {
             if call.output.is_none() {

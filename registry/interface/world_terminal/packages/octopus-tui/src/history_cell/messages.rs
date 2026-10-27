@@ -4,7 +4,6 @@ use super::*;
 pub(crate) struct UserHistoryCell {
     pub message: String,
     pub text_elements: Vec<TextElement>,
-    #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
 }

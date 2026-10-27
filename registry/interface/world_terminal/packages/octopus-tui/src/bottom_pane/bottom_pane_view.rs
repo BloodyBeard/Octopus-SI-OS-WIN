@@ -38,11 +38,6 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
-    #[allow(dead_code)]
-    fn active_tab_id(&self) -> Option<&str> {
-        None
-    }
-
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         CancellationEvent::NotHandled
     }

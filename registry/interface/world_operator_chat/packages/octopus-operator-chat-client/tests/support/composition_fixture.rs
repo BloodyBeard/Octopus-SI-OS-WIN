@@ -12,6 +12,9 @@ pub fn write(root: &Path, relative: &str, value: Value) {
     std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
+// Several test programs include this file; context_bindings and the provider's
+// tests use only the plain fixture, so this one is unused in those builds.
+#[allow(dead_code, reason = "shared test helper; not every including test builds a client fixture")]
 pub fn client_fixture(root: &Path) -> RunCompositionRequest {
     let mut request = fixture(root);
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../..");

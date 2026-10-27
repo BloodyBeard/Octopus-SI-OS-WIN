@@ -60,6 +60,7 @@ impl ChatWidget {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn on_terminal_interaction(&mut self, process_id: String, stdin: String) {
         if !self.bottom_pane.is_task_running() {
             return;

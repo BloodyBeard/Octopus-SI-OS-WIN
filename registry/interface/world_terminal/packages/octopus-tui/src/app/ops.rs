@@ -183,7 +183,6 @@ impl App {
                 }
             }
             AppCommand::OverrideTurnContext { .. } => {}
-            AppCommand::Shutdown => {}
         }
         Ok(())
     }

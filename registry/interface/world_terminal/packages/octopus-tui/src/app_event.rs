@@ -95,6 +95,7 @@ pub(crate) enum AppEvent {
         event: HistoryLookupResponse,
     },
 
+    #[cfg(test)]
     SyncThreadGitBranch {
         thread_id: String,
         branch: String,
@@ -174,15 +175,13 @@ pub(crate) enum AppEvent {
 
     Logout,
 
-    #[allow(dead_code)]
-    FatalExitRequest(String),
-
     CodexOp(AppCommand),
 
     ShellCommandCompleted {
         item: ExecCommandItem,
     },
 
+    #[cfg(test)]
     RestoreCancelledTurn(UserMessage),
 
     ApproveRecentAutoReviewDenial {
@@ -261,16 +260,19 @@ pub(crate) enum AppEvent {
 
     CommitPendingUsageOutputAfterStreamShutdown,
 
+    #[cfg(test)]
     SendAddCreditsNudgeEmail {
         credit_type: String,
     },
 
+    #[cfg(test)]
     AddCreditsNudgeEmailFinished {
         result: Result<String, String>,
     },
 
     DiffResult(String),
 
+    #[cfg(test)]
     OpenUrlInBrowser {
         url: String,
     },
@@ -314,13 +316,7 @@ pub(crate) enum AppEvent {
         result: Result<octopus_world_terminal_client::HookCatalog, String>,
     },
 
-    BeginInitialHistoryReplayBuffer,
-
-    BeginThreadSwitchHistoryReplayBuffer,
-
     InsertHistoryCell(Box<dyn HistoryCell>),
-
-    EndInitialHistoryReplayBuffer,
 
     ConsolidateAgentMessage {
         source: String,
@@ -368,10 +364,6 @@ pub(crate) enum AppEvent {
     OpenPlanReasoningScopePrompt {
         model: String,
         effort: Option<ReasoningEffort>,
-    },
-
-    OpenAllModelsPopup {
-        models: Vec<ModelPreset>,
     },
 
     OpenFullAccessConfirmation {
@@ -585,6 +577,5 @@ pub(crate) struct PermissionProfileSelection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExitMode {
     ShutdownFirst,
-    Immediate,
     Detach { run_id: String },
 }

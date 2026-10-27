@@ -301,6 +301,7 @@ impl ChatWidget {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_pending_rate_limit_reset_requests(&mut self) {
         self.pending_rate_limit_reset_request_id = None;
         self.available_rate_limit_reset_credits = None;

@@ -1,4 +1,5 @@
 use crate::exec_command::relativize_to_home;
+#[cfg(test)]
 use crate::plan_type::PlanType;
 use crate::status::StatusAccountDisplay;
 use crate::text_formatting;
@@ -96,6 +97,7 @@ pub(crate) fn compose_account_display(
     account_display.cloned()
 }
 
+#[cfg(test)]
 pub(crate) fn plan_type_display_name(plan_type: PlanType) -> String {
     if plan_type.is_team_like() {
         "Business".to_string()
@@ -181,6 +183,7 @@ pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<
     }
 }
 
+#[cfg(test)]
 fn title_case(s: &str) -> String {
     if s.is_empty() {
         return String::new();

@@ -8,6 +8,8 @@ rust-version = "1.85"
 [[bin]]
 name = "octopus-code-mode-tool-door-life"
 path = "src/bin/tool_door_life.rs"
+# The binary has no tests of its own; its shared modules are tested by their crates.
+test = false
 
 [dependencies]
 octopus-code-mode-room = { path = "../octopus-code-mode-room" }

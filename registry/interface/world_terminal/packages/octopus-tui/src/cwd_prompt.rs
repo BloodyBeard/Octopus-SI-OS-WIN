@@ -1,4 +1,3 @@
-use std::path::Path;
 
 use crate::key_hint;
 use crate::render::Insets;
@@ -7,9 +6,6 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableExt as _;
 use crate::selection_list::selection_option_row;
 use crate::tui::FrameRequester;
-use crate::tui::Tui;
-use crate::tui::TuiEvent;
-use color_eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -21,7 +17,6 @@ use ratatui::style::Stylize as _;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
-use tokio_stream::StreamExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CwdPromptAction {
@@ -51,12 +46,6 @@ pub(crate) enum CwdSelection {
     Session,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CwdPromptOutcome {
-    Selection(CwdSelection),
-    Exit,
-}
-
 impl CwdSelection {
     fn next(self) -> Self {
         match self {
@@ -70,50 +59,6 @@ impl CwdSelection {
             CwdSelection::Current => CwdSelection::Session,
             CwdSelection::Session => CwdSelection::Current,
         }
-    }
-}
-
-pub(crate) async fn run_cwd_selection_prompt(
-    tui: &mut Tui,
-    action: CwdPromptAction,
-    current_cwd: &Path,
-    session_cwd: &Path,
-) -> Result<CwdPromptOutcome> {
-    let mut screen = CwdPromptScreen::new(
-        tui.frame_requester(),
-        action,
-        current_cwd.display().to_string(),
-        session_cwd.display().to_string(),
-    );
-    tui.draw(u16::MAX, |frame| {
-        frame.render_widget_ref(&screen, frame.area());
-    })?;
-
-    let events = tui.event_stream();
-    tokio::pin!(events);
-
-    while !screen.is_done() {
-        if let Some(event) = events.next().await {
-            match event {
-                TuiEvent::Key(key_event) => screen.handle_key(key_event),
-                TuiEvent::Paste(_) => {}
-                TuiEvent::Draw | TuiEvent::Resize => {
-                    tui.draw(u16::MAX, |frame| {
-                        frame.render_widget_ref(&screen, frame.area());
-                    })?;
-                }
-            }
-        } else {
-            break;
-        }
-    }
-
-    if screen.should_exit {
-        Ok(CwdPromptOutcome::Exit)
-    } else {
-        Ok(CwdPromptOutcome::Selection(
-            screen.selection().unwrap_or(CwdSelection::Session),
-        ))
     }
 }
 

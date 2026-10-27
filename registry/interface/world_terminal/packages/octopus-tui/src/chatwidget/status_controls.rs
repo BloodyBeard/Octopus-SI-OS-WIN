@@ -62,10 +62,6 @@ impl ChatWidget {
         self.bottom_pane.set_status_line_hyperlink(url);
     }
 
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
-        self.bottom_pane.set_active_agent_label(active_agent_label);
-    }
-
     pub(crate) fn refresh_status_line(&mut self) {
         self.refresh_status_surfaces();
     }

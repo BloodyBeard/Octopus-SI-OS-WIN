@@ -15,6 +15,7 @@ impl ChatWidget {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn on_exec_approval_request(&mut self, _id: String, ev: ExecApprovalRequestEvent) {
         self.record_visible_turn_activity();
         let ev2 = ev.clone();
@@ -37,6 +38,7 @@ impl ChatWidget {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn on_guardian_assessment(&mut self, ev: GuardianAssessmentEvent) {
         let permission_request_summary = |subject: &str, reason: &Option<String>| {
             reason
@@ -273,15 +275,7 @@ impl ChatWidget {
         );
     }
 
-    pub(super) fn on_request_permissions(&mut self, ev: RequestPermissionsEvent) {
-        self.record_visible_turn_activity();
-        let ev2 = ev.clone();
-        self.defer_or_handle(
-            |q| q.push_request_permissions(ev),
-            |s| s.handle_request_permissions_now(ev2),
-        );
-    }
-
+    #[cfg(test)]
     pub(crate) fn handle_exec_approval_now(&mut self, ev: ExecApprovalRequestEvent) {
         self.flush_answer_stream_with_separator();
         let command = shlex::try_join(ev.command.iter().map(String::as_str))
@@ -438,22 +432,6 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn push_approval_request(&mut self, request: ApprovalRequest) {
-        self.bottom_pane.push_approval_request(request);
-        self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Waiting, None);
-        self.request_redraw();
-    }
-
-    pub(crate) fn push_mcp_server_elicitation_request(
-        &mut self,
-        request: McpServerElicitationFormRequest,
-    ) {
-        self.bottom_pane
-            .push_mcp_server_elicitation_request(request);
-        self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Waiting, None);
-        self.request_redraw();
-    }
-
     pub(crate) fn handle_request_user_input_now(
         &mut self,
         request: octopus_world_terminal_client::UserInputRequest,
@@ -474,21 +452,6 @@ impl ChatWidget {
             ));
         }
         self.bottom_pane.push_user_input_request(request);
-        self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Waiting, None);
-        self.request_redraw();
-    }
-
-    pub(crate) fn handle_request_permissions_now(&mut self, ev: RequestPermissionsEvent) {
-        self.flush_answer_stream_with_separator();
-        let request = ApprovalRequest::Permissions {
-            thread_id: self.thread_id.clone().unwrap_or_default(),
-            thread_label: None,
-            call_id: ev.call_id,
-            environment_id: ev.environment_id,
-            reason: ev.reason,
-            permissions: ev.permissions,
-        };
-        self.bottom_pane.push_approval_request(request);
         self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Waiting, None);
         self.request_redraw();
     }

@@ -1,4 +1,6 @@
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::VecDeque;
 
 use octopus_world_terminal_client::PLUGIN_TEXT_MENTION_SIGIL;
@@ -17,7 +19,7 @@ pub(crate) struct DecodedHistoryText {
     pub(crate) mentions: Vec<LinkedMention>,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn encode_history_mentions(text: &str, mentions: &[LinkedMention]) -> String {
     if mentions.is_empty() || text.is_empty() {
         return text.to_string();
@@ -214,6 +216,7 @@ fn is_mention_name_char(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-')
 }
 
+#[cfg(test)]
 fn starts_plaintext_mention(text: &str, index: usize) -> bool {
     if index == 0 {
         return true;
@@ -224,6 +227,7 @@ fn starts_plaintext_mention(text: &str, index: usize) -> bool {
         .is_some_and(|ch| ch.is_whitespace() || !is_mention_name_char_char(ch))
 }
 
+#[cfg(test)]
 fn ends_plaintext_mention(text_bytes: &[u8], index: usize) -> bool {
     text_bytes.get(index).is_none_or(|byte| {
         byte.is_ascii_whitespace()
@@ -239,6 +243,7 @@ fn ends_plaintext_mention(text_bytes: &[u8], index: usize) -> bool {
     })
 }
 
+#[cfg(test)]
 fn is_mention_name_char_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
 }

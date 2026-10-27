@@ -125,7 +125,6 @@ pub(crate) struct AppServerBootstrap {
 
 pub(crate) struct AppServerSession {
     remote_cwd_override: Option<PathBuf>,
-    thread_params_mode: ThreadParamsMode,
     default_model: Option<String>,
     available_models: Vec<ModelPreset>,
     embedded_spine: Option<crate::embedded_spine::TerminalClientSpine>,
@@ -191,6 +190,7 @@ pub(crate) struct RegistryTabReads {
     pub(crate) run_count: std::result::Result<usize, String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ThreadParamsMode {
     Embedded,
@@ -212,10 +212,9 @@ pub(crate) enum TurnPermissionsOverride {
 }
 
 impl AppServerSession {
-    pub(crate) fn new(thread_params_mode: ThreadParamsMode) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             remote_cwd_override: None,
-            thread_params_mode,
             default_model: None,
             available_models: Vec::new(),
             embedded_spine: None,
@@ -521,15 +520,6 @@ impl AppServerSession {
         })
     }
 
-    pub(crate) fn run_record_path(&self, run: &octopus_descriptors::RunId) -> Option<PathBuf> {
-        self.private_topology.as_ref().map(|context| {
-            context
-                .roots
-                .run_records_root
-                .join(format!("{}.json", run.as_str()))
-        })
-    }
-
     pub(crate) fn prompt_history_durable_root(&self) -> Option<std::path::PathBuf> {
         self.embedded_spine
             .as_ref()
@@ -689,18 +679,6 @@ impl AppServerSession {
     pub(crate) fn with_remote_cwd_override(mut self, remote_cwd_override: Option<PathBuf>) -> Self {
         self.remote_cwd_override = remote_cwd_override;
         self
-    }
-
-    pub(crate) fn remote_cwd_override(&self) -> Option<&std::path::Path> {
-        self.remote_cwd_override.as_deref()
-    }
-
-    pub(crate) fn uses_remote_workspace(&self) -> bool {
-        matches!(self.thread_params_mode, ThreadParamsMode::Remote)
-    }
-
-    pub(crate) fn uses_embedded_app_server(&self) -> bool {
-        false
     }
 
     pub(crate) fn codex_home_path(&self, local_codex_home: &AbsolutePathBuf) -> Option<HostPath> {
@@ -1052,11 +1030,6 @@ impl AppServerSession {
         Ok(spine.operator_responder())
     }
 
-    pub(crate) async fn thread_set_name(&mut self, name: String) -> Result<()> {
-        let _ = name;
-        self.unavailable_interface_action("rename current chat")
-    }
-
     pub(crate) async fn thread_goal_get(
         &mut self,
         thread_id: &str,
@@ -1324,7 +1297,7 @@ mod tests {
 
     #[test]
     fn embedded_session_refuses_unbound_interface_projection() {
-        let session = AppServerSession::new(ThreadParamsMode::Embedded);
+        let session = AppServerSession::new();
 
         let projection_err = session
             .project_interface_payload_as_arrival_artifact_input(

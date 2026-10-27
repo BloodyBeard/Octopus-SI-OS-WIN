@@ -55,7 +55,6 @@ pub(crate) struct AppLinkViewParams {
 }
 
 impl AppLinkViewParams {
-    #[allow(dead_code)]
     pub(crate) fn from_url_elicitation(
         thread_id: String,
         server_name: &str,

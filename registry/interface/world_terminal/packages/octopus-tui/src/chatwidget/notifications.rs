@@ -24,6 +24,7 @@ impl ChatWidget {
 #[derive(Debug)]
 pub(super) enum Notification {
     AgentTurnComplete { response: String },
+    #[cfg(test)]
     ExecApprovalRequested { command: String },
     EditApprovalRequested { cwd: PathBuf, changes: Vec<PathBuf> },
     ElicitationRequested { server_name: String },
@@ -37,6 +38,7 @@ impl Notification {
                 Notification::agent_turn_preview(response)
                     .unwrap_or_else(|| "Agent turn complete".to_string())
             }
+            #[cfg(test)]
             Notification::ExecApprovalRequested { command } => {
                 format!("Approval requested: {}", truncate_text(command, 30))
             }
@@ -63,8 +65,9 @@ impl Notification {
     fn type_name(&self) -> &str {
         match self {
             Notification::AgentTurnComplete { .. } => "agent-turn-complete",
-            Notification::ExecApprovalRequested { .. }
-            | Notification::EditApprovalRequested { .. }
+            #[cfg(test)]
+            Notification::ExecApprovalRequested { .. } => "approval-requested",
+            Notification::EditApprovalRequested { .. }
             | Notification::ElicitationRequested { .. } => "approval-requested",
             Notification::PlanModePrompt { .. } => "plan-mode-prompt",
         }
@@ -73,8 +76,9 @@ impl Notification {
     fn priority(&self) -> u8 {
         match self {
             Notification::AgentTurnComplete { .. } => 0,
-            Notification::ExecApprovalRequested { .. }
-            | Notification::EditApprovalRequested { .. }
+            #[cfg(test)]
+            Notification::ExecApprovalRequested { .. } => 1,
+            Notification::EditApprovalRequested { .. }
             | Notification::ElicitationRequested { .. }
             | Notification::PlanModePrompt { .. } => 1,
         }

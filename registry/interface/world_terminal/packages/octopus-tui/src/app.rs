@@ -59,7 +59,6 @@ use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use octopus_ansi_escape::ansi_escape_line;
 use octopus_descriptors::RunId;
-use octopus_exec::EnvironmentManager;
 use octopus_substrate_contract::approvals_substrate::AskForApproval;
 use octopus_substrate_contract::permission_profile::ActivePermissionProfile;
 use octopus_substrate_contract::permission_profile::PermissionProfile;
@@ -305,8 +304,6 @@ pub(crate) struct App {
     terminal_title_invalid_items_warned: Arc<AtomicBool>,
     pub(crate) backtrack: crate::app_backtrack::BacktrackState,
     pub(crate) backtrack_render_pending: bool,
-    #[allow(dead_code)]
-    environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
 
     windows_sandbox: WindowsSandboxState,
@@ -379,7 +376,6 @@ impl App {
         is_first_run: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
         app_server_target: AppServerTarget,
-        environment_manager: Arc<EnvironmentManager>,
         startup_elapsed_before_app: Duration,
         startup_bootstrap: Option<AppServerBootstrap>,
         startup_hooks_browser: Option<octopus_world_terminal_client::HookCatalog>,
@@ -621,7 +617,6 @@ See the Codex keymap documentation for supported actions and examples."
             terminal_title_invalid_items_warned: terminal_title_invalid_items_warned.clone(),
             backtrack: BacktrackState::default(),
             backtrack_render_pending: false,
-            environment_manager,
             app_server_target,
             windows_sandbox: WindowsSandboxState::default(),
             prompt_history,

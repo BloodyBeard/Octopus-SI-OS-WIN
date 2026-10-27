@@ -212,13 +212,6 @@ impl OnboardingScreen {
         }
     }
 
-    fn auth_widget_mut(&mut self) -> Option<&mut AuthModeWidget> {
-        self.steps.iter_mut().find_map(|step| match step {
-            Step::Auth(widget) => Some(widget),
-            Step::Welcome(_) | Step::TrustDirectory(_) => None,
-        })
-    }
-
     fn api_key_entry_context(&self) -> ApiKeyEntryContext {
         self.steps
             .iter()
@@ -427,7 +420,6 @@ pub(crate) async fn run_onboarding_app(
     let config_runtime = args.config_runtime.clone();
     let mut onboarding_screen = OnboardingScreen::new(tui, args).await;
     let mut directory_trust_persisted = false;
-    let mut did_full_clear_after_success = false;
 
     tui.draw(u16::MAX, |frame| {
         frame.render_widget_ref(&onboarding_screen, frame.area());
@@ -454,35 +446,6 @@ pub(crate) async fn run_onboarding_app(
                     onboarding_screen.handle_paste(text);
                 }
                 TuiEvent::Draw | TuiEvent::Resize => {
-                    if !did_full_clear_after_success
-                        && onboarding_screen.steps.iter().any(|step| {
-                            if let Step::Auth(w) = step {
-                                w.sign_in_state.read().is_ok_and(|g| {
-                                    matches!(&*g, super::auth::SignInState::ChatGptSuccessMessage)
-                                })
-                            } else {
-                                false
-                            }
-                        })
-                    {
-                        let _ = ratatui::crossterm::execute!(
-                            std::io::stdout(),
-                            ratatui::crossterm::style::SetAttribute(
-                                ratatui::crossterm::style::Attribute::Reset
-                            ),
-                            ratatui::crossterm::style::SetAttribute(
-                                ratatui::crossterm::style::Attribute::NoUnderline
-                            ),
-                            ratatui::crossterm::style::SetForegroundColor(
-                                ratatui::crossterm::style::Color::Reset
-                            ),
-                            ratatui::crossterm::style::SetBackgroundColor(
-                                ratatui::crossterm::style::Color::Reset
-                            )
-                        );
-                        let _ = tui.terminal.clear();
-                        did_full_clear_after_success = true;
-                    }
                     let _ = tui.draw(u16::MAX, |frame| {
                         frame.render_widget_ref(&onboarding_screen, frame.area());
                     });

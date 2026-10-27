@@ -5,8 +5,9 @@ use crate::diff_model::FileChange;
 use octopus_substrate_contract::approvals_substrate::NetworkPolicyRuleAction;
 use octopus_substrate_contract::permission_profile::FileSystemPermissions;
 use octopus_substrate_contract::permission_profile::NetworkPermissions;
-use octopus_util_abspath::AbsolutePathBuf;
+#[cfg(test)]
 use octopus_world_terminal_client::ApprovalDetail;
+#[cfg(test)]
 use octopus_world_terminal_client::ApprovalOptionItem;
 use serde::Deserialize;
 use serde::Serialize;
@@ -43,26 +44,6 @@ pub(crate) struct RequestPermissionsResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct RequestPermissionsEvent {
-    pub call_id: String,
-    #[serde(default)]
-    pub turn_id: String,
-    #[serde(
-        default,
-        rename = "environmentId",
-        alias = "environment_id",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub environment_id: Option<String>,
-    pub started_at_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    pub permissions: RequestPermissionProfile,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<AbsolutePathBuf>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub(crate) struct ExecPolicyAmendment {
     pub command: Vec<String>,
@@ -80,6 +61,7 @@ pub(crate) struct NetworkPolicyAmendment {
     pub action: NetworkPolicyRuleAction,
 }
 
+#[cfg(test)]
 pub(crate) fn default_approval_options(detail: &ApprovalDetail) -> Vec<ApprovalOptionItem> {
     let mut options = vec![ApprovalOptionItem {
         kind: "accept".to_string(),
@@ -104,6 +86,7 @@ pub(crate) fn default_approval_options(detail: &ApprovalDetail) -> Vec<ApprovalO
     options
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct ExecApprovalRequestEvent {
     pub(crate) request_id: String,
@@ -119,7 +102,9 @@ pub(crate) struct ExecApprovalRequestEvent {
     pub(crate) options: Vec<ApprovalOptionItem>,
 }
 
+#[cfg(test)]
 impl ExecApprovalRequestEvent {
+    #[cfg(test)]
     pub(crate) fn effective_options(&self) -> Vec<ApprovalOptionItem> {
         if self.options.is_empty() {
             default_approval_options(&self.detail)

@@ -36,6 +36,7 @@ impl HistoryCell for StreamingPlanTailCell {
         self.is_stream_continuation
     }
 }
+#[cfg(test)]
 pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
     let UpdatePlanArgs { explanation, plan } = update;
     PlanUpdateCell { explanation, plan }
@@ -130,12 +131,14 @@ impl HistoryCell for ProposedPlanStreamCell {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct PlanUpdateCell {
     explanation: Option<String>,
     plan: Vec<PlanItemArg>,
 }
 
+#[cfg(test)]
 impl HistoryCell for PlanUpdateCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let render_note = |text: &str| -> Vec<Line<'static>> {

@@ -164,7 +164,7 @@ impl ChatWidget {
         self.runtime_model_provider_base_url.as_deref()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn model_catalog(&self) -> Arc<ModelCatalog> {
         self.model_catalog.clone()
     }
@@ -181,6 +181,7 @@ impl ChatWidget {
         self.has_codex_backend_auth
     }
 
+    #[cfg(test)]
     pub(crate) fn update_account_state(
         &mut self,
         status_account_display: Option<StatusAccountDisplay>,
@@ -285,7 +286,7 @@ impl ChatWidget {
         )
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn current_collaboration_mode(&self) -> &CollaborationMode {
         &self.current_collaboration_mode
     }
@@ -474,26 +475,6 @@ impl ChatWidget {
         self.current_goal_status.as_ref().and_then(|state| {
             state.indicator(now, self.turn_lifecycle.goal_status_active_turn_started_at)
         })
-    }
-
-    pub(super) fn on_thread_goal_updated(
-        &mut self,
-        goal: octopus_world_terminal_client::GoalStatusItem,
-        turn_id: Option<String>,
-    ) {
-        if !self.config.features.enabled_key("goals") {
-            self.current_goal_status_indicator = None;
-            self.current_goal_status = None;
-            self.update_collaboration_mode_indicator();
-            return;
-        }
-        if goal.status == octopus_world_terminal_client::GoalState::BudgetLimited
-            && let Some(turn_id) = turn_id
-        {
-            self.turn_lifecycle.mark_budget_limited(turn_id);
-        }
-        self.current_goal_status = Some(GoalStatusState::new(goal, Instant::now()));
-        self.update_collaboration_mode_indicator();
     }
 
     pub(super) fn cycle_collaboration_mode(&mut self) {

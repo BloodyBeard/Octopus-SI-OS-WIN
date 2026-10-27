@@ -22,28 +22,16 @@ pub(crate) struct ActiveArrivalInterface {
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalSubmitAck {
     pub(crate) addressed_run: octopus_runtime::RunId,
-    pub(crate) admitted_seq: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TerminalSubmitError {
-    #[error("terminal input artifact could not be materialized: {0}")]
-    Materialize(String),
     #[error(
         "terminal has no client interface id; refusing to submit without a descriptor-selected interface"
     )]
     NoInterface,
     #[error("handing the input artifact to the octopus-app daemon failed: {0}")]
     Daemon(#[from] DaemonArrivalError),
-}
-
-fn default_durable_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("OCTOPUS_HOME") {
-        return PathBuf::from(root).join("ledger");
-    }
-    octopus_utils_home_dir::find_octopus_home()
-        .map(|home| home.join("ledger").to_path_buf())
-        .unwrap_or_else(|_| PathBuf::from(".octopus").join("ledger"))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -180,21 +168,6 @@ pub struct TerminalClientSpine {
 }
 
 impl TerminalClientSpine {
-    pub(crate) fn new(run: octopus_runtime::RunId, durable_root: PathBuf) -> Self {
-        let artifact_root = durable_root
-            .parent()
-            .map(octopus_world_terminal_client::terminal_hand_in_root_path)
-            .unwrap_or_else(|| durable_root.join("interface-hand-in/world_terminal"));
-        Self {
-            daemon: TerminalDaemonEmitter::from_env(),
-            artifact_root: artifact_root.join("terminal-input-artifacts"),
-            durable_root,
-            run,
-            active_arrival_interface: None,
-            client_interface: None,
-        }
-    }
-
     pub(crate) fn new_with_endpoint(
         run: octopus_runtime::RunId,
         endpoint: octopus_world_terminal_client::DaemonEndpoint,
@@ -210,31 +183,6 @@ impl TerminalClientSpine {
             active_arrival_interface: None,
             client_interface: None,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn new_with_emitter(
-        run: octopus_runtime::RunId,
-        durable_root: PathBuf,
-        daemon: TerminalDaemonEmitter,
-    ) -> Self {
-        let artifact_root = durable_root
-            .parent()
-            .map(octopus_world_terminal_client::terminal_hand_in_root_path)
-            .unwrap_or_else(|| durable_root.join("interface-hand-in/world_terminal"));
-        Self {
-            daemon,
-            artifact_root: artifact_root.join("terminal-input-artifacts"),
-            durable_root,
-            run,
-            active_arrival_interface: None,
-            client_interface: None,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn new_default_root(run: octopus_runtime::RunId) -> Self {
-        Self::new(run, default_durable_root())
     }
 
     pub(crate) fn with_active_arrival_interface(mut self, active: ActiveArrivalInterface) -> Self {
@@ -292,12 +240,11 @@ impl TerminalClientSpine {
     ) -> Result<TerminalSubmitAck, TerminalSubmitError> {
         self.client_interface()?;
         let verdict = self.daemon.emit_input_manifest(manifest_bytes).await?;
-        let octopus_interfaces::DeliveryVerdict::Admitted { seq } = verdict else {
+        let octopus_interfaces::DeliveryVerdict::Admitted { .. } = verdict else {
             unreachable!("the terminal daemon emitter converts refused verdicts into errors")
         };
         Ok(TerminalSubmitAck {
             addressed_run: self.run.clone(),
-            admitted_seq: seq,
         })
     }
 
@@ -307,11 +254,6 @@ impl TerminalClientSpine {
 
     fn open_daemon_ledger(&self) -> Option<DurableLog> {
         DurableLog::open(self.durable_root.join("movements.jsonl")).ok()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn run(&self) -> &octopus_runtime::RunId {
-        &self.run
     }
 
     pub(crate) fn durable_root(&self) -> &Path {

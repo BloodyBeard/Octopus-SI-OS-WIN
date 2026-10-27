@@ -2,15 +2,15 @@ use super::*;
 use octopus_world_terminal_client::ToolCallItem;
 use octopus_world_terminal_client::ToolCallStatus;
 use octopus_world_terminal_client::ToolCallSurface;
-use octopus_world_terminal_client::WebSearchActionItem;
-use octopus_world_terminal_client::WebSearchItem;
 
 impl ChatWidget {
+    #[cfg(test)]
     pub(super) fn on_patch_apply_begin(&mut self, changes: HashMap<PathBuf, FileChange>) {
         self.record_visible_turn_activity();
         self.add_to_history(history_cell::new_patch_event(changes, &self.config.cwd));
     }
 
+    #[cfg(test)]
     pub(super) fn on_view_image_tool_call(&mut self, path: AbsolutePathBuf) {
         self.record_visible_turn_activity();
         self.flush_answer_stream_with_separator();
@@ -21,11 +21,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(super) fn on_image_generation_begin(&mut self) {
-        self.record_visible_turn_activity();
-        self.flush_answer_stream_with_separator();
-    }
-
+    #[cfg(test)]
     pub(super) fn on_image_generation_end(
         &mut self,
         call_id: String,
@@ -73,56 +69,7 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn on_web_search_begin(&mut self, call_id: String) {
-        self.record_visible_turn_activity();
-        self.flush_answer_stream_with_separator();
-        self.flush_active_cell();
-        self.transcript.active_cell = Some(Box::new(history_cell::new_active_web_search_call(
-            call_id,
-            String::new(),
-            self.config.terminal.animations,
-        )));
-        self.bump_active_cell_revision();
-        self.request_redraw();
-    }
-
-    pub(super) fn on_web_search_item(&mut self, item: WebSearchItem) {
-        self.on_web_search_begin(item.item_id.clone());
-        self.on_web_search_end(
-            item.item_id,
-            item.query,
-            item.action.unwrap_or(WebSearchActionItem::Other),
-        );
-    }
-
-    pub(super) fn on_web_search_end(
-        &mut self,
-        call_id: String,
-        query: String,
-        action: WebSearchActionItem,
-    ) {
-        self.flush_answer_stream_with_separator();
-        let mut handled = false;
-        if let Some(cell) = self
-            .transcript
-            .active_cell
-            .as_mut()
-            .and_then(|cell| cell.as_any_mut().downcast_mut::<WebSearchCell>())
-            && cell.call_id() == call_id
-        {
-            cell.update(action.clone(), query.clone());
-            cell.complete();
-            self.bump_active_cell_revision();
-            self.flush_active_cell();
-            handled = true;
-        }
-
-        if !handled {
-            self.add_to_history(history_cell::new_web_search_call(call_id, query, action));
-        }
-        self.transcript.had_work_activity = true;
-    }
-
+    #[cfg(test)]
     pub(crate) fn on_patch_apply_completed(&mut self, success: bool) {
         if !success {
             self.add_to_history(history_cell::new_patch_apply_failure(String::new()));

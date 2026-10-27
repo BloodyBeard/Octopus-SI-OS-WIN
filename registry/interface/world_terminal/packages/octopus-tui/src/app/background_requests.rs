@@ -93,6 +93,7 @@ impl App {
         });
     }
 
+    #[cfg(test)]
     pub(super) fn send_add_credits_nudge_email(
         &mut self,
         _app_server: &AppServerSession,
@@ -209,6 +210,7 @@ pub(super) async fn consume_rate_limit_reset_credit_request(
     crate::unavailable_interface_action::fail("rate-limit reset credit consumption")
 }
 
+#[cfg(test)]
 pub(super) async fn send_add_credits_nudge_email(credit_type: String) -> Result<String> {
     let _ = credit_type;
     crate::unavailable_interface_action::fail("account credit notification")

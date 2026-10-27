@@ -35,6 +35,7 @@ impl TurnLifecycleState {
         self.sleep_inhibitor.set_turn_running(false);
     }
 
+    #[cfg(test)]
     pub(super) fn restore_running(&mut self, running: bool, now: Instant) {
         self.agent_turn_running = running;
         self.goal_status_active_turn_started_at = running.then_some(now);
@@ -53,10 +54,12 @@ impl TurnLifecycleState {
             .set_turn_running(self.agent_turn_running);
     }
 
+    #[cfg(test)]
     pub(super) fn mark_budget_limited(&mut self, turn_id: String) {
         self.budget_limited_turn_ids.insert(turn_id);
     }
 
+    #[cfg(test)]
     pub(super) fn take_budget_limited(&mut self, turn_id: &str) -> bool {
         self.budget_limited_turn_ids.remove(turn_id)
     }

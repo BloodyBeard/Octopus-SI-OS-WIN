@@ -21,17 +21,20 @@ impl HistoryCell for PlainHistoryCell {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct WebHyperlinkHistoryCell {
     lines: Vec<Line<'static>>,
 }
 
+#[cfg(test)]
 impl WebHyperlinkHistoryCell {
     pub(crate) fn new(lines: Vec<Line<'static>>) -> Self {
         Self { lines }
     }
 }
 
+#[cfg(test)]
 impl HistoryCell for WebHyperlinkHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         self.lines.clone()

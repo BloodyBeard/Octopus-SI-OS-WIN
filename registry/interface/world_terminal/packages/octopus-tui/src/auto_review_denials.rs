@@ -2,8 +2,10 @@ use std::collections::VecDeque;
 
 use crate::guardian_events::GuardianAssessmentAction;
 use crate::guardian_events::GuardianAssessmentEvent;
+#[cfg(test)]
 use crate::guardian_events::GuardianAssessmentStatus;
 
+#[cfg(test)]
 const MAX_RECENT_DENIALS: usize = 10;
 
 #[derive(Debug, Default)]
@@ -12,6 +14,7 @@ pub(crate) struct RecentAutoReviewDenials {
 }
 
 impl RecentAutoReviewDenials {
+    #[cfg(test)]
     pub(crate) fn push(&mut self, event: GuardianAssessmentEvent) {
         if event.status != GuardianAssessmentStatus::Denied {
             return;

@@ -49,9 +49,7 @@ mod headless_chatgpt_login;
 #[derive(Clone)]
 pub(crate) enum SignInState {
     PickMode,
-    #[allow(dead_code)]
     ChatGptDeviceCode(ContinueWithDeviceCodeState),
-    ChatGptSuccessMessage,
     ChatGptSuccess,
     ApiKeyEntry(ApiKeyInputState),
 }
@@ -139,9 +137,6 @@ impl KeyboardHandler for AuthModeWidget {
                 SignInState::PickMode => {
                     self.handle_sign_in_option(self.highlighted_mode);
                 }
-                SignInState::ChatGptSuccessMessage => {
-                    *self.sign_in_state.write().unwrap() = SignInState::ChatGptSuccess;
-                }
                 _ => {}
             }
             return;
@@ -158,7 +153,6 @@ impl KeyboardHandler for AuthModeWidget {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) struct AuthModeWidget {
     pub request_frame: FrameRequester,
     pub highlighted_mode: SignInOption,
@@ -408,54 +402,6 @@ impl AuthModeWidget {
             lines.push("".into());
             lines.push(err.red().into());
         }
-
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
-    }
-
-    fn render_chatgpt_success_message(&self, area: Rect, buf: &mut Buffer) {
-        let lines = vec![
-            "✓ Codex provider credential connected"
-                .fg(Color::Green)
-                .into(),
-            "".into(),
-            "  Before you start:".into(),
-            "".into(),
-            "  Octopus actions still cross declared interfaces and policy gates".into(),
-            Line::from(vec![
-                "  Provider credentials are only one bound interface input. See ".into(),
-                crate::terminal_hyperlinks::osc8_hyperlink(
-                    "https://developers.openai.com/codex/security",
-                    "Provider docs",
-                )
-                .underlined(),
-                ".".into(),
-            ])
-            .dim(),
-            "".into(),
-            "  Worker effects still need marks, artifacts, and replayable evidence".into(),
-            "  Review the code and commands produced through the bound worker environment"
-                .dim()
-                .into(),
-            "".into(),
-            "  Backed by your provider account".into(),
-            Line::from(vec![
-                "  Uses your plan's rate limits and ".into(),
-                crate::terminal_hyperlinks::osc8_hyperlink(
-                    "https://chatgpt.com/#settings",
-                    "training data preferences",
-                )
-                .underlined(),
-            ])
-            .dim(),
-            "".into(),
-            Line::from(vec![
-                "  Press ".fg(Color::Cyan),
-                self.confirm_binding().into(),
-                " to continue".fg(Color::Cyan),
-            ]),
-        ];
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -720,8 +666,7 @@ impl StepStateProvider for AuthModeWidget {
         match &*sign_in_state {
             SignInState::PickMode
             | SignInState::ApiKeyEntry(_)
-            | SignInState::ChatGptDeviceCode(_)
-            | SignInState::ChatGptSuccessMessage => StepState::InProgress,
+            | SignInState::ChatGptDeviceCode(_) => StepState::InProgress,
             SignInState::ChatGptSuccess => StepState::Complete,
         }
     }
@@ -736,9 +681,6 @@ impl WidgetRef for AuthModeWidget {
             }
             SignInState::ChatGptDeviceCode(state) => {
                 headless_chatgpt_login::render_device_code_login(self, area, buf, state);
-            }
-            SignInState::ChatGptSuccessMessage => {
-                self.render_chatgpt_success_message(area, buf);
             }
             SignInState::ChatGptSuccess => {
                 self.render_chatgpt_success(area, buf);

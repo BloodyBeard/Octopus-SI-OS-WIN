@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::app::App;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
+#[cfg(test)]
 use crate::chatwidget::UserMessage;
 #[cfg(test)]
 use crate::history_cell::AgentMessageCell;
@@ -167,6 +168,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_cancelled_turn_edit(&mut self, prompt: UserMessage) {
         let user_total = user_count(&self.transcript_cells);
         let selection = BacktrackSelection {

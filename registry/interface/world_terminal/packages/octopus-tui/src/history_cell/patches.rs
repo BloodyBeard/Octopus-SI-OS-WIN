@@ -1,11 +1,14 @@
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct PatchHistoryCell {
     changes: HashMap<PathBuf, FileChange>,
     cwd: PathBuf,
 }
 
+#[cfg(test)]
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         create_diff_summary(&self.changes, &self.cwd, width as usize)
@@ -19,6 +22,7 @@ impl HistoryCell for PatchHistoryCell {
         ))
     }
 }
+#[cfg(test)]
 pub(crate) fn new_patch_event(
     changes: HashMap<PathBuf, FileChange>,
     cwd: &Path,
@@ -29,6 +33,7 @@ pub(crate) fn new_patch_event(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -54,6 +59,7 @@ pub(crate) fn new_patch_apply_failure(stderr: String) -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }
 
+#[cfg(test)]
 pub(crate) fn new_view_image_tool_call(path: AbsolutePathBuf, cwd: &Path) -> PlainHistoryCell {
     let display_path = display_path_for(path.as_path(), cwd);
 
@@ -65,6 +71,7 @@ pub(crate) fn new_view_image_tool_call(path: AbsolutePathBuf, cwd: &Path) -> Pla
     PlainHistoryCell { lines }
 }
 
+#[cfg(test)]
 pub(crate) fn new_image_generation_call(
     call_id: String,
     status: &str,

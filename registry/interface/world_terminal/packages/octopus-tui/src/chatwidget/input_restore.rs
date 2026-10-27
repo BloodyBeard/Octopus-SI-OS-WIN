@@ -1,5 +1,7 @@
+#[cfg(test)]
 use std::collections::HashSet;
 
+#[cfg(test)]
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
@@ -24,6 +26,7 @@ impl ChatWidget {
             && !self.active_side_conversation;
     }
 
+    #[cfg(test)]
     fn take_armed_cancel_edit_prompt(&mut self, reason: TurnAbortReason) -> Option<UserMessage> {
         (reason == TurnAbortReason::Interrupted
             && self.cancel_edit.armed
@@ -32,12 +35,9 @@ impl ChatWidget {
             .flatten()
     }
 
+    #[cfg(test)]
     pub(super) fn clear_cancel_edit(&mut self) {
         self.cancel_edit = CancelEditState::default();
-    }
-
-    pub(crate) fn set_initial_user_message_submit_suppressed(&mut self, suppressed: bool) {
-        self.suppress_initial_user_message_submit = suppressed;
     }
 
     pub(crate) fn submit_initial_user_message_if_pending(&mut self) {
@@ -123,23 +123,7 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn enqueue_rejected_steer(&mut self) -> bool {
-        let Some(pending_steer) = self.input_queue.pending_steers.pop_front() else {
-            tracing::warn!(
-                "received active-turn-not-steerable error without a matching pending steer"
-            );
-            return false;
-        };
-        self.input_queue
-            .rejected_steers_queue
-            .push_back(pending_steer.user_message);
-        self.input_queue
-            .rejected_steer_history_records
-            .push_back(pending_steer.history_record);
-        self.refresh_pending_input_preview();
-        true
-    }
-
+    #[cfg(test)]
     pub(super) fn on_interrupted_turn(&mut self, reason: TurnAbortReason) {
         let cancelled_prompt = self.take_armed_cancel_edit_prompt(reason);
         self.finalize_turn();
@@ -187,6 +171,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    #[cfg(test)]
     fn drain_pending_messages_for_restore(&mut self) -> Option<ThreadComposerState> {
         if self.input_queue.pending_steers.is_empty() && !self.has_queued_follow_up_messages() {
             return None;
@@ -322,6 +307,7 @@ impl ChatWidget {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_thread_input_state(&self) -> Option<ThreadInputState> {
         let draft = self.bottom_pane.composer_draft_snapshot();
         let composer = ThreadComposerState {
@@ -367,6 +353,7 @@ impl ChatWidget {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn restore_thread_input_state(&mut self, input_state: Option<ThreadInputState>) {
         let restored_task_running = input_state.as_ref().is_some_and(|state| state.task_running);
         if let Some(input_state) = input_state {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ops::Deref;
@@ -7,7 +8,9 @@ use std::path::PathBuf;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
 use crate::bottom_pane::QueuedInputAction;
+#[cfg(test)]
 use crate::session_vocab::config_types::CollaborationMode;
+#[cfg(test)]
 use crate::session_vocab::config_types::CollaborationModeMask;
 use octopus_world_terminal_client::ByteRange;
 use octopus_world_terminal_client::TerminalUserInput;
@@ -95,6 +98,7 @@ pub(super) struct ThreadComposerState {
 }
 
 impl ThreadComposerState {
+    #[cfg(test)]
     pub(super) fn has_content(&self) -> bool {
         !self.text.is_empty()
             || !self.local_images.is_empty()
@@ -105,6 +109,7 @@ impl ThreadComposerState {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
     pub(super) composer: Option<ThreadComposerState>,
@@ -384,6 +389,7 @@ fn remap_placeholders_in_text(
     (rebuilt, rebuilt_elements)
 }
 
+#[cfg(test)]
 pub(super) fn remap_colliding_paste_placeholders(
     mut message: UserMessage,
     mut pending_pastes: Vec<(String, String)>,
@@ -483,6 +489,7 @@ fn remap_user_messages_with_history_records(
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn merge_user_messages(messages: Vec<UserMessage>) -> UserMessage {
     let messages = remap_user_messages_with_history_records(
         messages

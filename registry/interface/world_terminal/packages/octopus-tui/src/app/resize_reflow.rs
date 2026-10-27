@@ -87,12 +87,14 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn begin_initial_history_replay_buffer(&mut self) {
         if self.overlay.is_none() {
             self.initial_history_replay_buffer = Some(Default::default());
         }
     }
 
+    #[cfg(test)]
     pub(super) fn begin_thread_switch_history_replay_buffer(&mut self) {
         if self.resize_reflow_max_rows().is_some() && self.overlay.is_none() {
             self.initial_history_replay_buffer = Some(InitialHistoryReplayBuffer {
@@ -100,32 +102,6 @@ impl App {
                 render_from_transcript_tail: true,
             });
         }
-    }
-
-    pub(super) fn finish_initial_history_replay_buffer(&mut self, tui: &mut tui::Tui) {
-        let Some(buffer) = self.initial_history_replay_buffer.take() else {
-            return;
-        };
-
-        if buffer.retained_lines.is_empty() {
-            if buffer.render_from_transcript_tail {
-                let width = tui.terminal.last_known_screen_size.width;
-                let reflowed_lines = self.render_transcript_lines_for_reflow(width).lines;
-                if !reflowed_lines.is_empty() {
-                    tui.insert_history_hyperlink_lines_with_wrap_policy(
-                        reflowed_lines,
-                        self.history_line_wrap_policy(),
-                    );
-                }
-            }
-            return;
-        }
-
-        let retained_lines = buffer.retained_lines.into_iter().collect::<Vec<_>>();
-        tui.insert_history_hyperlink_lines_with_wrap_policy(
-            retained_lines,
-            self.history_line_wrap_policy(),
-        );
     }
 
     pub(super) fn insert_history_cell_lines_with_initial_replay_buffer(

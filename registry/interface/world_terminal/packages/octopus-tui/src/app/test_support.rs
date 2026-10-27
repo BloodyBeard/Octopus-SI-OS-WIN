@@ -41,7 +41,6 @@ pub(super) async fn make_test_app_with_runtime() -> (
         terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         backtrack: BacktrackState::default(),
         backtrack_render_pending: false,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
         windows_sandbox: WindowsSandboxState::default(),
         prompt_history: None,

@@ -615,7 +615,6 @@ impl MultiSelectPickerBuilder {
         self
     }
 
-    #[allow(dead_code)]
     pub fn on_change<F>(mut self, callback: F) -> Self
     where
         F: Fn(&[MultiSelectItem], &AppEventSender) + Send + Sync + 'static,

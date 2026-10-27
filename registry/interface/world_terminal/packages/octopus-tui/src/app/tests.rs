@@ -27,7 +27,6 @@ use crate::app_command::AppCommand as Op;
 use crate::session_telemetry::SessionTelemetry;
 use assert_matches::assert_matches;
 use insta::assert_snapshot;
-use octopus_util_abspath::AbsolutePathBuf;
 use octopus_world_terminal_client::TerminalUserInput as UserInput;
 use octopus_world_terminal_client::TextElement;
 use octopus_world_terminal_config::TerminalResizeReflowMaxRows;
@@ -44,10 +43,6 @@ macro_rules! assert_app_snapshot {
             assert_snapshot!($name, $value);
         });
     };
-}
-
-fn test_absolute_path(path: &str) -> AbsolutePathBuf {
-    AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
 }
 
 fn test_thread_session(thread_id: String, cwd: &str) -> ThreadSessionState {
@@ -814,7 +809,6 @@ fn build_test_app(chat_widget: crate::chatwidget::ChatWidget, app_event_tx: AppE
         terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         backtrack: BacktrackState::default(),
         backtrack_render_pending: false,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
         windows_sandbox: WindowsSandboxState::default(),
         prompt_history: None,
@@ -1101,17 +1095,6 @@ async fn height_shrink_schedules_resize_reflow() {
         &frame_requester,
     ));
     assert!(app.transcript_reflow.has_pending_reflow());
-}
-
-fn next_user_turn_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Op {
-    let mut seen = Vec::new();
-    while let Ok(op) = op_rx.try_recv() {
-        if matches!(op, Op::UserTurn { .. }) {
-            return op;
-        }
-        seen.push(format!("{op:?}"));
-    }
-    panic!("expected UserTurn op, saw: {seen:?}");
 }
 
 fn lines_to_single_string(lines: &[Line<'_>]) -> String {

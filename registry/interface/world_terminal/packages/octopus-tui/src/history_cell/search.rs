@@ -1,5 +1,7 @@
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 fn web_search_header(completed: bool) -> &'static str {
     if completed {
         "Searched the web"
@@ -8,6 +10,7 @@ fn web_search_header(completed: bool) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn web_search_action_detail(action: &WebSearchActionItem) -> String {
     match action {
         WebSearchActionItem::Search { query, queries } => {
@@ -31,6 +34,7 @@ fn web_search_action_detail(action: &WebSearchActionItem) -> String {
     }
 }
 
+#[cfg(test)]
 fn web_search_detail(action: Option<&WebSearchActionItem>, query: &str) -> String {
     let detail = action.map(web_search_action_detail).unwrap_or_default();
     if detail.is_empty() {
@@ -40,9 +44,9 @@ fn web_search_detail(action: Option<&WebSearchActionItem>, query: &str) -> Strin
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct WebSearchCell {
-    call_id: String,
     query: String,
     action: Option<WebSearchActionItem>,
     start_time: Instant,
@@ -50,15 +54,14 @@ pub(crate) struct WebSearchCell {
     animations_enabled: bool,
 }
 
+#[cfg(test)]
 impl WebSearchCell {
     pub(crate) fn new(
-        call_id: String,
         query: String,
         action: Option<WebSearchActionItem>,
         animations_enabled: bool,
     ) -> Self {
         Self {
-            call_id,
             query,
             action,
             start_time: Instant::now(),
@@ -67,20 +70,12 @@ impl WebSearchCell {
         }
     }
 
-    pub(crate) fn call_id(&self) -> &str {
-        &self.call_id
-    }
-
-    pub(crate) fn update(&mut self, action: WebSearchActionItem, query: String) {
-        self.action = Some(action);
-        self.query = query;
-    }
-
     pub(crate) fn complete(&mut self) {
         self.completed = true;
     }
 }
 
+#[cfg(test)]
 impl HistoryCell for WebSearchCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let bullet = if self.completed {
@@ -116,20 +111,12 @@ impl HistoryCell for WebSearchCell {
     }
 }
 
-pub(crate) fn new_active_web_search_call(
-    call_id: String,
-    query: String,
-    animations_enabled: bool,
-) -> WebSearchCell {
-    WebSearchCell::new(call_id, query, None, animations_enabled)
-}
-
+#[cfg(test)]
 pub(crate) fn new_web_search_call(
-    call_id: String,
     query: String,
     action: WebSearchActionItem,
 ) -> WebSearchCell {
-    let mut cell = WebSearchCell::new(call_id, query, Some(action), false);
+    let mut cell = WebSearchCell::new(query, Some(action), false);
     cell.complete();
     cell
 }

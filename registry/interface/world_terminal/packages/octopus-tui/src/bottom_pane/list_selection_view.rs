@@ -982,10 +982,6 @@ impl BottomPaneView for ListSelectionView {
         self.selected_actual_idx()
     }
 
-    fn active_tab_id(&self) -> Option<&str> {
-        ListSelectionView::active_tab_id(self)
-    }
-
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
     }

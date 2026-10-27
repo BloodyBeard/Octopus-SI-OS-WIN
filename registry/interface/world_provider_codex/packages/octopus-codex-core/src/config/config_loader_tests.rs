@@ -86,19 +86,6 @@ async fn make_config_for_test(
     .await
 }
 
-async fn write_linked_worktree_pointer(
-    repo_root: &Path,
-    worktree_root: &Path,
-) -> std::io::Result<()> {
-    let worktree_git_dir = repo_root.join(".git/worktrees/feature-x");
-    tokio::fs::create_dir_all(&worktree_git_dir).await?;
-    tokio::fs::write(
-        worktree_root.join(".git"),
-        format!("gitdir: {}\n", worktree_git_dir.display()),
-    )
-    .await
-}
-
 #[tokio::test]
 async fn cli_overrides_resolve_relative_paths_against_cwd() -> std::io::Result<()> {
     let codex_home = tempdir().expect("tempdir");

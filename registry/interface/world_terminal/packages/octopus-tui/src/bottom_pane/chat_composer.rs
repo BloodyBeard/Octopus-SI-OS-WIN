@@ -226,6 +226,7 @@ struct ComposerDraft {
     cursor: usize,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct ComposerDraftSnapshot {
     pub(crate) text: String,
@@ -1106,6 +1107,7 @@ impl ChatComposer {
         self.current_text_elements()
     }
 
+    #[cfg(test)]
     pub(crate) fn draft_snapshot(&self) -> ComposerDraftSnapshot {
         ComposerDraftSnapshot {
             text: self.current_text(),
@@ -1131,6 +1133,7 @@ impl ChatComposer {
         self.attachments.local_images()
     }
 
+    #[cfg(test)]
     pub(crate) fn mention_bindings(&self) -> Vec<MentionBinding> {
         self.snapshot_mention_bindings()
     }
@@ -3010,7 +3013,6 @@ impl ChatComposer {
         self.has_focus = has_focus;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_input_enabled(&mut self, enabled: bool, placeholder: Option<String>) {
         self.draft.input_enabled = enabled;
         self.draft.input_disabled_placeholder = if enabled { None } else { placeholder };
@@ -3085,14 +3087,6 @@ impl ChatComposer {
             return false;
         }
         self.footer.side_conversation_context_label = label;
-        true
-    }
-
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) -> bool {
-        if self.footer.active_agent_label == active_agent_label {
-            return false;
-        }
-        self.footer.active_agent_label = active_agent_label;
         true
     }
 }

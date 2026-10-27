@@ -81,6 +81,7 @@ pub(super) struct UnifiedExecWaitStreak {
 }
 
 impl UnifiedExecWaitStreak {
+    #[cfg(test)]
     pub(super) fn new(process_id: String, command_display: Option<String>) -> Self {
         Self {
             process_id,
@@ -88,6 +89,7 @@ impl UnifiedExecWaitStreak {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn update_command_display(&mut self, command_display: Option<String>) {
         if self.command_display.is_some() {
             return;

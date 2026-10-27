@@ -1,44 +1,68 @@
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use arc_swap::ArcSwap;
 
 use octopus_appserver_proto::ConfigLayerSource;
 use octopus_config::ConfigLayerStack;
 use octopus_config::ConfigLayerStackOrdering;
+#[cfg(test)]
 use octopus_execpolicy::AmendError;
+#[cfg(test)]
 use octopus_execpolicy::Decision;
+#[cfg(test)]
 use octopus_execpolicy::Error as ExecPolicyRuleError;
+#[cfg(test)]
 use octopus_execpolicy::Evaluation;
+#[cfg(test)]
 use octopus_execpolicy::MatchOptions;
-use octopus_execpolicy::NetworkRuleProtocol;
 use octopus_execpolicy::Policy;
 use octopus_execpolicy::PolicyParser;
+#[cfg(test)]
 use octopus_execpolicy::RuleMatch;
+#[cfg(test)]
 use octopus_execpolicy::blocking_append_allow_prefix_rule;
-use octopus_execpolicy::blocking_append_network_rule;
+#[cfg(test)]
 use octopus_protocol::approvals::ExecPolicyAmendment;
+#[cfg(test)]
 use octopus_protocol::config_types::WindowsSandboxLevel;
+#[cfg(test)]
 use octopus_protocol::models::PermissionProfile;
+#[cfg(test)]
 use octopus_protocol::permissions::FileSystemSandboxKind;
+#[cfg(test)]
 use octopus_protocol::protocol::AskForApproval;
+#[cfg(test)]
 use octopus_shell_command::is_dangerous_command::command_might_be_dangerous;
+#[cfg(test)]
 use octopus_shell_command::is_safe_command::is_known_safe_command;
 use thiserror::Error;
 use tokio::fs;
+#[cfg(test)]
 use tokio::sync::Semaphore;
+#[cfg(test)]
 use tokio::task::spawn_blocking;
+#[cfg(test)]
 use tracing::instrument;
 
+#[cfg(test)]
 use crate::config::Config;
+#[cfg(test)]
 use octopus_protocol::models::SandboxPermissions;
+#[cfg(test)]
 use octopus_shell_command::bash::parse_shell_lc_plain_commands;
+#[cfg(test)]
 use octopus_shell_command::bash::parse_shell_lc_single_command_prefix;
+#[cfg(test)]
 use octopus_util_abspath::AbsolutePathBuf;
+#[cfg(test)]
 use shlex::try_join as shlex_try_join;
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ExecApprovalRequirement {
     Skip {
@@ -54,31 +78,20 @@ pub(crate) enum ExecApprovalRequirement {
     },
 }
 
-impl ExecApprovalRequirement {
-    pub fn proposed_execpolicy_amendment(&self) -> Option<&ExecPolicyAmendment> {
-        match self {
-            Self::NeedsApproval {
-                proposed_execpolicy_amendment: Some(prefix),
-                ..
-            } => Some(prefix),
-            Self::Skip {
-                proposed_execpolicy_amendment: Some(prefix),
-                ..
-            } => Some(prefix),
-            _ => None,
-        }
-    }
-}
-
+#[cfg(test)]
 const PROMPT_CONFLICT_REASON: &str =
     "approval required by policy, but AskForApproval is set to Never";
+#[cfg(test)]
 const REJECT_SANDBOX_APPROVAL_REASON: &str =
     "approval required by policy, but AskForApproval::Granular.sandbox_approval is false";
+#[cfg(test)]
 const REJECT_RULES_APPROVAL_REASON: &str =
     "approval required by policy rule, but AskForApproval::Granular.rules is false";
 const RULES_DIR_NAME: &str = "rules";
 const RULE_EXTENSION: &str = "rules";
+#[cfg(test)]
 const DEFAULT_POLICY_FILE: &str = "default.rules";
+#[cfg(test)]
 static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
     &["python3"],
     &["python3", "-"],
@@ -128,6 +141,7 @@ static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
     &["osascript"],
 ];
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecPolicyCommandOrigin {
     Generic,
@@ -135,6 +149,7 @@ pub(crate) enum ExecPolicyCommandOrigin {
     PowerShell,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(crate) struct UnmatchedCommandContext<'a> {
     pub(crate) approval_policy: AskForApproval,
@@ -145,6 +160,7 @@ pub(crate) struct UnmatchedCommandContext<'a> {
     pub(crate) command_origin: ExecPolicyCommandOrigin,
 }
 
+#[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
 struct ExecPolicyCommands {
     commands: Vec<Vec<String>>,
@@ -152,6 +168,7 @@ struct ExecPolicyCommands {
     command_origin: ExecPolicyCommandOrigin,
 }
 
+#[cfg(test)]
 pub(crate) fn child_uses_parent_exec_policy(parent_config: &Config, child_config: &Config) -> bool {
     fn exec_policy_config_folders(config: &Config) -> Vec<AbsolutePathBuf> {
         config
@@ -173,6 +190,7 @@ pub(crate) fn child_uses_parent_exec_policy(parent_config: &Config, child_config
             == child_config.config_layer_stack.requirements().exec_policy
 }
 
+#[cfg(test)]
 fn is_policy_match(rule_match: &RuleMatch) -> bool {
     match rule_match {
         RuleMatch::PrefixRuleMatch { .. } => true,
@@ -180,6 +198,7 @@ fn is_policy_match(rule_match: &RuleMatch) -> bool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn prompt_is_rejected_by_policy(
     approval_policy: AskForApproval,
     prompt_is_rule: bool,
@@ -226,6 +245,7 @@ pub enum ExecPolicyError {
     },
 }
 
+#[cfg(test)]
 #[derive(Debug, Error)]
 pub enum ExecPolicyUpdateError {
     #[error("failed to update rules file {path}: {source}")]
@@ -241,11 +261,13 @@ pub enum ExecPolicyUpdateError {
     },
 }
 
+#[cfg(test)]
 pub(crate) struct ExecPolicyManager {
     policy: ArcSwap<Policy>,
     update_lock: Semaphore,
 }
 
+#[cfg(test)]
 pub(crate) struct ExecApprovalRequest<'a> {
     pub(crate) command: &'a [String],
     pub(crate) approval_policy: AskForApproval,
@@ -255,6 +277,7 @@ pub(crate) struct ExecApprovalRequest<'a> {
     pub(crate) prefix_rule: Option<Vec<String>>,
 }
 
+#[cfg(test)]
 impl ExecPolicyManager {
     pub(crate) fn new(policy: Arc<Policy>) -> Self {
         Self {
@@ -423,54 +446,9 @@ impl ExecPolicyManager {
         self.policy.store(Arc::new(updated_policy));
         Ok(())
     }
-
-    pub(crate) async fn append_network_rule_and_update(
-        &self,
-        codex_home: &Path,
-        host: &str,
-        protocol: NetworkRuleProtocol,
-        decision: Decision,
-        justification: Option<String>,
-    ) -> Result<(), ExecPolicyUpdateError> {
-        let _update_guard =
-            self.update_lock
-                .acquire()
-                .await
-                .map_err(|_| ExecPolicyUpdateError::AddRule {
-                    source: ExecPolicyRuleError::InvalidRule(
-                        "exec policy update semaphore closed".to_string(),
-                    ),
-                })?;
-        let policy_path = default_policy_path(codex_home);
-        let host = host.to_string();
-        spawn_blocking({
-            let policy_path = policy_path.clone();
-            let host = host.clone();
-            let justification = justification.clone();
-            move || {
-                blocking_append_network_rule(
-                    &policy_path,
-                    &host,
-                    protocol,
-                    decision,
-                    justification.as_deref(),
-                )
-            }
-        })
-        .await
-        .map_err(|source| ExecPolicyUpdateError::JoinBlockingTask { source })?
-        .map_err(|source| ExecPolicyUpdateError::AppendRule {
-            path: policy_path,
-            source,
-        })?;
-
-        let mut updated_policy = self.current().as_ref().clone();
-        updated_policy.add_network_rule(&host, protocol, decision, justification)?;
-        self.policy.store(Arc::new(updated_policy));
-        Ok(())
-    }
 }
 
+#[cfg(test)]
 impl Default for ExecPolicyManager {
     fn default() -> Self {
         Self::new(Arc::new(Policy::empty()))
@@ -616,6 +594,7 @@ pub async fn load_exec_policy(config_stack: &ConfigLayerStack) -> Result<Policy,
     Ok(policy.merge_overlay(requirements_policy.as_ref()))
 }
 
+#[cfg(test)]
 pub(crate) fn render_decision_for_unmatched_command(
     command: &[String],
     context: UnmatchedCommandContext<'_>,
@@ -706,6 +685,7 @@ pub(crate) fn render_decision_for_unmatched_command(
     }
 }
 
+#[cfg(test)]
 fn profile_has_managed_filesystem_restrictions(permission_profile: &PermissionProfile) -> bool {
     let file_system_sandbox_policy = permission_profile.file_system_sandbox_policy();
     matches!(permission_profile, PermissionProfile::Managed { .. })
@@ -716,10 +696,12 @@ fn profile_has_managed_filesystem_restrictions(permission_profile: &PermissionPr
         && !file_system_sandbox_policy.has_full_disk_write_access()
 }
 
+#[cfg(test)]
 fn default_policy_path(codex_home: &Path) -> PathBuf {
     codex_home.join(RULES_DIR_NAME).join(DEFAULT_POLICY_FILE)
 }
 
+#[cfg(test)]
 fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
     if let Some(commands) = parse_shell_lc_plain_commands(command)
         && !commands.is_empty()
@@ -760,6 +742,7 @@ fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
     }
 }
 
+#[cfg(test)]
 fn try_derive_execpolicy_amendment_for_prompt_rules(
     matched_rules: &[RuleMatch],
 ) -> Option<ExecPolicyAmendment> {
@@ -781,6 +764,7 @@ fn try_derive_execpolicy_amendment_for_prompt_rules(
         })
 }
 
+#[cfg(test)]
 fn try_derive_execpolicy_amendment_for_allow_rules(
     matched_rules: &[RuleMatch],
 ) -> Option<ExecPolicyAmendment> {
@@ -799,6 +783,7 @@ fn try_derive_execpolicy_amendment_for_allow_rules(
         })
 }
 
+#[cfg(test)]
 fn derive_requested_execpolicy_amendment_from_prefix_rule(
     prefix_rule: Option<&Vec<String>>,
     matched_rules: &[RuleMatch],
@@ -839,6 +824,7 @@ fn derive_requested_execpolicy_amendment_from_prefix_rule(
     }
 }
 
+#[cfg(test)]
 fn prefix_rule_would_approve_all_commands(
     exec_policy: &Policy,
     prefix_rule: &[String],
@@ -862,6 +848,7 @@ fn prefix_rule_would_approve_all_commands(
     })
 }
 
+#[cfg(test)]
 fn derive_prompt_reason(command_args: &[String], evaluation: &Evaluation) -> Option<String> {
     let command = render_shlex_command(command_args);
 
@@ -890,10 +877,12 @@ fn derive_prompt_reason(command_args: &[String], evaluation: &Evaluation) -> Opt
     }
 }
 
+#[cfg(test)]
 fn render_shlex_command(args: &[String]) -> String {
     shlex_try_join(args.iter().map(String::as_str)).unwrap_or_else(|_| args.join(" "))
 }
 
+#[cfg(test)]
 fn derive_forbidden_reason(command_args: &[String], evaluation: &Evaluation) -> String {
     let command = render_shlex_command(command_args);
 
