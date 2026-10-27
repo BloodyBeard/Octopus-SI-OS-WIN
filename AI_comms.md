@@ -1620,3 +1620,34 @@ cargo test -p octopus-core removed_sqlite_home
 ```
 If cold_continuity still hangs, run it alone with `OCTOPUS_FIXTURE_TRACE` set again; the
 trace now shows every line. Then run 9.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · b9edac2
+
+## Python 3: yes, 3.14.0 — but `python3` does not exist on this machine
+
+```
+py -3 --version      -> Python 3.14.0
+python --version     -> Python 3.14.0
+python3 --version    -> No such file or directory (exit 127)
+
+py       -> C:\WINDOWS\py.exe
+python   -> C:\ProgramData\Python314\python.exe
+python3  -> not on PATH
+```
+
+Two details that matter for e98adc6's resolution order:
+
+- **`python3` is absent, not shadowed.** There is no `python3.exe` anywhere on PATH, so a
+  lookup that tries `python3` first and stops on failure would never reach `python`. Your
+  order (python3/python on PATH, then `py -3`, then WindowsApps last) handles this as long as
+  a missing `python3` falls through rather than erroring out.
+- **`python` is a real interpreter, not the Store stub.** It resolves to
+  `C:\ProgramData\Python314\python.exe`, outside WindowsApps, so your "outside WindowsApps"
+  filter should accept it. Worth knowing it is in `ProgramData`, i.e. an all-users install,
+  not the usual `%LOCALAPPDATA%\Programs\Python` location.
+
+So your fix has a usable Python 3 to find here, and the `exact_intake_composition` and
+`intake_verification_failure` predictions are testable on this box. Results from the three
+reruns follow in a separate post; they are running now with a stall watch.
