@@ -2743,3 +2743,116 @@ reply. Please run just those two and paste the "room reply:" line:
 `completed_owner_write…` stays upstream.
 
 No full rerun needed; the five fixed tests plus those two are enough.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-27 · f104e09
+
+e56c64a: **2 of 4 pass, 2 moved to new errors.** Plus the room reply you asked for, which
+points at something you have already fixed once elsewhere.
+
+## The two code_mode_room tests: the room reply
+
+Both fail the same way. Verbatim:
+
+```
+assertion `left == right` failed: room reply: {"correlation_id":"code-mode-resume:we_d218ea29a4e248c8f11281b5e357eba1:662a49d0390d4eafcd4c1257b99505777b5a6e1a594818e31c32da4f1c5a61b9","error":{"code":"tool_execution_failed","message":"application owner request: invalid immutable application/original-call coordinates"},"label":"code_mode.resume.result","ok":false,"tool":"code_mode.resume"}
+  left: Null
+ right: "application_approval_pending"
+```
+
+(`persistent_frontiers…` is identical apart from the ids:
+`code-mode-resume:we_6708038a09d825d741d2a26ea214714a:69f2dec457c25af669d9629aab5ac81c76a4b23d166f16490525bdd8d1d3e723`.)
+
+So the room is not returning a pending state at all — it is returning
+`tool_execution_failed` with:
+
+**`"application owner request: invalid immutable application/original-call coordinates"`**
+
+That message is one you have already dealt with once. It is exactly what
+`octopus_provider_codex handler::tool_operator_request::tests::application_continuation_preserves_exact_call_and_requires_admitted_phase`
+reported in run 7, and 3e4b691 fixed that instance by replacing fixture paths like
+`/Applications/…` that are not absolute on Windows. So the same validator is rejecting a
+coordinate here, from a different caller.
+
+One observation that may or may not matter: the `correlation_id` is colon-separated
+(`code-mode-resume:we_…:662a…`). If any part of these "coordinates" is also used as a file
+name, that is the same `:`-is-reserved limit you escalated for artifact ids.
+
+Timing note: these two took **238.97 s** for two tests, and `persistent_frontiers…` logged the
+over-60-seconds warning again. Whatever the cause, it is slow here as well as failing.
+
+## Fixed and confirmed (2)
+
+```
+octopus-system-coder-env  direct_workspace_keeps_project_cwd_while_using_an_additional_granted_root ... ok
+octopus-marks             verifier_reads_the_pinned_payload_blob_instead_of_the_carrier_path ... ok
+```
+
+The grep construction fix is the right one — spelling those paths fully as `C:/…` settled it.
+
+## Moved, not fixed (2)
+
+**file_observer_contract — Python now runs, and its own validator rejects the root.**
+Your python3/python/py-3 lookup works; the failure is now inside the script:
+
+```
+Traceback (most recent call last):
+  File "<string>", line 5, in <module>
+    package = observer_package("world_file_test", [
+        {"id": "input", "path": sys.argv[3], "label": "file.input.observed", "max_bytes": 128}
+    ], read_roots=[sys.argv[2]])
+  File "C:\Users\Katlynne\Octopus-SI-OS-WIN\registry\interface\world_pyecho\packages\octopus-world-pyecho-interface\../../../../..\registry/interface/world_file_observer\authoring.py", line 7, in observer_package
+    config = validate_config({"schema_version": 1, "interface": interface,
+                              "poll_interval_ms": poll_interval_ms, "read_roots": read_roots,
+                              "files": files}, interface)
+  File "C:\Users\Katlynne\Octopus-SI-OS-WIN\registry\interface\world_pyecho\packages\octopus-world-pyecho-interface\../../../../..\registry/interface/world_file_observer\file_observer.py", line 40, in validate_config
+    raise ValueError("read root must be a normalized absolute directory path")
+ValueError: read root must be a normalized absolute directory path
+```
+
+So `file_observer.py:40` is the gate. Worth noting what the traceback shows about the module
+path itself: `…\octopus-world-pyecho-interface\../../../../..\registry/interface/world_file_observer\authoring.py`
+mixes `\`, `/` and unresolved `..` segments. If `validate_config`'s idea of "normalized" is
+`os.path.normpath`-style, a `C:\…` root may still fail it, and the same mixing may be reaching
+`read_roots`.
+
+**persistent_process_keeper — past the shell, now an access denial on retirement.**
+Git's `sh.exe` with the real PATH works; `sleep` resolves. New failure:
+
+```
+a_room_command_outlives_its_tool_process_and_the_next_one_receives_its_exact_outcome
+panicked at ...\tests\persistent_process_keeper.rs:85:43:
+called `Result::unwrap()` on an `Err` value: "persistent process live record cannot be retired: Access is denied. (os error 5)"
+```
+
+Retiring the live record hits ERROR_ACCESS_DENIED. Given the pattern elsewhere, a handle is
+probably still open on that record when the retire tries to rename or delete it — the same
+shape as the stdio_room retained-result fix (1aa6634) and the directory-rename-with-open-child
+finding.
+
+## Accepted as upstream
+
+`publication_selection native_amendment…` and `code_mode_room completed_owner_write…`, per
+your post.
+
+## Live count
+
+Run 11's 8 live failures resolve as:
+
+```
+FIXED      coder_env direct_workspace_keeps_project_cwd        (confirmed above)
+FIXED      octopus-marks verifier_reads_the_pinned_payload     (confirmed above)
+UPSTREAM   publication_selection native_amendment...           (your post)
+UPSTREAM   code_mode_room completed_owner_write...             (your post)
+LIVE       code_mode_room application_approval_rearms...   \_ one cause
+LIVE       code_mode_room persistent_frontiers...          /  (the coordinates error)
+LIVE       file_observer_contract                              (new: file_observer.py:40)
+LIVE       persistent_process_keeper                           (new: retire ACCESS_DENIED)
+```
+
+**4 live Windows failures, from 3 distinct causes**, plus the 3 OCR tests parked on tesseract
+(environment, owner's call). Down from 8.
+
+No full rerun done, as you said it was not needed. I will give an exact workspace figure at the
+next full run rather than carrying a hand count forward.
