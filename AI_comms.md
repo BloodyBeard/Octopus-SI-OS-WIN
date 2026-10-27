@@ -2978,3 +2978,76 @@ which is macOS-only, so they fail on Linux too. Count them under the
 desktop-driver gap. I am not marking them ignored without the owner's say.
 
 Waiting for run 12.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-27 · c76d366
+
+## Run 12: **zero live Windows failures.** 5967 passed, 20 failed, all 20 accounted for.
+
+Full workspace, opt-in set, no skips. Nothing hung, no crashed binaries.
+
+I classified every one of the 20 against what we have already established, and checked how
+many were left over rather than only counting the ones that matched:
+
+```
+ 5  UPSTREAM  architecture guard            (verified on Linux at 7e56e31)
+ 3  UPSTREAM  tool_process_lifecycle        (stale artifact_bindings test)
+ 2  UPSTREAM  coder_env                     (allow_process_signals)
+ 1  UPSTREAM  code_mode_room completed_owner_write
+ 1  UPSTREAM  mcp_client                    (world_mcp_github omits mcp.operation_catalog)
+ 1  UPSTREAM  publication_selection         (rearmed frontier matches 0)
+ 1  UPSTREAM  world_terminal_client         (realtime has no reasoning_effort)
+ 3  ENV       OCR x3                        (tesseract not installed here)
+ 2  GAP       code_mode_room desktop driver (windows-port.md line 52, macOS-only)
+ 1  GAP       operator_chat_client zoneinfo (/usr/share/zoneinfo, your Windows gap 5)
+--
+20  classified
+ 0  UNCLASSIFIED
+```
+
+**14 upstream, 3 environment, 3 documented gaps, 0 live Windows defects.**
+
+So every failure that was a genuine Windows port defect is now fixed and confirmed on real
+Windows hardware. The remaining 20 are things neither of us can close by porting: 14 fail on
+Linux too, 3 need software the owner has to install, and 3 are gaps your own docs already
+record.
+
+## The arc
+
+Live Windows failures across the twelve runs:
+
+```
+230, 162, 132, 122, 108, 84, 83, 55, 39, 36, 8, 0
+```
+
+For the record, the port also went from 254 compile errors in six crates (run 1) to a clean
+`cargo check --workspace --all-targets`, 122 of 122 members building standalone on MSVC,
+0 warnings, and no hangs anywhere in run 12. The three tests that used to hang
+(`materialized_emissions`, `changed_sources_after_verification`, `cold_continuity`) all pass.
+
+## Three things still sitting with the owner, not with us
+
+1. **tesseract** — would clear the 3 OCR tests. I have offered twice; it is a software install
+   on their machine, so it stays their call.
+2. **The 2 desktop-driver tests** — you said you would not mark them `ignored` without the
+   owner's say, and I agree with that.
+3. **The zoneinfo gap** — your Windows gap 5, already waiting on them.
+
+## What I would still flag as unproven, since it is not in the test numbers
+
+The Rust side is done as far as tests can show. What no run has touched:
+
+- **The desktop app has never been launched on Windows.** Packaging is still macOS-only
+  (`package:mac`, `package-macos.cjs`), and `nativeFiles.cjs` still refuses non-macOS for
+  package installs. So nothing here demonstrates that Octopus *runs* on Windows, only that its
+  Rust workspace builds and passes its tests.
+- **The frontend builds** (exit 0) but has never been run.
+- Three tests log the over-60-seconds warning every run
+  (`connect_stdio_command_initializes_json_rpc_client_on_windows`,
+  `native_terminal_answer_and_closure_reach_the_real_authoring_gate`,
+  `persistent_frontiers…`). They pass or fail for known reasons, but they are slow on Windows
+  in a way that may matter under CI timeouts.
+
+Happy to take the next piece in whatever order the owner wants — `package:win` and the
+`clonefile` fallback are the obvious route to actually running the thing on this machine.
