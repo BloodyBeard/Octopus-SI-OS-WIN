@@ -994,9 +994,20 @@ pub fn resolve_executable(
         let search_path = search_path.map(OsString::from).ok_or_else(|| {
             format!("process executable '{declared}' requires declared PATH resolution")
         })?;
-        std::env::split_paths(&search_path)
-            .flat_map(|root| search_path_candidates(&root, path))
-            .find(|candidate| executable_file(candidate))
+        #[cfg(windows)]
+        let found = if windows_python_name(declared) {
+            windows_python(&search_path)
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let found = None;
+        found
+            .or_else(|| {
+                std::env::split_paths(&search_path)
+                    .flat_map(|root| search_path_candidates(&root, path))
+                    .find(|candidate| executable_file(candidate))
+            })
             .ok_or_else(|| format!("process executable '{declared}' is absent from PATH"))?
     };
     let executable = std::fs::canonicalize(&candidate).map_err(|error| {
@@ -1156,6 +1167,65 @@ fn search_path_candidates(root: &Path, name: &Path) -> Vec<PathBuf> {
         candidates
     };
     candidates
+}
+
+/// Whether a bare command names Python 3 (`python3` in a `#!/usr/bin/env`
+/// line, or `python`).
+#[cfg(windows)]
+fn windows_python_name(declared: &str) -> bool {
+    declared.eq_ignore_ascii_case("python3") || declared.eq_ignore_ascii_case("python")
+}
+
+/// Python 3 on Windows, where `python3` is usually not a real program: the
+/// python.org installer provides `python.exe` and the `py` launcher, and
+/// `WindowsApps\python3.exe` is an App Execution Alias that only opens the
+/// Store unless Python came from the Store. In order: `python3`/`python` on
+/// PATH outside WindowsApps, the interpreter the `py` launcher selects for
+/// `-3` (installed Pythons need not be on PATH), then the WindowsApps aliases.
+#[cfg(windows)]
+fn windows_python(search_path: &OsStr) -> Option<PathBuf> {
+    let candidates = || {
+        std::env::split_paths(search_path).flat_map(|root| {
+            ["python3", "python"]
+                .into_iter()
+                .flat_map(move |name| search_path_candidates(&root, Path::new(name)))
+        })
+    };
+    let store_alias = |candidate: &Path| {
+        candidate
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|directory| directory.eq_ignore_ascii_case("WindowsApps"))
+    };
+    candidates()
+        .find(|candidate| !store_alias(candidate) && executable_file(candidate))
+        .or_else(|| windows_python_from_launcher(search_path))
+        .or_else(|| candidates().find(|candidate| store_alias(candidate) && executable_file(candidate)))
+}
+
+/// The interpreter the `py` launcher would run for `py -3`: the launcher on
+/// PATH, else where its installers put it (all users: the Windows directory;
+/// one user: `%LOCALAPPDATA%\Programs\Python\Launcher`).
+#[cfg(windows)]
+fn windows_python_from_launcher(search_path: &OsStr) -> Option<PathBuf> {
+    let installed = [
+        std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join("py.exe")),
+        std::env::var_os("LOCALAPPDATA")
+            .map(|root| PathBuf::from(root).join(r"Programs\Python\Launcher\py.exe")),
+    ];
+    let launcher = std::env::split_paths(search_path)
+        .map(|root| root.join("py.exe"))
+        .chain(installed.into_iter().flatten())
+        .find(|candidate| executable_file(candidate))?;
+    let output = std::process::Command::new(launcher)
+        .args(["-3", "-c", "import sys; sys.stdout.write(sys.executable)"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let interpreter = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+    (output.status.success() && interpreter.is_absolute() && executable_file(&interpreter))
+        .then_some(interpreter)
 }
 
 /// The program name in a POSIX absolute path (`/bin/sh` is `sh`), which on
