@@ -351,11 +351,12 @@ async fn native_terminal_handoff_cases(selected_phase: Option<usize>) {
                 assert_eq!(body["writes"].as_array().unwrap().len(),44);
                 if let crate::run_affordances::NativePhase::Writing {files,..}=&operation.state {
                     for (actual,expected) in body["writes"].as_array().unwrap().iter().zip(files) {
-                        // The path is compared as a path: file.write reports
-                        // C:/… on Windows where the plan spells C:\…; both
+                        // The path is compared by location: file.write reports
+                        // C:/… on Windows where the plan holds \\?\C:\…; both
                         // name the same file. Every other field is exact.
                         let (mut actual,mut expected)=(actual.clone(),serde_json::to_value(expected).unwrap());
-                        assert_eq!(std::path::Path::new(actual["path"].as_str().unwrap()),std::path::Path::new(expected["path"].as_str().unwrap()));
+                        let (actual_path,expected_path)=(actual["path"].as_str().unwrap(),expected["path"].as_str().unwrap());
+                        assert!(octopus_private_fs::same_path(std::path::Path::new(actual_path),std::path::Path::new(expected_path)),"{actual_path} names a different file than {expected_path}");
                         actual["path"]=json!(null);expected["path"]=json!(null);
                         assert_eq!(actual,expected);
                     }

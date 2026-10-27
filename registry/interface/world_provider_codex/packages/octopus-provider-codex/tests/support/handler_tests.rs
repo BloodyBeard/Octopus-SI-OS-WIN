@@ -1883,7 +1883,7 @@
         let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
         let body = serde_json::json!({"media": [{
             "mime_type": "image/png", "payload_base64": encoded,
-            "artifact": {"label": "screen.captured", "payload_path": "/unreadable/room/screen.payload",
+            "artifact": {"label": "screen.captured", "payload_path": native_fixture_path("/unreadable/room/screen.payload"),
                 "payload_content_hash": blake3::hash(&bytes).to_hex().to_string()}
         }], "observation_id": "exact-observation"});
         let result = ToolResultArtifact::success("room.observe", Some("call-image".into()), body.clone());

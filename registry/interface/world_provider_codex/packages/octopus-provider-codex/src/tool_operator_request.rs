@@ -387,7 +387,7 @@ mod tests {
             "schema_version":1,"request_id":"pending","call_id":"call-1",
             "original":{"run":"run-1","ee":"ee-1","worker":"system_worker_test","door_interface":"system_gui_test","tool":"gui.app_state__approval_task","correlation_id":"call-1","arguments":{"app":{"kind":"bundle_id","value":"com.example.app"}},"source_movement_seq":3,"source_artifact":original},
             "scope":{"worker_environment_id":"room-1","formation_pin":"pin-1","host_generation":"host-1"},
-            "application":{"bundle_id":"com.example.app","bundle_path":"/Applications/Example.app","display_name":"Example","instance":{"app":{"host_generation":"host-1","app_instance_id":"app-1"},"process_id":123}},
+            "application":{"bundle_id":"com.example.app","bundle_path":octopus_util_abspath::test_support::test_path_buf("/Applications/Example.app"),"display_name":"Example","instance":{"app":{"host_generation":"host-1","app_instance_id":"app-1"},"process_id":123}},
             "approval_scope":"formed_app_target","resume":{"tool":"gui.app_resume__approval_task","correlation_id":"pending"}
         })).unwrap();
         let request_digest = digest(&request);
