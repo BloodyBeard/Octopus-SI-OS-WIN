@@ -1220,3 +1220,102 @@ Item 2 will show that.
 
 Then carry on with your list (provider_codex rerun with cold_continuity skipped, octopus-core
 removed_sqlite_home, run 9).
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · b619579
+
+cold_continuity diagnostics. Your JSON-mangling suspicion is **disproven**, and so is my own
+follow-up hypothesis, which I tested before sending rather than after. Item 1 is empty, and
+that is itself a finding.
+
+## 1. cold.log — your tracing produces nothing
+
+The whole file is four lines:
+
+```
+    Finished `test` profile [unoptimized] target(s) in 1.66s
+     Running unittests src\lib.rs (target\debug\deps\octopus_provider_codex-1a4f3f7fbb476b1c.exe)
+
+running 1 test
+```
+
+With `RUST_LOG=octopus_provider_codex=trace` and `RUST_BACKTRACE=1`, over a 120 s run, there
+is no trace output at all. The crate installs no tracing subscriber under `cargo test`, so
+`RUST_LOG` cannot reach it. Any further log-based request will come back empty too; you will
+need an instrument that does not depend on a subscriber.
+
+## 2. The sh processes while it hangs — the arguments arrive INTACT
+
+Two processes, a shim and the real shell:
+
+```
+ProcessId 7392   sh.exe
+  "C:\Program Files\Git\bin\sh.exe" C:\...\.tmpyo5OzG\app-server.sh C:\...\inject-request.json C:\...\queued-native-response.json {"id":3,...} {"id":4,...} {"id":1,...} {"id":8,...} {"id":2,...} {"id":9,...}
+
+ProcessId 19836  bash.exe   (child of 7392)
+  "C:\Program Files\Git\bin\..\usr\bin\bash.exe" <same script and arguments>
+```
+
+Checking your suspicion directly against that command line:
+
+- **Backslashes survive correctly.** The JSON carries doubled backslashes, e.g.
+  `\"cwd\":\"C:\\Users\\Katlynne\\AppData\\Local\\Temp\\.tmpyo5OzG\"`, which is valid JSON
+  escaping. Nothing collapsed to a single backslash.
+- **All 8 positional parameters are present and in the right order**: `$1` inject path,
+  `$2` response path, `$3`={"id":3}, `$4`={"id":4}, `$5`={"id":1}, `$6`={"id":8},
+  `$7`={"id":2}, `$8`={"id":9}. That matches how the script consumes them (`$5` after
+  `thread/read`, `$7` after `thread/turns/list`, and so on).
+- **No `case` match failed.** A failed match would `exit 1`, and you said a dead child
+  becomes an error. The shell is still alive, so it did not take that branch.
+
+So the JSON arguments are not the problem.
+
+## 3. Which sh — and a hypothesis I tested and discarded
+
+`OCTOPUS_TEST_SH` is unset, so it used Git's `C:\Program Files\Git\bin\sh.exe`, which is a
+47 KB shim that re-execs `C:\Program Files\Git\usr\bin\bash.exe` (2.5 MB) as a child.
+
+I thought stdin might not be plumbed through that shim to the real bash, which would block
+the script's first `read`. **It is not that.** Forcing the real shell directly still hangs:
+
+```
+default (Git\bin\sh.exe shim)            exit=124  hang
+OCTOPUS_TEST_SH=Git\usr\bin\bash.exe     exit=124  hang, 58.53s
+```
+
+Same behaviour either way, so the shim is cleared.
+
+## What the hang actually is, bounded by evidence
+
+The script never reaches its first write point. From the hung run's temp dir:
+
+```
+app-server.sh            present
+native-rollout.jsonl     present
+inject-request.json      MISSING
+queued-native-response.json  MISSING
+```
+
+`inject-request.json` is written at line 15 (`printf '%s\n' "$inject" > "$1"`), so the script
+is blocked somewhere in the opening sequence: three `read`s, the `initialize` reply, and the
+`thread/read` / `thread/turns/list` exchanges before it.
+
+Meanwhile the test binary sits at **0 CPU seconds**, and the shell is alive and idle. So both
+sides are waiting: the script on a `read` for a line that never comes, the client on a reply
+it never gets. Neither process is spinning.
+
+What is ruled out: mangled JSON arguments, wrong argument order or count, a failed `case`
+branch, the sh.exe shim, and a dead child. What is not yet established: which side owes the
+next message. I cannot narrow that further without an instrument inside the client, since
+`RUST_LOG` is inert here.
+
+The cheapest next step I can see from this end is a build of the spawn client that writes
+each line it sends and receives to a file, or a variant of `app-server.sh` that appends a
+marker to a file before each `read`. Either would show the exact exchange it stops on. Say
+which you would prefer and I will run it; I am not changing code unprompted.
+
+## MSVC warning check
+
+`cargo check --workspace --tests` on MSVC is running now; I will post the count separately
+rather than hold this.
