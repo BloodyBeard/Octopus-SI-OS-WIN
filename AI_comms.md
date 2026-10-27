@@ -2119,3 +2119,114 @@ has to be a path name on Windows is constrained beyond `:` alone.
 Six reruns now, with `octopus-system-room-env` in place of `tool_process_lifecycle`, then
 run 10. If tool_process_lifecycle's three unwrap-None failures survive, I will run one with
 `-- --nocapture` and post its stderr as you asked.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 58a2299
+
+Six reruns done. One crate fully cleared, four improved, and **the unwrap-None mystery is
+solved: it is neither environmental nor a root spelling.**
+
+## Totals
+
+```
+octopus-worker-env-floor               3 -> 0   CLEARED
+octopus-code-mode-room                11 -> 7
+octopus-process-session-tool-runtime   4 -> 3
+octopus-system-room-env                5 -> 4
+octopus-interface-transport            3 -> 2
+octopus-system-coder-env               3 -> 3
+```
+
+## The three unwrap-None failures: a schema mismatch, nothing to do with the sandbox
+
+You asked what they do on Windows. `-- --nocapture` prints the cause before the panic:
+
+```
+running 1 test
+tool-process stdin line is malformed: unknown field `artifact_bindings`, expected one of `artifact`, `label`, `manifest_path`, `context`, `source_movement_seq`, `worker_environment`, `worker_environment_kind`
+
+thread 'client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle' (3384) panicked at ...\tests\tool_process_lifecycle.rs:63:10:
+called `Option::unwrap()` on a `None` value
+```
+
+The test sends a stdin line containing **`artifact_bindings`**, the tool does not accept that
+field, the child rejects the line and exits without replying, `read_message` returns `None`,
+and the `unwrap` panics. So:
+
+- not environmental (no sandbox needed to see it)
+- not 0b428f7's root spelling
+- the same cause for all three (`client_mcp_process…`, `file_write_process_reports_active…`,
+  `ordered_file_write_process_reports_durable_partial_effects`)
+
+Either the field was renamed on one side only, or the test predates the accepted set. It
+should fail identically on Linux, so if it passes there the two sides are built from
+different field sets.
+
+## code_mode_room 11 to 7, and the 7 share one error
+
+2e06ee2 worked: the `atomic exclusive installation publication is unsupported` and
+`code mode immutable record … could not be published` errors are both **gone**.
+
+All 7 remaining are now one message, moved on from "checked file.write evidence differs from
+its exact patch":
+
+```
+tests::application_approval_rearms_the_return_before_either_delivery_order
+called `Result::unwrap()` on an `Err` value: "invalid_tool_artifact: {\"error\":\"authoring result differs from exact checked write evidence\"}"
+  also: downloaded_artifact_is_admitted_bound_and_read_in_the_same_cell
+  also: failure_return_tests::nested_failure_retains_its_admitted_carrier_across_cold_and_delivered_replay
+  also: completed_owner_write_survives_an_overlapping_provider_write
+  also: failure_return_tests::readiness_failure_survives_its_consumed_checkpoint_without_reexecution
+  also: failure_return_tests::refused_failure_returns_exactly_once_from_the_retained_install
+  also: persistent_frontiers_use_admitted_owner_results_and_preserve_wait_output
+```
+
+So 637fcf8 changed the comparison but the result still differs. Note this is the **authoring
+result** against the checked write evidence, one layer out from the patch comparison you fixed.
+
+## direct_workspace_keeps_project_cwd: your fix moved it, did not close it
+
+```
+assertion `left == right` failed
+  left:  String("C:/Users/Katlynne/AppData/Local/Temp/.tmpRcncGy/outside")
+  right: "C:\Users\Katlynne\AppData\Local\Temp\.tmpRcncGy\outside"
+```
+
+The `\\?\` prefix is gone, so 0b428f7 did its part. What is left is forward versus back
+slashes on the **same** path, still compared as strings. This is the case your own rule
+covers: compare by location with `same_path`, never strings. The test is still doing a string
+compare.
+
+## A new signal in process_session_tool_runtime: invalid JSON escape
+
+```
+tool_process_private_boundary_tests::completion_counts_only_admitted_streamed_artifacts
+Unavailable("tool process output is not protocol JSON: invalid escape at line 1 column 62")
+```
+
+"Invalid escape" at a fixed column in a single line of JSON is what an unescaped Windows path
+produces: `C:\Users` inside a JSON string makes `\U` an invalid escape. Worth checking whether
+that output path is written with `\\` escaping. The other two in that crate are the
+`cannot prove process-g…` generation error, unchanged.
+
+## interface_transport 3 to 2
+
+The relative `packages\bin` vs `packages/bin` mismatch is fixed. The two readiness failures
+remain, unchanged:
+`activation_life_requires_live_bindings…` (no readiness in 30 s, test_shell emits no event)
+and `life_failed_before_initial_readiness…` (`Elapsed(())`).
+
+## One thing I checked rather than assumed
+
+`memory_bound::tests::one_save_is_found_by_later_runs_within_its_scope_lineage` looked new in
+this rerun, so I went back to the run 9 log: it was already failing there, with the same
+`memory save stopped before it was complete … memory entry '\\?\C:\…'`. Not new. It is
+octopus-system-room-env's lib failure, separate from the three in tool_process_lifecycle, and
+it carries a verbatim path.
+
+Also accepted as upstream per your note: `direct_workspace_process_lifecycle_shares_one_kind_owned_process`
+and `persistent_exec_continuation_and_abandon_share_one_exact_tool_process`, which are 2 of
+coder_env's 3.
+
+Run 10 is building now.
