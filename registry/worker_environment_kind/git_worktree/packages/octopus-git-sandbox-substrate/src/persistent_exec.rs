@@ -876,7 +876,8 @@ fn retire_spec(path: &Path, spec: &KeeperSpec) -> Result<(), String> {
     private_directory(retained.parent().expect("retained process parent"))?;
     match std::fs::hard_link(path, &retained) {
         Ok(()) => {},
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound) => {
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound)
+            || concurrent_delete(&error) => {
             let prior = KeeperSpec::read(&retained).map_err(|error| error.to_string())?;
             if prior != *spec {
                 return Err("retained persistent process differs from its original spec".into());
@@ -890,9 +891,35 @@ fn retire_spec(path: &Path, spec: &KeeperSpec) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => {},
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) if concurrent_delete(&error) => await_concurrent_delete(path)?,
         Err(error) => return Err(format!("persistent process live record cannot be retired: {error}")),
     }
     octopus_private_fs::sync_directory(path.parent().expect("process registry parent")).map_err(|error| error.to_string())
+}
+
+/// The keeper and its owner can both retire one record (a release does). On
+/// Windows a file another party is deleting stays visible until its last
+/// handle closes, and opening or deleting it meanwhile fails with "Access is
+/// denied", where Unix reports it gone. Only that error is a candidate here;
+/// `await_concurrent_delete` then waits for the entry to disappear.
+fn concurrent_delete(error: &std::io::Error) -> bool {
+    cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+fn await_concurrent_delete(path: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            _ if std::time::Instant::now() >= deadline => {
+                return Err(format!(
+                    "persistent process live record cannot be retired: '{}' is still present and access is denied",
+                    path.display()
+                ));
+            }
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 /// Unix: mode 0600. Windows: records take the owner-only access list of the

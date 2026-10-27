@@ -24,6 +24,11 @@ def identifier(value, name):
     return value
 
 
+def absolute_path(value):
+    """An absolute path on this platform: `/…`, or `C:\\…` on Windows."""
+    return isinstance(value, str) and Path(value).is_absolute()
+
+
 def validate_config(value, interface):
     object_keys(value, {"schema_version", "interface", "poll_interval_ms", "read_roots", "files"}, "observer config")
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
@@ -35,7 +40,7 @@ def validate_config(value, interface):
         raise ValueError("read_roots must be an array with at most 64 entries")
     roots = set()
     for root in value["read_roots"]:
-        if (not isinstance(root, str) or not root.startswith("/") or "\0" in root
+        if (not absolute_path(root) or "\0" in root
                 or len(root.encode()) > 4096 or os.path.normpath(root) != root):
             raise ValueError("read root must be a normalized absolute directory path")
         path = Path(root)
@@ -55,8 +60,9 @@ def validate_config(value, interface):
         object_keys(source, {"id", "path", "label", "max_bytes"}, "observed file")
         identifier(source["id"], "observed file id")
         path, label = source["path"], source["label"]
-        if (not isinstance(path, str) or not path.startswith("/") or "\0" in path
-                or len(path.encode()) > 4096 or os.path.normpath(path) != path or path == "/"):
+        if (not absolute_path(path) or "\0" in path
+                or len(path.encode()) > 4096 or os.path.normpath(path) != path
+                or Path(path).parent == Path(path)):
             raise ValueError("observed path must be an exact normalized absolute file path")
         if not any(root in Path(path).parents for root in roots):
             raise ValueError(f"observed file must be beneath an explicitly declared read root: {path}")
@@ -100,7 +106,11 @@ def read_snapshot(source):
         raise PermissionError(f"observed path is not a regular file: {path}")
     if before.st_size > source["max_bytes"]:
         raise ValueError(f"observed file exceeds max_bytes: {path}")
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    # Windows has no O_NOFOLLOW or O_NONBLOCK. There the identity checks below
+    # refuse a link: the opened file must be the entry `lstat` sees at `path`.
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_BINARY", 0))
+    descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):

@@ -3254,7 +3254,7 @@ async fn actual_gui_decision_preserves_the_original_promise(
     let generation = "11111111111111111111111111111111";
     let original = json!({"run":formation.run,"ee":formation.ee,"worker":formation.worker,"door_interface":"system_gui_test","tool":call.tool,"correlation_id":call.correlation_id,"arguments":call.arguments,"source_movement_seq":delivery.seq,"source_artifact":source_ref});
     let scope = json!({"worker_environment_id":"we_gui_fixture","formation_pin":"gui-formation-fixture","host_generation":generation});
-    let application = json!({"bundle_id":"example.fixture","bundle_path":"/Applications/Fixture.app","display_name":"Fixture","instance":null});
+    let application = json!({"bundle_id":"example.fixture","bundle_path":fixture_app_path(),"display_name":"Fixture","instance":null});
     let commitment = json!({"schema_version":1,"original":original,"scope":scope,"application":application,"approval_scope":"formed_app_target"});
     let digest = format!(
         "{:x}",
@@ -3390,7 +3390,7 @@ async fn actual_gui_decision_preserves_the_original_promise(
     let original_bytes = std::fs::read(&request_path).unwrap();
     let app_ref = json!({"host_generation":generation,"app_instance_id":"fixture-app"});
     let root_node = json!({"element_id":"fixture-app-root","parent_id":null,"window_id":null,"window_unavailable_reason":"ax_window_attribute_unavailable","role":"AXApplication","subrole":null,"title":"Fixture","description":null,"value":null,"value_type":null,"value_input":null,"enabled":null,"focused":null,"frame_screen_points":null,"settable_attributes":[],"actions":[],"unavailable_attributes":[]});
-    let mut state = json!({"scope":scope,"application":{"app":app_ref,"bundle_id":"example.fixture","bundle_path":"/Applications/Fixture.app","display_name":"Fixture","process_id":4242,"launch_time_unix_ms":null,"active":false,"hidden":false},"control_generation":0,"accessibility":{"mode":"full","observation_id":"fixture-observation","app":app_ref,"revision":1,"captured_at_unix_ms":1,"base_revision":null,"context":{"root_kind":"application","root_element_id":"fixture-app-root","menu_bar_element_id":null,"display_omissions":[]},"complete":true,"nodes":[root_node],"removed_ids":[],"omissions":[]},"windows":[],"captures":[],"primary_capture":null,"capture_omissions":[],"preparation_effects":[],"instructions":null});
+    let mut state = json!({"scope":scope,"application":{"app":app_ref,"bundle_id":"example.fixture","bundle_path":fixture_app_path(),"display_name":"Fixture","process_id":4242,"launch_time_unix_ms":null,"active":false,"hidden":false},"control_generation":0,"accessibility":{"mode":"full","observation_id":"fixture-observation","app":app_ref,"revision":1,"captured_at_unix_ms":1,"base_revision":null,"context":{"root_kind":"application","root_element_id":"fixture-app-root","menu_bar_element_id":null,"display_omissions":[]},"complete":true,"nodes":[root_node],"removed_ids":[],"omissions":[]},"windows":[],"captures":[],"primary_capture":null,"capture_omissions":[],"preparation_effects":[],"instructions":null});
     let native_presentation_text = format!("fixture-app-root AXApplication Fixture\n{}end of native presentation", "controlled native fixture text 🧭\n".repeat(160));
     state["accessibility"]["presentation"] = json!({"schema_version":1,"format":"macos_ax","context_type":"full_ui","mode":"full","base_revision":null,"text":native_presentation_text,"rendered_element_ids":["fixture-app-root"],"focused_element_id":null,"selected_text":null,"selected_element_ids":[]});
     let (media, _, _) = fixture_app_capture(root, &mut state, 0, true);
@@ -3714,7 +3714,7 @@ async fn actual_app_capture_facade(
     use base64::Engine;
     use sha2::{Digest,Sha256};
     let instruction="Use the controlled fixture's exact observed elements.";
-    let instructions=json!({"bundle_id":"example.fixture","bundle_path":"/Applications/Fixture.app","content_sha256":format!("{:x}",Sha256::digest(instruction.as_bytes())),"text":instruction});
+    let instructions=json!({"bundle_id":"example.fixture","bundle_path":fixture_app_path(),"content_sha256":format!("{:x}",Sha256::digest(instruction.as_bytes())),"text":instruction});
     let mut previous_observation=base_state["accessibility"]["observation_id"].clone();
     let mut previous_revision=base_state["accessibility"]["revision"].clone();
     for case in 0..6usize {
@@ -3749,7 +3749,7 @@ async fn actual_app_capture_facade(
         assert_eq!(call.tool,"gui.app_state");
         assert_eq!(call.arguments["include_screenshots"],true);
         assert_eq!(call.arguments["capture_selection"], "primary");
-        assert_eq!(call.arguments["app"],json!({"kind":"bundle_path","value":"/Applications/Fixture.app"}));
+        assert_eq!(call.arguments["app"],json!({"kind":"bundle_path","value":fixture_app_path()}));
         if case==0 { assert!(call.arguments.get("presentation_base").is_none()); }
         else { assert_eq!(call.arguments["presentation_base"],json!({"app":state["application"]["app"],"observation_id":previous_observation,"revision":previous_revision})); }
         previous_observation=state["accessibility"]["observation_id"].clone(); previous_revision=state["accessibility"]["revision"].clone();
@@ -3932,4 +3932,15 @@ async fn actual_provider_authoring_socket(
     let result: Result<(),String> = served.await;
     if let Err(error) = &result { eprintln!("provider authoring socket stopped: {error}"); }
     result
+}
+
+/// The fixture application's bundle path, absolute on this platform (an
+/// application owner request refuses a relative one, and `/Applications/…`
+/// has no drive on Windows).
+fn fixture_app_path() -> &'static str {
+    if cfg!(windows) {
+        r"C:\Applications\Fixture.app"
+    } else {
+        "/Applications/Fixture.app"
+    }
 }
