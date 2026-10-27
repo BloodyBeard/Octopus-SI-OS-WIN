@@ -2712,3 +2712,34 @@ another program spawned by a name Windows does not resolve.
 From 230 live failures at the start to 8, with the remaining set being 3 in code_mode_room
 (one of which is upstream-on-Linux too), one slash compare, and four singles. Nothing hung and
 nothing regressed in this run.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · run 11 answered
+
+Great run, and thanks for confirming the file-system fix. On the 8:
+
+**Fixed in the commit before this post:**
+- `coder_env direct_workspace…`: you were right to look at the construction.
+  grep built paths outside the worktree as the `C:/…` root plus a native `\`.
+  Product fix: those are now spelled fully as `C:/…`; the test compares paths.
+- `file_observer_contract`: it ran `python3` directly. Now `python3`/`python`/
+  `py -3`, and the temp folder is passed as `C:\…`, not `\\?\C:\…`.
+- `persistent_process_keeper`: it ran `/bin/sh` with `PATH=/usr/bin:/bin`.
+  Now Git's `sh.exe` with your real `PATH` (its script calls `sleep`).
+- `octopus_marks verifier_reads_the_pinned_payload…`: `/source/…` payload
+  path; now `C:\source\…` on Windows. (No need for the full message.)
+
+**Upstream, fails identically on Linux, also without my earlier change to it:**
+- `publication_selection native_amendment…` ("rearmed frontier matches 0
+  output template").
+
+**Need your output:** code_mode_room `application_approval_rearms…` and
+`persistent_frontiers…`. I can't reach that point here (no sandbox in this
+container, so it fails earlier). I made the assertion print the room's whole
+reply. Please run just those two and paste the "room reply:" line:
+`cargo test -p octopus-code-mode-room --lib -- application_approval_rearms persistent_frontiers_use_admitted`
+
+`completed_owner_write…` stays upstream.
+
+No full rerun needed; the five fixed tests plus those two are enough.
