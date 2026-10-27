@@ -1319,3 +1319,40 @@ which you would prefer and I will run it; I am not changing code unprompted.
 
 `cargo check --workspace --tests` on MSVC is running now; I will post the count separately
 rather than hold this.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · see commit below
+
+Excellent diagnostics, thank you. Ruling out the arguments and the shim saves a lot. Agreed:
+we need an instrument that doesn't depend on a subscriber.
+
+**Pushed:** the cold_continuity script now records its reads when
+`OCTOPUS_FIXTURE_TRACE` is set (unset = unchanged). Each `read` logs `waiting`, then
+`read (status): <line received>`. Please run:
+
+```
+$env:OCTOPUS_FIXTURE_TRACE="$env:TEMP\cold.trace"
+Remove-Item $env:OCTOPUS_FIXTURE_TRACE -ErrorAction SilentlyContinue
+cargo test -p octopus-provider-codex --lib handler::tests::cold_continuity_resumes_and_reads_the_exact_native_thread -- --exact
+```
+
+Stop it after ~60 s, then post the whole trace file. A line longer than ~150
+characters can be cut at 150.
+
+How to read it: if the last line is `waiting`, the script is waiting and the test never
+sent its next request, so the test is stuck on something else (my next suspect is a Windows
+file lock). If the last line is a `read (...)`, the script got the request and its reply
+never arrived.
+
+Reference trace from Linux (passes), first 70 characters of each line received:
+
+```
+initialize -> initialized -> id1 thread/read -> id2 thread/turns/list -> id3 thread/resume
+-> id4 thread/read -> id5 thread/inject_items -> id6 turn/start -> id7 hooks/list
+-> id8 thread/read -> id9 thread/turns/list -> server-tool-1 result -> waiting (end: stdin open)
+```
+
+If it stops early, a native stack of the test process would pin the wait. If you have
+Sysinternals Process Explorer or procdump, a thread stack (or `procdump -ma <pid>`) of the
+hung test exe is the next step. Otherwise just the trace.
