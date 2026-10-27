@@ -563,7 +563,35 @@ pub(crate) fn validate_artifact_id(id: &str) -> Result<(), String> {
     {
         return Err(format!("invalid context artifact identity '{id}'"));
     }
+    if cfg!(windows) {
+        if let Some(reason) = windows_name_problem(id) {
+            return Err(format!(
+                "context artifact identity '{id}' cannot be a folder name on Windows: {reason}"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Why `name` cannot name a file or folder on Windows, if it cannot. An
+/// artifact identity is also its folder under `registry/artifact`.
+fn windows_name_problem(name: &str) -> Option<String> {
+    if let Some(character) = name.chars().find(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control()) {
+        return Some(format!(
+            "it contains '{}' (Windows reserves < > : \" | ? * and control characters)",
+            character.escape_default()
+        ));
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some("it ends with a dot or a space, which Windows strips".to_string());
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0');
+    reserved.then(|| format!("'{stem}' is a reserved Windows device name"))
 }
 
 pub(crate) fn configure_tool_context(
@@ -669,4 +697,20 @@ pub(crate) fn configure_tool_context(
     record["interface_state"][provider.as_str()]["run_authoring_binding"] =
         serde_json::to_value(topology).map_err(|error| error.to_string())?;
     crate::pretty_json(&record)
+}
+
+#[cfg(test)]
+mod windows_name_tests {
+    use super::windows_name_problem;
+
+    #[test]
+    fn windows_folder_name_rules() {
+        assert!(windows_name_problem("procedure.reuse").is_none());
+        assert!(windows_name_problem("procedure:reuse").unwrap().contains("':'"));
+        assert!(windows_name_problem("notes.").is_some());
+        assert!(windows_name_problem("nul.json").unwrap().contains("NUL"));
+        assert!(windows_name_problem("com1").is_some());
+        assert!(windows_name_problem("com0").is_none());
+        assert!(windows_name_problem("console").is_none());
+    }
 }
