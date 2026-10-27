@@ -1771,17 +1771,21 @@ mod interface_life_switch_tests {
         let arrival = serde_json::json!({
             "kind": "arrival", "request_id": null, "artifact_manifest_path": manifest, "evidence": []
         }).to_string();
+        // The frames go through a file: Git for Windows' sh rebuilds argv by
+        // its own quoting rules, which mangles JSON holding Windows paths.
+        let frames = var_dir.join("frames.jsonl");
+        std::fs::write(&frames, format!("{ready}\n{arrival}\n")).unwrap();
         std::fs::write(iface_dir.join("life.json"), serde_json::json!({
             "processes": [{
                 "bin": crate::test_programs::shell(),
                 "io_limits": {"max_control_frame_bytes": 65536, "max_stderr_bytes": 65536,
                     "max_manifest_bytes": 65536, "max_payload_bytes": 1048576},
                 "args": ["-c", format!(
-                    "if [ -e '{0}' ]; then printf '%s\\n' \"$1\" \"$2\"; IFS= read -r ignored; else : > '{0}'; exit 3; fi",
-                    marker.display()), "octopus-test", ready, arrival],
+                    "if [ -e '{0}' ]; then while IFS= read -r line; do printf '%s\\n' \"$line\"; done < '{1}'; IFS= read -r ignored; else : > '{0}'; exit 3; fi",
+                    marker.display(), frames.display())],
                 "authority": {
                     "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
-                    "read_paths": [], "write_paths": [marker], "executable_paths": [crate::test_programs::shell()],
+                    "read_paths": [frames], "write_paths": [marker], "executable_paths": [crate::test_programs::shell()],
                     "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
                     "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
                 },
@@ -1962,6 +1966,14 @@ mod interface_life_switch_tests {
             "to_interface": "system_worker_planner"
         })
         .to_string();
+        // The frames go through a file: Git for Windows' sh rebuilds argv by
+        // its own quoting rules, which mangles JSON holding Windows paths.
+        let frames = interface_var_dir.join("frames.jsonl");
+        std::fs::write(
+            &frames,
+            format!("{ready_frame}\n{arrival_frame}\n{system_emission_frame}\n"),
+        )
+        .unwrap();
 
         std::fs::write(
             iface_dir.join("life.json"),
@@ -1976,19 +1988,16 @@ mod interface_life_switch_tests {
                     },
                     "args": ["-c",
                         format!(
-                            "echo life-started >&2; printf 'first frame: %s\\n' \"$1\" >&2; printf '%s\\n' \"$1\" \"$2\" \"$3\"; echo frames-written >&2; IFS= read -r verdict; printf '%s' \"$verdict\" > '{}'",
+                            "echo life-started >&2; while IFS= read -r line; do printf '%s\\n' \"$line\"; done < '{}'; echo frames-written >&2; IFS= read -r verdict; printf '%s' \"$verdict\" > '{}'",
+                            frames.display(),
                             verdict_path.display()
                         ),
-                        "octopus-test",
-                        ready_frame,
-                        arrival_frame,
-                        system_emission_frame
                     ],
                     "authority": {
                         "read_root_slots": [],
                         "write_root_slots": [],
                         "executable_root_slots": [],
-                        "read_paths": [],
+                        "read_paths": [frames],
                         "write_paths": [verdict_path],
                         "executable_paths": [crate::test_programs::shell()],
                         "executable_commands": [],
