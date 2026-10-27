@@ -6,7 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [lib]
-test = false
 doctest = false
 
 [dependencies]
@@ -30,6 +29,7 @@ windows-sys = { version = "0.52", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Kernel",
+    "Win32_System_Pipes",
 ] }
 
 [dev-dependencies]
