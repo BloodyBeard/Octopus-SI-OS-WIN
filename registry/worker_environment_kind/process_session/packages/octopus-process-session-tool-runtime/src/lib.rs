@@ -71,15 +71,15 @@ use process_authority::{ProcessAuthoritySpecExecution, ProcessInvocationAuthorit
 
 const TOOL_PROCESS_DURABLE_VAR_DIR_ENV: &str = "OCTOPUS_TOOL_PROCESS_DURABLE_VAR_DIR";
 const TOOL_PROCESS_OWNER_FILE: &str = "owner.json";
-// Process-group owner leases are Unix-only. Windows refuses to spawn tool
-// processes until it has a job-object lease (docs/windows-port.md).
+// The owner lease is a lock file held by the process group on Unix and the
+// generation's named job on Windows (see ToolProcessOwnerLease).
 #[cfg(unix)]
 const TOOL_PROCESS_OWNER_LOCK_FILE: &str = "owner.lock";
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const TOOL_PROCESS_OWNER_TERM_GRACE_MS: u64 = 2_000;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const TOOL_PROCESS_OWNER_KILL_GRACE_MS: u64 = 2_000;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const TOOL_PROCESS_OWNER_POLL_MS: u64 = 25;
 const INTERFACE_LOCAL_IPC_ROOT_SLOT: &str = "interface_local_ipc_root";
 
@@ -2639,6 +2639,7 @@ impl ToolProcessClient {
         })?;
         if let Err(error) = publish_tool_process_owner(
             &generation_dir,
+            &owner_lease,
             process_id,
             formation.map(|formation| formation.worker_environment_id.as_str()),
         ) {
@@ -5945,7 +5946,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
 }
 
 static PRIVATE_READ_SNAPSHOT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static TOOL_PROCESS_OWNER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 struct MaterializedPrivateGeneration {
@@ -5977,8 +5978,24 @@ struct ToolProcessOwnerLease {
     file: std::fs::File,
 }
 
-#[cfg(not(unix))]
+/// Windows: the generation's named job. It exists while its creator holds
+/// it or any tool process in it runs, which is what the Unix lock (held by
+/// the process group through an inherited descriptor) proves there.
+#[cfg(windows)]
+struct ToolProcessOwnerLease {
+    job: octopus_process_job::NamedJob,
+}
+
+#[cfg(not(any(unix, windows)))]
 struct ToolProcessOwnerLease;
+
+/// The name of a generation's job: one per generation, in this session's
+/// namespace, so a later host of the same user finds the processes a
+/// previous host left running.
+#[cfg(windows)]
+fn tool_process_job_name(generation: &Path) -> Result<String, String> {
+    Ok(format!("Local\\octopus-tool-process-{}", tool_process_generation_name(generation)?))
+}
 
 fn tool_process_generation_name(generation: &Path) -> Result<&str, String> {
     let name = generation
@@ -6058,7 +6075,30 @@ fn try_acquire_tool_process_owner_lease(
     Ok(Some(ToolProcessOwnerLease { file }))
 }
 
-#[cfg(not(unix))]
+/// Windows: the lease is free when the generation's job does not exist or
+/// has no running process; `None` when a tool process still runs in it.
+#[cfg(windows)]
+fn try_acquire_tool_process_owner_lease(
+    generation: &Path,
+) -> Result<Option<ToolProcessOwnerLease>, String> {
+    let name = tool_process_job_name(generation)?;
+    let (job, existed) = octopus_process_job::NamedJob::create_or_open(&name).map_err(|error| {
+        format!("tool process generation '{}' job cannot be opened: {error}", generation.display())
+    })?;
+    if existed && tool_process_job_active(generation, &job)? > 0 {
+        return Ok(None);
+    }
+    Ok(Some(ToolProcessOwnerLease { job }))
+}
+
+#[cfg(windows)]
+fn tool_process_job_active(generation: &Path, job: &octopus_process_job::NamedJob) -> Result<u32, String> {
+    job.active_processes().map_err(|error| {
+        format!("tool process generation '{}' job cannot be inspected: {error}", generation.display())
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn try_acquire_tool_process_owner_lease(
     generation: &Path,
 ) -> Result<Option<ToolProcessOwnerLease>, String> {
@@ -6075,6 +6115,9 @@ fn acquire_tool_process_owner_lease(generation: &Path) -> Result<ToolProcessOwne
             generation.display()
         )
     })?;
+    // Windows: the job is the group, so holding the lease already proves no
+    // process of this generation runs.
+    #[cfg(unix)]
     if let Some(record) = read_tool_process_owner_record(generation)?
         && process_group_exists(record.process_group_id)?
     {
@@ -6106,14 +6149,14 @@ fn process_group_exists(process_group_id: i32) -> Result<bool, String> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn process_group_exists(process_group_id: i32) -> Result<bool, String> {
     Err(format!(
         "tool process group {process_group_id} cannot be inspected on this platform"
     ))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn quiesce_worker_environment_owner_generations(
     root: &Path,
     worker_environment_id: &WorkerEnvironmentId,
@@ -6188,7 +6231,7 @@ async fn quiesce_worker_environment_owner_generations(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn quiesce_worker_environment_owner_generations(
     root: &Path,
     _worker_environment_id: &WorkerEnvironmentId,
@@ -6260,6 +6303,54 @@ async fn quiesce_tool_process_owner_generation(
             generation.display(),
             expected.process_group_id
         ))
+    }
+}
+
+/// Windows: ends the generation's job and waits for its processes to exit.
+/// Windows has no SIGTERM for background processes, so where Unix asks the
+/// group to stop and then kills it, the job is terminated at once.
+#[cfg(windows)]
+async fn quiesce_tool_process_owner_generation(
+    generation: &Path,
+    expected: &ToolProcessOwnerRecord,
+) -> Result<(), String> {
+    if read_tool_process_owner_record(generation)?.as_ref() != Some(expected) {
+        return Err(format!(
+            "tool process generation '{}' changed owner identity during quiescence",
+            generation.display()
+        ));
+    }
+    let name = tool_process_job_name(generation)?;
+    let Some(job) = octopus_process_job::NamedJob::open(&name).map_err(|error| {
+        format!("tool process generation '{}' job cannot be opened: {error}", generation.display())
+    })?
+    else {
+        return Ok(());
+    };
+    if tool_process_job_active(generation, &job)? == 0 {
+        return Ok(());
+    }
+    job.terminate().map_err(|error| {
+        format!("tool process generation '{}' job cannot be terminated: {error}", generation.display())
+    })?;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(TOOL_PROCESS_OWNER_TERM_GRACE_MS + TOOL_PROCESS_OWNER_KILL_GRACE_MS);
+    loop {
+        if tool_process_job_active(generation, &job)? == 0 {
+            return Ok(());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "tool process generation '{}' retained running processes after its job was terminated",
+                generation.display()
+            ));
+        }
+        tokio::time::sleep(
+            std::time::Duration::from_millis(TOOL_PROCESS_OWNER_POLL_MS)
+                .min(deadline.saturating_duration_since(now)),
+        )
+        .await;
     }
 }
 
@@ -6379,7 +6470,7 @@ async fn quiesce_orphaned_generation_owners(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn quiesce_orphaned_generation(generation: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(generation) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -6403,7 +6494,7 @@ async fn quiesce_orphaned_generation(generation: &Path) -> Result<(), String> {
     quiesce_tool_process_owner_generation(generation, &record).await
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn quiesce_orphaned_generation(_generation: &Path) -> Result<(), String> {
     Ok(())
 }
@@ -6517,6 +6608,7 @@ fn configure_tool_process_owner_lease(
 #[cfg(unix)]
 fn publish_tool_process_owner(
     generation: &Path,
+    _lease: &ToolProcessOwnerLease,
     process_id: u32,
     formation_id: Option<&str>,
 ) -> Result<(), String> {
@@ -6545,9 +6637,35 @@ fn publish_tool_process_owner(
     write_tool_process_owner_record(generation, &record)
 }
 
-#[cfg(not(unix))]
+/// Windows: puts the tool process into the generation's job (the processes
+/// it starts later join it too) and records it, its id standing for the
+/// group as the leader's id does for a Unix process group.
+#[cfg(windows)]
 fn publish_tool_process_owner(
     generation: &Path,
+    lease: &ToolProcessOwnerLease,
+    process_id: u32,
+    formation_id: Option<&str>,
+) -> Result<(), String> {
+    let process_group_id = i32::try_from(process_id)
+        .map_err(|_| "tool process id exceeds the recorded process-group range".to_string())?;
+    lease.job.assign(process_id).map_err(|error| {
+        format!("tool process {process_id} cannot join generation '{}' job: {error}", generation.display())
+    })?;
+    let record = ToolProcessOwnerRecord {
+        schema_version: 1,
+        generation: tool_process_generation_name(generation)?.to_string(),
+        formation_id: formation_id.map(str::to_string),
+        process_id,
+        process_group_id,
+    };
+    write_tool_process_owner_record(generation, &record)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn publish_tool_process_owner(
+    generation: &Path,
+    _lease: &ToolProcessOwnerLease,
     _process_id: u32,
     _formation_id: Option<&str>,
 ) -> Result<(), String> {
@@ -6557,7 +6675,7 @@ fn publish_tool_process_owner(
     ))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn write_tool_process_owner_record(
     generation: &Path,
     record: &ToolProcessOwnerRecord,
@@ -10348,7 +10466,7 @@ mod tool_process_private_boundary_tests {
                 .kill_on_drop(true);
             configure_tool_process_owner_lease(&mut command, &lease);
             let child = command.spawn().unwrap();
-            publish_tool_process_owner(generation, child.id().unwrap(), Some(formation.as_str()))
+            publish_tool_process_owner(generation, &lease, child.id().unwrap(), Some(formation.as_str()))
                 .unwrap();
             drop(lease);
             child

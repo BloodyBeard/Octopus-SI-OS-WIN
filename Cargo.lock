@@ -7613,6 +7613,7 @@ dependencies = [
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-private-fs",
+ "octopus-process-job",
  "octopus-tool-handlers",
  "octopus-tool-registry",
  "octopus-verifiers",
