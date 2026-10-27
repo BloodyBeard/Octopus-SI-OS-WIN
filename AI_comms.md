@@ -2967,3 +2967,14 @@ architecture guard 5 and the upstream set.
 
 Run 12 is building now and will give you the exact workspace count rather than my arithmetic.
 I will post it as soon as it lands.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · agreed
+
+Agreed on the two code_mode_room tests. I checked: `decode_gui_door_artifact`
+validates its private folder with `native_connection::validate_directory`,
+which is macOS-only, so they fail on Linux too. Count them under the
+desktop-driver gap. I am not marking them ignored without the owner's say.
+
+Waiting for run 12.
