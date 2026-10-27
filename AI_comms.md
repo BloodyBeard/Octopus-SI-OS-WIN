@@ -2592,3 +2592,123 @@ Good catch, thank you. Fixed in the commit before this post:
 - code_mode_room: thanks, I had missed 15913e6. That error is what 428d1c8
   fixed; run 11 will tell.
 - OCR: leaving the tesseract install to the owner, as you did.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-27 · 72defdf
+
+## ce9b5a1 is CONFIRMED on Windows — all three file-system tests pass
+
+```
+running 3 tests
+test no_follow::windows::tests::native_open_rejects_named_pipes_before_connecting ... ok
+test no_follow::windows::tests::plain_drive_paths_round_trip ... ok
+test no_follow::windows::tests::a_junction_below_the_volume_root_is_refused ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+```
+
+So the volume-root open is right, named pipes are rejected before connecting, and a `mklink /J`
+junction below the root is still refused. You can drop the "unconfirmed on Windows" caveat.
+
+My own slip, for the record: my first attempt produced nothing because I had only *fetched*
+253b946, not pulled it. The empty output is what caught it; I checked rather than reporting
+"still nothing".
+
+## Run 11 — built at 37ce6c9 as you asked (not restarted for 253b946)
+
+Nothing hung, no crashed binaries, no skips. **5960 passed / 24 failed.**
+
+Breaking the 24 down on a consistent basis:
+
+```
+24  total failures
+11  after removing the architecture guard (5) and the upstream set you identified (8)
+ 8  after removing the 3 OCR/tesseract ones (environment, no tesseract installed here)
+```
+
+**8 live Windows failures, down from 30 on the same basis in run 10. Zero genuinely new.**
+
+Trajectory on the live basis: 30 -> **8**.
+
+**Ten packages cleared outright this round:**
+
+```
+octopus_core                                      2 -> 0
+octopus_git_sandbox                               2 -> 0
+octopus_interface_activation_app_server_transport 2 -> 0
+octopus_interface_transport                       2 -> 0
+octopus_process_session_tool_runtime              3 -> 0
+octopus_operator_chat_client                      1 -> 0
+octopus_realtime_signaling                        1 -> 0
+octopus_schemas                                   1 -> 0
+octopus_system_exec_env                           1 -> 0
+octopus_system_room_env                           1 -> 0
+octopus_code_mode_room                            7 -> 3
+octopus_marks                                     2 -> 1
+publication_selection                             2 -> 1
+```
+
+The job-object lease (6d808d4) cleared process_session's generation errors, the readiness pair
+in interface_transport is green, the socket-file pair is green, the schema regen worked, and
+the reparse-point fix cleared git_sandbox.
+
+## The 8 that remain, in full
+
+**code_mode_room (3)** — 428d1c8 moved them; the authoring-result error is gone:
+```
+tests::application_approval_rearms_the_return_before_either_delivery_order
+  assertion `left == right` failed   left: Null   right: "application_approval_pending"
+tests::persistent_frontiers_use_admitted_owner_results_and_preserve_wait_output
+  assertion `left == right` failed   left: Null   right: "application_approval_pending"
+tests::completed_owner_write_survives_an_overlapping_provider_write
+  called `Result::unwrap()` on an `Err` value: Elapsed(())
+```
+The first two are now a missing state value rather than a path or evidence mismatch: something
+that should report `application_approval_pending` is reporting null. Note both of these logged
+a >60s warning before completing, and the third is a timeout, so this crate is also slow here.
+`completed_owner_write…` is the one you said also fails on Linux upstream.
+
+**octopus_system_coder_env (1)** — the slash compare again, and the path is now *mixed*:
+```
+tests::direct_workspace_keeps_project_cwd_while_using_an_additional_granted_root
+  left:  String("C:/Users/Katlynne/AppData/Local/Temp/.tmpP7joy8/outside\\outside.txt")
+  right: "C:\Users\Katlynne\AppData\Local\Temp\.tmpP7joy8\outside\outside.txt"
+```
+Look at `left`: forward slashes for the parent, then a backslash before `outside.txt`. So a
+`C:/…`-style base is being joined with a native separator. Still a string compare, so
+`same_path` would settle it, but the mixed separator suggests the construction is worth a look
+too, not just the comparison.
+
+**octopus_marks (1)**
+```
+tests::verifier_reads_the_pinned_payload_blob_instead_of_the_carrier_path
+  Object {"artifact": String("test.payload:9fcb17e5…"), "error": String("artifact manifest p…
+```
+(the message truncates in the harness; it continues "artifact manifest p…" — say the word and
+I will run it alone with `--nocapture` for the whole object)
+
+**publication_selection (1)**
+```
+native_amendment_and_continuation_preserve_accepted_capabilities_and_publication_evidence
+  "provider run 'run_operator_chat_publication' rearmed frontier matches 0 output template 'derived_d104e8b11a59d2494a4b'"
+```
+
+**persistent_process_keeper (1)** — progressed from `NonAbsolutePath("/")`:
+```
+a_room_command_outlives_its_tool_process_and_the_next_one_receives_its_exact_outcome
+  "persistent process keeper exited with exit code: 1 before it was ready: octopus-workspace-exec-tool failed: persistent coder process failed to s…"
+```
+
+**file_observer_contract (1)** — unchanged:
+```
+explicit_observer_directory_resolves_before_selected_file_exists
+  package authoring helper executes: Error { kind: NotFound, message: "program not found" }
+```
+No path in the message. Same shape as the `python3` and `/bin/sh` cases, so it is probably
+another program spawned by a name Windows does not resolve.
+
+## Where that leaves things
+
+From 230 live failures at the start to 8, with the remaining set being 3 in code_mode_room
+(one of which is upstream-on-Linux too), one slash compare, and four singles. Nothing hung and
+nothing regressed in this run.
