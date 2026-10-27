@@ -2068,13 +2068,13 @@ struct ToolProcessCompletion {
     generation: PathBuf,
 }
 
-// Windows cannot capture primary inputs yet (see its `capture` below), so
-// there is nothing to hold.
 struct ToolProcessPrimaryInput {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     directory: std::fs::File,
     #[cfg(unix)]
     files: Vec<(std::ffi::OsString, ContentHash, std::fs::Metadata)>,
+    #[cfg(windows)]
+    files: Vec<(std::ffi::OsString, ContentHash, octopus_private_fs::windows::beneath::Entry)>,
 }
 
 async fn hand_completed_tool_outputs(
@@ -2201,7 +2201,93 @@ impl ToolProcessPrimaryInput {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows: the same capture, check and retirement as Unix, made beneath
+/// open directory handles (`octopus_private_fs::windows::beneath`) so no name
+/// is followed through a link, with the file's identity, size, times and link
+/// count standing in for its `stat`, and an owner-only access list for its
+/// owner check.
+#[cfg(windows)]
+impl ToolProcessPrimaryInput {
+    fn capture_invocation(root: &Path, request_id: u64, envelope: &ToolProcessWireEnvelope, limits: &InterfaceHostIoLimits) -> Result<Self, String> {
+        let mut owned = Self::capture(root, request_id, &envelope.manifest_path, limits)?;
+        let expected = envelope.context.read_bytes(root, request_id, limits)?;
+        let name = envelope.context.path.file_name().ok_or("tool-process context carrier has no filename")?;
+        let (bytes, entry) = owned.read_file(name, envelope.context.byte_len)?;
+        if bytes != expected { return Err("tool-process context carrier changed before dispatch".into()); }
+        owned.files.push((name.to_os_string(), envelope.context.content_hash, entry));
+        Ok(owned)
+    }
+
+    fn capture(root: &Path, request_id: u64, manifest_path: &Path, limits: &InterfaceHostIoLimits) -> Result<Self, String> {
+        use octopus_private_fs::{same_path, windows::beneath};
+        let root = root.canonicalize().map_err(|error| error.to_string())?;
+        let request_root = root.join(request_id.to_string());
+        let directory_path = request_root.join("artifact");
+        // Callers may spell the root C:\... where canonicalize gives \\?\C:\...
+        let in_directory = |path: &Path| path.parent().is_some_and(|parent| same_path(parent, &directory_path));
+        if !in_directory(manifest_path) {
+            return Err("tool-process primary manifest left its exact request directory".into());
+        }
+        let artifact = read_tool_process_input_artifact(manifest_path, &request_root, limits)?;
+        let snapshot = artifact.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+            .map_err(|error| error.to_string())?;
+        if !in_directory(&snapshot.manifest.payload_path) {
+            return Err("tool-process primary payload left its exact request directory".into());
+        }
+        let opened = |error: std::io::Error| format!("tool-process primary input directory cannot be opened: {error}");
+        let mut directory = beneath::open_directory_path(&root).map_err(opened)?;
+        for component in [request_id.to_string(), "artifact".to_string()] {
+            directory = beneath::open_directory(&directory, std::ffi::OsStr::new(&component)).map_err(opened)?;
+        }
+        let mut owned = Self { directory, files: Vec::with_capacity(2) };
+        for (path, expected) in [(manifest_path, snapshot.manifest_bytes.as_slice()),
+            (snapshot.manifest.payload_path.as_path(), snapshot.payload_bytes.as_slice())]
+        {
+            let name = path.file_name().ok_or("tool-process primary input has no filename")?;
+            let (bytes, entry) = owned.read_file(name, expected.len() as u64)?;
+            if bytes != expected { return Err("tool-process primary input changed before dispatch".into()); }
+            owned.files.push((name.to_os_string(), ContentHash::of_bytes(&bytes), entry));
+        }
+        Ok(owned)
+    }
+
+    fn read_file(&self, name: &std::ffi::OsStr, maximum: u64) -> Result<(Vec<u8>, octopus_private_fs::windows::beneath::Entry), String> {
+        use octopus_private_fs::windows::beneath::{self, EntryKind};
+        let mut file = beneath::open_file(&self.directory, name)
+            .map_err(|error| format!("tool-process primary input cannot be opened: {error}"))?;
+        let before = beneath::entry_of(&file).map_err(|error| error.to_string())?;
+        let owner_only = octopus_private_fs::is_owner_only_handle(&file).map_err(|error| error.to_string())?;
+        if before.kind != EntryKind::File || before.links != 1 || !owner_only || before.len > maximum {
+            return Err("tool-process primary input changed its private regular-file boundary".into());
+        }
+        let mut bytes = Vec::new();
+        (&mut file).take(maximum.saturating_add(1)).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        let after = beneath::entry_of(&file).map_err(|error| error.to_string())?;
+        if bytes.len() as u64 != before.len || before != after {
+            return Err("tool-process primary input changed during verification".into());
+        }
+        Ok((bytes, after))
+    }
+
+    fn retire(self) -> Result<(), String> {
+        use octopus_private_fs::windows::beneath;
+        for (name, hash, expected) in &self.files {
+            let (bytes, observed) = self.read_file(name, expected.len)?;
+            if *expected != observed || ContentHash::of_bytes(&bytes) != *hash {
+                return Err("tool-process primary input changed before retirement".into());
+            }
+        }
+        for (name, _, expected) in &self.files {
+            beneath::remove(&self.directory, name, false, expected.identity.device_and_file())
+                .map_err(|error| format!("tool-process primary input retirement failed: {error}"))?;
+        }
+        octopus_private_fs::sync_handle(&self.directory).map_err(|error| {
+            format!("tool-process primary input retirement directory sync failed: {error}")
+        })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 impl ToolProcessPrimaryInput {
     fn capture_invocation(_root: &Path, _request_id: u64, _envelope: &ToolProcessWireEnvelope, _limits: &InterfaceHostIoLimits) -> Result<Self, String> {
         Err("tool-process primary input retirement requires descriptor-relative file operations".into())
