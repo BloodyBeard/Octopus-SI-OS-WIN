@@ -5795,6 +5795,9 @@
                 }]
             );
             host.await.unwrap();
+            // A Unix socket leaves a file behind; a Windows named pipe is gone
+            // once its server closes, so there is nothing to remove there.
+            #[cfg(unix)]
             std::fs::remove_file(&socket).unwrap();
             assert!(
                 std::fs::read(&movements_path)
