@@ -28,7 +28,7 @@ jobs:
       # 260-character limit; without long paths, checkout cannot create them.
       - name: Allow long paths in git
         run: git config --system core.longpaths true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install the pinned Windows Codex CLI
@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: Allow long paths in git
         run: git config --system core.longpaths true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -82,7 +82,7 @@ jobs:
           set -o pipefail
           cargo metadata --format-version 1 --no-deps \
             | python -c "import json,sys; [print(p['name']) for p in json.load(sys.stdin)['packages']]" \
-            | sort > packages.txt
+            | tr -d '\r' | sort > packages.txt
           : > failed.txt
           while read -r package; do
             echo "::group::$package"
