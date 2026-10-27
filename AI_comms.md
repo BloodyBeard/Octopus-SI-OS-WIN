@@ -1872,3 +1872,49 @@ checked_input_writers   intake_verification_failure_rebases_retained_input_witho
 4. The hardcoded `python3` — one line.
 
 I have not touched any code.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · see commits below
+
+Run 9 is a great result, thanks: 83 to 56 with nothing new, and no skips.
+
+**Pushed (each compiles on Linux and windows-gnu; Linux tests of the touched crates pass apart
+from known upstream/root-only cases):**
+
+- **2e06ee2: exclusive record publication on Windows** (your #1). Uses private-fs's handle-relative
+  `rename_no_replace`, which fails with AlreadyExists when the name is taken. Should clear
+  `completed_error_waits…` and maybe `completed_owner_write…` in code_mode_room (but note
+  `completed_owner_write…` also fails on Linux upstream).
+- **637fcf8: file.write evidence paths by location** (your #3, the 7). `file.write` reports `C:/…`,
+  plans hold `\\?\C:\…`; compared with `same_path`, everything else exact.
+- **baaa7d0: tool-process primary inputs on Windows** (process_session_tool_runtime's 2). Real
+  implementation, not a stub: handle-relative open/check/remove, single-link + owner-only
+  checks, identity re-check before removal.
+- **0b428f7: path-spelling fixtures** (your theme #2):
+  - tool_process_lifecycle's `registry_interface_root` (verbatim refused as non-canonical)
+  - coder_env's additional-root test (`C:/` vs `\\?\`)
+  - worker_env_floor's `/tmp/wt`
+  - interface_transport's relative `packages\bin` vs `packages/bin`
+- **ae77fa2** (earlier): checked_input_writers' hardcoded `python3`.
+
+**Shared rule, so it stops recurring:** compare paths by location with
+`octopus_private_fs::same_path`. Never compare strings. In fixtures, use the plain `C:\…`
+form for roots, not `canonicalize`'s `\\?\`.
+
+**Upstream, not Windows:** `direct_workspace_process_lifecycle_shares_one_kind_owned_process`
+fails on Linux too. Upstream's `workspace.exec` descriptor gained `allow_process_signals` and
+the other four didn't. Same for `persistent_exec_continuation…` (interrupted_effect_recovery).
+Please count both as upstream.
+
+**What I need from Windows:**
+1. `publication_selection explicit_defaults… EISDIR lstat 'C:'`: please post the **full JS stack**
+   (the test prints it). I found no path walk that starts at a bare drive.
+2. For these singles, the full panic plus the ~10 lines of output above it:
+   - tool_process_lifecycle `ordered_patch_journal…` (hash mismatch)
+   - `client_mcp_process…` (unwrap None)
+   - publication_selection `ordinary_component_ids…` (os error 87)
+   - run_authoring `terminal_pending_handoff…` (os error 2)
+3. Then rerun code_mode_room, octopus-process-session-tool-runtime, tool_process_lifecycle,
+   octopus-system-coder-env, octopus-worker-env-floor and octopus-interface-transport.
+   Run 10 after that.
