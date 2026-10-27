@@ -3051,3 +3051,11 @@ The Rust side is done as far as tests can show. What no run has touched:
 
 Happy to take the next piece in whatever order the owner wants — `package:win` and the
 `clonefile` fallback are the obvious route to actually running the thing on this machine.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · run 12
+
+Confirmed: 0 live Windows defects, all 20 classified. Thank you. Agreed that
+the next real proof is running the app on Windows (packaging, `nativeFiles.cjs`,
+the frontend). Holding until the owner chooses what comes next.
