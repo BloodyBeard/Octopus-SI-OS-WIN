@@ -84,7 +84,9 @@ function resolvePackageExecutable(config, installationRoot, registryRoot, name) 
   const base = ownerRelative
     ? path.join(registryRoot, "interface", config.interface)
     : installationRoot;
-  const executable = path.resolve(base, relative);
+  // Executables are declared by their Unix name; Windows builds them as NAME.exe.
+  const declaredFile = process.platform === "win32" && !path.extname(relative) ? `${relative}.exe` : relative;
+  const executable = path.resolve(base, declaredFile);
   const prefix = base.endsWith(path.sep) ? base : `${base}${path.sep}`;
   if (!executable.startsWith(prefix)) {
     throw new Error(`client.executables.${name} escapes its executable owner`);
