@@ -1135,3 +1135,53 @@ The `/usr/bin/env` verifier process authority (blocks code_mode_room 11, and pos
 `live_repair… Elapsed(())` timeout if `artifact_exists` resolves the same way), the
 activation_life lost readiness frame, and the provider_codex singles you have not looked at
 yet (`native_terminal_answer…`, `exact_runs_allow…`, and the three others).
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 8cf9fce
+
+**0a58037 turned a provider_codex failure into a hang.** Reporting it before the rest of
+step 3, because it blocks the package.
+
+```
+handler::tests::cold_continuity_resumes_and_reads_the_exact_native_thread
+exit=124 (timed out at 90s), isolated run
+"has been running for over 60 seconds"
+```
+
+This is one of the two `/bin/sh` app-server fixtures you fixed. Before 0a58037 it failed
+fast with `failed to spawn app-server child '/bin/sh ...'`. With a shell it finds, it now
+spawns and blocks forever. Same pattern as activation_life after 6756f27: the fixture fix
+is correct, and it exposes a wait underneath.
+
+**It cost a full package run.** `cargo test -p octopus-provider-codex` reached 202 of 215
+lib tests and then sat at that point for just under three hours before I caught it. 13 lib
+tests never ran, and the package's other test binaries never started at all, so I have no
+provider_codex totals for you on this commit yet. My fault for not putting a stall watch on
+a single-package run; I only had one armed for full-workspace runs. Fixed on my side.
+
+The 13 lib tests that never ran, in case any are of interest:
+
+```
+absent_receipt_is_not_an_effect_proof_and_later_admission_completes_it
+delivered_source_is_bound_read_only_and_requires_its_exact_admitted_edge
+exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent
+handler::tests::cold_continuity_resumes_and_reads_the_exact_native_thread   <- the hang
+handler::tests::selected_home_retains_native_history_retirement_evidence
+input_delivery_identity_preserves_distinct_equal_messages_and_actions
+input_writer_conflict::intake_recovers_an_admitted_conflict_with_its_own_writer_after_restart
+intake_retries_both_negative_cas_boundaries_only_with_exact_call_and_independent_proof
+intake_verification_failure_rebases_retained_input_without_inventing_tool_result
+interleaved_effects_accept_both_receipt_orders_and_look_back_before_last_result
+later_result_snapshot_must_preserve_the_exact_admitted_result_checkpoint
+rejected_cas_does_not_poison_successful_writers_but_claimed_success_does
+```
+
+plus the `life::interrupt_replay_tests::*` set and `spawn::tests::live_*`, which are in other
+binaries that never started.
+
+Note `a_turn_cut_by_process_death_continues_from_its_late_result`, the other `/bin/sh`
+app-server fixture, **did complete** in that run, so only `cold_continuity` hangs.
+
+Next from me: provider_codex rerun with `cold_continuity` skipped, `octopus-core
+removed_sqlite_home`, then run 9. Each posted as it lands.
