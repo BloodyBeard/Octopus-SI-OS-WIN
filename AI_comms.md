@@ -1743,3 +1743,132 @@ through the first of `python3`, `python`, `py -3` that reports Python 3, instead
 
 Please rerun `cargo test -p octopus-provider-codex --test checked_input_writers` (expect 8/8),
 then carry on with run 9.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · b9edac2
+
+## Run 9 — biggest drop yet
+
+Full workspace, opt-in set, **no skips**, nothing hung, no crashed binaries.
+
+**5923 passed / 61 failed → 56 non-upstream** (run 8: 83). **Zero genuinely new failures.**
+
+Both 60-second warnings resolved into passes this time, including
+`native_terminal_answer_and_closure_reach_the_real_authoring_gate`, so no test needed
+skipping for the first time in several runs.
+
+Packages cleared or improved:
+
+```
+octopus_provider_codex              12 ->  0
+stdio_room                           7 ->  0
+worker_interface_cross_run_fan_out   3 ->  0
+octopus_app_server                   3 ->  1
+octopus_core                         3 ->  2
+octopus                              1 ->  0
+input_intake                         1 ->  0
+```
+
+Non-upstream trajectory across the runs: 230, 162, 132, 122, 108, 84, 83, **56**.
+
+## code_mode_room is still 11, but every error changed
+
+The WebSocket reset is gone from all 11. Same tests, three new and much more specific
+causes. For each I checked what the same test said in run 8:
+
+**[7] shared with octopus_run_authoring**
+```
+tests::application_approval_rearms_the_return_before_either_delivery_order
+"checked file.write evidence differs from its exact patch"
+  (run 8: "interface authoring verdict read failed: WebSocket protocol error ...")
+```
+
+**[3]**
+```
+tests::completed_owner_write_survives_an_overlapping_provider_write
+"code mode immutable record \\?\C:\Users\...\oct-cm-Wvymu9\var\.tool-process-host-state\worker-environment-state\57b3e251...\181312be....inst..." (truncated)
+  (run 8: the same WebSocket error)
+```
+
+**[2] an unimplemented Windows primitive, stated outright**
+```
+tests::completed_error_waits_for_the_checked_provider_result_before_dispatch
+code mode immutable record \\?\C:\Users\...\output-authority.json could not be published:
+  atomic exclusive installation publication is unsupported on this platform
+  (run 8: the same WebSocket error)
+```
+
+That last one is the clearest next target in the whole set: it is not a mismatch or a
+fixture, it is a primitive that has no Windows implementation yet.
+
+## One theme accounts for much of the rest: path spelling
+
+Five failures across four packages are the same shape, one path in two spellings:
+
+```
+octopus_system_coder_env  direct_workspace_keeps_project_cwd_while_using_an_additional_granted_root
+  left:  "C:/Users/Katlynne/AppData/Local/Temp/.tmpK9XEFw/outside/outside.txt"
+  right: "\\?\C:\Users\Katlynne\AppData\Local\Temp\.tmpK9XEFw\outside\outside.txt"
+
+octopus_interface_transport  interface_owned_executable_resolves_through_the_declared_source_owner
+  left:  "packages\bin\octopus-app-server-activation-life"
+  right: "packages/bin/octopus-app-server-activation-life"
+        (separators only, in a RELATIVE path)
+
+tool_process_lifecycle  ordered_file_write_process_reports_durable_partial_effects
+  MalformedFormation("door root binding 'registry_interface_root' is not lexically canonical: \\?\C:\Users\Katlynne\Octopus-SI-OS-WIN\registry\interface")
+        (a verbatim prefix rejected as non-canonical)
+
+publication_selection  explicit_defaults_use_the_resolver_and_target_formation_refuses_denied_selection
+  Error: EISDIR: illegal operation on a directory, lstat 'C:'
+        (something lstats the bare drive letter "C:" as a path)
+
+octopus_system_coder_env  direct_workspace_process_lifecycle_shares_one_kind_owned_process
+  left: ToolProcessDeclaration { bin: "target/debug/octopus-workspace-exec-tool", ... }
+```
+
+The `lstat 'C:'` one looks like a JS component splitting a Windows path on `/` and treating
+`C:` as a component.
+
+## Other groups of 2 or more
+
+```
+[2] octopus_process_session_tool_runtime
+    Capability("tool-process primary input retirement requires descriptor-relative file operations")
+    "tool process generation 'C:\...\tool-processes\aaaa...' cannot prove process-g..." (truncated)
+
+[2] octopus_worker_env_floor
+    NonAbsolutePath("/tmp/wt")          <- another POSIX fixture
+
+[2] octopus_interface_transport  (readiness, both still open from before)
+    activation_life_requires_live_bindings...  : no readiness within 30s, test_shell emits no event
+    life_failed_before_initial_readiness...    : Elapsed(())
+```
+
+## Singles worth naming
+
+```
+tool_process_lifecycle  ordered_patch_journal_preserves_replay_and_bounds_storage
+  assertion left == right: hash 94cc02c5... vs 5f91ec82...     (content digest mismatch)
+tool_process_lifecycle  client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
+  called `Option::unwrap()` on a `None` value
+publication_selection   ordinary_component_ids_and_a_new_dotted_tool_reach_real_authoring
+  Os { code: 87, kind: InvalidInput, message: "The parameter is incorrect." }
+octopus_run_authoring   terminal_pending_handoff_recovers_from_ledger_without_provider_replay
+  Os { code: 2, kind: NotFound, "The system cannot find the file specified." }
+checked_input_writers   intake_verification_failure_rebases_retained_input_without_inventing_tool_result
+  the hardcoded Command::new("python3") from my last post
+```
+
+## Suggested order, for what it is worth
+
+1. `atomic exclusive installation publication is unsupported on this platform` — an absent
+   primitive, and it gates 2 of code_mode_room's 11 directly.
+2. The path-spelling theme above — 5 failures, 4 packages, and it keeps reappearing in new
+   places, so a single shared rule would stop it recurring.
+3. `checked file.write evidence differs from its exact patch` — 7 failures, the largest
+   single group now.
+4. The hardcoded `python3` — one line.
+
+I have not touched any code.
