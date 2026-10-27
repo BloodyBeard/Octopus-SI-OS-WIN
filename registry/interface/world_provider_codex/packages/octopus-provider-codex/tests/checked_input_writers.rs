@@ -730,7 +730,7 @@ fn intake_verification_failure_rebases_retained_input_without_inventing_tool_res
     use octopus_provider_codex::intake_state::{checked_input_result, reprepare_input};
     use octopus_run_authoring::checked_edit_verification_failure;
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let mut f = Fixture::new();
     let before = f.before.clone();
     let i = f.config.writer.clone();
@@ -753,7 +753,7 @@ fn intake_verification_failure_rebases_retained_input_without_inventing_tool_res
     let verify = |payload: &[u8], metadata: &InvocationMetadata| {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../../../registry/verifier/tool_call_allowed/verify.py");
-        let mut child = Command::new("python3")
+        let mut child = python3()
             .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -987,4 +987,23 @@ fn delivered_source_is_bound_read_only_and_requires_its_exact_admitted_edge() {
         emitted.invocation_metadata = Some(meta.into());
         assert_eq!(input_artifacts::validate_input_transition(&mut Changed(&f, emitted), &chain[0]).is_ok(), case == 0, "explicit emission case {case}");
     }
+}
+
+/// A command that runs Python 3. Windows usually has no `python3`: the
+/// python.org installer provides `python` and the `py` launcher, so the
+/// first of `python3`, `python` and `py -3` that reports Python 3 is used.
+fn python3() -> std::process::Command {
+    for (program, args) in [("python3", &[][..]), ("python", &[][..]), ("py", &["-3"][..])] {
+        let reports_python3 = std::process::Command::new(program)
+            .args(args)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).starts_with("Python 3"));
+        if reports_python3 {
+            let mut command = std::process::Command::new(program);
+            command.args(args);
+            return command;
+        }
+    }
+    panic!("this test runs a Python 3 verifier script; install Python 3");
 }
