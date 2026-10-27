@@ -17,10 +17,21 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../..")
-        .canonicalize()
-        .unwrap()
+    native_canonical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../.."))
+}
+
+/// `canonicalize` in the form root bindings use. On Windows it returns
+/// `\\?\C:\...`, which formation refuses as not lexically canonical and in
+/// which `/` is not a separator; a drive path is spelled `C:\...` instead.
+fn native_canonical(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap();
+    #[cfg(windows)]
+    if let Some(plain) = canonical.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        if !plain.starts_with(r"UNC\") {
+            return PathBuf::from(plain);
+        }
+    }
+    canonical
 }
 
 fn canonical_hash(value: &impl Serialize) -> String {
@@ -61,7 +72,7 @@ fn ordered_patch_journal_preserves_replay_and_bounds_storage() {
     use octopus_interfaces::InterfaceInvocationEnvelope;
     use octopus_system_room_env::execute_file_write_result;
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = native_canonical(temp.path());
     let target = root.join("target.json");
     let peer = root.join("peer.json");
     let effects = root.join("effects");
@@ -213,7 +224,7 @@ async fn file_write_process_case(ordered: bool) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&durable_var_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let durable_var_dir = std::fs::canonicalize(durable_var_dir).unwrap();
+    let durable_var_dir = native_canonical(&durable_var_dir);
     let root_slots = BTreeMap::from([
         ("run_records_root".to_string(), run_records_root.clone()),
         (
@@ -420,7 +431,7 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
     let kind_id = WorkerEnvironmentKindId::new("system_room");
     let (kind, _) = registry.get(&kind_id).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = native_canonical(temp.path());
     let process_var_dir = root.join("process-var");
     std::fs::create_dir_all(process_var_dir.join("invocations")).unwrap();
     let root_slots = BTreeMap::new();

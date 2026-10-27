@@ -457,10 +457,24 @@ async fn build_returns_byte_exact_tagged_evidence_and_separate_lossy_preview() {
     assert!(result.body["output"].get("stdout_base64").is_none());
 }
 
+/// `canonicalize` without the `\\?\` prefix Windows adds to drive paths.
+fn native_canonical(path: &Path) -> PathBuf {
+    let canonical = path.canonicalize().unwrap();
+    #[cfg(windows)]
+    if let Some(plain) = canonical.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        if !plain.starts_with(r"UNC\") {
+            return PathBuf::from(plain);
+        }
+    }
+    canonical
+}
+
 #[tokio::test]
 async fn direct_workspace_keeps_project_cwd_while_using_an_additional_granted_root() {
     let host = tempfile::tempdir().unwrap();
-    let host_root = host.path().canonicalize().unwrap();
+    // Roots are spelled C:\... on Windows, as the room resolves them, not the
+    // \\?\C:\... that canonicalize returns.
+    let host_root = native_canonical(host.path());
     let workspace_root = host_root.join("workspace");
     let outside_root = host_root.join("outside");
     std::fs::create_dir_all(&workspace_root).unwrap();

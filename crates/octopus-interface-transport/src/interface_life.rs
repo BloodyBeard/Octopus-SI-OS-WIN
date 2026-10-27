@@ -4124,7 +4124,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(program, "packages/bin/octopus-app-server-activation-life");
+        // A relative path, spelled with the platform's separator.
+        assert_eq!(Path::new(&program), Path::new("packages/bin/octopus-app-server-activation-life"));
         assert_eq!(base, std::fs::canonicalize(source_owner).unwrap());
         assert!(
             resolve_executable_base(

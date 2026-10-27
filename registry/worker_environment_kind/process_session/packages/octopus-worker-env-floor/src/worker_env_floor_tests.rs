@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use octopus_substrate_contract::permissions::{
     FileSystemAccessMode, FileSystemPath, FileSystemSandboxKind, NetworkSandboxPolicy,
@@ -7,8 +7,14 @@ use octopus_worker_env::{AbsPath, NetworkCeiling, ProjectedSandbox};
 
 use crate::{permission_profile_for_projected_sandbox, sandbox_policy_for_projected_sandbox};
 
+/// A fixture path absolute on this platform (`/tmp/wt`, or `C:\tmp\wt` on
+/// Windows, where a path without a drive is not absolute).
+fn native(p: &str) -> PathBuf {
+    octopus_util_abspath::test_support::test_path_buf(p)
+}
+
 fn abs(p: &str) -> AbsPath {
-    AbsPath::new(Path::new(p)).unwrap()
+    AbsPath::new(&native(p)).unwrap()
 }
 
 fn worktree_projection() -> ProjectedSandbox {
@@ -27,7 +33,7 @@ fn has_entry(
 ) -> bool {
     policy.entries.iter().any(|e| match &e.path {
         FileSystemPath::Path { path } => {
-            path.as_path().to_string_lossy() == abs_path && e.access == access
+            path.as_path() == native(abs_path) && e.access == access
         }
         _ => false,
     })
@@ -39,7 +45,7 @@ fn has_writable_entry(
 ) -> bool {
     policy.entries.iter().any(|e| match &e.path {
         FileSystemPath::Path { path } => {
-            path.as_path().to_string_lossy() == abs_path && e.access == FileSystemAccessMode::Write
+            path.as_path() == native(abs_path) && e.access == FileSystemAccessMode::Write
         }
         _ => false,
     })
@@ -82,7 +88,7 @@ fn writable_only_at_projected_root_protected_subpath_read_only() {
     );
 
     let profile =
-        permission_profile_for_projected_sandbox(&projected, Path::new("/tmp/wt")).unwrap();
+        permission_profile_for_projected_sandbox(&projected, &native("/tmp/wt")).unwrap();
     assert_eq!(
         profile.network_sandbox_policy(),
         NetworkSandboxPolicy::Restricted,
@@ -119,7 +125,7 @@ fn read_only_projection_is_strict_no_ambient_default() {
     );
 
     let profile =
-        permission_profile_for_projected_sandbox(&projected, Path::new("/tmp/wt")).unwrap();
+        permission_profile_for_projected_sandbox(&projected, &native("/tmp/wt")).unwrap();
     assert_eq!(
         profile.network_sandbox_policy(),
         NetworkSandboxPolicy::Restricted,
