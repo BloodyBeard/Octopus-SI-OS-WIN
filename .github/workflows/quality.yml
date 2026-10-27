@@ -7,6 +7,8 @@ on:
     paths-ignore:
       - "docs/**"
       - "README.md"
+      # The temporary channel between the cloud and Windows port sessions.
+      - "AI_comms.md"
   workflow_dispatch: {}
 
 permissions:

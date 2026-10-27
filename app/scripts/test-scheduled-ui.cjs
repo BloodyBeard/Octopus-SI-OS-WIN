@@ -90,7 +90,16 @@ async function input(element, value) {
   const setter = Object.getOwnPropertyDescriptor(prototype, "value").set;
   await act(async () => { setter.call(element, value); element.dispatchEvent(new Event("input", { bubbles: true })); });
 }
-async function commit(element, value) { await act(async () => element.focus()); await input(element, value); await act(async () => element.blur()); }
+// A field that commits on blur only commits if it still holds focus and is still the
+// rendered field when it blurs; say which one failed instead of a later wrong value.
+async function commit(element, value) {
+  await act(async () => element.focus());
+  assert.equal(document.activeElement, element, "the field took focus before typing");
+  await input(element, value);
+  assert.ok(element.isConnected, "the field was not re-rendered away while typing");
+  assert.equal(document.activeElement, element, "the field kept focus until it was committed");
+  await act(async () => element.blur());
+}
 async function choose(menuLabel, option) { await click(button(dialog(), menuLabel)); await click(menuItem(option)); }
 
 test("Triggers keeps navigation, selection, search and authoring in one workspace", async () => {
