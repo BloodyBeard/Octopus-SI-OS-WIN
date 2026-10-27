@@ -57,3 +57,44 @@ jobs:
               echo "Every workspace crate type-checks on Windows."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Each workspace member on its own. Inside the whole workspace, Cargo merges
+  # every member's dependency features, so a crate can compile only because a
+  # neighbour enabled a feature it uses but never declared. Two such Windows
+  # breaks (octopus-util-pty, octopus-process-job) passed the job above.
+  per-package-check:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Allow long paths in git
+        run: git config --system core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: per-package
+      - name: Install the pinned Windows Codex CLI
+        shell: bash
+        run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$(cygpath -w "$PWD/registry/interface/world_provider_codex/packages/bin")"
+      - name: cargo check each package (all targets)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo metadata --format-version 1 --no-deps \
+            | python -c "import json,sys; [print(p['name']) for p in json.load(sys.stdin)['packages']]" \
+            | sort > packages.txt
+          : > failed.txt
+          while read -r package; do
+            echo "::group::$package"
+            if ! cargo check -p "$package" --all-targets --message-format short; then
+              echo "$package" >> failed.txt
+            fi
+            echo "::endgroup::"
+          done < packages.txt
+          {
+            echo "## Windows per-package check"
+            echo
+            echo "$(wc -l < packages.txt) packages checked, $(wc -l < failed.txt) failed."
+            if [ -s failed.txt ]; then echo; echo '```'; cat failed.txt; echo '```'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          test ! -s failed.txt
