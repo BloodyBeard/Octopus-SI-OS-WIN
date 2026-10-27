@@ -2412,3 +2412,54 @@ octopus_world_terminal_client  every_registry_provider_catalog_admits_its_defaul
 4. The process-group ownership primitive (2) — likely just wiring octopus-process-job in.
 5. The OCR verifier (3) — the oldest unexplained failures in the whole set.
 6. The POSIX fixtures (6) and the socket-file pair (2), both classes you have swept before.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · run 10 answered
+
+## Pushed since run 10 (please pull, rebuild, run 11)
+
+- **119c17f** `verifier_descriptor` schema regenerated.
+- **da37121** topology planner lookup adds `.exe` on Windows.
+- **6d808d4** process-group ownership on Windows is a **named job object**
+  (`Local\octopus-tool-process-<gen>`): owner lease, assign, quiesce, terminate.
+  Should clear `explicit_terminal_release…` and `host_shutdown_detaches…`.
+- **f13ca5e** fixtures: app-server socket pair (a pipe leaves no file, so the
+  file check is Unix-only; the connect still proves the bind; no more `/tmp`
+  home on Windows), `/declared/tools`, octopus-marks payload path, the two
+  octopus_core `/tmp`/`/my/workspace` paths, persistent_process_keeper `"/"`.
+- **ce9b5a1** **real bug, upstream code:** `octopus-file-system`'s Windows
+  no-follow open used `OBJ_DONT_REPARSE` on the whole `\??\C:\…` path. That flag
+  also refuses object-manager links, and `C:` is one, so **every** no-follow
+  read/write on a drive failed with "path contains a reparse point". Your
+  `%TEMP%` was fine. Now: open the volume root normally (must be a disk), open
+  the rest beneath it with the flag. Junctions below the root are still refused.
+  New Windows tests in that crate: `plain_drive_paths_round_trip`,
+  `a_junction_below_the_volume_root_is_refused` (uses `mklink /J`, no admin).
+  Also git_sandbox: native `PING.EXE` instead of `/bin/sleep` (the exec-server
+  "path not found"), changed-path compared as a Path.
+- **0102d4d** realtime recording path; system_exec_env finds Git's `sh.exe`.
+- **(this push)** interface_transport readiness pair: frames now go through a
+  file read with shell built-ins (same argv-mangling cause as cold_continuity).
+
+## Please count as upstream / environment (fail on Linux too)
+
+- `every_registry_provider_catalog_admits_its_default_model_and_effort`:
+  `world_provider_realtime` has no `reasoning_effort`. Upstream.
+- `every_remote_mcp_operation…` (`world_mcp_github … operation_catalog`). Upstream.
+- **OCR (3):** "process executable 'tesseract' is absent from PATH". The
+  verifier declares tesseract and refuses without it, even for text. Same on
+  Linux. If you want them green: install Tesseract, add its folder to PATH,
+  check `where tesseract`.
+- `real_registry_home_plan_exports_authoring`: time-zone database is declared
+  `/usr/share/zoneinfo`. Now documented as Windows gap 5; waiting on the owner.
+- memory_bound should be fixed by e7de142; coder_env slash compare by ac35b41.
+
+## Asks
+
+1. Run 11 at this HEAD. Same format please.
+2. Tell me if `a_junction_below_the_volume_root_is_refused` or
+   `native_open_rejects_named_pipes_before_connecting` fails — they are the
+   only tests here I could not run anywhere.
+3. You never gave the 7 code_mode_room names/errors after 2e06ee2. Please list
+   whatever is left in that crate.
