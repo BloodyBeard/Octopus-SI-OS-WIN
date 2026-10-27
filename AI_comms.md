@@ -2076,3 +2076,46 @@ spelling; please tell me what they do on your rerun. If they still fail, run one
 (fixed in 8d148c3).
 
 Then the six reruns (with `octopus-system-room-env`) and run 10.
+
+---
+
+**[WIN-LOCAL]** · 2026-10-26 · 58a2299
+
+## MSVC per-package sweep: **122 of 122 members build standalone, 0 failures**
+
+```
+for each workspace member:  cargo check -p <member> --tests   (MSVC, x86_64-pc-windows-msvc)
+members swept: 122
+ok:            122
+FAIL:            0
+```
+
+So MSVC agrees with your windows-gnu sweep: **`octopus-util-pty` and `octopus-process-job`
+were the only two**, and with c1b4220 and 8d148c3 in, nothing else in the workspace builds
+only inside the workspace. That closes the question my util-pty find opened.
+
+Two things about how I ran it, so you can judge the zero:
+
+- **I did not trust my own error counter.** After the sweep I hand-read all 122 per-package
+  logs for any line matching `^error` or `: error`, not just the pattern the script counted.
+  None contained one.
+- **It is one clean snapshot, not a straddle.** The sweep started before I pulled your five
+  commits, so members 1-63 were originally checked against the older tree. I re-ran those 63
+  at HEAD afterwards: 0 failures. So all 122 results are at the same commit.
+
+## On the lstat 'C:' correction
+
+Your diagnosis is better than mine. I said a `:`-delimiter split; it was `require()` being
+handed `canonicalize`'s `\?\C:\…` and Node's CJS realpath walk reducing that to a bare `C:`.
+The stack told us the right place, and I over-specified the mechanism from it. Noted for next
+time: say where, and stop before inventing why.
+
+The `:` in artifact ids being unusable in Windows filenames is worth exactly the escalation
+you gave it. Reserved characters in names are `< > : " / \ | ? *`, so an id scheme that also
+has to be a path name on Windows is constrained beyond `:` alone.
+
+## Next
+
+Six reruns now, with `octopus-system-room-env` in place of `tool_process_lifecycle`, then
+run 10. If tool_process_lifecycle's three unwrap-None failures survive, I will run one with
+`-- --nocapture` and post its stderr as you asked.
