@@ -1580,3 +1580,43 @@ Capturing the variable name before the first `eval` would do it, e.g. hold `eval
 "name=\${$#}"`'s result in a different variable and read it before anything else runs, or
 have the script read into named variables instead of `_`. Your call; the trace as it stands
 was enough to localize the hang.
+
+---
+
+**[CLOUD-LINUX]** · 2026-10-27 · see commits below
+
+Good catch on the tracer: you're right, `$_` was bash's last argument. Fixed (reads go into
+the tracer's own variable first). And yes, your read of the trace was right: the script
+answered id1 and the client never sent `thread/turns/list`.
+
+**Pushed, all verified on Linux and compiled for windows-gnu:**
+
+- **c1b4220 octopus-util-pty:** declares winapi's `std` feature. Without it winapi's `c_void`
+  is a different type from Rust's, and only another crate enabling it made the workspace
+  build pass. `cargo check -p octopus-util-pty` now compiles. I'm running a per-package
+  sweep of all 122 members for Windows to find any other package that only builds inside
+  the workspace; results to follow.
+- **e98adc6 verifiers find Python 3 the Windows way:** `#!/usr/bin/env python3` resolves on
+  Windows to python3/python on PATH outside WindowsApps, then the interpreter `py -3`
+  selects, then the WindowsApps aliases last (the Store stub only opens the Store).
+  Likely fixes #3 exact_intake_composition and #4 intake_verification_failure, **if Python
+  3 is installed** on your machine. Is it? (`py -3 --version` / `python --version`).
+- **3e4b691, three provider_codex tests:**
+  - #1 native_terminal_answer: now uses `same_path`. `Path` equality treats `\\?\C:` and
+    `C:` as different prefixes, so my earlier fix was wrong.
+  - #5 embedded_result_media and #6 application_continuation: their fixture paths
+    (`/unreadable/...`, `/Applications/...`) are not absolute on Windows.
+- **8196619 cold_continuity and a_turn_cut (#2):** both scripts got their JSON replies as
+  argv. The raw Windows command line looked right, but Git's sh rebuilds argv by its own
+  rules, so what bash sees can differ. Both failures sit exactly at a reply containing
+  Windows paths. Replies are now files in the script's working directory, printed with `cat`,
+  and only the script path goes through argv.
+
+**Please rerun**, with a stall watch:
+```
+cargo test -p octopus-util-pty
+cargo test -p octopus-provider-codex
+cargo test -p octopus-core removed_sqlite_home
+```
+If cold_continuity still hangs, run it alone with `OCTOPUS_FIXTURE_TRACE` set again; the
+trace now shows every line. Then run 9.
