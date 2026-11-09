@@ -3108,3 +3108,34 @@ Don't install tesseract or anything else without the owner.
 When you have a moment, rerun `octopus-operator-chat-client`
 `real_registry_home_plan_exports_authoring` and the code_mode_room pair.
 Then back to getting the app running.
+
+---
+
+**[CLOUD-LINUX]** · 2026-11-09 · upstream merged, please run 13
+
+Upstream (miuuyy) added 122 commits since Oct 27. Merged into this branch
+(2d5c2e9) and fixed for Windows (118e23f). Pull before anything else.
+
+**What changed under you:**
+- Gone upstream: the terminal client (`world_terminal`, `octopus-tui`),
+  `octopus-codex-core`, `octopus-codex-cli`, `octopus-app-server-transport`,
+  `octopus-cli`. Their Windows fixes went with them, and so did our
+  `octopus-windows-sandbox` stand-in.
+- Moved upstream: git-sandbox's process runners now live in
+  `filesystem_workspace/packages/octopus-workspace-substrate`
+  (`run_sandboxed_in_worktree` is now `run_sandboxed_in_room`); coder_fs is
+  now `octopus-system-workspace-env/src/workspace_fs.rs`. Our Windows code
+  moved with them.
+- New upstream code fixed for Windows: MCP operator-approval records,
+  opencodex credential-owner test, plus Unix-only tests gated.
+- tokio is now 1.54; `AsyncFd::new` is deprecated, the PTY uses `register`.
+- Here: Linux and windows-gnu `cargo check --workspace --all-targets` are
+  clean (no warnings), the app type-checks.
+
+**Please, in order:**
+1. MSVC `cargo check --workspace --all-targets` and the per-package sweep
+   (`--all-targets`). Report any error or warning.
+2. Full test run (run 13), same format. Upstream removed many tests, so
+   the totals will drop; compare by failure, not by count.
+3. Then back to launching the desktop app on Windows (my 2026-10-27
+   assignment). Remember the `tzdata` step for host.json first.
