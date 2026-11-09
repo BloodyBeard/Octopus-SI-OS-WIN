@@ -123,7 +123,7 @@ function windowsFixture(root, version) {
     return { archive, evidence: { archive_entry: name, archive_bytes: fs.statSync(archive).size, archive_sha256: cli.digest(archive),
       url: `https://github.com/openai/codex/releases/download/rust-v${version}/${name}.tar.gz` } };
   };
-  const primary = pack(entry, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'codex-cli ${version}'; exit 0; fi\nif [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then\nmkdir -p "$5"\nprintf '{}\\n' > "$5/SourceProbe.json"\nexit 0\nfi\nexit 1\n`);
+  const primary = pack(entry, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'codex-cli ${version}'; exit 0; fi\nif [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then\nmkdir -p "$5"\nprintf '{}\\n' > "$5/SourceProbe.json"\nprintf '{"oneOf":[{"properties":{"method":{"enum":["turn/completed"]}}}]}\\n' > "$5/ServerNotification.json"\nexit 0\nfi\nexit 1\n`);
   const archives = { [primary.evidence.url]: primary.archive };
   const companions = {};
   for (const name of ["codex-code-mode-host", "codex-windows-sandbox-setup", "codex-command-runner"]) {
@@ -135,7 +135,7 @@ function windowsFixture(root, version) {
     schema_version: 2, version, tag: `rust-v${version}`, release_url: `https://github.com/openai/codex/releases/tag/rust-v${version}`,
     platforms: { "win32-x64": { ...primary.evidence, companions } },
     schemas: { "SourceProbe.json": crypto.createHash("sha256").update("{}\n").digest("hex") },
-    legal: {},
+    legal: {}, notifications: { mirrored: ["turn/completed"], opt_out: ["thread/queue/changed"] },
   };
   fs.mkdirSync(path.join(source, "upstream"));
   for (const name of ["LICENSE", "NOTICE"]) {

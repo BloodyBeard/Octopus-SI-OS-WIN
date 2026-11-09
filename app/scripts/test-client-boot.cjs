@@ -73,7 +73,7 @@ const LaunchTerminal = compile("src/components/onboarding/LaunchTerminal.tsx", {
 const WorkspaceSetupGate = compile("src/components/onboarding/WorkspaceSetupGate.tsx", {
   "../chat/chatWorkspaceCapabilities": "export const providerServiceTierAvailable = () => false;",
   "../../extensions/useClientExtensions": "export function useClientExtensions() { return { loading: true }; }",
-  "../../onboarding/workspaceSetup": "export const clearWorkspaceSetupDraft = () => {}; export const compileWorkspaceInitializeRequest = () => ({}); export const readWorkspaceSetupDraft = () => null; export const saveWorkspaceSetupDraft = (draft) => draft; export const workspaceInitializeRequestDigest = async () => \"\";",
+  "../../onboarding/workspaceSetup": "export const clearWorkspaceSetupDraft = () => {}; export const compileWorkspaceInitializeRequest = () => ({}); export const readWorkspaceSetupDraft = () => null; export const saveWorkspaceSetupDraft = (draft) => draft; export const workspaceInitializeRequestDigest = async () => \"\"; export const workspaceSetupProviderId = () => null;",
   "../../projectionClient": `const gate = () => globalThis.__boot.gate;
 export async function readCurrentClientSetup() { gate().reads += 1; if (gate().failure) throw new Error(gate().failure); return gate().setup; }
 export async function readWorkspaceSetupState() { return gate().workspace; }
@@ -83,7 +83,9 @@ export async function readClientSetup() { return null; }
 export async function resumeClientSetup() { throw new Error("setup is outside this fixture"); }
 export function onClientSetupProgress() { return () => {}; }
 export async function openSetupFile() { return { opened: false }; }
-export async function saveSetupFile() { return { saved: false }; }`,
+export async function saveSetupFile() { return { saved: false }; }
+export async function readSetupProviderConfiguration() { throw new Error("provider setup is outside this fixture"); }
+export async function saveSetupProviderConfiguration() { throw new Error("provider setup is outside this fixture"); }`,
   "../../projectionLive": `import { useState } from "react"; export function useProjectionStructureGeneration() { const [generation, setGeneration] = useState(0); globalThis.__boot.gate.change = () => setGeneration((value) => value + 1); return generation; }`,
   "../../account/useChatgptAccount": "export function useChatgptAccount() { return { account: null }; }",
   "./ChatGptSignInGate": nothing("ChatGptSignInGate"),
@@ -91,7 +93,7 @@ export async function saveSetupFile() { return { saved: false }; }`,
   "../../design-system/components": `import { createElement } from "react"; export function OcButton({ children, onClick }) { return createElement("button", { onClick, type: "button" }, children); }`,
   "../../toasts": "export const appToast = { danger(title, duration, options) { const toasts = globalThis.__boot.gate.toasts; let toast = toasts.find((item) => item.open && item.options.dedupeKey === options.dedupeKey); if (toast) Object.assign(toast, { title, options, count: toast.count + 1 }); else toasts.push(toast = { title, duration, options, open: true, count: 1 }); return { close() { toast.open = false; } }; } };",
   "../OctopusLoadingLogo": `import { createElement } from "react"; export function OctopusLoadingLogo() { return null; } export function OctopusLoadingState({ label }) { return createElement("div", { className: "stub-loading" }, label); }`,
-  "./WorkspaceSetupOverlay": `${nothing("WorkspaceSetupOverlay", "WorkspaceSetupProgress")}\nexport const createDefaultWorkspaceSetupDraft = () => null;`,
+  "./WorkspaceSetupOverlay": `${nothing("WorkspaceSetupOverlay", "WorkspaceSetupProgress", "ProviderSetupForm")}\nexport const createDefaultWorkspaceSetupDraft = () => null;`,
 }, "WorkspaceSetupGate");
 const RuntimeTopologyProbe = compile("src/runtimeTopology.ts", {}, "useRuntimeTopology").then((useRuntimeTopology) => function Probe() {
   boot.topology = useRuntimeTopology(true, [], false);

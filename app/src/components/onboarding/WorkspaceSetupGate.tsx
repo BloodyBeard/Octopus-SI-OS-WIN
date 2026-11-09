@@ -434,7 +434,7 @@ function WorkspaceSetupFlow({ accessProfile, children, initialSetup }: Omit<Prop
     allowSignIn = false,
   ): Promise<void> => {
     if (inFlight.current) return inFlight.current;
-    const credentials = setup.plan.provider.required_state === "credentials_configured";
+    const credentials = setup.plan?.provider?.required_state === "credentials_configured";
     setApplyState(allowSignIn ? {
       ...savedSetupProgress(setup),
       label: credentials ? "Connecting your model" : "Connecting ChatGPT",

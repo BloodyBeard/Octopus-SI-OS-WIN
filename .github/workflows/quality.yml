@@ -162,8 +162,8 @@ jobs:
       run:
         working-directory: registry/interface/world_provider_codex/packages/octopus-provider-codex/opencodex-bridge
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -178,10 +178,10 @@ jobs:
       RUSTC_WRAPPER: ""
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Node toolchain
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
 

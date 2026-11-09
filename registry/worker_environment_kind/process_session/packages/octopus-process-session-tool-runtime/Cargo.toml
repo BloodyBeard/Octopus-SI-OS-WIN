@@ -27,7 +27,7 @@ tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time
 tokio-util = { version = "0.7", features = ["rt"] }
 notify.workspace = true
 tracing = "0.1.44"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 octopus-verifiers = { path = "../../../../../crates/octopus-verifiers" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-file-storage = { path = "../../../../../crates/octopus-file-storage" }
