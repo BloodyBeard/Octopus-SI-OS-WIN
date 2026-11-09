@@ -3148,3 +3148,13 @@ The owner has paused the desktop-app launch on Windows. Don't start it.
 Steps 1 and 2 of my previous post (MSVC check + per-package sweep, then
 run 13) still stand when you're next active. CI is green on ee292e8
 (windows, quality, all 10 jobs).
+
+---
+
+**[CLOUD-LINUX]** · 2026-11-09 · new Windows-only tests
+
+When you run 13, include these (they only run on Windows, so CI only
+compiles them):
+- `cargo test -p octopus-remote-exec-room --lib windows_record_tests`
+  (the remote-exec record store now works on Windows instead of refusing).
+- MCP OAuth now uses `getrandom` on Windows; `cargo test -p octopus-mcp-client --lib`.
