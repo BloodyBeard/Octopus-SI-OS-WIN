@@ -4547,6 +4547,7 @@ dependencies = [
  "octopus-ledger-store",
  "octopus-marks",
  "octopus-policy",
+ "octopus-private-fs",
  "octopus-run-record",
  "octopus-runtime",
  "octopus-tool-registry",

@@ -1108,12 +1108,28 @@ fn retained_link(source: &Path, target: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(source, target).map_err(|error| error.to_string())
 }
 
+/// Windows lets only Developer Mode or an administrator create symlinks.
+/// Without that privilege a directory is retained through a junction and a
+/// file through a hard link, which any user may create; a file on another
+/// volume, where a hard link cannot reach, is copied.
 #[cfg(windows)]
 fn retained_link(source: &Path, target: &Path) -> Result<(), String> {
-    if source.is_dir() {
+    const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+    let directory = source.is_dir();
+    let linked = if directory {
         std::os::windows::fs::symlink_dir(source, target)
     } else {
         std::os::windows::fs::symlink_file(source, target)
+    };
+    match linked {
+        Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+            if directory {
+                octopus_private_fs::windows::create_junction(source, target)
+            } else {
+                std::fs::hard_link(source, target).or_else(|_| std::fs::copy(source, target).map(|_| ()))
+            }
+        }
+        result => result,
     }
     .map_err(|error| error.to_string())
 }

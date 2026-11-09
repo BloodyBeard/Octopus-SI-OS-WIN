@@ -817,6 +817,73 @@ mod platform {
         std::fs::rename(&backup, replacement)
     }
 
+    /// Creates `link` as a directory junction (a mount point) to the
+    /// directory `target`. Any user may create one, where a directory
+    /// symlink needs Developer Mode or administrator rights. `target` must be
+    /// an absolute path on a local volume; `link` must not exist.
+    pub fn create_junction(target: &Path, link: &Path) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        let target = crate::ordinary_path(std::path::absolute(target)?);
+        if !target.is_absolute() || !std::fs::metadata(&target)?.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "junction target must be an existing absolute directory"));
+        }
+        let print: Vec<u16> = target.as_os_str().encode_wide().collect();
+        let substitute: Vec<u16> = r"\??\".encode_utf16().chain(print.iter().copied()).collect();
+        let too_long = || io::Error::new(io::ErrorKind::InvalidInput, "junction target path is too long");
+        let substitute_bytes = u16::try_from(substitute.len() * 2).map_err(|_| too_long())?;
+        let print_bytes = u16::try_from(print.len() * 2).map_err(|_| too_long())?;
+        // REPARSE_DATA_BUFFER for IO_REPARSE_TAG_MOUNT_POINT: the tag, the
+        // data length, a reserved word, then the substitute and print names'
+        // offsets and lengths, then both names, each followed by a NUL.
+        let data_length = u16::try_from(8 + (substitute.len() + 1 + print.len() + 1) * 2).map_err(|_| too_long())?;
+        let mut buffer = Vec::with_capacity(8 + data_length as usize);
+        buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        buffer.extend_from_slice(&data_length.to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&0u16.to_le_bytes());
+        buffer.extend_from_slice(&substitute_bytes.to_le_bytes());
+        buffer.extend_from_slice(&(substitute_bytes + 2).to_le_bytes());
+        buffer.extend_from_slice(&print_bytes.to_le_bytes());
+        for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+            buffer.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::create_dir(link)?;
+        let result = (|| {
+            let directory = OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(link)?;
+            let mut returned = 0u32;
+            // SAFETY: the handle is open for writing for the call, and the
+            // input buffer is a complete mount-point reparse buffer of the
+            // length passed; no output buffer is used.
+            if unsafe {
+                DeviceIoControl(
+                    handle(&directory),
+                    FSCTL_SET_REPARSE_POINT,
+                    buffer.as_ptr().cast(),
+                    buffer.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_dir(link);
+        }
+        result
+    }
+
     /// Gives an existing directory owned by the current user a protected
     /// access list for that user and SYSTEM, inherited by its contents: the
     /// counterpart of `chmod 0700` on a directory the user owns.
@@ -871,7 +938,7 @@ mod beneath_windows;
 #[cfg(windows)]
 pub mod windows {
     pub use super::platform::{
-        exchange_files, make_dir_owner_only, open_entry_handle, pipe_server_is_current_user,
+        create_junction, exchange_files, make_dir_owner_only, open_entry_handle, pipe_server_is_current_user,
         process_is_current_user, OwnerOnlySecurity,
     };
 

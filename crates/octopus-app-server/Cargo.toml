@@ -33,6 +33,10 @@ octopus-ee = { path = "../octopus-ee" }
 octopus-verifiers = { path = "../octopus-verifiers" }
 octopus-tool-registry = { path = "../octopus-tool-registry" }
 octopus-worker-env = { path = "../octopus-worker-env" }
+
+[target.'cfg(windows)'.dependencies]
+octopus-private-fs = { path = "../octopus-private-fs" }
+
 [dev-dependencies]
 octopus-ledger-store = { path = "../octopus-ledger-store" }
 pretty_assertions = "1.4.1"

@@ -718,4 +718,21 @@ mod tests {
         assert!(crate::same_path(Path::new(r"\\?\C:\Dir\x"), Path::new("c:/dir/x")));
         assert!(!crate::same_path(Path::new(r"C:\dir\x"), Path::new(r"C:\dir\y")));
     }
+
+    #[test]
+    fn a_junction_reaches_its_target_and_is_refused_by_no_follow_opens() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = crate::ordinary_path(std::fs::canonicalize(root.path()).unwrap());
+        let target = root_path.join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("t.txt"), b"through").unwrap();
+        let link = root_path.join("junction");
+        crate::windows::create_junction(&target, &link).unwrap();
+        assert_eq!(std::fs::read(link.join("t.txt")).unwrap(), b"through");
+        let top = open_directory_path(&root_path).unwrap();
+        assert!(is_link_refusal(&open_directory(&top, OsStr::new("junction")).unwrap_err()));
+        assert!(crate::windows::create_junction(&target, &link).is_err(), "an existing name is not replaced");
+        std::fs::remove_dir(&link).unwrap();
+        assert!(target.join("t.txt").exists(), "removing the junction leaves its target");
+    }
 }
