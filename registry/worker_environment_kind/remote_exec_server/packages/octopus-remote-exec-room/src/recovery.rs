@@ -1,9 +1,8 @@
-// The durable record store below is Unix-only: on Windows every record
-// operation refuses until it has a Windows backend (docs/windows-port.md).
-#[cfg(unix)]
+// The durable record store opens every record beneath a held, owner-only
+// directory handle: `openat` on Unix, `octopus_private_fs::windows::beneath`
+// on Windows.
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -13,11 +12,11 @@ use serde::{Deserialize, Serialize};
 const SESSION_FILE: &str = "session.json";
 const PROCESSES_DIR: &str = "processes";
 const HISTORY_DIR: &str = "history";
-#[cfg(unix)]
 const STATE_LOCK_FILE: &str = ".state.lock";
-#[cfg(unix)]
 const MAX_RECORD_BYTES: u64 = 512 * 1024;
-#[cfg(unix)]
+// The Windows listing takes a bound; Unix lists without one.
+#[cfg(windows)]
+const MAX_DIRECTORY_ENTRIES: usize = 1 << 20;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -146,8 +145,7 @@ pub(crate) struct RecoveryStore {
 
 struct RecoveryStateGuard<'a> {
     _mutation: MutexGuard<'a, ()>,
-    // Unlocked on drop (Unix flock).
-    #[cfg(unix)]
+    // Unlocked on drop (Unix flock, Windows LockFileEx).
     state_lock: &'a std::fs::File,
 }
 
@@ -156,6 +154,13 @@ impl Drop for RecoveryStateGuard<'_> {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
         let _ = unsafe { libc::flock(self.state_lock.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RecoveryStateGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.state_lock.unlock();
     }
 }
 
@@ -787,7 +792,6 @@ impl RecoveryStore {
         lock_state_file(&self.state_lock)?;
         Ok(RecoveryStateGuard {
             _mutation: mutation,
-            #[cfg(unix)]
             state_lock: &self.state_lock,
         })
     }
@@ -895,14 +899,14 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
             ensure_owner_only_directory(path, &metadata)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(false);
             #[cfg(unix)]
-            {
+            let created = {
                 use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder.create(path).map_err(|error| {
+                std::fs::DirBuilder::new().recursive(false).mode(0o700).create(path)
+            };
+            #[cfg(windows)]
+            let created = octopus_private_fs::create_private_dir(path);
+            created.map_err(|error| {
                 format!(
                     "remote exec durable directory '{}' cannot be created: {error}",
                     path.display()
@@ -985,13 +989,60 @@ fn ensure_private_subdirectory_at(
     Ok(directory)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn ensure_private_subdirectory_at(
-    _parent: &std::fs::File,
-    _display_parent: &Path,
-    _leaf: &str,
+    parent: &std::fs::File,
+    display_parent: &Path,
+    leaf: &str,
 ) -> Result<std::fs::File, String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    use octopus_private_fs::windows::beneath;
+    validate_held_directory(parent, display_parent)?;
+    let display_path = display_parent.join(leaf);
+    let name = std::ffi::OsStr::new(leaf);
+    let directory = match beneath::open_directory(parent, name) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let created = match beneath::create_directory(parent, name) {
+                Ok(directory) => directory,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    beneath::open_directory(parent, name).map_err(|error| {
+                        format!(
+                            "remote exec durable directory '{}' cannot be opened after creation: {error}",
+                            display_path.display()
+                        )
+                    })?
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "remote exec durable directory '{}' cannot be created: {error}",
+                        display_path.display()
+                    ));
+                }
+            };
+            octopus_private_fs::sync_handle(parent).map_err(|error| {
+                format!(
+                    "remote exec durable directory '{}' cannot publish its child: {error}",
+                    display_parent.display()
+                )
+            })?;
+            created
+        }
+        Err(error) => {
+            return Err(format!(
+                "remote exec durable directory '{}' cannot be opened: {error}",
+                display_path.display()
+            ));
+        }
+    };
+    validate_held_directory(&directory, &display_path)?;
+    octopus_private_fs::sync_handle(&directory).map_err(|error| {
+        format!(
+            "remote exec durable directory '{}' cannot be synchronized: {error}",
+            display_path.display()
+        )
+    })?;
+    validate_held_directory(parent, display_parent)?;
+    Ok(directory)
 }
 
 fn ensure_owner_only_directory(path: &Path, metadata: &std::fs::Metadata) -> Result<(), String> {
@@ -1012,10 +1063,22 @@ fn ensure_owner_only_directory(path: &Path, metadata: &std::fs::Metadata) -> Res
         }
         Ok(())
     }
-    #[cfg(not(unix))]
+    // Windows has no mode bits: the directory's access list must name only
+    // its owner, the current user (and SYSTEM).
+    #[cfg(windows)]
     {
-        let _ = (path, metadata);
-        Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+        let _ = metadata;
+        match octopus_private_fs::is_owner_only(path) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "remote exec durable directory '{}' must be private to the current user",
+                path.display()
+            )),
+            Err(error) => Err(format!(
+                "remote exec durable directory '{}' cannot be inspected: {error}",
+                path.display()
+            )),
+        }
     }
 }
 
@@ -1123,14 +1186,101 @@ fn write_json_at<T: Serialize>(
     result
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn write_json_at<T: Serialize>(
-    _directory: &std::fs::File,
-    _display_directory: &Path,
-    _leaf_text: &str,
-    _value: &T,
+    directory: &std::fs::File,
+    display_directory: &Path,
+    leaf_text: &str,
+    value: &T,
 ) -> Result<(), String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    use octopus_private_fs::windows::beneath;
+    validate_held_directory(directory, display_directory)?;
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("remote exec record did not serialize: {error}"))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(format!(
+            "remote exec record requires {} bytes, above durable limit {MAX_RECORD_BYTES}",
+            bytes.len()
+        ));
+    }
+    let sequence = NEXT_TEMP
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| "remote exec temporary record sequence is exhausted".to_string())?;
+    let leaf = std::ffi::OsStr::new(leaf_text);
+    let temporary_text = format!(
+        ".write.{}.{}.{}.tmp",
+        safe_fragment(leaf_text),
+        std::process::id(),
+        sequence
+    );
+    let temporary = std::ffi::OsStr::new(&temporary_text);
+    let temporary_path = display_directory.join(&temporary_text);
+    let mut file = match beneath::create_file(directory, temporary) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = beneath::open_file(directory, temporary).map_err(|error| {
+                format!("remote exec stale temporary record cannot be opened: {error}")
+            })?;
+            validate_private_record(&temporary_path, &stale)?;
+            let identity = record_identity(&stale)?;
+            drop(stale);
+            beneath::remove(directory, temporary, false, identity.device_and_file()).map_err(
+                |error| format!("remote exec stale temporary record cannot be removed: {error}"),
+            )?;
+            octopus_private_fs::sync_handle(directory).map_err(|error| error.to_string())?;
+            beneath::create_file(directory, temporary).map_err(|error| {
+                format!("remote exec temporary record cannot be recreated: {error}")
+            })?
+        }
+        Err(error) => {
+            return Err(format!(
+                "remote exec temporary record cannot be opened: {error}"
+            ));
+        }
+    };
+    let result = (|| {
+        validate_private_record(&temporary_path, &file)?;
+        let identity = record_identity(&file)?.device_and_file();
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        let synced = record_identity(&file)?;
+        if synced.device_and_file() != identity
+            || file.metadata().map_err(|error| error.to_string())?.len() != bytes.len() as u64
+        {
+            return Err(format!(
+                "remote exec temporary record '{}' changed while it was written",
+                temporary_path.display()
+            ));
+        }
+        let named_temporary =
+            beneath::open_file(directory, temporary).map_err(|error| error.to_string())?;
+        if record_identity(&named_temporary)? != synced {
+            return Err("remote exec temporary record pathname changed before publish".to_string());
+        }
+        drop(named_temporary);
+        drop(file);
+        beneath::rename_replace(directory, temporary, directory, leaf)
+            .map_err(|error| error.to_string())?;
+        let published = beneath::open_file(directory, leaf).map_err(|error| error.to_string())?;
+        if record_identity(&published)?.device_and_file() != identity
+            || published.metadata().map_err(|error| error.to_string())?.len() != bytes.len() as u64
+        {
+            return Err("remote exec published record is not the written file".to_string());
+        }
+        octopus_private_fs::sync_handle(directory).map_err(|error| error.to_string())?;
+        validate_held_directory(directory, display_directory)
+    })();
+    if result.is_err() {
+        if let Ok(entry) = beneath::open_file(directory, temporary)
+            .and_then(|file| octopus_private_fs::identity_of_file(&file))
+        {
+            let _ = beneath::remove(directory, temporary, false, entry.device_and_file());
+        }
+        let _ = octopus_private_fs::sync_handle(directory);
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -1199,13 +1349,87 @@ fn read_json_at<T: for<'de> Deserialize<'de>>(
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn read_json_at<T: for<'de> Deserialize<'de>>(
-    _directory: &std::fs::File,
-    _display_directory: &Path,
-    _leaf_text: &str,
+    directory: &std::fs::File,
+    display_directory: &Path,
+    leaf_text: &str,
 ) -> Result<Option<T>, String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    use octopus_private_fs::windows::beneath;
+    validate_held_directory(directory, display_directory)?;
+    let path = display_directory.join(leaf_text);
+    let leaf = std::ffi::OsStr::new(leaf_text);
+    let mut file = match beneath::open_file(directory, leaf) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "remote exec record '{}' cannot be opened: {error}",
+                path.display()
+            ));
+        }
+    };
+    validate_private_record(&path, &file)?;
+    let length = file.metadata().map_err(|error| error.to_string())?.len();
+    if length == 0 || length > MAX_RECORD_BYTES {
+        return Err(format!(
+            "remote exec record '{}' has invalid length {length}",
+            path.display()
+        ));
+    }
+    let opened_identity = record_identity(&file)?;
+    let mut bytes = Vec::with_capacity(length as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 != length {
+        return Err(format!(
+            "remote exec record '{}' changed during read",
+            path.display()
+        ));
+    }
+    let named = beneath::open_file(directory, leaf).map_err(|error| {
+        format!(
+            "remote exec record '{}' cannot be re-opened: {error}",
+            path.display()
+        )
+    })?;
+    if record_identity(&file)? != opened_identity || record_identity(&named)? != opened_identity {
+        return Err(format!(
+            "remote exec record '{}' changed during read",
+            path.display()
+        ));
+    }
+    validate_held_directory(directory, display_directory)?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        format!(
+            "remote exec record '{}' is malformed: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Windows: a record is a private (owner-only), single-link regular file.
+#[cfg(windows)]
+fn validate_private_record(path: &Path, file: &std::fs::File) -> Result<(), String> {
+    match octopus_private_fs::is_private_single_link_file(file) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "remote exec record '{}' must be a private single-link regular file",
+            path.display()
+        )),
+        Err(error) => Err(format!(
+            "remote exec record '{}' cannot be inspected: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// Windows: which file a handle names (volume, file ID) and its change time.
+#[cfg(windows)]
+fn record_identity(file: &std::fs::File) -> Result<octopus_private_fs::FileIdentity, String> {
+    octopus_private_fs::identity_of_file(file).map_err(|error| error.to_string())
 }
 
 #[cfg(unix)]
@@ -1328,13 +1552,42 @@ fn remove_record_at(
     validate_held_directory(directory, display_directory)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn remove_record_at(
-    _directory: &std::fs::File,
-    _display_directory: &Path,
-    _leaf_text: &str,
+    directory: &std::fs::File,
+    display_directory: &Path,
+    leaf_text: &str,
 ) -> Result<(), String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    use octopus_private_fs::windows::beneath;
+    validate_held_directory(directory, display_directory)?;
+    let path = display_directory.join(leaf_text);
+    let leaf = std::ffi::OsStr::new(leaf_text);
+    let existing = match beneath::open_file(directory, leaf) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "remote exec record '{}' cannot be opened for removal: {error}",
+                path.display()
+            ));
+        }
+    };
+    validate_private_record(&path, &existing)?;
+    let identity = record_identity(&existing)?;
+    drop(existing);
+    beneath::remove(directory, leaf, false, identity.device_and_file()).map_err(|error| {
+        format!(
+            "remote exec record '{}' cannot be removed: {error}",
+            path.display()
+        )
+    })?;
+    octopus_private_fs::sync_handle(directory).map_err(|error| {
+        format!(
+            "remote exec durable directory '{}' cannot be synchronized: {error}",
+            display_directory.display()
+        )
+    })?;
+    validate_held_directory(directory, display_directory)
 }
 
 #[cfg(unix)]
@@ -1355,9 +1608,14 @@ fn sync_directory_entry_parent(path: &Path) -> Result<(), String> {
         })
 }
 
-#[cfg(not(unix))]
-fn sync_directory_entry_parent(_path: &Path) -> Result<(), String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+#[cfg(windows)]
+fn sync_directory_entry_parent(path: &Path) -> Result<(), String> {
+    octopus_private_fs::sync_directory(path).map_err(|error| {
+        format!(
+            "remote exec durable directory parent '{}' cannot be synchronized: {error}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -1373,10 +1631,33 @@ fn open_private_directory_fd(path: &Path) -> Result<std::fs::File, String> {
     Ok(directory)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn open_private_directory_fd(path: &Path) -> Result<std::fs::File, String> {
-    let _ = path;
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    let directory = octopus_private_fs::windows::beneath::open_directory_path(path).map_err(
+        |error| {
+            format!(
+                "remote exec durable directory '{}' cannot be opened: {error}",
+                path.display()
+            )
+        },
+    )?;
+    validate_held_directory(&directory, path)?;
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn validate_held_directory(directory: &std::fs::File, display: &Path) -> Result<(), String> {
+    match octopus_private_fs::is_owner_only_handle(directory) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "remote exec durable directory '{}' must be private to the current user",
+            display.display()
+        )),
+        Err(error) => Err(format!(
+            "remote exec durable directory '{}' cannot be inspected: {error}",
+            display.display()
+        )),
+    }
 }
 
 #[cfg(unix)]
@@ -1406,12 +1687,30 @@ fn open_state_lock(
     Ok(file)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn open_state_lock(
-    _directory: &std::fs::File,
-    _display_root: &Path,
+    directory: &std::fs::File,
+    display_root: &Path,
 ) -> Result<std::fs::File, String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    use octopus_private_fs::windows::beneath;
+    validate_held_directory(directory, display_root)?;
+    let leaf = std::ffi::OsStr::new(STATE_LOCK_FILE);
+    let file = match beneath::create_file(directory, leaf) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            beneath::open_file(directory, leaf).map_err(|error| {
+                format!("remote exec durable state lock cannot be opened: {error}")
+            })?
+        }
+        Err(error) => {
+            return Err(format!(
+                "remote exec durable state lock cannot be opened: {error}"
+            ));
+        }
+    };
+    validate_private_record(&display_root.join(STATE_LOCK_FILE), &file)?;
+    octopus_private_fs::sync_handle(directory).map_err(|error| error.to_string())?;
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -1427,9 +1726,10 @@ fn lock_state_file(file: &std::fs::File) -> Result<(), String> {
     }
 }
 
-#[cfg(not(unix))]
-fn lock_state_file(_file: &std::fs::File) -> Result<(), String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+#[cfg(windows)]
+fn lock_state_file(file: &std::fs::File) -> Result<(), String> {
+    file.lock()
+        .map_err(|error| format!("remote exec durable state lock cannot be acquired: {error}"))
 }
 
 #[cfg(unix)]
@@ -1525,12 +1825,30 @@ fn read_directory_names(
     result
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn read_directory_names(
-    _directory: &std::fs::File,
-    _display_directory: &Path,
+    directory: &std::fs::File,
+    display_directory: &Path,
 ) -> Result<Vec<String>, String> {
-    Err("remote exec durable records require Unix owner-only filesystem semantics".to_string())
+    validate_held_directory(directory, display_directory)?;
+    let names = octopus_private_fs::windows::beneath::names(directory, MAX_DIRECTORY_ENTRIES)
+        .map_err(|error| {
+            format!(
+                "remote exec durable directory '{}' cannot be listed: {error}",
+                display_directory.display()
+            )
+        })?;
+    names
+        .into_iter()
+        .map(|name| {
+            name.into_string().map_err(|_| {
+                format!(
+                    "remote exec durable directory '{}' holds a name that is not UTF-8",
+                    display_directory.display()
+                )
+            })
+        })
+        .collect()
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1823,5 +2141,50 @@ mod tests {
         for entry in std::fs::read_dir(root.path().join("remote-exec/history")).unwrap() {
             assert!(entry.unwrap().file_name().to_string_lossy().len() <= 255);
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_record_tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Sample {
+        value: u32,
+    }
+
+    #[test]
+    fn records_round_trip_beneath_an_owner_only_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        octopus_private_fs::create_private_dir(&root).unwrap();
+        let directory = open_private_directory_fd(&root).unwrap();
+        let processes = ensure_private_subdirectory_at(&directory, &root, PROCESSES_DIR).unwrap();
+        let processes_path = root.join(PROCESSES_DIR);
+
+        assert_eq!(read_json_at::<Sample>(&processes, &processes_path, "p.json").unwrap(), None);
+        write_json_at(&processes, &processes_path, "p.json", &Sample { value: 1 }).unwrap();
+        write_json_at(&processes, &processes_path, "p.json", &Sample { value: 2 }).unwrap();
+        assert_eq!(
+            read_json_at::<Sample>(&processes, &processes_path, "p.json").unwrap(),
+            Some(Sample { value: 2 })
+        );
+        assert_eq!(read_directory_names(&processes, &processes_path).unwrap(), vec!["p.json"]);
+        remove_record_at(&processes, &processes_path, "p.json").unwrap();
+        assert_eq!(read_json_at::<Sample>(&processes, &processes_path, "p.json").unwrap(), None);
+
+        let lock = open_state_lock(&directory, &root).unwrap();
+        lock_state_file(&lock).unwrap();
+        lock.unlock().unwrap();
+    }
+
+    #[test]
+    fn a_directory_others_can_use_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        // A plain temporary folder inherits its parent's access list, which
+        // grants more than the current user.
+        let shared = temporary.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        assert!(open_private_directory_fd(&shared).is_err());
     }
 }

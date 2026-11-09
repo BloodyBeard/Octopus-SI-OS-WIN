@@ -22,6 +22,10 @@ octopus-interface-transport = { path = "../../../../../crates/octopus-interface-
 octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 
+
+[target.'cfg(windows)'.dependencies]
+getrandom = "0.3"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

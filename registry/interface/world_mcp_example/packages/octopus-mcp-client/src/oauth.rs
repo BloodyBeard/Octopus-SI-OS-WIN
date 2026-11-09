@@ -1245,7 +1245,13 @@ fn fill_secure_random(value: &mut [u8]) -> Result<(), OAuthError> {
             .map_err(|error| OAuthError::Config(format!("secure randomness failed: {error}")))?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    // Windows: the system's preferred random generator (ProcessPrng).
+    #[cfg(windows)]
+    {
+        getrandom::fill(value)
+            .map_err(|error| OAuthError::Config(format!("secure randomness failed: {error}")))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = value;
         Err(OAuthError::Config(

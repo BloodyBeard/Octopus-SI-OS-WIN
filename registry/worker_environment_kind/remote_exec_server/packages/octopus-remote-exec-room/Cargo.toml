@@ -25,6 +25,9 @@ octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.182"
 
+[target.'cfg(windows)'.dependencies]
+octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
+
 [dev-dependencies]
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
