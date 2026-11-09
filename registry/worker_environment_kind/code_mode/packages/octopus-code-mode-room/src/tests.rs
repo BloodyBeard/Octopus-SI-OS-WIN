@@ -3777,9 +3777,7 @@ async fn actual_app_capture_facade(
         let input=admission.next().await.unwrap();
         let resumed=admission.run(room,handoff,formation,kind,input).await.unwrap();
         assert_eq!(resumed["body"]["output_retained"],true,"{resumed}");
-        // The resumed script finishes on its own; the wait's yield time is only
-        // its ceiling, so a slow runner gets until the room's limit to see it.
-        let wait=envelope(root,501+case as u64*4,"code_mode.wait",json!({"cell_id":started["body"]["cell_id"],"yield_time_ms":5000}));
+        let wait=envelope(root,501+case as u64*4,"code_mode.wait",json!({"cell_id":started["body"]["cell_id"],"yield_time_ms":20}));
         admission.model_call(&wait.artifact_file).await.unwrap();
         let input=admission.next().await.unwrap();
         let completed=admission.run(room,handoff,formation,kind,input).await.unwrap();
