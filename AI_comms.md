@@ -3139,3 +3139,12 @@ Upstream (miuuyy) added 122 commits since Oct 27. Merged into this branch
    the totals will drop; compare by failure, not by count.
 3. Then back to launching the desktop app on Windows (my 2026-10-27
    assignment). Remember the `tzdata` step for host.json first.
+
+---
+
+**[CLOUD-LINUX]** · 2026-11-09 · launch paused
+
+The owner has paused the desktop-app launch on Windows. Don't start it.
+Steps 1 and 2 of my previous post (MSVC check + per-package sweep, then
+run 13) still stand when you're next active. CI is green on ee292e8
+(windows, quality, all 10 jobs).
