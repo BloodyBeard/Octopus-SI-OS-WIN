@@ -404,36 +404,21 @@ test("setup arms each selected pack trigger once as a template copy bound into i
 });
 
 test("setup triggers start their runs on Home's chosen provider", async () => {
-  const { setupTriggerEntries, setupTriggerProof, armSetupTriggers } = require("../electron/projection.cjs");
-  const os = require("node:os");
-  const repoRegistry = path.join(appRoot, "..", "registry");
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "octopus-setup-trigger-provider-")));
-  const registry = path.join(home, "registry");
-  for (const kind of ["interface", "tool"]) {
-    for (const entry of fs.readdirSync(path.join(repoRegistry, kind), { withFileTypes: true }).filter((row) => row.isDirectory())) {
-      for (const name of ["interface.json", "life.json", "policy.json", "activation.json", "tool.json"]) {
-        const source = path.join(repoRegistry, kind, entry.name, name);
-        if (!fs.existsSync(source)) continue;
-        fs.mkdirSync(path.join(registry, kind, entry.name), { recursive: true });
-        fs.copyFileSync(source, path.join(registry, kind, entry.name, name));
-      }
-    }
-  }
-  fs.mkdirSync(path.join(home, "state", "runs"), { recursive: true });
-  const pack = JSON.parse(fs.readFileSync(path.join(appRoot, "distribution", "local-packages", "packs", "codex.json"), "utf8"));
-  const entries = setupTriggerEntries(pack, ["world_system_review", "world_memory_cron"], "world_provider_custom");
-  assert.ok(entries.length >= 1 && entries.every((entry) => entry.provider_interface_id === "world_provider_custom"));
-  const hooks = { commitClientAuthoring: async (plan) => {
-    for (const write of plan.writes) {
-      fs.mkdirSync(path.dirname(write.file), { recursive: true });
-      fs.writeFileSync(write.file, `${JSON.stringify(write.next, null, 2)}\n`);
-    }
-  } };
-  await armSetupTriggers(registry, home, entries, hooks);
-  for (const entry of entries) {
-    const armed = JSON.parse(fs.readFileSync(path.join(registry, "interface", entry.interface_id, "activation.json"), "utf8")).activations[0];
-    if (armed.config.target?.provider_interface_id !== undefined) assert.equal(armed.config.target.provider_interface_id, "world_provider_custom");
-  }
-  assert.equal((await setupTriggerProof(registry, home, entries)).length, entries.length);
-  fs.rmSync(home, { recursive: true, force: true });
+  const { setupTriggerTaskPlanner } = require("../electron/projection.cjs");
+  const requests = [];
+  const planSurface = async ({ request }) => {
+    requests.push(request);
+    return { runId: `run_${request.chatId}`, writes: [{ filePath: "/run.json", expectedBeforeHash: null, content: "{}", tag: "run" }] };
+  };
+  const entry = { interface_id: "world_memory_cron_setup", task: { worker_interface_id: "system_worker_memory" } };
+  const home = { providerInterfaceId: "world_provider_custom", providerModel: "vendor/model-x", reasoningEffort: "medium" };
+  const plan = setupTriggerTaskPlanner(planSurface, { eeInstancesRoot: "/ees", rootEeId: "ee_home", home });
+  const task = await plan(entry, { checkpointId: "cp_world_memory_cron_setup", interfaceId: entry.interface_id, artifactNames: ["cron.current_time"] });
+  assert.equal(task.runId, "run_trigger_world_memory_cron_setup");
+  assert.equal(requests[0].providerInterfaceId, "world_provider_custom");
+  assert.equal(requests[0].providerModel, "vendor/model-x");
+  assert.equal(requests[0].reasoningEffort, "medium");
+  assert.equal(requests[0].workerInterfaceId, "system_worker_memory");
+  const unconfigured = setupTriggerTaskPlanner(planSurface, { eeInstancesRoot: "/ees", rootEeId: "ee_home", home: {} });
+  await assert.rejects(unconfigured(entry, {}), /Home provider interface is required/);
 });
