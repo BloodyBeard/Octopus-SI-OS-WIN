@@ -290,8 +290,12 @@ jobs:
           cargo test --locked -p octopus-operator-chat-client --lib every_registry_provider_catalog_admits_its_default_model_and_effort
 
   native-client:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    # Intel macOS: GitHub's arm64 macOS pool repeatedly never assigned
+    # these jobs a runner ("not acquired ... capacity constraints").
+    runs-on: macos-15-intel
+    # A cold cache on this image builds the planner and intake life from
+    # scratch; 30 minutes is tight for that.
+    timeout-minutes: 60
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
