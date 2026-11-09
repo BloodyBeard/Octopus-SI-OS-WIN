@@ -28,7 +28,7 @@ impl ProviderOutputHandoff {
         bindings: &[ProviderOutgoingBinding],
     ) -> Result<AuthoredRun, String> {
         self.author_run_with_generations(current, context_artifacts, outputs, refresh_context, u64::from(refresh_context),
-            consumed_context_free_independent_input, consumed_verified_input, terminal, bindings, Vec::new())
+            consumed_context_free_independent_input, consumed_verified_input, terminal, bindings, Vec::new(), None)
     }
 
     pub(crate) fn author_run_with_generations(
@@ -43,6 +43,7 @@ impl ProviderOutputHandoff {
         terminal: bool,
         bindings: &[ProviderOutgoingBinding],
         standing: Vec<PendingHandoffItem>,
+        continuation: Option<&PendingHandoff>,
     ) -> Result<AuthoredRun, String> {
         let first_output = outputs
             .first()
@@ -63,6 +64,10 @@ impl ProviderOutputHandoff {
                 self.config.worker.as_str()
             ));
         }
+        let continued_context = continuation
+            .map(|prior| source_continuation::continued_context(&record, &self.config, prior, context_artifacts, outputs))
+            .transpose()?;
+        let context_artifacts = continued_context.as_deref().unwrap_or(context_artifacts);
         let verified_input_carriers = outputs
             .iter()
             .filter(|output| !output.verified_inputs.is_empty())
@@ -130,12 +135,15 @@ impl ProviderOutputHandoff {
                 .checkpoints
                 .extend(carrier.verified_inputs.iter().cloned());
         }
-        let deferred_publication = terminal && outputs.iter().any(|output| {
+        let deferred_publication = terminal && (outputs.iter().any(|output| {
             !output.output_checkpoint.result_receiving.is_empty() && context_artifacts.contains(&output.identity.artifact.id)
-        });
+        }) || continuation.is_some_and(|prior| prior.deferred_publication));
         let consumed_result_input = result_inputs::prepare(
             self, &record, outputs, terminal.then_some(context_artifacts), &mut next_topology,
         )?;
+        if continuation.is_some() && consumed_result_input.is_some() {
+            return Err("a source continuation cannot consume its source input again".into());
+        }
         let mut next_config = self.config.clone();
         next_config.checkpoints = next_topology.checkpoints.clone();
         next_config.validate(&self.config.provider_interface, &self.config.run)?;
@@ -182,7 +190,10 @@ impl ProviderOutputHandoff {
         let mut target_context = mandatory_role_artifacts.clone();
         for artifact in context_artifacts { append_artifact(&mut target_context, artifact.clone()); }
         let mut live_context = target_context.clone();
-        if target_context.iter().any(|id| outputs.iter().any(|output| &output.identity.artifact.id == id)) {
+        if continuation.is_some() {
+            live_context = mandatory_role_artifacts.clone();
+            for artifact in current_context_artifacts(&record, &self.config)? { append_artifact(&mut live_context, artifact); }
+        } else if target_context.iter().any(|id| outputs.iter().any(|output| &output.identity.artifact.id == id)) {
             live_context = mandatory_role_artifacts.clone();
             for artifact in current_context_artifacts(&record, &self.config)? { append_artifact(&mut live_context, artifact); }
             for artifact in context_artifacts.iter().filter(|id| !outputs.iter().any(|output| &output.identity.artifact.id == *id)) {
@@ -234,7 +245,7 @@ impl ProviderOutputHandoff {
             });
         }
         for template in next_config.checkpoints.iter().filter(|template| retains_future_output(template)) {
-            if !pending_items.iter().any(|item| pending_output_matches_template(item, template)) {
+            if !pending_items.iter().any(|item| pending_output_serves_template(item, template)) {
                 let id = format!("{batch_prefix}_{}",template.name);
                 next_frontier_ids.push(id.clone());
                 next_frontier.push(materialize_checkpoint(template,&id,&record.id,&mandatory_role_bindings));
@@ -335,7 +346,7 @@ impl ProviderOutputHandoff {
                     self.config.provider_interface.as_str()
                 )
             })?;
-        let context_generation = if refresh_context && !self.failed_source {
+        let context_generation = if (refresh_context || continuation.is_some()) && !self.failed_source {
             previous_context_generation.checked_add(context_generations).ok_or_else(|| {
                 format!(
                     "provider run '{}' context generation overflowed",
@@ -362,6 +373,7 @@ impl ProviderOutputHandoff {
                     .ok_or_else(|| "provider response batch became empty".to_string())?
             ),
         );
+        let standing = standing_routes::distinct_standing(standing, &pending_items)?;
         let pending_batch = PendingHandoff {
             source_movement_seq: self.source_movement_seq,
             items: pending_items,
@@ -370,10 +382,12 @@ impl ProviderOutputHandoff {
             deferred_publication,
             source_without_context: self.failed_source,
             settlement_of: None,
+            continuation_of: continuation.map(source_continuation::last_output).transpose()?,
             dispatch_fenced: true,
             withdrawal: None,
             replacement: None,
             standing,
+            rebase: Vec::new(),
         };
         provider_state.insert(
             "pending_handoff".to_string(),
@@ -422,7 +436,7 @@ impl ProviderOutputHandoff {
                 self.config.run.as_str()
             ));
         }
-        Ok(AuthoredRun {
+        let mut authored = AuthoredRun {
             json_format: Some(JsonFormat::Compact),
             before_hash,
             after_hash,
@@ -436,7 +450,43 @@ impl ProviderOutputHandoff {
             pending_handoff: pending_batch,
             content,
             patch,
-        })
+        };
+        self.seal_authored_run(current, &mut authored, None)?;
+        Ok(authored)
+    }
+
+    pub(crate) fn seal_authored_run(
+        &self,
+        current: &[u8],
+        authored: &mut AuthoredRun,
+        consumed: Option<&[ArtifactRef]>,
+    ) -> Result<(), String> {
+        let before = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(&authored.content).map_err(|error| error.to_string())?;
+        let pending = result_inputs::seal_pending(&before, &mut value, &self.config)?;
+        if consumed.is_some_and(|required| required != pending.rebase.as_slice()) {
+            return Err("result consumption context differs from its recorded rebase".into());
+        }
+        if pending == authored.pending_handoff {
+            return Ok(());
+        }
+        let format = authored.json_format.unwrap_or(JsonFormat::Compact);
+        let content = String::from_utf8(format.encode(&value)?).map_err(|error| error.to_string())?;
+        let after_hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
+        let patch = json_patch::diff(
+            &serde_json::from_slice(current).map_err(|error| error.to_string())?,
+            &value,
+        );
+        if apply_run_json_patch(current, &patch, &after_hash, Some(format))? != content {
+            return Err("sealed provider write did not reconstruct its exact bytes".into());
+        }
+        authored.json_format = Some(format);
+        authored.content = content;
+        authored.after_hash = after_hash;
+        authored.patch = patch;
+        authored.pending_handoff = pending;
+        Ok(())
     }
 
     pub(crate) fn materialize_file_write_call(
@@ -486,7 +536,7 @@ impl ProviderOutputHandoff {
             if let Some(rejected) = authoring_retry::rejected_write(&self.ctx, &self.config, authored)? {
                 return Ok(AuthoringWriteOutcome::Rejected(rejected));
             }
-            if let Some((failure_seq, failure)) =
+            if let Some((failure_seq, failure, _)) =
                 self.recover_authoring_failure(&current_record, current_run_record)?
             {
                 if admitted_seq.is_some_and(|admitted| failure.source_movement_seq != admitted) {

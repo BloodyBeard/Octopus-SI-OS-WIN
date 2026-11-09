@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { OctopusRuntimeHostState } from "./electron";
+import type { OctopusHomeStorageHealth, OctopusInterfaceFailure, OctopusRuntimeHostState } from "./electron";
 
 export type RuntimeClientState = OctopusRuntimeHostState & {
   available: boolean;
@@ -20,6 +20,8 @@ const EMPTY_STATE: RuntimeClientState = {
   launchEnv: {},
   endpoint: "",
   error: null,
+  storageHealth: null,
+  interfaceFailures: [],
   updatedAtMs: 0,
 };
 
@@ -72,3 +74,22 @@ export function useRuntimeHost() {
 }
 
 export type RuntimeHostView = ReturnType<typeof useRuntimeHost>;
+
+const EMPTY_HOME_HEALTH = { storageHealth: null, interfaceFailures: [] as OctopusInterfaceFailure[] };
+
+export function useRuntimeHomeHealth(home: string, enabled: boolean): Pick<OctopusRuntimeHostState, "storageHealth" | "interfaceFailures"> {
+  const [observation, setObservation] = useState<{ home: string; storageHealth: OctopusHomeStorageHealth | null; interfaceFailures: OctopusInterfaceFailure[] } | null>(null);
+  useEffect(() => {
+    const bridge = window.octopusTransport;
+    if (!enabled || !home || !bridge?.bootStatus) return;
+    let active = true;
+    let observedEvent = false;
+    const apply = (state: OctopusRuntimeHostState) => {
+      if (active && state.home === home) setObservation({ home, storageHealth: state.storageHealth, interfaceFailures: state.interfaceFailures });
+    };
+    const unsubscribe = bridge.onRuntimeHostState?.((state) => { observedEvent = true; apply(state); });
+    void bridge.bootStatus().then((state) => { if (!observedEvent) apply(state); }).catch(() => undefined);
+    return () => { active = false; unsubscribe?.(); };
+  }, [home, enabled]);
+  return enabled && observation?.home === home ? observation : EMPTY_HOME_HEALTH;
+}

@@ -18,11 +18,9 @@ use octopus_interfaces::{
 use octopus_ledger::{ArtifactRef, Endpoint, Movement, MovementKind};
 use octopus_ledger_index::LedgerSqliteReader;
 use octopus_ledger_store::DurableMovementDecoder;
-use octopus_runtime::{
-    AuthoredInterfaceBinding, BindingArtifactPolicy, ContentHash, InterfaceBindingConfig,
-    RequiredVerifiedArtifact,
-    run_record::{ArtifactBinding, RunRecord},
-};
+use octopus_ledger::{ContentHash, RequiredVerifiedArtifact};
+use octopus_policy::{AuthoredInterfaceBinding, BindingArtifactPolicy, InterfaceBindingConfig};
+use octopus_run_record::{ArtifactBinding, RunRecord};
 use octopus_tool_handlers::ToolResultArtifact;
 use octopus_world_pyecho_life_runtime::LedgerTailReader;
 use sha2::{Digest, Sha256};
@@ -45,11 +43,13 @@ pub enum ProviderEmissionRoute {
     ClientProjectionWithVerifiedInputs { inputs: Vec<ProviderVerifiedInput> },
     Tool { tool: String },
     Interface { interface: InterfaceId },
+    Operation { interface: InterfaceId, result_label: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderVerifiedInput {
     pub also_deliver_to_tool: Option<String>,
+    pub also_deliver_to_interface: Option<InterfaceId>,
     pub artifact_label: String,
     pub required_verified_artifact: RequiredVerifiedArtifact,
 }
@@ -74,6 +74,7 @@ enum ProviderHandoffRoute {
     ClientProjectionWithVerifiedInputs { inputs: Vec<ProviderVerifiedInput> },
     Tool { tool: String },
     Interface { interface: InterfaceId },
+    Operation { interface: InterfaceId, result_label: String },
     TransportDispatch { attempt: u32 },
 }
 
@@ -93,6 +94,9 @@ impl From<ProviderEmission> for ProviderHandoffEmission {
             ProviderEmissionRoute::Interface { interface } => {
                 ProviderHandoffRoute::Interface { interface }
             }
+            ProviderEmissionRoute::Operation { interface, result_label } => {
+                ProviderHandoffRoute::Operation { interface, result_label }
+            }
         };
         Self {
             artifact: emission.artifact,
@@ -104,7 +108,6 @@ impl From<ProviderEmission> for ProviderHandoffEmission {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderSourceRecovery {
     Process,
-    Bridged { invocation_movement_seq: u64 },
     Completed,
     Interrupted { last_artifact_label: String },
 }
@@ -308,6 +311,7 @@ enum AuthoringAttemptRecovery {
 struct ValidatedAuthoringFailureSource {
     provider_source_movement_seq: u64,
     correlation_id: String,
+    rebase: Vec<ArtifactRef>,
 }
 
 #[derive(Clone)]
@@ -349,6 +353,7 @@ struct HandoffState {
     consumed_context_free_independent_input: Option<RunAuthoringCheckpoint>,
     consumed_verified_input: bool,
     deferred_context_generations: u64,
+    result_rebase: Option<Vec<ArtifactRef>>,
 }
 
 #[derive(Clone)]
@@ -409,6 +414,8 @@ struct PendingHandoff {
     source_without_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settlement_of: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuation_of: Option<ArtifactRef>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dispatch_fenced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -417,6 +424,8 @@ struct PendingHandoff {
     replacement: Option<Box<rejected_final::Rejection>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     standing: Vec<PendingHandoffItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rebase: Vec<ArtifactRef>,
 }
 
 impl PendingHandoff {
@@ -451,6 +460,7 @@ pub use writer_run::{separate_writer_run, separate_owner_writer_run, owner_write
 mod source_replay;
 mod source_settlement;
 pub use source_settlement::PendingSourceSettlement;
+mod source_continuation;
 mod source_withdrawal;
 pub use source_withdrawal::{PendingSourceIntent, PendingSourceWithdrawal};
 mod settled_definition;

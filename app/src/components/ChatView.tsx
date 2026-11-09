@@ -34,6 +34,7 @@ import { WorkspacePaneHeaderActions, useWorkspacePaneHeaderActionsHost } from ".
 import { recordClientTaskRead } from "../shell/clientWorkspaces";
 import { chatProductError } from "./chat/chatProductError";
 import type { FilesOpenTarget } from "./files/types";
+import { FilesPaneNavigationProvider } from "./files/FilesPaneNavigation";
 import {
   directivePathWithinRoot,
   type AssistantVisualizationTarget,
@@ -413,6 +414,7 @@ export function ChatView({
         applicationSelectionLocked={chat.applicationSelectionLocked}
         applicationSelectionLockReason={chat.applicationSelectionLockReason}
         canSubmit={chat.canSubmit}
+        blockingReason={chat.runtimeBlockReason}
         contextUsage={chat.contextUsage}
         canQueue={chat.canQueue}
         onQueue={chat.queueCurrentTurn}
@@ -517,6 +519,7 @@ export function ChatView({
   );
 
   return (
+    <FilesPaneNavigationProvider onOpen={onOpenFiles}>
     <section className={chatViewClassName(composerVisible, headerMode)}>
       <main className="chat-thread relative isolate flex min-h-0 flex-1 flex-col">
         {headerMode !== "pane" ? <div
@@ -614,6 +617,7 @@ export function ChatView({
               onPinMessageExcerpt={chat.pinMessageExcerpt}
               revealPinnedContext={revealedPinnedContext}
               responseStreaming={chat.busy}
+              blockingReason={chat.runtimeBlockReason}
               resolveAssistantVisualization={resolveAssistantVisualization}
               onPinnedContextRevealed={() => setRevealedPinnedContext(null)}
               onFindMatchCountChange={setFindMatchCount}
@@ -648,6 +652,7 @@ export function ChatView({
         </div>
       </main>
     </section>
+    </FilesPaneNavigationProvider>
   );
 }
 

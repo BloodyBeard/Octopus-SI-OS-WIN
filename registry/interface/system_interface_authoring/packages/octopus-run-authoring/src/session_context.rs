@@ -237,7 +237,7 @@ pub fn validate_payload_artifact_selection(selected: &[ArtifactRef]) -> Result<(
 
 pub(crate) fn validate_payload_read_bindings(
     selected: &[ArtifactRef],
-    checkpoint: &octopus_runtime::run_record::CheckpointRecord,
+    checkpoint: &octopus_run_record::CheckpointRecord,
     references: &[ArtifactRef],
     readable: &BTreeSet<ArtifactId>,
     roles: &[String],
@@ -266,7 +266,7 @@ pub fn context_artifact_payloads(
     let runtime = metadata.runtime.as_ref().ok_or("context projection has no admitted runtime coordinate")?;
     let mut selected = payload_artifact_bindings(record, &runtime.interface)?;
     if let Some(reference) = result_inputs::bound_call_evidence(record, &runtime.interface, &runtime.checkpoint)? {
-        if metadata.grant.artifact_access.get(reference.id.as_str()) != Some(&octopus_runtime::ArtifactAccess::read_only()) {
+        if metadata.grant.artifact_access.get(reference.id.as_str()) != Some(&octopus_policy::ArtifactAccess::read_only()) {
             return Err("result context lost its exact read-only call evidence grant".into());
         }
         if !selected.contains(&reference) { selected.push(reference); }
@@ -429,7 +429,7 @@ pub(crate) fn collect_bound_context_from_cache(
         )?;
         let covered_artifact_count = resolved_artifacts.len().saturating_sub(1);
         let covered_fingerprint =
-            session_artifacts_fingerprint(&resolved_artifacts[..covered_artifact_count])?;
+            session_snapshot_prefix_fingerprint(&resolved_artifacts[..covered_artifact_count])?;
         session_context.artifacts.extend(resolved_artifacts);
         *session_snapshot_head = Some(SessionSnapshotHead {
             artifact: artifact.clone(),
@@ -769,7 +769,7 @@ pub(crate) fn reconcile_session_context_order(
 
 pub(crate) fn merge_failed_source_context(
     existing: &[SessionContextArtifact], recovered: &[SessionContextArtifact], source: u64,
-    invocation_source: Option<u64>,
+    invocation_source: Option<u64>, rebase: &[ArtifactRef],
 ) -> Result<Vec<SessionContextArtifact>, String> {
     let input_successor = invocation_source.filter(|sequence| *sequence != source).and_then(|sequence| {
         existing.iter().position(|entry| entry.source_movement_seq == Some(sequence))
@@ -783,7 +783,9 @@ pub(crate) fn merge_failed_source_context(
         .ok_or("recovered failed context has no exact original source entry")?.source_artifact.clone();
     let publications = recovered.iter().map(|entry| {
         let sequence = entry.source_movement_seq.ok_or("recovered failed history has no exact movement")?;
-        if sequence > source { return Err("recovered failed history follows its source".to_string()); }
+        if sequence > source && !rebase.contains(&entry.source_artifact) {
+            return Err("recovered failed history follows its source".to_string());
+        }
         Ok((artifact_ref_key(&entry.source_artifact), BTreeSet::from([sequence])))
     }).collect::<Result<BTreeMap<_, _>, String>>()?;
     if publications.len() != recovered.len() { return Err("recovered failed history repeats an artifact".into()); }
@@ -941,12 +943,27 @@ pub(crate) fn validate_session_snapshot(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn session_artifacts_fingerprint(
     artifacts: &[SessionContextArtifact],
 ) -> Result<ContentHash, String> {
     serde_json::to_vec(artifacts)
         .map(|bytes| ContentHash::of_bytes(&bytes))
         .map_err(|error| format!("session context fingerprint could not be encoded: {error}"))
+}
+
+pub(crate) fn session_snapshot_prefix_fingerprint(
+    artifacts: &[SessionContextArtifact],
+) -> Result<ContentHash, String> {
+    // Movement coordinates are grounded independently against the ledger on
+    // every read. Filling an absent coordinate must not invalidate the immutable
+    // payload prefix and turn each incremental snapshot into a full-history copy.
+    let sources = artifacts.iter().map(|entry| {
+        (&entry.label, &entry.payload, &entry.source_artifact)
+    }).collect::<Vec<_>>();
+    serde_json::to_vec(&sources)
+        .map(|bytes| ContentHash::of_bytes(&bytes))
+        .map_err(|error| format!("session snapshot prefix could not be encoded: {error}"))
 }
 
 pub(crate) fn reconcile_resolved_session_snapshot_head(
@@ -970,7 +987,7 @@ pub(crate) fn reconcile_resolved_session_snapshot_head(
         );
     }
     let grounded_fingerprint =
-        session_artifacts_fingerprint(&session_context.artifacts[..head.covered_artifact_count])?;
+        session_snapshot_prefix_fingerprint(&session_context.artifacts[..head.covered_artifact_count])?;
     if grounded_fingerprint != head.covered_fingerprint {
         *session_snapshot_head = None;
     }
@@ -997,7 +1014,7 @@ pub(crate) fn session_snapshot_head_after_output(
     Ok(SessionSnapshotHead {
         artifact,
         covered_artifact_count,
-        covered_fingerprint: session_artifacts_fingerprint(
+        covered_fingerprint: session_snapshot_prefix_fingerprint(
             &session_context.artifacts[..covered_artifact_count],
         )?,
     })
@@ -1023,7 +1040,7 @@ pub(crate) fn session_snapshot_for_context(
         ));
     }
     if let Some(head) = session_snapshot_head {
-        if session_artifacts_fingerprint(&session_context.artifacts[..head.covered_artifact_count])?
+        if session_snapshot_prefix_fingerprint(&session_context.artifacts[..head.covered_artifact_count])?
             != head.covered_fingerprint
         {
             return Err(

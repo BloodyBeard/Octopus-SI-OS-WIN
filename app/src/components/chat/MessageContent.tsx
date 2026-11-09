@@ -18,7 +18,7 @@ import {
 import Markdown, { type Components, defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import { useAppearance } from "../../appearance";
-import { OcButton, OcDialog, OcDialogFooter, OcDialogHeader } from "../../design-system/components";
+import { openWebLink } from "../../clientBrowser";
 import { copyText } from "../../runtimeFormat";
 import { Glyph } from "../IconGlyphs";
 import { ShellTooltip } from "../shell/ShellTooltip";
@@ -282,8 +282,6 @@ function MarkdownTable({ children, lead, node }: { children: ReactNode; lead: st
 }
 
 function SafeMarkdownLink({ children, href = "", onOpenFile }: { children: ReactNode; href?: string; onOpenFile: MessageContentProps["onOpenFile"] }) {
-  const [confirming, setConfirming] = useState(false);
-  const cancelRef = useRef<HTMLButtonElement>(null);
   const external = /^https?:\/\//i.test(href);
 
   if (!external) {
@@ -297,55 +295,11 @@ function SafeMarkdownLink({ children, href = "", onOpenFile }: { children: React
       }}>{children}</a>
     );
   }
-  let host = "External website";
-  try {
-    host = new URL(href).hostname;
-  } catch {
-    void 0;
-  }
-  return (
-    <>
-      <a
-        href={href}
-        onClick={(event) => {
-          event.preventDefault();
-          setConfirming(true);
-        }}
-        rel="noreferrer"
-        target="_blank"
-      >
-        {children}
-      </a>
-      <OcDialog
-        ariaLabelledBy="external-link-dialog-title"
-        backdropClassName="octopus-dialog-overlay bg-[#00000022]"
-        initialFocusRef={cancelRef}
-        onClose={() => setConfirming(false)}
-        open={confirming}
-        panelClassName="octopus-dialog w-[460px] max-w-[calc(100vw-2rem)] rounded-3xl bg-token-dropdown-background/95 p-5 text-token-foreground ring-[0.5px] ring-token-border backdrop-blur-xl"
-      >
-        <OcDialogHeader
-          className="p-0"
-          description={`This link opens ${host} in your default browser.`}
-          title="Open external link?"
-          titleId="external-link-dialog-title"
-        />
-        <div className="mt-3 max-h-28 overflow-auto rounded-lg bg-token-foreground/[0.04] px-3 py-2 font-mono text-xs break-all text-token-text-secondary">{href}</div>
-        <OcDialogFooter className="mt-5 min-h-0 border-0 p-0">
-          <OcButton buttonRef={cancelRef} onClick={() => setConfirming(false)} variant="ghost">Cancel</OcButton>
-          <OcButton
-            onClick={() => {
-              setConfirming(false);
-              window.open(href, "_blank", "noopener,noreferrer");
-            }}
-            variant="primary"
-          >
-            Open link
-          </OcButton>
-        </OcDialogFooter>
-      </OcDialog>
-    </>
-  );
+  return <a href={href} rel="noreferrer" onClick={event => {
+    event.preventDefault(); openWebLink(href);
+  }} onAuxClick={event => {
+    if (event.button === 1) { event.preventDefault(); openWebLink(href); }
+  }}>{children}</a>;
 }
 
 function SafeMarkdownImage({ alt, revealKey, src }: { alt: string; revealKey?: string; src: string }) {

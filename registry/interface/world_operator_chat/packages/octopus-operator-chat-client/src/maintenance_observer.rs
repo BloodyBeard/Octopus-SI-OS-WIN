@@ -46,7 +46,10 @@ pub struct MaintenanceObserverRequest {
     pub source_provider_interface_id: String,
     pub source_client_interface_id: String,
     pub source_input_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_payload_input_labels: Vec<String>,
     pub config: MaintenanceObserverConfig,
+    pub observer_selection: Value,
     pub write_hash_algorithm: WriteHashAlgorithm,
 }
 
@@ -439,6 +442,7 @@ pub fn plan_maintenance_observer(
         &roles,
         &[],
         Some(&request.roots.interface_private_state_root),
+        &BTreeMap::new(),
         &mut writes,
     )?;
     clone_source_life(
@@ -557,6 +561,7 @@ pub fn plan_maintenance_observer(
         &[],
         &[],
         None,
+        &OperationRoutes::default(),
     )?;
     let content = finish_observer_record(content, &identity, &projection, &entries_root, cfg)?;
     let content = context_bindings::configure_tool_context(registry, &identity, content, None)?;
@@ -630,7 +635,9 @@ pub fn plan_maintenance_observer(
             "provider_interface":projection_id,"initial_record":projection_initial,"initial_record_content":projection_content},
         "collection_source":cfg.collection_source,
         "collection_entries_root":entries_root,"publication_door_interface":publication_door,"publication_tool":publication_tool,
-        "initial_record":initial_record,"initial_record_content":content,"lifecycle_ownership":lifecycle_ownership});
+        "initial_record":initial_record,"initial_record_content":content,"lifecycle_ownership":lifecycle_ownership,
+        "observer_selection":request.observer_selection});
+    let mut owner_first = Vec::new();
     push_json_write(
         request
             .roots
@@ -638,8 +645,10 @@ pub fn plan_maintenance_observer(
             .join(format!("{run_id}.json")),
         content,
         format!("run:{run_id}"),
-        &mut run_writes,
+        &mut owner_first,
     )?;
+    owner_first.append(&mut run_writes);
+    let mut run_writes = owner_first;
     normalize_write_hash_algorithm(&mut writes, request.write_hash_algorithm)?;
     normalize_write_hash_algorithm(&mut run_writes, request.write_hash_algorithm)?;
     let mut interfaces = exact_topology_interface_ids(&identity, &external);
@@ -741,6 +750,68 @@ fn admitted_label_family(inputs: &[&BoundCheckpointTemplate], label: &str) -> Ve
     family.into_iter().collect()
 }
 
+pub(crate) fn refresh_projection_contracts(
+    request: &MaintenanceObserverRequest,
+    source_run: &RunRecord,
+    declaration: &Value,
+    writes: &mut Vec<PlannedClientWrite>,
+) -> Result<(), String> {
+    let topology: BoundRunAuthoringTopology = serde_json::from_value(
+        source_run
+            .interface_state
+            .get(&InterfaceId::new(&request.source_provider_interface_id))
+            .and_then(|state| state.get("run_authoring_binding"))
+            .cloned()
+            .ok_or("maintenance source has no ordinary handoff topology")?,
+    )
+    .map_err(|e| e.to_string())?;
+    let (input_rules, input_routes, evidence_rules) =
+        projection_contracts(request, &topology, writes)?;
+    let projection = declaration
+        .get("projection_interface")
+        .and_then(Value::as_str)
+        .ok_or("accepted maintenance declaration has no projection interface")?;
+    safe_segment(projection, "accepted maintenance projection")?;
+    let path = request
+        .roots
+        .registry_root
+        .join("interface")
+        .join(projection)
+        .join("interface.json");
+    let mut descriptor: Value =
+        serde_json::from_slice(&planned_bytes(writes, &path)?).map_err(|e| e.to_string())?;
+    let slot = descriptor
+        .pointer_mut("/interface_driver_config/private_config/context_projection")
+        .ok_or("accepted maintenance projection has no context projection declaration")?;
+    let mut config: ContextProjectionConfig =
+        serde_json::from_value(slot.clone()).map_err(|e| e.to_string())?;
+    if config.source_run != source_run.id.as_str()
+        || config.source_provider_interface != request.source_provider_interface_id
+    {
+        return Err("accepted maintenance projection observes another source".into());
+    }
+    let formed = input_rules.iter().chain(&evidence_rules).flat_map(|rule| rule.labels.iter().cloned()).collect::<BTreeSet<_>>();
+    let retained = |rules: &[ProjectionRule]| rules.iter().filter_map(|rule| {
+        let labels = rule.labels.iter().filter(|label| !formed.contains(*label)).cloned().collect::<Vec<_>>();
+        (!labels.is_empty()).then(|| ProjectionRule { labels, ..rule.clone() })
+    }).collect::<Vec<_>>();
+    let kept_inputs = retained(&config.input_rules);
+    let kept_evidence = retained(&config.evidence_rules);
+    let mut routes = input_routes;
+    for route in std::mem::take(&mut config.input_routes) {
+        if !routes.iter().any(|next| json!(next) == json!(route)) { routes.push(route); }
+    }
+    config.input_rules = input_rules.into_iter().chain(kept_inputs).collect();
+    config.evidence_rules = evidence_rules.into_iter().chain(kept_evidence).collect();
+    config.input_routes = routes;
+    config.validate()?;
+    *slot = json!(config);
+    if writes.iter().any(|write| write.path == path) {
+        return replace(writes, &path, &descriptor);
+    }
+    push_json_write(path, pretty_json(&descriptor)?, format!("interface:{projection}"), writes)
+}
+
 fn projection_contracts(
     request: &MaintenanceObserverRequest,
     topology: &BoundRunAuthoringTopology,
@@ -765,10 +836,30 @@ fn projection_contracts(
         .filter(|label| !additional.contains(*label))
         .cloned()
         .collect::<Vec<_>>();
+    let payload_labels = request
+        .source_payload_input_labels
+        .iter()
+        .filter(|label| {
+            !additional.iter().chain(&labels).any(|declared| {
+                label.as_str() == declared
+                    || label.strip_prefix(declared.as_str()).is_some_and(|rest| rest.starts_with('.'))
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     if !labels.is_empty() {
         rules.push(ProjectionRule {
             labels,
             pointers: cfg.input_pointers.clone(),
+            whole_payload: false,
+            origin: None,
+        });
+    }
+    if !payload_labels.is_empty() {
+        rules.push(ProjectionRule {
+            labels: payload_labels,
+            pointers: Vec::new(),
+            whole_payload: true,
             origin: None,
         });
     }
@@ -876,6 +967,7 @@ fn projection_contracts(
             evidence.push(ProjectionRule {
                 labels: result_labels.into_iter().collect(),
                 pointers: cfg.tool_result_pointers.clone(),
+                whole_payload: false,
                 origin: None,
             });
         }
@@ -1245,9 +1337,9 @@ fn plan_projection_run(
     descriptor["interface_driver_config"]["private_config"]["run_authoring_profile"] = profile;
     descriptor["interface_driver_config"]["private_config"]["model_hidden_tools"] = json!([tool]);
     descriptor["interface_driver_config"]["private_config"]["context_output_labels"] =
-        json!([OUTCOME_LABEL, OUTCOME_ERROR_LABEL]);
+        json!([OUTCOME_LABEL]);
     descriptor["interface_driver_config"]["private_config"]["session_snapshot_labels"] =
-        json!([OUTCOME_LABEL, OUTCOME_ERROR_LABEL]);
+        json!([OUTCOME_LABEL]);
     descriptor["interface_driver_config"]["private_config"]["client_projection_output_labels"] =
         json!([OUTPUT_LABEL, OUTCOME_LABEL, OUTCOME_ERROR_LABEL]);
     descriptor["interface_driver_config"]["host_slots"]["run_records_root"] =
@@ -1404,6 +1496,7 @@ fn plan_projection_run(
         &tool,
         writes,
     )?;
+    let mut owner_first = Vec::new();
     push_json_write(
         request
             .roots
@@ -1411,9 +1504,10 @@ fn plan_projection_run(
             .join(format!("{}.json", projection.projection_run)),
         content.clone(),
         format!("run:{}", projection.projection_run),
-        &mut run_writes,
+        &mut owner_first,
     )?;
-    Ok((content, run_writes, interfaces, vec![tool]))
+    owner_first.append(&mut run_writes);
+    Ok((content, owner_first, interfaces, vec![tool]))
 }
 
 fn names_binding(interface: &str, labels: &[String]) -> Result<AuthoredInterfaceBinding, String> {

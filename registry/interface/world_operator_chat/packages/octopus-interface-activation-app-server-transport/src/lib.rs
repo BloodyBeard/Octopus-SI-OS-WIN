@@ -683,13 +683,13 @@ mod tests {
     ) -> ActivationStart {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         ActivationStart {
-            interface_id: InterfaceId::new("world_terminal"),
+            interface_id: InterfaceId::new("world_operator_chat"),
             config,
             host_io_limits: test_limits(),
             artifact_root: octopus_home.join("interface-artifacts"),
             tx,
             cancel: cancel.clone(),
-            interface_var_dir: octopus_home.join("interfaces/world_terminal"),
+            interface_var_dir: octopus_home.join("interfaces/world_operator_chat"),
             root_slots: std::collections::BTreeMap::from([
                 (
                     APP_SERVER_CONTROL_ROOT_SLOT.to_string(),
@@ -766,7 +766,7 @@ mod tests {
             .await
             .expect("the interface bind activation starts");
         let socket =
-            interface_control_socket_path(home.path(), &InterfaceId::new("world_terminal"));
+            interface_control_socket_path(home.path(), &InterfaceId::new("world_operator_chat"));
 
         #[cfg(unix)]
         assert!(socket.exists());
@@ -797,7 +797,7 @@ mod tests {
             .expect_err("a declared missing client bundle must fail closed");
         assert!(error.contains("cannot be inspected"));
         assert!(
-            !interface_control_socket_path(home.path(), &InterfaceId::new("world_terminal"))
+            !interface_control_socket_path(home.path(), &InterfaceId::new("world_operator_chat"))
                 .exists()
         );
     }
@@ -829,7 +829,7 @@ mod tests {
         })
         .to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let interface = InterfaceId::new("world_terminal");
+        let interface = InterfaceId::new("world_operator_chat");
         let in_flight = Arc::new(InFlightHandIns::default());
 
         let handler = handle_wire_frame_with_inflight(
@@ -870,7 +870,7 @@ mod tests {
         })
         .to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        let interface = InterfaceId::new("world_terminal");
+        let interface = InterfaceId::new("world_operator_chat");
         let in_flight = Arc::new(InFlightHandIns::default());
         let first = handle_wire_frame_with_inflight(
             &frame,
@@ -926,7 +926,7 @@ mod tests {
         })
         .to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        let interface = InterfaceId::new("world_terminal");
+        let interface = InterfaceId::new("world_operator_chat");
         let in_flight = Arc::new(InFlightHandIns::default());
         let cancel = CancellationToken::new();
         let spawn_waiter = |frame: String| {
@@ -991,7 +991,7 @@ mod tests {
         })
         .to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        let interface = InterfaceId::new("world_terminal");
+        let interface = InterfaceId::new("world_operator_chat");
         let in_flight = Arc::new(InFlightHandIns::default());
         let first = tokio::spawn({
             let tx = tx.clone();

@@ -1,6 +1,7 @@
 module.exports = { artifactAttachmentBytes, artifactMovementCoordinates, artifactPayloadFilename, artifactPayloadMimeType, compareArtifactMovementNewest, compareMovementOrder, escapeSqlLike, filterByEnvelopeKind, filterInterfaceArtifactTransferTargets, formatCanonicalSchemaErrors, immutableClientAction, indexedEndpoint, indexedMovementRunId, indexedUnsignedInteger, interfaceArtifactTransferTargetRow, interfaceEndpointName, isClientSurfaceDocumentPayload, ledgerRowsForRun, loadLedgerArtifactPayload, matchesMovementPage, movementBaseKind, movementBelongsToRun, movementBoundaryInterface, movementEndpoint, movementKindText, movementPageRequiresIndex, movementPayloadPreview, movementRows, movementRunId, nestedArtifactMedia, normalizeIndexedProjectionMovement, normalizedMovementKindFilter, openValidatedLedgerIndex, optionalActivityAfterSeq, optionalUnsignedInteger, pendingArtifactRows, projectMovementRows, projectedTextFile, projectionLedgerSourceCursor, projectionRequiresFullLedger, rawMovement, readChangeJournal, readIndexedTaskSearchCandidates, readStableArtifactBytes, readStableContentAddressedArtifactBytes, recentMovementRows, summarizeInterfaceArtifactTransferTargets, taskSearchSnippet, validateCanonicalMovement };
 
 const { readContentAddressedArtifactProjection } = require("../contentAddressedArtifact.cjs");
+const { setImmediate: yieldToClient } = require("node:timers/promises");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
@@ -343,7 +344,12 @@ async function readStableArtifactBytes(filePath, maximumBytes, label, onStableFi
 async function readStableContentAddressedArtifactBytes(filePath, expectedHash, maximumBytes, label, onVerifiedFile) {
   let evidence;
   const bytes = await readStableArtifactBytes(filePath, maximumBytes, label, (value) => { evidence = value; });
-  const actualHash = Buffer.from(blake3(bytes)).toString("hex");
+  const hash = blake3.create();
+  for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+    hash.update(bytes.subarray(offset, offset + 64 * 1024));
+    await yieldToClient();
+  }
+  const actualHash = Buffer.from(hash.digest()).toString("hex");
   if (actualHash !== expectedHash) throw new Error(`${label} does not match its content-addressed digest.`);
   onVerifiedFile?.(evidence);
   return bytes;
@@ -532,10 +538,19 @@ async function loadLedgerArtifactPayload(row, hex, required = false, projection 
   }
   const payloadText = payloadBytes.toString("utf8");
   try {
-    return { payload: JSON.parse(payloadText), cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength, files };
+    return { payload: withoutEmbeddedMedia(JSON.parse(payloadText)), cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength, files };
   } catch {
     return { payload: { __raw: payloadText }, cacheable: true, retainedBytes: bytes.byteLength + payloadBytes.byteLength, files };
   }
+}
+
+function withoutEmbeddedMedia(payload) {
+  if (!Array.isArray(payload?.media)) return payload;
+  return { ...payload, media: payload.media.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const { payload_base64: _bytes, ...summary } = entry;
+    return summary;
+  }) };
 }
 
 function movementBoundaryInterface(row, endpointKey) {
@@ -710,14 +725,14 @@ function taskSearchSnippet(value, normalizedIndex, needleLength) {
   return `${start ? "…" : ""}${compact.slice(start, end)}${end < compact.length ? "…" : ""}`;
 }
 
-async function readChangeJournal(projection, runId) {
+async function readChangeJournal(projection, runId, firing) {
   try {
-    const plan = await changeJournalPlan(projection.octopusHome, projection.registryRoot, runId);
+    const plan = await changeJournalPlan(projection.octopusHome, projection.registryRoot, runId, firing);
     if (!plan) return null;
     const { writes, ...journal } = plan;
     return journal;
   } catch (error) {
-    return { run_id: runId, error: String(error?.message ?? error) };
+    return { run_id: runId, firing, error: String(error?.message ?? error) };
   }
 }
 

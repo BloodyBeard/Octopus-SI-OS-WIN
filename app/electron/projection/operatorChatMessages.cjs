@@ -79,7 +79,7 @@ function operatorChatMessagesProjection(store) {
       ...entry.inbound,
       ...entry.outbound,
     ], false, { projection: protocol.artifactReadProjection });
-    const expandedOutbound = operatorChatExpandedStreamRows(entry.outbound, payloads, entry.runId);
+    const expandedOutbound = await operatorChatExpandedStreamRows(entry.outbound, payloads, entry.runId);
     for (const row of entry.inbound) {
       if (!isHomeVoiceInput(entry, row)) continue;
       const payload = payloads.get(row), key = sourceKey(row.artifact);
@@ -316,7 +316,7 @@ function operatorChatMessagesProjection(store) {
       return true;
     });
     const payloads = await store.resolveLedgerArtifactPayloads(sourceRows, false, { projection: protocol.artifactReadProjection });
-    const ordered = operatorChatExpandedStreamRows(sourceRows, payloads, entry.runId).sort(compareMovementOrder);
+    const ordered = (await operatorChatExpandedStreamRows(sourceRows, payloads, entry.runId)).sort(compareMovementOrder);
     const interfaceRoles = new Map(baseInterfaceRows(projection).map((descriptor) => [
       stringValue(descriptor.rule_id ?? descriptor.id),
       stringValue(descriptor.role),

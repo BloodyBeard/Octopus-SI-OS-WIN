@@ -7,7 +7,7 @@ import { TaskEnvironmentSummary } from "../worker-environment/TaskEnvironmentSum
 import { OcIconButton } from "../../design-system/components";
 import { Glyph, type GlyphName } from "../IconGlyphs";
 import { artifactEndResourceFromMessage, type ArtifactEndResource } from "../artifacts/ArtifactEndResources";
-import { ArtifactWorkbench } from "../artifacts/ArtifactWorkbench";
+import { useOpenArtifactFiles } from "../files/FilesPaneNavigation";
 import type { ArtifactReference } from "../artifacts/types";
 import type { WorkerEnvironmentPanelKind } from "../worker-environment/surfaceRegistry";
 import type { WorkerEnvironmentPaneTarget } from "../worker-environment/workerEnvironmentPane";
@@ -61,7 +61,7 @@ export function TaskSummaryPanel({
   onRevealMessage,
   onShowAllSources,
 }: Props) {
-  const [artifactTarget, setArtifactTarget] = useState<ArtifactReference | null>(null);
+  const openArtifactFiles = useOpenArtifactFiles();
   const plan = useMemo(() => [...messages].reverse().find((message) => message.eventKind === "plan" && message.text.trim()), [messages]);
   const outputs = useMemo(() => messages.flatMap((message): OutputRow[] => {
     const resource = artifactEndResourceFromMessage(message);
@@ -108,7 +108,7 @@ export function TaskSummaryPanel({
                     </span>
                     <Glyph className="task-summary-row-chevron" name="chevronDown" size={13} />
                   </button>
-                  <OcIconButton className="task-summary-artifact-action" glyph="artifact" label="Open artifact" onClick={() => setArtifactTarget(resource.reference)} size="xs" variant="ghost" />
+                  <OcIconButton className="task-summary-artifact-action" glyph="artifact" label="Open artifact" onClick={() => openArtifactFiles(resource.reference)} size="xs" variant="ghost" />
                 </div>
               ))}
             </div>
@@ -164,7 +164,7 @@ export function TaskSummaryPanel({
           <SummarySection count={String(sources.length)} title="Sources">
             <div className="task-summary-list">
               {visibleSources.map((source) => (
-                <ArtifactSourceRow key={source.id} onOpen={setArtifactTarget} source={source} />
+                <ArtifactSourceRow key={source.id} onOpen={openArtifactFiles} source={source} />
               ))}
               <ViewAllButton onClick={() => onShowAllSources(sources)} />
             </div>
@@ -172,7 +172,6 @@ export function TaskSummaryPanel({
         ) : null}
         </div>
       </div>
-      {artifactTarget ? <ArtifactWorkbench onClose={() => setArtifactTarget(null)} presentation="overlay" reference={artifactTarget} /> : null}
     </div>
   );
 }

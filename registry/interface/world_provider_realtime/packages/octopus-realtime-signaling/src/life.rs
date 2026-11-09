@@ -243,7 +243,7 @@ pub(crate) async fn door_life(ctx: InterfaceLiftContext) -> Result<(), String> {
                 .read_artifact_manifest()
                 .map_err(|error| error.to_string())?;
             if authoring_results
-                .consume_if_matches(&ctx, &own.movement, &envelope, &manifest.label)
+                .consume_if_matches(&ctx, &session, &own.movement, &envelope, &manifest.label)
                 .await?
             {
                 reader.commit_through(&own)?;

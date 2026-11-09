@@ -189,6 +189,13 @@ awaited artifact.
 Nothing coordinates on failures. Runs wait only on admitted ticks; a
 `VerificationFailed` row is diagnostic evidence, not a wait key.
 
+An `InterfaceArrival` carrying `verification_failure` is finished rejection
+evidence, not a candidate for mark proof. Restart replay retains these rows
+without treating repeated rejected attempts as ambiguous pending arrivals.
+A rejected arrival cannot replace a pending arrival: a `replaces_arrival_seq`
+claim on it still fails replay. Ordinary indistinguishable pending arrivals
+without a valid replacement link remain an error.
+
 No module routes marks. Delivery across environments *is* the artifact-transfer
 protocol.
 

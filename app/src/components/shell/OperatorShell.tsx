@@ -1,8 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { AnimatePresence } from "motion/react";
-import { AppShell, readSidebarWidth } from "./AppShell";
+import { AppShell, readSidebarOpen, readSidebarWidth } from "./AppShell";
 import { isVoiceCallActive } from "../voice/voicePresentation";
 import { SurfacePage } from "./SurfacePage";
+import { ClientBrowserTab } from "./ClientBrowserTab";
+import { OPEN_WEB_LINK_EVENT, type ClientBrowserState } from "../../clientBrowser";
 import { TaskBrowserPane, emptyTaskBrowserTabs, type TaskBrowserTabs } from "./TaskBrowserPane";
 import { MarkActivityView } from "../activity/MarkActivityView";
 import { ScheduledWorkspaceProvider } from "../scheduled/ScheduledWorkspace";
@@ -38,7 +40,7 @@ import {
 } from "./WorkspaceSurfacePane";
 import { rollbackDestinationPaneTransfer } from "../../shell/paneTransferState";
 import { useClientPaneDropZone } from "../../shell/useClientPaneDropZone";
-import { usePaneTabs } from "./paneTabs";
+import { useWorkspacePaneState, type WorkspacePaneState } from "./useWorkspacePaneState";
 import { anchorClientPaneDrop, useClientPaneWindowDrag } from "./useClientPaneWindowDrag";
 import { paneOwnsWindowTitlebar, secondaryPaneUsesTabStrip } from "./paneChromeOwnership";
 import {
@@ -63,6 +65,7 @@ import { applyHomeWidgetAction } from "../../client-surfaces/homeWidgetControls"
 import { useClientObservation } from "../../client-surfaces/useClientObservation";
 import { useAdmittedClientActions } from "../../shell/useAdmittedClientActions";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
+import type { ClientExtensionDestination } from "../settings/ExtensionsSection";
 import {
   clientWindowChatStorageScope,
   clientWindowStateKey,
@@ -116,9 +119,12 @@ import type { HomeViewMode } from "../voice/VoiceView";
 import { useMarkActivity } from "../activity/useMarkActivity";
 import { dispatchClientCommand, subscribeClientCommands, type ClientCommandId } from "../../clientActions";
 import { clientDialogOwnsCommands, formatKeyboardShortcut, keyboardCommandConflictsWithEditing, keyboardCommandForEvent, keyboardTargetHasEditableOwner, keyboardTargetHasRichEditingOwner, useKeyboardShortcuts } from "../../keyboardShortcuts";
-import { subscribeAirHandGestures, useGestureShortcutPreferences } from "../../gestureShortcuts";
+import { subscribeAirHandGestures, useGestureShortcutPreferences, useSetGestureShortcutPreferences } from "../../gestureShortcuts";
 import { useCustomGestureDispatch } from "../../customGestures";
 import { useGestureFocus } from "../../gestureFocus";
+import { GestureCommandHud } from "../gestures/GestureCommandHud";
+import { GestureFocusRing } from "../gestures/GestureFocusRing";
+import { GestureTourHost } from "../gestures/GestureTourDialog";
 import { startGestureRecognition, stopGestureRecognition } from "../../gestureRecognition";
 import type { RuntimeHostView } from "../../runtimeHost";
 import type { ClientSurfaceActionEvent } from "../../client-surfaces/types";
@@ -146,14 +152,16 @@ import {
   isSidebarOnlySurface,
   normalizeSurfaceNavigation,
   readSecondaryPaneState,
+  readSecondaryPaneStateAtKey,
   resolveSelection,
   secondaryPaneTab,
+  secondaryPaneStorageKey,
   sameClientDestination,
   stringifyPreparedContext,
   writeSecondaryPaneState,
+  writeSecondaryPaneStateAtKey,
   type ClientDestination,
   type SecondaryPaneTabState,
-  type StoredSecondaryPaneState,
 } from "./operatorShellState";
 
 const SettingsPage = lazy(() => import("../settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
@@ -183,6 +191,12 @@ function samePaneTransferTarget(
 type ActiveClientPaneTransfer = {
   reference: ClientPaneDragPayload;
   target: TransferableWorkspacePaneTarget;
+};
+
+type WorkspacePaneOwner = {
+  key: string;
+  read: () => WorkspacePaneState;
+  write: (state: WorkspacePaneState) => void;
 };
 
 export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHost }: {
@@ -218,11 +232,11 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const taskOrganization = useClientTaskOrganization(accessProfile);
   const setClientPreferences = useSetClientPreferences();
   const gesturePreferences = useGestureShortcutPreferences(accessProfile);
+  const setGesturePreferences = useSetGestureShortcutPreferences(accessProfile);
   const keyboardShortcuts = useKeyboardShortcuts(accessProfile);
   const homeRunId = agentProjectWorkspace.homeRunId;
   const osRootEeId = agentProjectWorkspace.rootEeId;
-  const [sidebarWidth, setSidebarWidth] = useState(() => readSidebarWidth(accessProfile, clientWindow.scope));
-  const [effectiveSidebarWidth, setEffectiveSidebarWidth] = useState(sidebarWidth);
+  const [effectiveSidebarWidth, setEffectiveSidebarWidth] = useState(() => readSidebarWidth(accessProfile, clientWindow.scope));
   useEffect(() => {
     if (clientWindow.primary) offerClientProfileStorageRecovery(accessProfile);
   }, [accessProfile, clientWindow.primary]);
@@ -237,22 +251,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     availableSurfaces: visibleSurfaces.filter(surface => !isSidebarOnlySurface(surface)),
     ready: surfaceRegistry.hydrated && !surfaceRegistry.errors.length && !agentProjectWorkspace.error,
   });
-  const initialSecondaryPaneState = useMemo(() => {
-    if (clientWindowInitialTarget) {
-      const tab = workspacePaneTabForTarget(clientWindowInitialTarget);
-      return { version: 3, open: true, activeTabId: tab.id, tabs: [tab] } satisfies StoredSecondaryPaneState;
-    }
-    return readSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope);
-  }, [accessProfile, clientWindow.scope, clientWindowInitialTarget, homeRunId]);
-  const initialSecondaryTab = initialSecondaryPaneState.tabs.find((tab) => tab.id === initialSecondaryPaneState.activeTabId)
-    ?? initialSecondaryPaneState.tabs[0]
-    ?? null;
-  const [secondaryPaneOpen, setSecondaryPaneOpen] = useState(() => initialSecondaryPaneState.open);
-  const [secondaryPaneFocused, setSecondaryPaneFocused] = useState(Boolean(clientWindowInitialTarget));
   const [primaryPaneBlocked, setPrimaryPaneBlocked] = useState(false);
-  const [activePane, setActivePane] = useState<"primary" | "secondary">(
-    clientWindowInitialTarget ? "secondary" : "primary",
-  );
   const chatWorkspace = useChatWorkspace(
     accessProfile,
     true,
@@ -271,6 +270,61 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     runtimeHost.home,
     clientContext,
   );
+  const initialDestination = clientWindowInitialTarget ? clientWindowInitialDestination(clientWindowInitialTarget) : null;
+  const startupSurfaceId = clientWindow.primary ? clientPreferences.startupSurfaceId : initialDestination?.surfaceId ?? "voice";
+  const [surfaceNavigation, setSurfaceNavigation] = useState(
+    () => initialDestination ? { entries: [initialDestination], index: 0 }
+      : initializeSurfaceNavigation(startupSurfaceId, accessProfile, chatWorkspace.activeRunId, clientWindow.scope),
+  );
+  const [settingsRecordingId, setSettingsRecordingId] = useState("");
+  const activeNavigation = surfaceNavigation;
+  const navigationDestination = activeNavigation.entries[activeNavigation.index] ?? clientDestination("voice");
+  const activeDestination = useMemo(() => (
+    navigationDestination.surfaceId === "chat" && !navigationDestination.runId && chatWorkspace.activeRunId
+      ? { ...navigationDestination, runId: chatWorkspace.activeRunId }
+      : navigationDestination
+  ), [chatWorkspace.activeRunId, navigationDestination]);
+  const settingsOpen = Boolean(activeDestination.settingsSection);
+  const paneScope = JSON.stringify([runtimeHost.home, activeDestination.surfaceId, activeDestination.runId ?? ""]);
+  const paneStateKey = secondaryPaneStorageKey(accessProfile, homeRunId, clientWindow.scope, paneScope);
+  const activePaneStateKeyRef = useRef(paneStateKey);
+  activePaneStateKeyRef.current = paneStateKey;
+  const initialWorkspacePaneState = useMemo<WorkspacePaneState>(() => {
+    const restored = readSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope, paneScope);
+    const initialTarget = clientWindowInitialTarget && window.sessionStorage.getItem(initialTargetConsumptionKey) !== "true"
+      ? clientWindowInitialTarget : undefined;
+    const tab = initialTarget ? workspacePaneTabForTarget(initialTarget) : null;
+    return {
+      ...restored,
+      ...(tab ? { open: true, activeTabId: tab.id, tabs: [tab] } : {}),
+      layout: restored.layout ?? {
+        activePane: tab ? "secondary" : "primary",
+        focused: Boolean(tab),
+        sidebarOpen: readSidebarOpen(accessProfile, clientWindow.scope, !clientWindow.initialTarget),
+        sidebarWidth: readSidebarWidth(accessProfile, clientWindow.scope),
+        widthPercent: clientPreferences.secondaryTaskPaneWidthPercent,
+      },
+    };
+  }, [accessProfile, clientPreferences.secondaryTaskPaneWidthPercent, clientWindow.initialTarget, clientWindow.scope, clientWindowInitialTarget, homeRunId, initialTargetConsumptionKey, paneScope]);
+  const workspacePane = useWorkspacePaneState(paneStateKey, initialWorkspacePaneState);
+  const { state: workspacePaneState, tabs: secondaryTabModel, setOpen: setSecondaryPaneOpen, setFocused: setSecondaryPaneFocused,
+    setActivePane, setSidebarWidth } = workspacePane;
+  const secondaryPaneOpen = workspacePaneState.open;
+  const { activePane, focused: secondaryPaneFocused, sidebarWidth } = workspacePaneState.layout;
+  const paneOwner = useMemo<WorkspacePaneOwner>(() => ({
+    key: paneStateKey,
+    read: workspacePane.getState,
+    write: (state) => workspacePane.setStateAt(paneStateKey, state),
+  }), [paneStateKey, workspacePane.getState, workspacePane.setStateAt]);
+  const transferPaneOwner = useCallback((transferId: string): WorkspacePaneOwner | null => {
+    const key = window.sessionStorage.getItem(`octopus.client-pane-owner.${transferId}`);
+    if (!key) return null;
+    const stored = workspacePane.getStateAt(key) ?? readSecondaryPaneStateAtKey(clientWindow.scope, key);
+    if (!stored.layout) return null;
+    const state: WorkspacePaneState = { ...stored, layout: stored.layout };
+    return { key, read: () => workspacePane.getStateAt(key) ?? state, write: (next) => workspacePane.setStateAt(key, next) };
+  }, [clientWindow.scope, workspacePane.getStateAt, workspacePane.setStateAt]);
+  const getWorkspacePaneStates = workspacePane.getStates;
   const secondaryChatWorkspace = useChatWorkspace(
     accessProfile,
     secondaryPaneOpen,
@@ -302,11 +356,11 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     [chatWorkspace.runs, clientPreferences.showInternalRuns],
   );
   useEffect(() => {
-    if (agentProjectWorkspace.loading) return;
+    if (agentProjectWorkspace.phase === "initial-loading" || agentProjectWorkspace.phase === "failed") return;
     if (projectFilterEeId && !agentProjectWorkspace.projects.some((project) => project.id === projectFilterEeId)) {
       setProjectFilterEeId("");
     }
-  }, [agentProjectWorkspace.loading, agentProjectWorkspace.projects, projectFilterEeId, setProjectFilterEeId]);
+  }, [agentProjectWorkspace.phase, agentProjectWorkspace.projects, projectFilterEeId, setProjectFilterEeId]);
 
   useEffect(() => {
     if (homeRunId) {
@@ -374,7 +428,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     if (secondaryPaneOpen) return;
     setSecondaryPaneFocused(false);
     setActivePane("primary");
-  }, [secondaryPaneOpen]);
+  }, [secondaryPaneOpen, setActivePane, setSecondaryPaneFocused]);
   useEffect(() => {
     if (!secondaryPaneOpen) return;
     const recordActivePane = (event: Event) => {
@@ -388,17 +442,8 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       window.removeEventListener("focusin", recordActivePane, true);
       window.removeEventListener("pointerdown", recordActivePane, true);
     };
-  }, [secondaryPaneOpen]);
-  const initialDestination = clientWindowInitialTarget ? clientWindowInitialDestination(clientWindowInitialTarget) : null;
-  const startupSurfaceId = clientWindow.primary ? clientPreferences.startupSurfaceId : initialDestination?.surfaceId ?? "voice";
-  const [surfaceNavigation, setSurfaceNavigation] = useState(
-    () => initialDestination ? { entries: [initialDestination], index: 0 }
-      : initializeSurfaceNavigation(startupSurfaceId, accessProfile, chatWorkspace.activeRunId, clientWindow.scope),
-  );
-  const activeNavigation = surfaceNavigation;
-  const activeDestination = activeNavigation.entries[activeNavigation.index] ?? clientDestination("voice");
-  const settingsOpen = Boolean(activeDestination.settingsSection);
-  useGestureFocus(gesturePreferences.enabled && !settingsOpen);
+  }, [secondaryPaneOpen, setActivePane]);
+  useGestureFocus(accessProfile, gesturePreferences.enabled, gesturePreferences.spatialControl);
   useCustomGestureDispatch(accessProfile, gesturePreferences.enabled && !settingsOpen);
   const activeSurfaceId = activeDestination.surfaceId;
   const shortcutNavigationDestinations = useMemo(() => clientNavigationDestinations.filter((destination) => (
@@ -409,10 +454,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       ?? visibleSurfaces.find((surface) => surface.id === "voice")
   ), [activeSurfaceId, visibleSurfaces]);
   const activeWorkspaceKey = activeSurface ? workspaceForSurface(activeSurface) : "octopus-os";
-  const secondaryTabModel = usePaneTabs<SecondaryPaneTabState>({
-    activeTabId: initialSecondaryPaneState.activeTabId,
-    tabs: initialSecondaryPaneState.tabs,
-  });
   const secondaryTabs = secondaryTabModel.tabs;
   const activeSecondaryTabId = secondaryTabModel.activeTabId;
   const activeSecondaryTab = secondaryTabs.find((tab) => tab.id === activeSecondaryTabId) ?? null;
@@ -425,6 +466,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const finalizingSourceIdsRef = useRef(new Set<string>());
   const [sourceFinalizationPendingCount, setSourceFinalizationPendingCount] = useState(0);
   const pendingAcceptedPaneTransfersRef = useRef(new Map<string, {
+    owner: WorkspacePaneOwner;
     previousActiveTabId: string;
     previousActivePane: "primary" | "secondary";
     previousFocused: boolean;
@@ -441,10 +483,8 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const setSecondaryTabs = secondaryTabModel.setTabs;
   const setActiveSecondaryTabId = secondaryTabModel.selectTab;
   const newSecondaryTaskPhaseRef = useRef<"idle" | "awaiting_empty" | "awaiting_run">("idle");
-  const restoreSecondarySelectionRef = useRef(Boolean(initialSecondaryTab));
+  const restoreSecondarySelectionRef = useRef(Boolean(initialWorkspacePaneState.tabs.length));
   const activatedSecondaryTabIdRef = useRef("");
-  const hydratedSecondaryHomeRef = useRef("");
-  const secondaryHomeRestorePendingRef = useRef(false);
   const secondaryWorkspaceSurfaces = useMemo(() => visibleSurfaces.filter((surface) => (
     !isSidebarOnlySurface(surface)
     && surfaceBelongsToWorkspace(surface, secondaryWorkspaceKey)
@@ -626,7 +666,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const surfacesById = new Map(visibleSurfaces.map((surface) => [surface.id, surface]));
     const nextTabs = secondaryTabs.filter((tab) => {
       const target = tab.target;
-      if (target.kind === "terminal" || target.kind === "files" || target.kind === "task_sources" || target.kind === "launcher") return true;
+      if (target.kind === "client_browser" || target.kind === "terminal" || target.kind === "files" || target.kind === "task_sources" || target.kind === "launcher") return true;
       if (target.kind === "worker_environment") return topology.projection.mode !== "live"
         || Boolean(resolveWorkerEnvironment(topology, target.target.workerEnvironmentId));
       const surface = surfacesById.get(target.surfaceId);
@@ -634,44 +674,23 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       if (!surfaceBelongsToWorkspace(surface, target.workspaceKey)) return false;
       if (target.surfaceId !== "chat") return true;
       return !target.runId
-        || !chatWorkspace.runsLoaded
+        || chatWorkspace.runsPhase !== "ready"
         || chatWorkspace.runs.some((run) => run.runId === target.runId);
     });
     if (nextTabs.length === secondaryTabs.length) return;
     secondaryTabModel.reconcileTabs(nextTabs);
-  }, [chatWorkspace.runs, chatWorkspace.runsLoaded, secondaryTabModel.reconcileTabs, secondaryTabs, surfaceRegistry.loading, topology, visibleSurfaces]);
+  }, [chatWorkspace.runs, chatWorkspace.runsPhase, secondaryTabModel.reconcileTabs, secondaryTabs, surfaceRegistry.loading, topology, visibleSurfaces]);
 
   useEffect(() => {
-    const homeKey = homeRunId.trim();
-    if (!homeKey || hydratedSecondaryHomeRef.current === homeKey) return;
-    hydratedSecondaryHomeRef.current = homeKey;
-    if (clientWindowInitialTarget) return;
-    const restored = readSecondaryPaneState(accessProfile, homeKey, clientWindow.scope);
-    if (!restored.tabs.length) return;
-    secondaryHomeRestorePendingRef.current = true;
-    restoreSecondarySelectionRef.current = true;
-    secondaryTabModel.replaceState(restored);
-    setSecondaryPaneOpen(restored.open);
-  }, [accessProfile, clientWindow.scope, clientWindowInitialTarget, homeRunId]);
-
-  useEffect(() => {
-    if (!homeRunId.trim() || hydratedSecondaryHomeRef.current !== homeRunId.trim()) return;
-    if (pendingAcceptedPaneTransfersRef.current.size > 0) return;
-    if (secondaryHomeRestorePendingRef.current) {
-      secondaryHomeRestorePendingRef.current = false;
-      return;
-    }
+    if (!homeRunId.trim()) return;
+    if ([...pendingAcceptedPaneTransfersRef.current.values()].some((pending) => pending.owner.key === paneStateKey)) return;
     try {
-      writeSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope, {
-        activeTabId: activeSecondaryTabId,
-        open: secondaryPaneOpen,
-        tabs: secondaryTabs,
-      });
+      writeSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope, workspacePaneState, paneScope);
       if (clientWindowInitialTarget) window.sessionStorage.setItem(initialTargetConsumptionKey, "true");
     } catch (error) {
       appToast.warning(`Could not save pane tabs: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [accessProfile, activeSecondaryTabId, clientWindow.scope, clientWindowInitialTarget, homeRunId, initialTargetConsumptionKey, secondaryPaneOpen, secondaryTabs, windowStateStorage]);
+  }, [accessProfile, clientWindow.scope, clientWindowInitialTarget, homeRunId, initialTargetConsumptionKey, paneScope, paneStateKey, workspacePaneState]);
 
   const effectiveSelection = useMemo(
     () => resolveSelection(selectedRef, topology),
@@ -705,6 +724,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   }, []);
 
   const setSettingsOpen = useCallback((open: boolean) => {
+    if (!open) setSettingsRecordingId("");
     setSurfaceNavigation((current) => {
       const destination = current.entries[current.index];
       if (open) {
@@ -742,7 +762,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       appToast.warning("This surface is unavailable.");
       return;
     }
-    setActivePane("primary");
     selectDestination(clientDestination(surfaceId, exactRunId ?? chatWorkspace.activeRunId));
   }, [chatWorkspace.activeRunId, selectDestination, visibleSurfaces]);
 
@@ -752,9 +771,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const destination = surfaceNavigation.entries[index];
     const current = surfaceNavigation.entries[surfaceNavigation.index];
     if (destination.surfaceId !== current.surfaceId || destination.runId !== current.runId) {
-      setSecondaryPaneOpen(false);
-      setSecondaryPaneFocused(false);
-      setActivePane("primary");
       if (destination.surfaceId === "chat") chatWorkspace.selectRun(destination.runId ?? "");
     }
     setSurfaceNavigation((current) => ({ ...current, index }));
@@ -763,7 +779,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   }, [chatWorkspace, surfaceNavigation]);
 
   useEffect(() => {
-    if (activeDestination.surfaceId !== "chat" || activeDestination.runId || !chatWorkspace.activeRunId) return;
+    if (navigationDestination.surfaceId !== "chat" || navigationDestination.runId || !chatWorkspace.activeRunId) return;
     setSurfaceNavigation((current) => {
       const destination = current.entries[current.index];
       if (destination?.surfaceId !== "chat" || destination.runId) return current;
@@ -772,16 +788,16 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       ));
       return { ...current, entries };
     });
-  }, [activeDestination.runId, activeDestination.surfaceId, chatWorkspace.activeRunId]);
+  }, [navigationDestination.runId, navigationDestination.surfaceId, chatWorkspace.activeRunId]);
 
   useEffect(() => {
     if (surfaceRegistry.loading) return;
-    const chatRunIds = chatWorkspace.loadingRuns ? undefined : new Set([
+    const chatRunIds = chatWorkspace.runsPhase !== "ready" ? undefined : new Set([
       ...chatWorkspace.runs.map((run) => run.runId),
       chatWorkspace.activeRunId,
     ].filter(Boolean));
     setSurfaceNavigation((current) => normalizeSurfaceNavigation(current, visibleSurfaces, chatRunIds));
-  }, [chatWorkspace.activeRunId, chatWorkspace.loadingRuns, chatWorkspace.runs, surfaceRegistry.loading, visibleSurfaces]);
+  }, [chatWorkspace.activeRunId, chatWorkspace.runsPhase, chatWorkspace.runs, surfaceRegistry.loading, visibleSurfaces]);
 
   useEffect(() => {
     if (surfaceRegistry.loading || !activeSurface) return;
@@ -789,8 +805,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   }, [accessProfile, activeSurface?.id, clientWindow.scope, surfaceRegistry.loading, windowStateStorage]);
 
   const activateSecondaryTab = useCallback((tab: SecondaryPaneTabState) => {
-    activatedSecondaryTabIdRef.current = tab.id;
     setActiveSecondaryTabId(tab.id);
+    if (activePaneStateKeyRef.current !== paneStateKey) return;
+    activatedSecondaryTabIdRef.current = JSON.stringify([paneStateKey, tab.id]);
     setSecondaryQuery("");
     setSecondarySearchFocusTick(0);
     if (tab.target.kind !== "surface") return;
@@ -806,22 +823,22 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     } else {
       newSecondaryTaskPhaseRef.current = "idle";
     }
-  }, []);
+  }, [paneStateKey, setActiveSecondaryTabId]);
 
   const openSecondaryTab = useCallback((tab: SecondaryPaneTabState) => {
     secondaryTabModel.openTab(tab, activeSecondaryTab?.target.kind === "launcher" && tab.target.kind !== "launcher" ? activeSecondaryTab.id : undefined);
     activateSecondaryTab(tab);
     setSecondaryPaneOpen(true);
     setActivePane("secondary");
-  }, [activateSecondaryTab, activeSecondaryTab, secondaryTabModel.openTab]);
+  }, [activateSecondaryTab, activeSecondaryTab, secondaryTabModel.openTab, setActivePane, setSecondaryPaneOpen]);
 
   useEffect(() => {
     const tab = secondaryTabs.find((candidate) => candidate.id === activeSecondaryTabId) ?? secondaryTabs[0];
     if (!tab) return;
-    if (!restoreSecondarySelectionRef.current && activatedSecondaryTabIdRef.current === tab.id) return;
+    if (!restoreSecondarySelectionRef.current && activatedSecondaryTabIdRef.current === JSON.stringify([paneStateKey, tab.id])) return;
     restoreSecondarySelectionRef.current = false;
     activateSecondaryTab(tab);
-  }, [activateSecondaryTab, activeSecondaryTabId, secondaryTabs]);
+  }, [activateSecondaryTab, activeSecondaryTabId, paneStateKey, secondaryTabs]);
 
   const openSecondaryChatTab = useCallback((runId: string) => {
     openSecondaryTab(secondaryPaneTab("octopus-os", "chat", runId));
@@ -870,7 +887,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         ? { ...tab, target: { ...tab.target, title } }
         : tab
     )));
-  }, []);
+  }, [setSecondaryTabs]);
 
   const openWorkerEnvironmentPane = useCallback((raw: Omit<WorkerEnvironmentPaneTarget, "schemaVersion">) => {
     const resolved = resolveWorkerEnvironment(topology, raw.workerEnvironmentId);
@@ -895,8 +912,39 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     }));
   }, [activeClientSurfaceIdentity.workspaceKey, openSecondaryTab, surfaceRegistry.workerEnvironmentSurfaces, topology]);
 
+  const clientBrowserPaneOwnerRef = useRef({ open: openSecondaryTab, workspaceKey: activeClientSurfaceIdentity.workspaceKey });
+  clientBrowserPaneOwnerRef.current = { open: openSecondaryTab, workspaceKey: activeClientSurfaceIdentity.workspaceKey };
+  useEffect(() => {
+    let disposed = false;
+    const bridge = window.octopusTransport;
+    const show = (page: ClientBrowserState, owner = clientBrowserPaneOwnerRef.current) => {
+      if (disposed) { void bridge?.clientBrowser({ action: "close", id: page.id }); return; }
+      owner.open({ id: `browser:${page.id}`, target: { kind: "client_browser", pageId: page.id,
+        title: page.title, workspaceKey: owner.workspaceKey } });
+    };
+    const open = (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail?.url !== "string") return;
+      event.preventDefault();
+      if (accessProfile !== "live" || !bridge?.clientBrowser) { appToast.danger("The in-app browser is unavailable."); return; }
+      const owner = clientBrowserPaneOwnerRef.current;
+      void bridge.clientBrowser({ action: "open", url: event.detail.url }).then(page => { if (page) show(page, owner); })
+        .catch(error => appToast.danger(error instanceof Error ? error.message : String(error)));
+    };
+    const stop = bridge?.onClientBrowserOpened((page) => show(page));
+    const stopState = bridge?.onClientBrowserState((page) => {
+      for (const [key, state] of Object.entries(getWorkspacePaneStates())) {
+        if (!state.tabs.some((tab) => tab.target.kind === "client_browser" && tab.target.pageId === page.id && tab.target.title !== page.title)) continue;
+        workspacePane.setStateAt(key, (current) => ({ ...current, tabs: current.tabs.map((tab) =>
+          tab.target.kind === "client_browser" && tab.target.pageId === page.id ? { ...tab, target: { ...tab.target, title: page.title } } : tab) }));
+      }
+    });
+    window.addEventListener(OPEN_WEB_LINK_EVENT, open);
+    return () => { disposed = true; window.removeEventListener(OPEN_WEB_LINK_EVENT, open); stop?.(); stopState?.(); };
+  }, [accessProfile, runtimeHost.home, getWorkspacePaneStates, workspacePane.setStateAt]);
+
   const secondaryPaneTabs = useMemo<WorkspacePaneTab[]>(() => secondaryTabs.map((tab) => {
     const target = tab.target;
+    if (target.kind === "client_browser") return { glyph: "browser" as const, id: tab.id, showWhenSingle: true, title: target.title || "Browser" };
     if (target.kind === "launcher") {
       return { glyph: "browser" as const, id: tab.id, launcher: true, showWhenSingle: true, title: "New tab" };
     }
@@ -972,10 +1020,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   );
 
   const openLauncherTab = useCallback(() => {
-    if (!activeClientSurfaceIdentity.ready) {
-      appToast.warning("Wait for the selected task before opening a new tab.");
-      return;
-    }
     const target = activeClientSurfaceIdentity.pane === "secondary" ? activeSecondaryTab?.target : undefined;
     const source = target?.kind === "launcher" ? target.source
       : target?.kind === "terminal" ? { kind: "terminal" as const, cwd: target.cwd }
@@ -1039,7 +1083,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       activateSecondaryTab(tabs[selected]);
       setSecondaryPaneOpen(true);
     }
-  }, [accessProfile, activateSecondaryTab, activeClientSurfaceIdentity, activeSecondaryTab, browserPresentationGeneration, runtimeHost.home, runtimeHost.ready, setSecondaryTabs, sourceFinalizationPendingCount, sourceHandoffPending, topology, workerEnvironmentActionRunIds]);
+  }, [accessProfile, activateSecondaryTab, activeClientSurfaceIdentity, activeSecondaryTab, browserPresentationGeneration, runtimeHost.home, runtimeHost.ready, setSecondaryPaneFocused, setSecondaryPaneOpen, setSecondaryTabs, sourceFinalizationPendingCount, sourceHandoffPending, topology, workerEnvironmentActionRunIds]);
 
   const secondaryPaneAddActions = useMemo<WorkspacePaneAddAction[]>(() => [
     { glyph: "terminal" as const, id: "operator:terminal", section: "workspace", shortcut: paneShortcut("open_terminal"), title: "Terminal" },
@@ -1104,23 +1148,17 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     }
     if (runId) chatWorkspace.selectRun(runId);
     else chatWorkspace.createChat(newTaskProjectId);
-    setSecondaryPaneOpen(false);
-    setSecondaryPaneFocused(false);
     selectSurface("chat", runId);
   }, [agentProjectWorkspace.projects, chatWorkspace, projectFilterEeId, selectSurface, setProjectFilterEeId]);
 
   function workspaceWithTaskDraftActions(source: typeof chatWorkspace) {
     return { ...source, ...taskDraftActions(source, chatWorkspace, () => {
       setProjectFilterEeId("");
-      setSecondaryPaneOpen(false);
-      setSecondaryPaneFocused(false);
       selectSurface("chat", "");
     }) };
   }
 
   const openVoice = useCallback(() => {
-    setSecondaryPaneOpen(false);
-    setSecondaryPaneFocused(false);
     const callHomeRunId = isVoiceCallActive(voiceSession.phase)
       ? voiceSession.context?.homeRunId
       : "";
@@ -1151,15 +1189,11 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
 
   const openHomeRun = useCallback((runId: string) => {
     if (!runId) return;
-    setSecondaryPaneOpen(false);
-    setSecondaryPaneFocused(false);
     homeChatWorkspace.selectRun(runId);
     selectSurface("voice");
   }, [homeChatWorkspace, selectSurface]);
 
   const openSidebarSurface = useCallback((surfaceId: string) => {
-    setSecondaryPaneFocused(false);
-    setSecondaryPaneOpen(false);
     selectSurface(surfaceId);
   }, [selectSurface]);
 
@@ -1172,8 +1206,14 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     else openChat(runId);
   }, [openChat, openHomeRun]);
 
+  const openSecondarySurfaceRun = useCallback((runId: string, role: "home" | "task") => {
+    if (role === "home") {
+      homeChatWorkspace.selectRun(runId);
+      openSecondaryTab(secondaryPaneTab("octopus-os", "voice", ""));
+    } else openSecondaryChatTab(runId);
+  }, [homeChatWorkspace, openSecondaryChatTab, openSecondaryTab]);
+
   const openNavigationSection = useCallback((section: ClientNavigationSection) => {
-    setSecondaryPaneFocused(false);
     if (section === "home") {
       openVoice();
       setHomeViewMode("voice");
@@ -1187,7 +1227,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         return surface && navigationSectionForSurface(surface) === "tasks";
       });
       if (previous && previous.surfaceId !== "chat") {
-        setSecondaryPaneOpen(false);
         selectSurface(previous.surfaceId);
       } else {
         const runId = previous ? previous.runId ?? "" : chatWorkspace.activeRunId;
@@ -1195,7 +1234,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
           appToast.warning("This task is no longer available. Select another task or create one with the plus button.");
           return;
         }
-        setSecondaryPaneOpen(false);
         chatWorkspace.selectRun(runId);
         selectSurface("chat", runId);
       }
@@ -1207,7 +1245,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       const surface = visibleSurfaces.find((surface) => surface.id === candidate.surfaceId);
       return surface && navigationSectionForSurface(surface) === "dashboard";
     }) : undefined;
-    setSecondaryPaneOpen(false);
     selectSurface(previous?.surfaceId || destination.surfaceId);
   }, [chatWorkspace, openVoice, selectSurface, surfaceNavigation.entries, taskChatRuns, visibleSurfaces]);
 
@@ -1217,10 +1254,27 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       openNavigationSection(destination.id);
       return;
     }
-    setSecondaryPaneFocused(false);
-    setSecondaryPaneOpen(false);
     selectSurface(surface.id);
   }, [openNavigationSection, selectSurface]);
+
+  const openExtensionDestination = useCallback((destination: ClientExtensionDestination) => {
+    if (destination.kind === "settings") {
+      selectSettingsSection(destination.sectionId);
+      return;
+    }
+    if (destination.kind === "home") {
+      setSettingsOpen(false);
+      openVoice();
+      return;
+    }
+    const surface = surfaceRegistry.surfaces.find((candidate) => candidate.id === destination.surfaceId);
+    if (!surface) {
+      appToast.warning("This extension's tab is not available yet.");
+      return;
+    }
+    setSettingsOpen(false);
+    openPrimarySurface(surface, true);
+  }, [openPrimarySurface, openVoice, selectSettingsSection, setSettingsOpen, surfaceRegistry.surfaces]);
 
   const selectInboxItem = useCallback((item: MarkActivityItem, ids: readonly string[] = [item.id]) => {
     const current = markActivity.projectedItems.find((candidate) => candidate.id === item.id);
@@ -1261,7 +1315,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       if (target?.kind !== "mark") return;
       const item = markActivity.projectedItems.find((candidate) => candidate.id === target.movementId);
       if (!item) { appToast.warning("This activity is no longer available in the current projection."); return; }
-      setSecondaryPaneOpen(false);
       selectSurface("inbox");
       selectInboxItem(item);
     };
@@ -1431,7 +1484,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     if (!tab) return;
     activateSecondaryTab(tab);
     setActivePane("secondary");
-  }, [activateSecondaryTab, secondaryTabs]);
+  }, [activateSecondaryTab, secondaryTabs, setActivePane]);
 
   const secondaryClosePendingRef = useRef(false);
   const closeSecondaryTabSet = useCallback(async (tabIds: string[], focusTabId?: string) => {
@@ -1440,7 +1493,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     try {
       const requested = new Set(tabIds);
       const closing = transferSourceStateRef.current.secondaryTabs.filter((tab) => requested.has(tab.id));
-      const fileKeys = closing.filter((tab) => tab.target.kind === "files").map((tab) => filesPaneKey(accessProfile, tab.id));
+      const fileKeys = closing.filter((tab) => tab.target.kind === "files").map((tab) => filesPaneKey(accessProfile, tab.id, paneStateKey));
       if (!await requestCloseFilesPanes(fileKeys)) return;
       for (const key of fileKeys) {
         const snapshot = captureFilesPane(key);
@@ -1449,6 +1502,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       let state = transferSourceStateRef.current;
       if (closing.some((tab) => state.secondaryTabs.find((current) => current.id === tab.id) !== tab)) return;
       for (const tab of closing) {
+        if (tab.target.kind === "client_browser") { await window.octopusTransport?.clientBrowser({ action: "close", id: tab.target.pageId }); continue; }
         if (tab.target.kind !== "worker_environment") continue;
         const room = resolveWorkerEnvironment(topology, tab.target.target.workerEnvironmentId);
         const surface = room && resolvePaneSurface(room.workerEnvironment, tab.target.target);
@@ -1467,7 +1521,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       secondaryTabModel.replaceState({ tabs, activeTabId: nextActive?.id ?? "" });
       for (const tab of closing) {
         if (tab.target.kind === "terminal") void window.octopusTransport?.closeTerminal(tab.target.terminalId).catch(() => undefined);
-        if (tab.target.kind === "files") forgetFilesPane(filesPaneKey(accessProfile, tab.id));
+        if (tab.target.kind === "files") forgetFilesPane(filesPaneKey(accessProfile, tab.id, paneStateKey));
       }
       if (!nextActive) setSecondaryPaneOpen(false);
       else if (nextActive.id !== state.activeSecondaryTabId) activateSecondaryTab(nextActive);
@@ -1476,7 +1530,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     } finally {
       secondaryClosePendingRef.current = false;
     }
-  }, [accessProfile, activateSecondaryTab, secondaryTabModel.replaceState, topology]);
+  }, [accessProfile, activateSecondaryTab, paneStateKey, secondaryTabModel.replaceState, setSecondaryPaneOpen, topology]);
 
   const closeSecondaryTab = useCallback((tabId: string) => {
     void closeSecondaryTabSet([tabId]);
@@ -1510,6 +1564,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const paneTransferBlockReasonRef = useRef(paneTransferBlockReason);
   paneTransferBlockReasonRef.current = paneTransferBlockReason;
   const transferSourceStateRef = useRef({
+    paneScope,
+    paneStateKey,
+    layout: workspacePaneState.layout,
     activePane,
     activeSecondaryTabId,
     primaryRunIdentityReady,
@@ -1520,6 +1577,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     titlebarTransferTarget,
   });
   transferSourceStateRef.current = {
+    paneScope,
+    paneStateKey,
+    layout: workspacePaneState.layout,
     activePane,
     activeSecondaryTabId,
     primaryRunIdentityReady,
@@ -1529,9 +1589,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     secondaryTabs,
     titlebarTransferTarget,
   };
-  const windowCloseHomeRef = useRef(homeRunId);
-  windowCloseHomeRef.current = homeRunId;
-
   useEffect(() => {
     const bridge = window.octopusTransport;
     if (!bridge) return;
@@ -1562,18 +1619,17 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         if (!ownsRequest()) return;
         const allowClose = approved && acquireFilesWindowClose(request.requestId);
         if (allowClose) {
-          const state = transferSourceStateRef.current;
-          const tabs = state.secondaryTabs.map((tab) => {
-            if (tab.target.kind !== "files") return tab;
-            const key = filesPaneKey(accessProfile, tab.id);
-            if (!hasFilesPane(key)) return tab;
-            const snapshot = normalizeFilesPaneSnapshot(readFilesPane(key).snapshot);
-            if (!snapshot) throw new Error("The current Files document could not be preserved before closing.");
-            return { ...tab, target: { kind: "files" as const, workspaceKey: tab.target.workspaceKey, snapshot, ...(snapshot.target ? { openTarget: snapshot.target } : {}) } };
-          });
-          writeSecondaryPaneState(accessProfile, windowCloseHomeRef.current, clientWindow.scope, {
-            activeTabId: state.activeSecondaryTabId, open: state.secondaryPaneOpen, tabs,
-          });
+          for (const [key, state] of Object.entries(getWorkspacePaneStates())) {
+            const tabs = state.tabs.map((tab) => {
+              if (tab.target.kind !== "files") return tab;
+              const fileKey = filesPaneKey(accessProfile, tab.id, key);
+              if (!hasFilesPane(fileKey)) return tab;
+              const snapshot = normalizeFilesPaneSnapshot(readFilesPane(fileKey).snapshot);
+              if (!snapshot) throw new Error("The current Files document could not be preserved before closing.");
+              return { ...tab, target: { kind: "files" as const, workspaceKey: tab.target.workspaceKey, snapshot, ...(snapshot.target ? { openTarget: snapshot.target } : {}) } };
+            });
+            writeSecondaryPaneStateAtKey(clientWindow.scope, key, { ...state, tabs });
+          }
         }
         const outcome = await bridge.resolveClientWindowClose({ windowId: request.windowId, requestId: request.requestId, generation: request.generation, allowClose });
         if (ownsRequest() && (!allowClose || !outcome.accepted)) cancelCurrent();
@@ -1610,14 +1666,14 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       cancelled();
       if (registration) void bridge.unregisterClientWindowCloseGuard(registration).catch((error) => appToast.danger(error instanceof Error ? error.message : String(error)));
     };
-  }, [accessProfile, clientWindow.scope, clientWindow.windowId]);
+  }, [accessProfile, clientWindow.scope, clientWindow.windowId, getWorkspacePaneStates]);
 
   const beginPaneTransfer = useCallback((sourceTabId: string, target: TransferableWorkspacePaneTarget, sourcePane: "primary" | "secondary") => {
     if (nativeWindowCloseRequestRef.current) throw new Error("Finish or cancel this window's close request before moving a pane.");
     const begin = window.octopusTransport?.beginClientPaneTransfer;
     if (!begin) throw new Error("Native client pane transfer is unavailable.");
     if (target.kind === "files") {
-      const key = filesPaneKey(accessProfile, sourceTabId);
+      const key = filesPaneKey(accessProfile, sourceTabId, paneStateKey);
       ensureFilesPane(key, target.openTarget, target.snapshot);
       const snapshot = captureFilesPane(key);
       if (!snapshot) throw new Error("The source Files pane is unavailable.");
@@ -1627,34 +1683,44 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     if (reference.sourceWindowId !== clientWindow.windowId) {
       throw new Error("Client pane transfer source does not match this window.");
     }
+    try { window.sessionStorage.setItem(`octopus.client-pane-owner.${reference.transferId}`, paneStateKey); }
+    catch (error) {
+      void window.octopusTransport?.cancelClientPaneTransfer({ transferId: reference.transferId });
+      throw error;
+    }
     return { reference, target } satisfies ActiveClientPaneTransfer;
-  }, [accessProfile, clientWindow.windowId]);
+  }, [accessProfile, clientWindow.windowId, paneStateKey]);
 
   const cancelPaneTransfer = useCallback((transfer: ActiveClientPaneTransfer) => {
     const cancel = window.octopusTransport?.cancelClientPaneTransfer;
     if (cancel) void cancel({ transferId: transfer.reference.transferId }).catch(() => undefined);
   }, []);
 
-  const sourceTransferMatches = useCallback((completion: ClientPaneTransferCompleted) => {
+  const sourceTransferMatches = useCallback((completion: ClientPaneTransferCompleted, finalizing = false) => {
     if (completion.sourceWindowId !== clientWindow.windowId) return false;
+    const owner = transferPaneOwner(completion.transferId);
+    if (!owner) return false;
     const state = transferSourceStateRef.current;
+    const source = owner.read();
+    const current = owner.key === state.paneStateKey;
+    if (!current && (!finalizing || completion.sourcePane === "primary")) return false;
     const wholeWindow = completion.sourceTabId === `client-window:${clientWindow.windowId}`;
-    const currentTab = state.secondaryTabs.find((tab) => tab.id === completion.sourceTabId);
+    const currentTab = source.tabs.find((tab) => tab.id === completion.sourceTabId);
     const currentTarget = wholeWindow ? state.titlebarTransferTarget : currentTab ? transferableWorkspacePaneTarget(currentTab.target) : null;
-    if (wholeWindow && (clientWindow.primary || state.secondaryTabs.length > 0)) return false;
+    if (wholeWindow && (clientWindow.primary || source.tabs.length > 0)) return false;
     if (currentTarget?.kind === "files" && completion.target.kind === "files") {
       if (!completion.target.snapshot) return false;
       if (!samePaneTransferTarget({ ...currentTarget, snapshot: undefined }, { ...completion.target, snapshot: undefined })) return false;
       try {
-        if (!filesPaneMatchesSnapshot(filesPaneKey(accessProfile, completion.sourceTabId), completion.target.snapshot)) return false;
+        if (!filesPaneMatchesSnapshot(filesPaneKey(accessProfile, completion.sourceTabId, owner.key), completion.target.snapshot)) return false;
       } catch {
         return false;
       }
     } else if (!samePaneTransferTarget(currentTarget, completion.target)) return false;
-    if (completion.sourcePane === "secondary" && currentTab?.id === state.activeSecondaryTabId && !state.secondaryRunIdentityReady) return false;
-    if (completion.sourcePane === "primary" && !state.primaryRunIdentityReady) return false;
-    return !paneTransferBlockReasonRef.current(completion.target, completion.sourcePane);
-  }, [accessProfile, clientWindow.primary, clientWindow.windowId]);
+    if (current && completion.sourcePane === "secondary" && currentTab?.id === state.activeSecondaryTabId && !state.secondaryRunIdentityReady) return false;
+    if (current && completion.sourcePane === "primary" && !state.primaryRunIdentityReady) return false;
+    return !current || !paneTransferBlockReasonRef.current(completion.target, completion.sourcePane);
+  }, [accessProfile, clientWindow.primary, clientWindow.windowId, transferPaneOwner]);
 
   const handleClientPaneTransferCompletion = useCallback((completion: ClientPaneTransferCompleted) => {
     const bridge = window.octopusTransport;
@@ -1664,7 +1730,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const released = sourceTransferMatches(completion);
     if (released) {
       preparedSourceTransfersRef.current.set(completion.transferId, completion);
-      if (completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId), true);
+      if (completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId, transferSourceStateRef.current.paneStateKey), true);
     }
     try {
       bridge.acknowledgeClientPaneTransfer({ released, transferId: completion.transferId });
@@ -1672,7 +1738,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       if (!released) appToast.warning("The source changed during handoff. It was retained and the destination move was cancelled.");
     } catch (error) {
       preparedSourceTransfersRef.current.delete(completion.transferId);
-      if (completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId), false);
+      if (completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId, transferSourceStateRef.current.paneStateKey), false);
       appToast.danger(error instanceof Error ? error.message : String(error));
     }
   }, [accessProfile, sourceTransferMatches]);
@@ -1683,11 +1749,12 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const cancelled = bridge.onClientPaneTransferCancelled((completion) => {
       const prepared = preparedSourceTransfersRef.current.get(completion.transferId);
       preparedSourceTransfersRef.current.delete(completion.transferId);
-      if (prepared && completion.sourceWindowId === clientWindow.windowId && completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId), false);
+      const owner = transferPaneOwner(completion.transferId);
+      if (owner && prepared && completion.sourceWindowId === clientWindow.windowId && completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId, owner.key), false);
       setSourceHandoffPending(preparedSourceTransfersRef.current.size > 0);
     });
     const finishSource = async (completion: ClientPaneTransferCompleted) => {
-      if (completion.sourceWindowId !== clientWindow.windowId || finalizingSourceIdsRef.current.has(completion.transferId) || !primaryRunIdentityReady || !secondaryRunIdentityReady) return;
+      if (completion.sourceWindowId !== clientWindow.windowId || finalizingSourceIdsRef.current.has(completion.transferId)) return;
       finalizingSourceIdsRef.current.add(completion.transferId);
       setSourceFinalizationPendingCount((count) => count + 1);
       preparedSourceTransfersRef.current.delete(completion.transferId);
@@ -1695,25 +1762,28 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       const marker = `octopus.client-pane-finalized.${completion.transferId}`;
       let closeWindow = false;
       try {
+        const owner = transferPaneOwner(completion.transferId);
+        if (!owner) throw new Error("The pane transfer has no exact source owner.");
         if (window.sessionStorage.getItem(marker) == null) {
-          if (!sourceTransferMatches(completion)) {
+          if (!sourceTransferMatches(completion, true)) {
             appToast.warning("Destination handoff completed, but the changed source was retained.");
             window.sessionStorage.setItem(marker, "retained");
-            if (completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId), false);
+            if (completion.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, completion.sourceTabId, owner.key), false);
           } else {
-            const state = transferSourceStateRef.current;
+            const state = owner.read();
             if (completion.sourceTabId === `client-window:${clientWindow.windowId}`) closeWindow = true;
             else {
-              const index = state.secondaryTabs.findIndex((tab) => tab.id === completion.sourceTabId);
-              const tabs = state.secondaryTabs.filter((tab) => tab.id !== completion.sourceTabId);
-              const activeTabId = state.activeSecondaryTabId === completion.sourceTabId ? tabs[Math.min(index, tabs.length - 1)]?.id ?? "" : state.activeSecondaryTabId;
-              const open = tabs.length > 0 && state.secondaryPaneOpen;
-              writeSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope, { activeTabId, open, tabs });
-              secondaryTabModel.replaceState({ activeTabId, tabs });
-              if (completion.target.kind === "files") forgetFilesPane(filesPaneKey(accessProfile, completion.sourceTabId), completion.target.snapshot);
-              setSecondaryPaneOpen(open);
-              if (!open) { setSecondaryPaneFocused(false); setActivePane("primary"); }
-              closeWindow = !clientWindow.primary && tabs.length === 0;
+              const index = state.tabs.findIndex((tab) => tab.id === completion.sourceTabId);
+              const tabs = state.tabs.filter((tab) => tab.id !== completion.sourceTabId);
+              const activeTabId = state.activeTabId === completion.sourceTabId ? tabs[Math.min(index, tabs.length - 1)]?.id ?? "" : state.activeTabId;
+              const open = tabs.length > 0 && state.open;
+              const next = { ...state, activeTabId, open, tabs,
+                layout: open ? state.layout : { ...state.layout, focused: false, activePane: "primary" as const } };
+              writeSecondaryPaneStateAtKey(clientWindow.scope, owner.key, next);
+              owner.write(next);
+              if (completion.target.kind === "files") forgetFilesPane(filesPaneKey(accessProfile, completion.sourceTabId, owner.key), completion.target.snapshot);
+              closeWindow = !clientWindow.primary && tabs.length === 0
+                && !Object.entries(getWorkspacePaneStates()).some(([key, pane]) => key !== owner.key && pane.tabs.length);
             }
             window.sessionStorage.setItem(marker, closeWindow ? "close-window" : "removed");
           }
@@ -1733,7 +1803,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     }).catch((error) => appToast.danger(error instanceof Error ? error.message : String(error)));
 
     return () => { cancelled(); finalized(); };
-  }, [accessProfile, clientWindow.primary, clientWindow.scope, clientWindow.windowId, homeRunId, primaryRunIdentityReady, secondaryRunIdentityReady, secondaryTabModel.replaceState, sourceTransferMatches]);
+  }, [accessProfile, clientWindow.primary, clientWindow.scope, clientWindow.windowId, getWorkspacePaneStates, primaryRunIdentityReady, secondaryRunIdentityReady, sourceTransferMatches, transferPaneOwner]);
 
   useEffect(() => {
     const bridge = window.octopusTransport;
@@ -1823,6 +1893,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   }, []);
 
   const stageDestinationPaneTransfer = useCallback((transfer: ClientPaneTransferCompleted, resume: boolean) => {
+    if (!homeRunId.trim()) return;
     if (pendingAcceptedPaneTransfersRef.current.has(transfer.transferId)) return;
     if (nativeWindowCloseRequestRef.current) {
       void window.octopusTransport?.rejectClientPaneTransfer({ transferId: transfer.transferId }).catch((error) => appToast.danger(error instanceof Error ? error.message : String(error)));
@@ -1833,12 +1904,13 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const tab = workspacePaneTabForTarget(transfer.target);
     if (transfer.target.kind === "files") {
       if (!transfer.target.snapshot) throw new Error("Files handoff has no document snapshot.");
-      const key = filesPaneKey(accessProfile, tab.id);
+      const key = filesPaneKey(accessProfile, tab.id, paneStateKey);
       ensureFilesPane(key, transfer.target.openTarget, transfer.target.snapshot);
       setFilesPaneTransferPending(key, true);
     }
     const detachedWindow = Boolean(clientWindow.reattachWindowId) && state.secondaryTabs.length === 0;
     pendingAcceptedPaneTransfersRef.current.set(transfer.transferId, {
+      owner: paneOwner,
       previousActiveTabId: state.activeSecondaryTabId,
       previousActivePane: state.activePane,
       previousFocused: state.secondaryPaneFocused,
@@ -1852,7 +1924,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     });
     openSecondaryTab(tab);
     setSecondaryPaneFocused(detachedWindow || Boolean(clientWindow.reattachWindowId) && state.secondaryPaneFocused);
-  }, [accessProfile, clientWindow.reattachWindowId, openSecondaryTab]);
+  }, [accessProfile, clientWindow.reattachWindowId, homeRunId, openSecondaryTab, paneOwner, paneStateKey, setSecondaryPaneFocused]);
 
   const handleClientPaneDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
     const reference = parseClientPaneDragPayload(event.dataTransfer.getData(CLIENT_PANE_DRAG_MIME));
@@ -1896,27 +1968,26 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const pending = pendingAcceptedPaneTransfersRef.current.get(transferId);
     if (!pending) return;
     pendingAcceptedPaneTransfersRef.current.delete(transferId);
-    const state = transferSourceStateRef.current;
+    const state = pending.owner.read();
     const next = rollbackDestinationPaneTransfer(
-      { tabs: state.secondaryTabs, activeTabId: state.activeSecondaryTabId },
+      state,
       { tabs: pending.previousTabs, activeTabId: pending.previousActiveTabId },
       pending.stagedTab,
     );
-    const open = next.tabs.length > 0 && (state.activeSecondaryTabId === pending.tabId ? pending.previousOpen || next.tabs.length > pending.previousTabs.length : state.secondaryPaneOpen);
-    try { writeSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope, { ...next, open }); }
+    const open = next.tabs.length > 0 && (state.activeTabId === pending.tabId ? pending.previousOpen || next.tabs.length > pending.previousTabs.length : state.open);
+    const layout = state.activeTabId === pending.tabId
+      ? { ...state.layout, focused: open && pending.previousFocused, activePane: open ? pending.previousActivePane : "primary" as const }
+      : state.layout;
+    const restored = { ...state, ...next, open, layout };
+    try { writeSecondaryPaneStateAtKey(clientWindow.scope, pending.owner.key, restored); }
     catch (error) { appToast.danger(`Could not persist the destination rollback: ${error instanceof Error ? error.message : String(error)}`); }
-    secondaryTabModel.replaceState(next);
+    pending.owner.write(restored);
     if (pending.stagedTab.target.kind === "files" && !next.tabs.some((tab) => tab.id === pending.tabId)) {
-      forgetFilesPane(filesPaneKey(accessProfile, pending.tabId), pending.stagedTab.target.snapshot);
+      forgetFilesPane(filesPaneKey(accessProfile, pending.tabId, pending.owner.key), pending.stagedTab.target.snapshot);
     } else if (pending.stagedTab.target.kind === "files") {
-      setFilesPaneTransferPending(filesPaneKey(accessProfile, pending.tabId), false);
+      setFilesPaneTransferPending(filesPaneKey(accessProfile, pending.tabId, pending.owner.key), false);
     }
-    setSecondaryPaneOpen(open);
-    if (state.activeSecondaryTabId === pending.tabId) {
-      setSecondaryPaneFocused(open && pending.previousFocused);
-      setActivePane(open ? pending.previousActivePane : "primary");
-    }
-  }, [accessProfile, clientWindow.scope, homeRunId, secondaryTabModel.replaceState]);
+  }, [accessProfile, clientWindow.scope]);
 
   useEffect(() => window.octopusTransport?.onClientPaneTransferCancelled((completion) => {
     if (completion.sourceWindowId !== clientWindow.windowId) rollbackAcceptedPaneTransfer(completion.transferId);
@@ -1927,36 +1998,36 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     if (!bridge || pendingAcceptedPaneTransfersRef.current.size === 0) return;
     const tabIds = new Set(secondaryTabs.map((tab) => tab.id));
     for (const [transferId, pending] of pendingAcceptedPaneTransfersRef.current) {
-      if (pending.started || !tabIds.has(pending.tabId) || pending.tabId !== activeSecondaryTabId || !secondaryRunIdentityReady) continue;
+      if (pending.started || pending.owner.key !== paneStateKey || !tabIds.has(pending.tabId) || pending.tabId !== activeSecondaryTabId || !secondaryRunIdentityReady) continue;
       pending.started = true;
       const requireCurrentDestination = () => {
         const state = transferSourceStateRef.current;
         const currentTab = state.secondaryTabs.find((tab) => tab.id === pending.tabId);
         const stagedTarget = transferableWorkspacePaneTarget(pending.stagedTab.target);
-        if (pendingAcceptedPaneTransfersRef.current.get(transferId) !== pending || !currentTab || !stagedTarget || !samePaneTransferTarget(transferableWorkspacePaneTarget(currentTab.target), stagedTarget) || state.activeSecondaryTabId !== pending.tabId || !state.secondaryRunIdentityReady) throw new Error("Destination changed before handoff finalized.");
+        if (state.paneStateKey !== pending.owner.key || pendingAcceptedPaneTransfersRef.current.get(transferId) !== pending || !currentTab || !stagedTarget || !samePaneTransferTarget(transferableWorkspacePaneTarget(currentTab.target), stagedTarget) || state.activeSecondaryTabId !== pending.tabId || !state.secondaryRunIdentityReady) throw new Error("Destination changed before handoff finalized.");
         if (pending.stagedTab.target.kind === "files") {
           const snapshot = pending.stagedTab.target.snapshot;
-          if (!snapshot || !filesPaneMatchesSnapshot(filesPaneKey(accessProfile, pending.tabId), snapshot)) throw new Error("Destination Files snapshot changed before handoff finalized.");
+          if (!snapshot || !filesPaneMatchesSnapshot(filesPaneKey(accessProfile, pending.tabId, paneStateKey), snapshot)) throw new Error("Destination Files snapshot changed before handoff finalized.");
         }
         return state;
       };
       const outcome = (async () => {
-        if (pending.stagedTab.target.kind === "files") await validateFilesPaneRoot(filesPaneKey(accessProfile, pending.tabId), bridge);
+        if (pending.stagedTab.target.kind === "files") await validateFilesPaneRoot(filesPaneKey(accessProfile, pending.tabId, paneStateKey), bridge);
         requireCurrentDestination();
         return pending.resume
           ? bridge.resumeClientPaneTransfer({ transferId })
           : bridge.commitClientPaneTransfer({ transferId });
       })();
       void outcome.then(async () => {
-        if (pending.stagedTab.target.kind === "files") await validateFilesPaneRoot(filesPaneKey(accessProfile, pending.tabId), bridge);
+        if (pending.stagedTab.target.kind === "files") await validateFilesPaneRoot(filesPaneKey(accessProfile, pending.tabId, paneStateKey), bridge);
         if (pending.detachedWindow) await anchorClientPaneDrop(transferId, pending.tabId);
         const state = requireCurrentDestination();
         writeSecondaryPaneState(accessProfile, homeRunId, clientWindow.scope, {
-          activeTabId: state.activeSecondaryTabId, open: state.secondaryPaneOpen, tabs: state.secondaryTabs,
-        });
+          activeTabId: state.activeSecondaryTabId, open: state.secondaryPaneOpen, tabs: state.secondaryTabs, layout: state.layout,
+        }, state.paneScope);
         await bridge.finalizeClientPaneTransfer({ transferId });
         pendingAcceptedPaneTransfersRef.current.delete(transferId);
-        if (pending.stagedTab.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, pending.tabId), false);
+        if (pending.stagedTab.target.kind === "files") setFilesPaneTransferPending(filesPaneKey(accessProfile, pending.tabId, paneStateKey), false);
       }).catch(async (error) => {
         rollbackAcceptedPaneTransfer(transferId);
         try { await bridge.rejectClientPaneTransfer({ transferId }); }
@@ -1966,7 +2037,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         appToast.danger(error instanceof Error ? error.message : String(error));
       });
     }
-  }, [accessProfile, activeSecondaryTabId, clientWindow.scope, homeRunId, rollbackAcceptedPaneTransfer, secondaryRunIdentityReady, secondaryTabs]);
+  }, [accessProfile, activeSecondaryTabId, clientWindow.scope, homeRunId, paneStateKey, rollbackAcceptedPaneTransfer, secondaryRunIdentityReady, secondaryTabs]);
 
 
   const addSecondaryTab = useCallback((actionId: string) => {
@@ -2021,21 +2092,19 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     }
     setSecondaryPaneOpen(true);
     setActivePane("secondary");
-  }, [activateSecondaryTab, activeSecondaryTabId, secondaryPaneOpen, secondaryTabs]);
+  }, [activateSecondaryTab, activeSecondaryTabId, secondaryPaneOpen, secondaryTabs, setActivePane, setSecondaryPaneOpen]);
 
   const closeSecondaryPane = useCallback(() => {
     setSecondaryPaneOpen(false);
-  }, []);
+  }, [setSecondaryPaneOpen]);
 
   useEffect(() => subscribeAirHandGestures((gesture, source) => {
     if (!gesturePreferences.enabled || settingsOpen) return;
     if (accessProfile === "live" && source === "test") return;
-    if (gesture === "left_click" && gesturePreferences.spatialControl && activeSurface?.id === "voice") return;
-    if (gesture === "fist" && document.querySelector("[data-airhand-target='drag']")) return;
     if (clientDialogOwnsCommands()) return;
     const command = gesturePreferences.mappings[gesture];
     if (command !== "none") dispatchClientCommand(command, "gesture");
-  }), [accessProfile, activeSurface?.id, gesturePreferences, settingsOpen]);
+  }), [accessProfile, gesturePreferences, settingsOpen]);
 
   useEffect(() => {
     if (!gesturePreferences.enabled) {
@@ -2056,7 +2125,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
 
   useEffect(() => () => stopGestureRecognition(), []);
 
-  useEffect(() => subscribeClientCommands((command) => {
+  useEffect(() => subscribeClientCommands((command, _source, settingsDestination) => {
     if (command === "open_command_menu") {
       setCommandMenuOpen(true);
       return;
@@ -2072,7 +2141,13 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     }
     if (command === "open_settings") {
       setCommandMenuOpen(false);
+      setSettingsRecordingId(settingsDestination?.dictationRecordingId ?? "");
       setSettingsOpen(true);
+      if (settingsDestination?.sectionId) selectSettingsSection(settingsDestination.sectionId);
+      return;
+    }
+    if (command === "toggle_gesture_control") {
+      setGesturePreferences((current) => ({ enabled: !current.enabled }));
       return;
     }
     if (command === "toggle_pin_task") {
@@ -2129,7 +2204,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     const direction = command === "previous_surface" ? -1 : 1;
     const next = (index + direction + shortcutNavigationDestinations.length) % shortcutNavigationDestinations.length;
     openNavigationSection(shortcutNavigationDestinations[next].id);
-  }), [accessProfile, activeClientSurfaceIdentity, activeNavigationSection, navigateSurfaceHistory, openChat, openNavigationSection, openSecondaryChatTab, openTerminalTab, openVoice, openWorkerEnvironmentPane, projectFilterEeId, setSettingsOpen, shortcutNavigationDestinations, toggleSecondaryPane, workerEnvironmentActions]);
+  }), [accessProfile, activeClientSurfaceIdentity, activeNavigationSection, navigateSurfaceHistory, openChat, openNavigationSection, openSecondaryChatTab, openTerminalTab, openVoice, openWorkerEnvironmentPane, projectFilterEeId, selectSettingsSection, setGesturePreferences, setSettingsOpen, shortcutNavigationDestinations, toggleSecondaryPane, workerEnvironmentActions]);
 
   useEffect(() => {
     const handleClientSurfaceAction = (event: Event) => {
@@ -2163,7 +2238,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
 
   useAdmittedClientActions({
     enabled: accessProfile === "live" && clientWindow.primary && runtimeHost.available && runtimeHost.ready
-      && surfaceRegistry.hydrated && agentProjectWorkspace.status === "ready" && !agentProjectWorkspace.error && homeChatWorkspace.runsLoaded
+      && surfaceRegistry.hydrated && agentProjectWorkspace.status === "ready" && !agentProjectWorkspace.error && homeChatWorkspace.runsLoaded && !homeChatWorkspace.runListError
       && homeChatWorkspace.activeRunId === homeRunId && homeChatWorkspace.activeRun?.runId === homeRunId
       && homeChatWorkspace.activeRun?.clientSurfaceRole === "home"
       && homeChatWorkspace.activeRun?.chatInterfaceId === agentProjectWorkspace.homeInterfaceId,
@@ -2295,7 +2370,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     installedVoiceWidgetsReady={surfaceRegistry.extensions.hydrated}
     builtinVoiceWidgetSources={surfaceRegistry.extensions.builtinWidgetSources}
     workerEnvironmentSurfaces={surfaceRegistry.workerEnvironmentSurfaces}
-    onOpenRun={openSurfaceRun}
+    onOpenRun={openSecondarySurfaceRun}
           />
   ) : null;
   const secondaryPane = secondarySurface || secondaryPaneOpen ? (
@@ -2330,10 +2405,12 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       />
       <RetainedFilesTabs
         accessProfile={accessProfile}
+        paneStateKey={paneStateKey}
         active={secondaryPaneOpen}
         activeTabId={activeSecondaryTabId}
         tabs={secondaryTabs}
       />
+      {secondaryTabs.map(tab => tab.target.kind === "client_browser" ? <div key={tab.id} className="h-full min-h-0" hidden={!secondaryPaneOpen || tab.id !== activeSecondaryTabId}><ClientBrowserTab id={tab.target.pageId} active={accessProfile === "live" && secondaryPaneOpen && tab.id === activeSecondaryTabId && !settingsOpen} /></div> : null)}
       <RetainedWorkerEnvironmentTabs
         accessProfile={accessProfile}
         active={secondaryPaneOpen}
@@ -2344,8 +2421,8 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         tabs={secondaryTabs}
       />
       <Suspense fallback={<SurfaceLoadingState label={`Loading ${activeSecondaryPanePresentation?.title || "tab"}…`} />}>
-      {activeSecondaryTab?.target.kind === "terminal" || activeSecondaryTab?.target.kind === "files" || activeSecondaryTab?.target.kind === "worker_environment" ? null : activeSecondaryTab?.target.kind === "task_sources" ? (
-        <TaskSourcesPaneTab sources={activeTaskSources} />
+      {activeSecondaryTab?.target.kind === "client_browser" || activeSecondaryTab?.target.kind === "terminal" || activeSecondaryTab?.target.kind === "files" || activeSecondaryTab?.target.kind === "worker_environment" ? null : activeSecondaryTab?.target.kind === "task_sources" ? (
+        <TaskSourcesPaneTab onOpenFiles={(target) => openFilesTab(target, secondaryWorkspaceKey)} sources={activeTaskSources} />
       ) : !secondarySurface ? null : secondarySurface.rendererKind === "builtin.chat" && !secondaryRunIdentityReady ? (
         <SurfaceLoadingState label="Opening task…" />
       ) : (
@@ -2395,22 +2472,23 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       onCreateTask={(text) => {
         chatWorkspace.createChat("", "", text);
         setProjectFilterEeId("");
-        setSecondaryPaneOpen(false);
-        setSecondaryPaneFocused(false);
         selectSurface("chat", "");
       }}>
       <FilesPaneDialogs />
       <AppShell
         accessProfile={accessProfile}
-        clientWindowScope={clientWindow.scope}
-        defaultSidebarOpen={!clientWindow.initialTarget}
+        paneStateKey={paneStateKey}
+        preferredSidebarOpen={workspacePaneState.layout.sidebarOpen}
+        onSidebarOpenChange={workspacePane.setSidebarOpen}
         sidebarWidth={sidebarWidth}
         surfaces={visibleSurfaces}
         navigationSection={activeNavigationSection}
         activeSurfaceId={primarySurfaceTarget.surfaceId}
         activeChatRunId={primarySurfaceTarget.runId}
         chatRuns={taskChatRuns}
-        chatRunsLoading={chatWorkspace.loadingRuns}
+        chatRunsPhase={chatWorkspace.runsPhase}
+        chatRunListError={chatWorkspace.runListError}
+        onRetryChatRuns={chatWorkspace.refreshRuns}
         homeRunId={homeRunId}
         inboxUnreadCount={markActivity.unreadCount}
         inboxArrivalId={markActivity.arrivalId}
@@ -2438,8 +2516,10 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
               documents={surfaceRegistry.documents}
               extensions={surfaceRegistry.extensions}
               onClose={() => setSettingsOpen(false)}
+              onOpenExtensionDestination={openExtensionDestination}
               onSectionChange={selectSettingsSection}
               sectionId={activeDestination.settingsSection!}
+              recordingId={settingsRecordingId}
               sidebarWidth={effectiveSidebarWidth}
               surfaceErrors={surfaceRegistry.errors}
               surfaces={surfaceRegistry.surfaces}
@@ -2450,7 +2530,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         secondaryPaneFocused={secondaryPaneFocused}
         secondaryPaneOpen={secondaryPaneOpen}
         secondaryPane={secondaryPane}
-        secondaryTaskPaneWidthPercent={clientPreferences.secondaryTaskPaneWidthPercent}
+        secondaryTaskPaneWidthPercent={workspacePaneState.layout.widthPercent}
         titlebarSurfaceContext={titlebarTask
           ? { glyph: "folder", title: clientTaskTitle(titlebarTask.runId, titlebarTask.title, taskOrganization) }
           : { glyph: activeSurface.chrome.titlebarGlyph ?? activeSurface.glyph, title: activeSurface.label }}
@@ -2471,7 +2551,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         onSecondaryPaneFocusedChange={setSecondaryPaneFocused}
         onPrimaryPaneBlockedChange={setPrimaryPaneBlocked}
         onSecondaryPaneOpenChange={setSecondaryPaneOpen}
-        onSecondaryTaskPaneWidthPercentChange={(secondaryTaskPaneWidthPercent) => setClientPreferences({ secondaryTaskPaneWidthPercent })}
+        onSecondaryTaskPaneWidthPercentChange={workspacePane.setWidthPercent}
         onOpenSettings={(section) => { setSettingsOpen(true); if (section) selectSettingsSection(section); }}
         onLogOut={onLogOut}
         onSearch={() => setCommandMenuOpen(true)}
@@ -2567,6 +2647,17 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       ) : null}
       {accessProfile === "live" ? (
         <BuiltinClientExtensionActionHost actions={surfaceRegistry.extensions.installedActions} />
+      ) : null}
+      <GestureFocusRing />
+      <GestureCommandHud accessProfile={accessProfile} />
+      {clientWindow.primary ? (
+        <GestureTourHost
+          accessProfile={accessProfile}
+          onOpenSettings={() => {
+            setSettingsOpen(true);
+            selectSettingsSection("gestures");
+          }}
+        />
       ) : null}
     </ScheduledWorkspaceProvider>
   );

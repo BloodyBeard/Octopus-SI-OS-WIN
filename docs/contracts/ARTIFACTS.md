@@ -232,6 +232,13 @@ malformed ledger row is evidence corruption, not an empty ledger. Tools never
 emit marks: if a checkpoint requires an artifact verified, the mark appears
 only after the verifier passes over that reference.
 
+Artifact search returns ranked excerpts, not full artifact payloads. It defaults
+to 20 hits, retains at most 2 KiB of UTF-8 text per hit, and bounds the serialized
+result body to 64 KiB. Each hit records its exact byte offset, retained byte count,
+source-line extent and truncation state; `artifact.read` can retrieve the original
+text at those offsets. The result also reports total and omitted matches, including
+omissions caused by the result byte bound. Search never widens the run's bindings.
+
 ## Evidence
 
 Some artifacts serve as mark evidence. A mark proves only what its evidence

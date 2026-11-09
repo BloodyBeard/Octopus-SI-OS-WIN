@@ -104,7 +104,7 @@ fn encode(path: &Path, rows: &[Movement]) -> Vec<u8> {
     rows.iter()
         .enumerate()
         .map(|(line, row)| {
-            let mut row = encode_durable_movement_row(row, line, |bytes| {
+            let mut row = encode_durable_movement_row(row, line, |_, bytes| {
                 let hash = ContentHash::of_bytes(bytes);
                 std::fs::write(
                     path.parent().unwrap().join("metadata").join(hash.to_hex()),

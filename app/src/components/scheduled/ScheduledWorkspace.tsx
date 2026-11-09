@@ -56,7 +56,7 @@ function useScheduledWorkspaceState(active: boolean, onCreateTask: (text: string
   }
 
   function startEdit(task: ScheduledInterfaceProjection) {
-    if (pending || !canEdit || !task.valid) return;
+    if (pending || !canEdit || !task.valid || task.eventSource) return;
     setEditor((previous) => ({ mode: { kind: "edit", task }, draft: draftFromScheduledInterface(task), revision: (previous?.revision ?? 0) + 1 }));
     setEditorError("");
   }
@@ -70,13 +70,13 @@ function useScheduledWorkspaceState(active: boolean, onCreateTask: (text: string
   }
 
   function toggleTask(task: ScheduledInterfaceProjection) {
-    if (pending || !canEdit || !task.valid) return;
+    if (pending || !canEdit || !task.valid || task.eventSource) return;
     void mutate({ action: "set_enabled", interfaceId: task.interfaceId, expectedDigest: task.activationDigest, enabled: task.status === "disabled" }, "Could not update trigger", () => {});
   }
 
   function confirmDelete() {
     const task = deleteCandidate;
-    if (!task || pending || !canEdit) return;
+    if (!task || pending || !canEdit || task.eventSource) return;
     void mutate({ action: "delete", interfaceId: task.interfaceId, expectedDigest: task.activationDigest }, "Could not delete trigger", () => {
       setDeleteCandidate(null);
       if (selectedId === task.interfaceId) setSelectedId("");
@@ -86,13 +86,13 @@ function useScheduledWorkspaceState(active: boolean, onCreateTask: (text: string
   function confirmUndo() {
     const delivery = undoCandidate;
     if (!delivery?.journal?.undoable || pending || !canEdit) return;
-    void mutate({ action: "undo_changes", runId: delivery.runId, expectedJournalDigest: delivery.journal.digest }, "Could not undo changes", () => setUndoCandidate(null));
+    void mutate({ action: "undo_changes", runId: delivery.runId, firing: delivery.journal.firing, expectedJournalDigest: delivery.journal.digest }, "Could not undo changes", () => setUndoCandidate(null));
   }
 
   return {
     ...projection, tasks: triggers, selected, selectedId, selectTask, editor, editorError, templates, pending, canEdit, createUnavailableReason,
     timeSuggestionUnavailableReason, startCreate, startEdit, save, toggleTask,
-    deleteCandidate, requestDelete: (task: ScheduledInterfaceProjection) => { if (!pending && canEdit) setDeleteCandidate(task); },
+    deleteCandidate, requestDelete: (task: ScheduledInterfaceProjection) => { if (!pending && canEdit && !task.eventSource) setDeleteCandidate(task); },
     cancelDelete: () => { if (!pending) setDeleteCandidate(null); }, confirmDelete,
     undoCandidate, requestUndo: (delivery: ScheduledDelivery) => { if (!pending && delivery.journal?.undoable) setUndoCandidate(delivery); },
     cancelUndo: () => { if (!pending) setUndoCandidate(null); }, confirmUndo,

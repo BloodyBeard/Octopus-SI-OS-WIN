@@ -43,6 +43,7 @@ export type DescriptorHash = [
 ];
 
 export interface Mark {
+  arrival_seq?: number | null;
   class: MarkClass;
   details?: {
     [k: string]: unknown;

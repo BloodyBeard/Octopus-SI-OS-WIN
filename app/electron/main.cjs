@@ -34,6 +34,7 @@ const {
   setupTriggerEntries,
   setupTriggerProof,
   armSetupTriggers,
+  setupTriggerTaskPlanner,
 } = require("./projection.cjs");
 const { projectionReadRequest } = require("./projectionReadContract.cjs");
 const { createClientAccessController } = require("./clientAccess.cjs");
@@ -45,6 +46,7 @@ const {
 const { createPaneWindowDragHost } = require("./paneWindowDrag.cjs");
 const { createClientWindowCloseHost } = require("./clientWindowClose.cjs");
 const { createClientContextMenuHost } = require("./clientContextMenu.cjs");
+const { revealGestureTrace, saveGestureTrace } = require("./gestureTraces.cjs");
 const { createClientAttachmentStagingStore, selectClientAttachments, stageClientAttachmentPaths } = require("./clientAttachments.cjs");
 const {
   downloadClientFileCopy,
@@ -79,6 +81,7 @@ const { createClientExtensionStore, readClientExtensionFilesystemSource } = requ
 const { createClientSetupStore } = require("./clientSetup.cjs");
 const { createChatgptSignIn } = require("./chatgptSignIn.cjs");
 const { createClientProviderMetadata, validateProviderModelSelection } = require("./clientProviderMetadata.cjs");
+const { createApplicationConnectionHost, createRegistryConnectionTargets } = require("./applicationConnection.cjs");
 const { runClientDoctor } = require("./clientDoctor.cjs");
 const { createClientSupportHost } = require("./clientSupport.cjs");
 const {
@@ -90,7 +93,12 @@ const {
 const { createCodexUsageReader } = require("./codexUsage.cjs");
 const { createTerminalHost } = require("./terminalHost.cjs");
 const { createRuntimeHost } = require("./runtimeHost.cjs");
-const { transcribeClientDictation } = require("./clientDictation.cjs");
+const { transcribeClientDictation, dictationFailure } = require("./clientDictation.cjs");
+const { createClientDictationStream } = require("./clientDictationStream.cjs");
+const { createClientDictationRecordings } = require("./clientDictationRecordings.cjs");
+const clientDictationRecordings = createClientDictationRecordings(path.join(app.getPath("userData"), "dictation-recordings"));
+const clientDictationRequests = new Map();
+const clientDictationStreams = new Map();
 const {
   operatorChatSubmitDiagnostic,
   operatorChatSubmitFailure,
@@ -132,6 +140,7 @@ let clientAccessController = null;
 let clientArtifactStreamStore = null;
 let clientAttachmentStagingStore = null;
 let cdpViewerManager = null;
+let applicationConnectionHost = null;
 let nativeBrowserHost = null;
 let nativeBrowserStartup = null;
 let nativeBrowserStartupError = null;
@@ -436,30 +445,52 @@ function readTouchIdEnrollmentRecord() {
   }
 }
 
-function verifyTouchIdEnrollment(record) {
-  if (!record || !safeStorage.isEncryptionAvailable()) {
+async function verifyTouchIdEnrollment(record) {
+  if (!record || !await safeStorage.isAsyncEncryptionAvailable()) {
     throw new Error("Touch ID secure storage is unavailable on this device.");
   }
-  let verifier;
+  let opened;
   try {
-    verifier = safeStorage.decryptString(Buffer.from(record.sealedVerifier, "base64"));
+    opened = await safeStorage.decryptStringAsync(Buffer.from(record.sealedVerifier, "base64"));
   } catch {
     throw new Error("Touch ID enrollment could not be verified.");
   }
-  if (!/^[a-f0-9]{64}$/.test(verifier)) {
+  const verifier = opened?.result;
+  if (typeof verifier !== "string" || !/^[a-f0-9]{64}$/.test(verifier)) {
     throw new Error("Touch ID enrollment could not be verified.");
+  }
+  requireUnchangedTouchIdEnrollment(record);
+  if (opened.shouldReEncrypt !== true) return;
+  const sealedVerifier = (await safeStorage.encryptStringAsync(verifier)).toString("base64");
+  requireUnchangedTouchIdEnrollment(record);
+  sealTouchIdEnrollment(record.credentialFingerprint, sealedVerifier);
+}
+
+function requireUnchangedTouchIdEnrollment(record) {
+  const current = readTouchIdEnrollmentRecord();
+  const fingerprint = getClientAccessController().credentialFingerprint();
+  if (!current || !fingerprint || current.credentialFingerprint !== fingerprint
+    || current.credentialFingerprint !== record.credentialFingerprint || current.sealedVerifier !== record.sealedVerifier) {
+    throw new Error("Touch ID enrollment changed before unlock completed.");
   }
 }
 
-function writeTouchIdEnrollment() {
-  if (process.platform !== "darwin" || !safeStorage.isEncryptionAvailable()) {
+async function writeTouchIdEnrollment() {
+  if (process.platform !== "darwin" || !await safeStorage.isAsyncEncryptionAvailable()) {
     throw new Error("Touch ID is unavailable on this device.");
   }
   const fingerprint = getClientAccessController().credentialFingerprint();
   if (!fingerprint) throw new Error("Configure the Administrator password before enabling Touch ID.");
-  const sealedVerifier = safeStorage.encryptString(randomBytes(32).toString("hex")).toString("base64");
+  const sealedVerifier = (await safeStorage.encryptStringAsync(randomBytes(32).toString("hex"))).toString("base64");
+  if (getClientAccessController().credentialFingerprint() !== fingerprint) {
+    throw new Error("The Administrator password changed before Touch ID was enabled.");
+  }
+  sealTouchIdEnrollment(fingerprint, sealedVerifier);
+}
+
+function sealTouchIdEnrollment(credentialFingerprint, sealedVerifier) {
   const temporary = `${touchIdEnrollmentPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, credentialFingerprint: fingerprint, sealedVerifier })}\n`, { mode: 0o600, flag: "wx" });
+  fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, credentialFingerprint, sealedVerifier })}\n`, { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, touchIdEnrollmentPath);
   fs.chmodSync(touchIdEnrollmentPath, 0o600);
 }
@@ -997,7 +1028,7 @@ function scheduleNativeDesktopPresentations() {
       for (const room of result.worker_environments ?? []) {
         if (room.worker_environment_kind === "browser_session" && nativeBrowserHost && home === nativeBrowserHome) {
           const history = room.client_surfaces?.find(value => value.protocol === "browser.native.downloads.v1" && value.mode === "direct");
-          if (history && nativeBrowserHost.getEngineInfo().capabilities.persistentDownloadHistory) { historyRooms.push({ room, surface: history }); runIds.add(room.run_id); }
+          if (room.lifecycle === "active" && history && nativeBrowserHost.getEngineInfo().capabilities.persistentDownloadHistory) { historyRooms.push({ room, surface: history }); runIds.add(room.run_id); }
           const surface = room.client_surfaces?.find(value => ["browser.native.v1", "browser.native.downloads.v1"].includes(value.protocol)
             && value.mode === "direct" && value.data?.engine_handle && value.data?.browser_context_id);
           if (room.lifecycle === "active" && surface) { browserRooms.push({ room, surface }); runIds.add(room.run_id); }
@@ -1530,7 +1561,7 @@ async function clientSetupWorkspaceProof(plan, operationId) {
 
 async function clientSetupTriggerEntries(plan) {
   const pack = requireClientSetupPack(await readLocalPackageCatalog(clientSetupPackageRoots()), plan);
-  return setupTriggerEntries(pack, plan.pack.selected_recommended, plan.workspace.request.home.providerInterfaceId);
+  return setupTriggerEntries(pack, plan.pack.selected_recommended);
 }
 
 async function applyClientSetupTriggers(plan, operationId) {
@@ -1543,8 +1574,14 @@ async function applyClientSetupTriggers(plan, operationId) {
     || state.receipt.request_digest !== plan.workspace.request_digest
   ) throw new Error("Workspace receipt is not ready for its triggers.");
   const entries = await clientSetupTriggerEntries(plan);
+  const home = plan.workspace.request?.home;
   await armSetupTriggers(registryRoot, octopusHome, entries, {
     commitClientAuthoring: (authoringRequest) => commitProjectionClientAuthoring(octopusHome, registryRoot, authoringRequest),
+    planTriggerTask: setupTriggerTaskPlanner(planWorkspaceHomeSurface, {
+      eeInstancesRoot: path.join(octopusHome, "state", "ee_instances"),
+      rootEeId: state.receipt.root_ee_id,
+      home,
+    }),
   });
   getProjectionStore("live").invalidate();
   if (!await setupTriggerProof(registryRoot, octopusHome, entries)) {
@@ -2620,6 +2657,7 @@ function startClientQuitCleanup() {
 
 function closeClientResources() {
   chatgptSignIn?.dispose();
+  applicationConnectionHost?.dispose();
   clearGlobalDictationShortcut();
   cdpViewerManager?.closeAll();
   processViewerManager?.closeAll();
@@ -2998,6 +3036,16 @@ ipcMain.handle("octopus:chatgpt-rate-limits", async (event, token) => {
   return getChatgptSignIn().rateLimits();
 });
 
+ipcMain.handle("octopus:chatgpt-account-sessions", async (event, token) => {
+  requireRuntimeStateAccess(event, token);
+  return getChatgptSignIn().sessions();
+});
+
+ipcMain.handle("octopus:chatgpt-switch-workspace", async (_event, token, request) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  return getChatgptSignIn().switchWorkspace(request);
+});
+
 ipcMain.handle("octopus:chatgpt-logout", async (_event, token) => {
   getClientAccessController().requireSession(token, ["live"]);
   return getChatgptSignIn().logout();
@@ -3021,7 +3069,7 @@ ipcMain.handle("octopus:chatgpt-sign-in-cancel", async (event, token, loginId) =
 ipcMain.handle("octopus:clipboard-write", async (_event, token, value) => {
   getClientAccessController().requireSession(token);
   if (typeof value !== "string") throw new Error("clipboard value must be a string");
-  clipboard.writeText(value);
+  await clipboard.writeText(value);
   return { copied: true };
 });
 
@@ -3265,7 +3313,7 @@ ipcMain.handle("octopus:touch-id-set-enabled", async (_event, token, enabled) =>
     return touchIdStatus();
   }
   await promptTouchId("Enable Touch ID to unlock Octopus");
-  writeTouchIdEnrollment();
+  await writeTouchIdEnrollment();
   return touchIdStatus();
 });
 ipcMain.handle("octopus:touch-id-unlock", async (event) => {
@@ -3275,18 +3323,8 @@ ipcMain.handle("octopus:touch-id-unlock", async (event) => {
     throw new Error("Touch ID is not enabled for the current Administrator password.");
   }
   await promptTouchId("Unlock Octopus");
-  const currentEnrollment = readTouchIdEnrollmentRecord();
-  const currentFingerprint = getClientAccessController().credentialFingerprint();
-  if (
-    !currentEnrollment
-    || !currentFingerprint
-    || currentEnrollment.credentialFingerprint !== currentFingerprint
-    || currentEnrollment.credentialFingerprint !== enrollment.credentialFingerprint
-    || currentEnrollment.sealedVerifier !== enrollment.sealedVerifier
-  ) {
-    throw new Error("Touch ID enrollment changed before unlock completed.");
-  }
-  verifyTouchIdEnrollment(currentEnrollment);
+  requireUnchangedTouchIdEnrollment(enrollment);
+  await verifyTouchIdEnrollment(enrollment);
   const result = getClientAccessController().unlockWithTouchId();
   bindClientWindowAccessToken(event, result.token);
   return result;
@@ -3629,7 +3667,7 @@ ipcMain.handle("octopus:login-item-settings", async (_event, token, request) => 
   const supported = app.isPackaged;
   if (request && Object.prototype.hasOwnProperty.call(request, "enabled")) {
     if (!supported) throw new Error("Open at login is available only in a packaged Octopus application.");
-    app.setLoginItemSettings({ openAtLogin: request.enabled === true, openAsHidden: false });
+    app.setLoginItemSettings({ openAtLogin: request.enabled === true });
   }
   const settings = app.getLoginItemSettings();
   return { supported, enabled: supported && settings.openAtLogin === true };
@@ -3665,6 +3703,16 @@ ipcMain.handle("octopus:camera-access-status", async (_event, token) => {
   if (process.platform !== "darwin") return { granted: true, status: "browser-managed" };
   const status = systemPreferences.getMediaAccessStatus("camera");
   return { granted: status === "granted", status };
+});
+
+ipcMain.handle("octopus:gesture-trace-save", async (_event, token, text) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  return saveGestureTrace({ root: clientProfileRoot, text });
+});
+
+ipcMain.handle("octopus:gesture-trace-reveal", async (_event, token, target) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  return revealGestureTrace({ root: clientProfileRoot, target, shell });
 });
 
 ipcMain.handle("octopus:request-camera-access", async (_event, token) => {
@@ -3804,6 +3852,54 @@ ipcMain.handle("octopus:projection-read", async (_event, token, request) => {
   return result;
 });
 
+const SETUP_FILE_MAX_BYTES = 256 * 1024;
+
+ipcMain.handle("octopus:setup-file-save", async (event, token, request) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  if (!request || typeof request.text !== "string" || typeof request.suggestedName !== "string") {
+    throw new Error("Exporting a setup needs the file text and a name.");
+  }
+  if (Buffer.byteLength(request.text, "utf8") > SETUP_FILE_MAX_BYTES) throw new Error("This setup is larger than Octopus writes.");
+  const name = path.basename(request.suggestedName).replace(/[^A-Za-z0-9._-]+/g, "-") || "octopus.octopus-setup.json";
+  const selected = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender) ?? undefined, {
+    title: "Export setup",
+    defaultPath: path.join(app.getPath("documents"), name),
+    filters: [{ name: "Octopus setup", extensions: ["json"] }],
+  });
+  if (selected.canceled || !selected.filePath) return { saved: false };
+  const file = await fs.promises.open(
+    selected.filePath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
+    0o644,
+  );
+  try {
+    await file.writeFile(request.text, "utf8");
+  } finally {
+    await file.close();
+  }
+  return { saved: true, name: path.basename(selected.filePath) };
+});
+
+ipcMain.handle("octopus:setup-file-open", async (event, token) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  const selected = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender) ?? undefined, {
+    title: "Import setup",
+    properties: ["openFile"],
+    filters: [{ name: "Octopus setup", extensions: ["json"] }],
+  });
+  if (selected.canceled || !selected.filePaths.length) return { opened: false };
+  const filePath = selected.filePaths[0];
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("Choose a setup file, not a folder.");
+    if (stat.size > SETUP_FILE_MAX_BYTES) throw new Error("This setup file is larger than Octopus accepts.");
+    return { opened: true, name: path.basename(filePath), text: await handle.readFile("utf8") };
+  } finally {
+    await handle.close();
+  }
+});
+
 ipcMain.handle("octopus:workspace-setup-state", async (_event, token) => {
   getClientAccessController().requireSession(token, ["live"]);
   const state = await inspectWorkspaceSetupState({
@@ -3890,6 +3986,8 @@ ipcMain.handle("octopus:scheduled-interface-mutate", async (_event, token, reque
 });
 
 ipcMain.handle("octopus:application-private-configuration-mutate", async (_event, token, request) => {
+  const { profile } = getClientAccessController().requireSession(token);
+  if (profile === "lab") return getProjectionStore("lab").mutateApplicationPrivateConfiguration(request);
   getClientAccessController().requireSession(token, ["live"]);
   await initializeRuntimeHost();
   const octopusHome = resolveOctopusHome();
@@ -3901,6 +3999,82 @@ ipcMain.handle("octopus:application-private-configuration-mutate", async (_event
   getProjectionStore("live").invalidate(false);
   return outcome;
 });
+
+function getApplicationConnectionHost() {
+  applicationConnectionHost ??= createApplicationConnectionHost({
+    resolveTargets: createRegistryConnectionTargets({
+      registryRoot: () => path.join(resolveOctopusHome(), "registry"),
+      octopusHome: resolveOctopusHome,
+      launchEnvironment: () => ({ ...process.env, ...resolveRuntimeLaunchEnv() }),
+      openExternal: (url) => shell.openExternal(url),
+    }),
+    scope: resolveOctopusHome,
+  });
+  return applicationConnectionHost;
+}
+
+async function applicationConnectionOperation(token, operation, { writes = false } = {}) {
+  let live = false;
+  try {
+    const { profile } = getClientAccessController().requireSession(token);
+    if (profile !== "lab") {
+      getClientAccessController().requireSession(token, ["live"]);
+      await initializeRuntimeHost();
+      live = true;
+    }
+    return { contract: "octopus.application-connection.v1", ok: true, value: await operation(live ? null : getProjectionStore("lab")) };
+  } catch (error) {
+    return {
+      contract: "octopus.application-connection.v1",
+      ok: false,
+      error: {
+        message: error instanceof Error && error.message ? error.message : "Octopus couldn't finish the connection.",
+        code: error?.code === "cancelled" ? "cancelled" : "failed",
+      },
+    };
+  } finally {
+    if (writes && live) getProjectionStore("live").invalidate(false);
+  }
+}
+
+ipcMain.handle("octopus:application-connection-probe", (_event, token, request) => applicationConnectionOperation(token, (lab) => (
+  lab ? lab.applicationConnectionProbe(request) : getApplicationConnectionHost().probe(request)
+)));
+
+ipcMain.handle("octopus:application-connection-connect", (event, token, request) => applicationConnectionOperation(token, async (lab) => {
+  const sender = event.sender;
+  const cancel = () => {
+    const operationId = { operationId: request?.operationId };
+    if (lab) lab.applicationConnectionCancel(operationId);
+    else getApplicationConnectionHost().cancel(operationId);
+  };
+  const navigation = (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) cancel();
+  };
+  sender.once("destroyed", cancel);
+  sender.on("render-process-gone", cancel);
+  sender.on("did-start-navigation", navigation);
+  const options = {
+    onProgress: (progress) => {
+      if (!sender.isDestroyed()) sender.send("octopus:application-connection-progress", progress);
+    },
+  };
+  try {
+    return await (lab ? lab.applicationConnectionConnect(request, options) : getApplicationConnectionHost().connect(request, options));
+  } finally {
+    sender.removeListener("destroyed", cancel);
+    sender.removeListener("render-process-gone", cancel);
+    sender.removeListener("did-start-navigation", navigation);
+  }
+}, { writes: true }));
+
+ipcMain.handle("octopus:application-connection-cancel", (_event, token, request) => applicationConnectionOperation(token, (lab) => (
+  lab ? lab.applicationConnectionCancel(request) : getApplicationConnectionHost().cancel(request)
+)));
+
+ipcMain.handle("octopus:application-connection-disconnect", (_event, token, request) => applicationConnectionOperation(token, (lab) => (
+  lab ? lab.applicationConnectionDisconnect(request) : getApplicationConnectionHost().disconnect(request)
+), { writes: true }));
 
 ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
   getClientAccessController().requireSession(token, ["live"]);
@@ -4025,6 +4199,14 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
   }
   store.invalidate();
   return outcome;
+});
+
+let clientBrowserManager;
+ipcMain.handle("octopus:client-browser", (event, token, request) => {
+  if (event.senderFrame !== event.sender.mainFrame) throw new Error("Browser requires the owning client frame.");
+  clientBrowserManager ??= require("./clientBrowser.cjs").createClientBrowser({ electron: require("electron"),
+    getHome: resolveOctopusHome, requireAccess: value => getClientAccessController().requireSession(value, ["live"]) });
+  return clientBrowserManager.handle(token, event.sender, request);
 });
 
 ipcMain.handle("octopus:cdp-viewer-open", async (event, token, request) => {
@@ -4453,6 +4635,12 @@ ipcMain.handle("octopus:runtime-status", async (_event, token, request) => {
   };
 });
 
+function retainChatAttachmentsAfterStorageFailure(token, attachments, error) {
+  if (error?.code !== "ENOSPC" && error?.code !== "EDQUOT" && error?.code !== "home_storage_blocked") return;
+  for (const attachment of attachments) getClientAttachmentStagingStore().restore(token, attachment);
+  attachments.length = 0;
+}
+
 ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
   let profile = "unknown";
   let stagedAttachments = [];
@@ -4463,6 +4651,7 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
       submissionStarted = true;
       return operatorChatSubmitSuccess(await getProjectionStore("lab").submitChatTurn(request));
     }
+    await ensureRuntimeHost().assertStorageWritable();
     await prepareLiveProjectionRead();
     const octopusHome = resolveOctopusHome();
     const { submitOperatorTurn } = await loadOperatorChatClient();
@@ -4539,6 +4728,8 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
     );
     return operatorChatSubmitSuccess(result);
   } catch (error) {
+    if (profile === "live") runtimeHost?.recordStorageFailure(error);
+    retainChatAttachmentsAfterStorageFailure(token, stagedAttachments, error);
     await appendClientLog("error", "operator_chat.submit_failed", {
       profile,
       runId: stringValue(request?.runId),
@@ -4595,13 +4786,16 @@ ipcMain.handle("octopus:submit-operator-turn-control", async (_event, token, req
 });
 
 ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
-  const { profile } = getClientAccessController().requireSession(token);
-  if (profile === "lab") return getProjectionStore("lab").submitChatSteer(request);
-  await prepareLiveProjectionRead();
-  const octopusHome = resolveOctopusHome();
-  const { submitOperatorTurn } = await loadOperatorChatClient();
+  let profile = "unknown";
+  let submissionStarted = false;
   const stagedAttachments = [];
   try {
+    ({ profile } = getClientAccessController().requireSession(token));
+    if (profile === "lab") return operatorChatSubmitSuccess(await getProjectionStore("lab").submitChatSteer(request));
+    await ensureRuntimeHost().assertStorageWritable();
+    await prepareLiveProjectionRead();
+    const octopusHome = resolveOctopusHome();
+    const { submitOperatorTurn } = await loadOperatorChatClient();
     const requestedPayloads = request?.payloadArtifactBindings === undefined
       ? undefined : payloadArtifactBindings(request.payloadArtifactBindings);
     const revalidatePayloadSource = async () => {
@@ -4613,6 +4807,7 @@ ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
       stagedAttachments.push(await getClientAttachmentStagingStore().consume(token, input?.stage));
     }
     await revalidatePayloadSource();
+    submissionStarted = true;
     const result = await submitOperatorTurn({
       clientArtifactsRoot: (interfaceId) => path.join(octopusHome, "interface-hand-in", interfaceId, "client"),
       octopusHome: () => octopusHome,
@@ -4654,7 +4849,7 @@ ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
       text: request?.text,
       attachments: stagedAttachments,
     });
-    return {
+    return operatorChatSubmitSuccess({
       interfaceId: result.chatInterfaceId,
       runId: result.runId,
       label: result.label,
@@ -4663,7 +4858,12 @@ ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
       contentHash: result.contentHash,
       messageRecovered: result.messageRecovered,
       verdict: result.messageVerdict,
-    };
+    });
+  } catch (error) {
+    if (profile === "live") runtimeHost?.recordStorageFailure(error);
+    retainChatAttachmentsAfterStorageFailure(token, stagedAttachments, error);
+    if (error?.code !== "home_storage_blocked" && error?.code !== "ENOSPC" && error?.code !== "EDQUOT") throw error;
+    return operatorChatSubmitFailure(error, { submissionStarted });
   } finally {
     await Promise.allSettled(stagedAttachments.map((attachment) => getClientAttachmentStagingStore().discard(attachment)));
   }
@@ -4682,20 +4882,115 @@ ipcMain.handle("octopus:update-chat-pins", async (_event, token, request) => {
 });
 
 ipcMain.handle("octopus:transcribe-dictation", async (_event, token, request) => {
-  getClientAccessController().requireSession(token, ["live"]);
-  return transcribeClientDictation({
-    bytes: bufferFromIpcBytes(request?.bytes),
-    durationMs: request?.durationMs,
-    mediaType: request?.mediaType,
-    provider: request?.provider,
-    sampleRateHz: request?.sampleRateHz,
-    timeoutMs: request?.timeoutMs,
-  }, {
-    clientVersion: app.getVersion(),
-    cwd: app.getPath("home"),
-    fetch: electronNet.fetch,
-  });
+  const attemptId = request?.attemptId;
+  const key = `${token}:${attemptId}`;
+  let controller;
+  try {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (typeof attemptId !== "string" || !/^[a-f0-9-]{36}$/.test(attemptId) || clientDictationRequests.has(key)) {
+      throw new Error("Invalid transcription attempt.");
+    }
+    controller = new AbortController();
+    clientDictationRequests.set(key, controller);
+    const value = await transcribeClientDictation({
+      bytes: bufferFromIpcBytes(request?.bytes),
+      durationMs: request?.durationMs,
+      mediaType: request?.mediaType,
+      provider: request?.provider,
+      sampleRateHz: request?.sampleRateHz,
+      timeoutMs: request?.timeoutMs,
+    }, {
+      clientVersion: app.getVersion(),
+      cwd: app.getPath("home"),
+      fetch: electronNet.fetch,
+      signal: controller.signal,
+    });
+    return { ok: true, value };
+  } catch (error) {
+    return { ok: false, error: dictationFailure(error) };
+  } finally {
+    if (controller) clientDictationRequests.delete(key);
+  }
 });
+
+ipcMain.handle("octopus:dictation-stream-start", async (event, token, request) => {
+  const key = `${token}:${request?.attemptId}`;
+  let stream;
+  const release = () => {
+    stream?.close();
+    if (clientDictationStreams.get(key)?.stream === stream) clientDictationStreams.delete(key);
+    event.sender.removeListener("destroyed", release);
+  };
+  try {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (!/^[a-f0-9-]{36}$/.test(request?.attemptId ?? "") || [...clientDictationStreams.values()].some((entry) => entry.owner === event.sender.id)) throw new Error("Dictation is already active.");
+    stream = createClientDictationStream(request, {
+      clientVersion: app.getVersion(), cwd: app.getPath("home"),
+      onEvent(payload) {
+        try {
+          getClientAccessController().requireSession(token, ["live"]);
+          if (!event.sender.isDestroyed()) event.sender.send("octopus:dictation-stream-event", { attemptId: request.attemptId, ...payload });
+        } catch { release(); }
+      },
+    });
+    clientDictationStreams.set(key, { stream, owner: event.sender.id, release });
+    event.sender.once("destroyed", release);
+    await stream.ready;
+    return { ok: true, value: null };
+  } catch (error) {
+    release();
+    return { ok: false, error: dictationFailure(error) };
+  }
+});
+
+ipcMain.on("octopus:dictation-stream-audio", (event, token, attemptId, bytes) => {
+  const entry = clientDictationStreams.get(`${token}:${attemptId}`);
+  if (!entry || entry.owner !== event.sender.id) return;
+  try {
+    getClientAccessController().requireSession(token, ["live"]);
+    entry.stream.append(bufferFromIpcBytes(bytes));
+  } catch { entry.release(); }
+});
+
+ipcMain.handle("octopus:dictation-stream-finish", async (event, token, attemptId) => {
+  const entry = clientDictationStreams.get(`${token}:${attemptId}`);
+  try {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (!entry || entry.owner !== event.sender.id) throw new Error("Dictation is no longer active.");
+    return { ok: true, value: await entry.stream.finish() };
+  } catch (error) {
+    return { ok: false, error: dictationFailure(error) };
+  } finally { if (entry?.owner === event.sender.id) entry.release(); }
+});
+
+ipcMain.handle("octopus:cancel-dictation", (event, token, attemptId) => {
+  getClientAccessController().requireSession(token, ["live", "lab"]);
+  clientDictationRequests.get(`${token}:${attemptId}`)?.abort();
+  const stream = clientDictationStreams.get(`${token}:${attemptId}`);
+  if (stream?.owner === event.sender.id) stream.release();
+});
+
+for (const [channel, operation] of [
+  ["octopus:dictation-recordings-read", (profile) => clientDictationRecordings.state(profile)],
+  ["octopus:dictation-recordings-configure", (profile, enabled) => clientDictationRecordings.configure(profile, enabled)],
+  ["octopus:dictation-recording-save", (profile, request) => clientDictationRecordings.save(profile, { ...request, bytes: bufferFromIpcBytes(request?.bytes) })],
+  ["octopus:dictation-recording-read", (profile, id) => clientDictationRecordings.read(profile, id)],
+  ["octopus:dictation-recording-update", (profile, request) => clientDictationRecordings.update(profile, request)],
+  ["octopus:dictation-recording-delete", async (profile, id) => {
+    if (id === null) await clientDictationRecordings.clear(profile);
+    else await clientDictationRecordings.remove(profile, id);
+    return null;
+  }],
+]) {
+  ipcMain.handle(channel, async (_event, token, request) => {
+    try {
+      const { profile } = getClientAccessController().requireSession(token, ["live", "lab"]);
+      return { ok: true, value: await operation(profile, request) };
+    } catch {
+      return { ok: false, error: { code: "recording-storage", message: "Couldn't access dictation recordings. Try again and check available disk space." } };
+    }
+  });
+}
 
 ipcMain.handle("octopus:submit-interface-artifact", async (_event, token, request) => {
   const { profile } = getClientAccessController().requireSession(token, ["live", "lab"]);
@@ -4967,6 +5262,7 @@ function resolveRuntimeLaunchEnv() {
     OCTOPUS_HOME: resolveOctopusHome(),
     OCTOPUS_SOURCE_REGISTRY: resolveSourceRegistry(),
     OCTOPUS_MACHINE_CODEX_AUTH_FILE: path.join(resolveOperatorCodexHome(), "auth.json"),
+    OCTOPUS_MACHINE_CODEX_AUTH_LOCK_FILE: path.join(resolveOperatorCodexHome(), "auth.lock"),
   };
   if (allowUnsandboxedProcesses()) env.OCTOPUS_ALLOW_UNSANDBOXED_PROCESSES = "1";
   if (stringValue(process.env.OCTOPUS_RUNTIME_BIN)) return env;

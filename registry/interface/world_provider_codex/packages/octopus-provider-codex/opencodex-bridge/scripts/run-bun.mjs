@@ -18,15 +18,15 @@ if (!["darwin", "freebsd", "linux", "win32"].includes(platform)) {
 if (!["aarch64", "x64"].includes(architecture)) {
   throw new Error(`unsupported Bun architecture '${process.arch}'`);
 }
-const packagePlatform = platform === "win32" ? "windows" : platform;
-const executable = path.join(
-  root,
-  "node_modules",
-  "@oven",
-  `bun-${packagePlatform}-${architecture}`,
-  "bin",
-  platform === "win32" ? "bun.exe" : "bun",
-);
+const installedPackage = path.join(root, "node_modules", "bun");
+const installedManifest = JSON.parse(fs.readFileSync(path.join(installedPackage, "package.json"), "utf8"));
+if (installedManifest.name !== "bun" || installedManifest.version !== expectedVersion) {
+  throw new Error(`installed Bun package must match pinned version ${expectedVersion}`);
+}
+const executable = path.resolve(installedPackage, installedManifest.bin.bun);
+if (!executable.startsWith(installedPackage + path.sep)) {
+  throw new Error("installed Bun executable must belong to its pinned package");
+}
 const stat = fs.statSync(executable);
 if (!stat.isFile() || (platform !== "win32" && (stat.mode & 0o111) === 0)) {
   throw new Error(`pinned Bun executable is not runnable: ${executable}`);

@@ -32,8 +32,13 @@ outcome, and binding snapshot are typed provenance metadata *on* the edge,
 never alternate endpoint kinds.
 
 In durable invocation rows, `invocation_metadata.grant_content` references the
-stored grant projection. Decoding resolves that content into `grant`; formation
-still recomputes authority at the next arrival. See the
+stored grant projection, and non-empty binding reference lists use
+`artifact_binding_refs_content`. Both are canonical BLAKE3 addresses in
+`ledger/metadata/`, so repeated content is stored once. Decoding verifies and
+restores the typed fields; providing both inline and addressed forms of a field
+is invalid. Metadata content belongs to the durable truth and cannot be deleted
+as an index cache. Readers that reuse a checked prefix revalidate the metadata
+files they used. Formation still recomputes authority at the next arrival. See the
 [artifact and metadata example](ARTIFACTS.md#payload-manifest-and-delivery-metadata).
 
 | Kind | Meaning |
@@ -130,36 +135,60 @@ What keeps it a cache:
 - **Never consulted for a kernel decision**, and never written except as a
   projection of rows already appended.
 
+Provider recovery validates movement projections before selecting complete grants.
+Writer history uses the SQLite edge index to locate its declared call and result
+transfers, then verifies their bytes, grants and ordered preimages against the
+ledger. Selection includes transfers missing runtime metadata so they still fail
+validation. The indexed boundary is checked against the log; an unavailable or
+unusable index reads the authoritative prefix, and later rows are read from that
+boundary. Complete grants are materialized only for the writer's own call and
+result edges. The provider handoff and its authoring-result consumer share
+one writer-history cache for the same interface and ledger. Result consumption
+validates that identity and checks the appended delta against the retained cursor.
+Retained delivery uses a read-only projection for its emitting interface. Its reader
+checks every ledger row's JSON and sequence, then decodes only that source's movements.
+Selected required arrivals keep complete grants and exact mark and replacement proof;
+other interfaces' grants are outside this projection. The projection accepts only its
+source and increasing original sequence numbers, and exposes retained-delivery queries,
+not kernel admission decisions. The kernel's complete arrival index is unchanged.
+Other recovery readers validate their selected referenced grant content without copying
+unused authority into every historical movement.
+
 ## Caches over the JSON on disk
 
 The ledger is one truth surface. The descriptor and run JSON on disk is the
 other, and the same discipline applies: the arrival path answers from an
 in-memory projection refreshed only where a file changed.
 
-**The run-records index.** A reverse projection from interface folder to the
-active checkpoints, in any run, that pin it. Before each resolution it stats
-each run file and re-parses only those whose size or modification time changed.
-A malformed run record becomes its own inert slot and contributes no target;
-one broken run never fails another interface's arrival. This index only
-accelerates discovery - the actual admission still reloads the target run
-record from disk and re-forms its grant.
+**The run-record index.** A reverse map from interface folder to the active
+checkpoints that pin it. Before resolving targets, the index compares each file's
+identity, size, modification and change times. Settled, unchanged files reuse the
+parsed record and routes. Only changed or recently observed files are reread;
+equal bytes avoid reparsing. Vanished files are dropped. Malformed or unreadable
+records contribute no targets, while healthy siblings continue. Admission still
+reads the chosen run and forms its grant from current data.
 
 When a run file changes, already-admitted outputs for its newly visible
 bindings are replayed through the ordinary per-edge gates. A repaired recipient
 catches up while the runtime stays up, with no resend, no poller, and no
 delivery queue.
 
-**The registry snapshot guard.** The in-memory registry is reloaded only when
-the descriptor tree actually changed: a metadata-only walk folds a fingerprint
-over the descriptor kinds, and the heavy parse and validation run only when it
-moves. Before/after observations must agree. Unreadable or stably malformed
-descriptors fail closed; concurrent writes return `RegistryUnstable`. Retained
-delivery preserves that typed refusal even before its fan-out scope exists.
-The sender waits within its declared timeout and cancellation boundary, keeping
-the same artifact and delivery identity. It does not repeat the producing effect
-or replace a retained scope. Policy refusals remain terminal.
+**The registry snapshot guard.** A walk folds paths, metadata and cached content
+digests into a fingerprint. Changed files and files with recent or unusable
+timestamps are reread; settled, unchanged files reuse their digests. Cache age
+alone cannot change the fingerprint. Parsing and validation run when the
+fingerprint changes. Before/after
+observations must agree. Unreadable or stably malformed descriptors fail closed;
+concurrent writes return `RegistryUnstable`.
+Retained delivery preserves that typed refusal, the artifact and delivery identity.
+It does not repeat the producing effect. Policy refusals remain terminal.
 
-Both are caches that rebuild from the log.
+The one-second freshness window covers equal-size writes within a coarse
+filesystem clock tick. An observation must already be settled before reading:
+a cached recent observation cannot become reusable just because time passes.
+Missing or future timestamps cannot establish freshness. Platforms without a
+change timestamp keep the read path. Context-artifact materialization follows
+the same rule before reusing its canonical blob.
 
 ## Restart
 

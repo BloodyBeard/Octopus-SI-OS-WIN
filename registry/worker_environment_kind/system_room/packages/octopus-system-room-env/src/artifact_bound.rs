@@ -237,24 +237,57 @@ async fn search(
         .collect();
     let ranked = relevance::rank(&query, &corpus);
 
-    let limit = max_results.unwrap_or(usize::MAX);
-    let matches: Vec<serde_json::Value> = ranked
-        .into_iter()
-        .take(limit)
-        .map(|scored| {
-            serde_json::json!({
-                "id": scored.entry.artifact.id.as_str(),
-                "score": scored.score,
-                "line": scored.snippet,
-            })
-        })
-        .collect();
-
-    Ok(ToolHandlerResult::new(serde_json::json!({
+    let total_matches = ranked.len();
+    let mut body = serde_json::json!({
         "result": "artifacts_searched",
         "query": query,
-        "matches": matches,
-    })))
+        "matches": [],
+        "total_matches": total_matches,
+        "omitted_matches": total_matches,
+        "truncated": false,
+        "max_result_bytes": 65536,
+        "max_snippet_bytes": relevance::MAX_SNIPPET_BYTES,
+    });
+    if serde_json::to_vec(&body).map_err(|e| execution_encoding(tool_id, e))?.len() > 65536 {
+        return Err(ToolHandlerError::InvalidArguments {
+            tool_id: tool_id.clone(),
+            reason: "query exceeds the artifact search response byte bound".to_string(),
+        });
+    }
+    for scored in ranked.into_iter().take(max_results.unwrap_or(20)) {
+        let snippet = &scored.snippet;
+        let value = serde_json::json!({
+            "id": scored.entry.artifact.id.as_str(),
+            "score": scored.score,
+            "line": snippet.text,
+            "offset_bytes": snippet.offset_bytes,
+            "bytes_returned": snippet.text.len(),
+            "line_offset_bytes": snippet.line_offset_bytes,
+            "line_bytes": snippet.line_bytes,
+            "truncated": snippet.text.len() < snippet.line_bytes,
+            "next_offset_bytes": (snippet.offset_bytes + snippet.text.len()
+                < snippet.line_offset_bytes + snippet.line_bytes)
+                .then_some(snippet.offset_bytes + snippet.text.len()),
+        });
+        body["matches"].as_array_mut().unwrap().push(value);
+        if serde_json::to_vec(&body).map_err(|e| execution_encoding(tool_id, e))?.len() > 65536 {
+            body["matches"].as_array_mut().unwrap().pop();
+            break;
+        }
+    }
+    let matches = body["matches"].as_array().unwrap();
+    let omitted = total_matches - matches.len();
+    let truncated = omitted > 0 || matches.iter().any(|entry| entry["truncated"] == true);
+    body["omitted_matches"] = omitted.into();
+    body["truncated"] = truncated.into();
+    Ok(ToolHandlerResult::new(body))
+}
+
+fn execution_encoding(tool_id: &str, error: serde_json::Error) -> ToolHandlerError {
+    ToolHandlerError::Execution {
+        tool_id: tool_id.to_string(),
+        reason: format!("artifact search result is not encodable JSON: {error}"),
+    }
 }
 
 mod relevance {
@@ -262,11 +295,19 @@ mod relevance {
 
     const K1: f64 = 1.5;
     const B: f64 = 0.75;
+    pub(super) const MAX_SNIPPET_BYTES: usize = 2048;
+
+    pub(super) struct Snippet<'a> {
+        pub text: &'a str,
+        pub offset_bytes: usize,
+        pub line_offset_bytes: usize,
+        pub line_bytes: usize,
+    }
 
     pub(super) struct Scored<'a> {
         pub entry: &'a BoundArtifact,
         pub score: f64,
-        pub snippet: String,
+        pub snippet: Snippet<'a>,
     }
 
     struct Doc<'a> {
@@ -363,8 +404,8 @@ mod relevance {
             .collect()
     }
 
-    fn best_snippet(text: &str, query_set: &[&String]) -> String {
-        text.lines()
+    fn best_snippet<'a>(text: &'a str, query_set: &[&String]) -> Snippet<'a> {
+        let line = text.lines()
             .map(|line| {
                 let line_terms = tokenize(line);
                 let hits = query_set
@@ -374,8 +415,27 @@ mod relevance {
                 (hits, line)
             })
             .max_by(|a, b| a.0.cmp(&b.0))
-            .map(|(_, line)| line.trim().to_string())
-            .unwrap_or_default()
+            .map(|(_, line)| line.trim())
+            .unwrap_or("");
+        let line_offset_bytes = if line.is_empty() { 0 } else {
+            line.as_ptr() as usize - text.as_ptr() as usize
+        };
+        let hit = line.split(|c: char| !c.is_alphanumeric())
+            .find(|token| query_set.iter().any(|term| token.to_lowercase() == term.as_str()))
+            .map(|token| token.as_ptr() as usize - line.as_ptr() as usize)
+            .unwrap_or(0);
+        let mut start = if line.len() > MAX_SNIPPET_BYTES {
+            hit.saturating_sub(MAX_SNIPPET_BYTES / 4)
+        } else { 0 };
+        while !line.is_char_boundary(start) { start += 1; }
+        let mut end = (start + MAX_SNIPPET_BYTES).min(line.len());
+        while !line.is_char_boundary(end) { end -= 1; }
+        Snippet {
+            text: &line[start..end],
+            offset_bytes: line_offset_bytes + start,
+            line_offset_bytes,
+            line_bytes: line.len(),
+        }
     }
 }
 
@@ -872,6 +932,49 @@ mod tests {
             decoy_top.starts_with("memory.knowledge_graph:"),
             "the richer knowledge-graph artifact still wins on the shared phrase, got {decoy_top}"
         );
+    }
+
+    #[tokio::test]
+    async fn search_bounds_large_utf8_lines_and_preserves_read_offsets() {
+        let surface = Arc::new(RunBoundArtifacts::new());
+        let ctx = ctx_with(surface.clone());
+        for index in 0..40 {
+            let text = format!("unrelated\r\n  {} NeEdLe {} {index}\r\n",
+                "🙂 ".repeat(10000), "\u{0001}界".repeat(2000));
+            surface.append("large", text.as_bytes()).await.unwrap();
+        }
+        for arguments in [
+            serde_json::json!({"query":"needle"}),
+            serde_json::json!({"query":"needle", "max_results":1000}),
+            serde_json::json!({"query":"needle", "max_results":1}),
+        ] {
+            let result = run_tool(&ctx, "artifact.search", arguments.clone()).await.unwrap();
+            assert!(serde_json::to_vec(&result).unwrap().len() <= 65536);
+            let matches = result["matches"].as_array().unwrap();
+            assert!(!matches.is_empty());
+            assert!(matches.len() <= arguments["max_results"].as_u64().unwrap_or(20) as usize);
+            assert_eq!(result["total_matches"], 40);
+            assert_eq!(result["omitted_matches"], 40 - matches.len());
+            assert_eq!(result["truncated"], true);
+            for hit in matches {
+                let excerpt = hit["line"].as_str().unwrap();
+                assert!(excerpt.contains("NeEdLe") && excerpt.len() <= 2048);
+                assert_eq!(hit["truncated"], true);
+                assert!(hit["offset_bytes"].as_u64().unwrap() > 11);
+                let read = run_tool(&ctx, "artifact.read", serde_json::json!({
+                    "id":hit["id"], "offset_bytes":hit["offset_bytes"],
+                    "max_bytes":hit["bytes_returned"],
+                })).await.unwrap();
+                assert_eq!(read["text"], hit["line"]);
+                assert_eq!(read["next_offset_bytes"], hit["next_offset_bytes"]);
+            }
+        }
+        let filtered = run_tool(&ctx, "artifact.search",
+            serde_json::json!({"query":"needle", "label":"other"})).await.unwrap();
+        assert_eq!(filtered["total_matches"], 0);
+        assert_eq!(filtered["truncated"], false);
+        assert!(run_tool(&ctx, "artifact.search",
+            serde_json::json!({"query":"x".repeat(65536)})).await.is_err());
     }
 
     #[tokio::test]

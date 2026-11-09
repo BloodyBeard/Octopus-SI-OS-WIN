@@ -17,6 +17,7 @@ type Props = {
   motion?: "tilt" | "pan";
   onAssembled?: () => void;
   replayKey?: number;
+  skipReveal?: boolean;
   className?: string;
 };
 
@@ -38,7 +39,7 @@ const REVEAL_FADE_MS = 1350;
 const MAX_RENDER_PIXEL_RATIO = 1.25;
 const FRAME_INTERVAL_MS = 1000 / 30;
 
-export function OctopusDotCloud({ src, framing = "bottom", motion = "tilt", onAssembled, replayKey = 0, className = "" }: Props) {
+export function OctopusDotCloud({ src, framing = "bottom", motion = "tilt", onAssembled, replayKey = 0, skipReveal = false, className = "" }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mouseRef = useRef({ x: 0, y: 0, active: false });
   const assembledRef = useRef(false);
@@ -166,7 +167,7 @@ export function OctopusDotCloud({ src, framing = "bottom", motion = "tilt", onAs
       const cyN = 0.5;
       const depthScale = 0.42;
 
-      const revealDone = reduceMotion || elapsed > REVEAL_SWEEP_MS + REVEAL_FADE_MS;
+      const revealDone = skipReveal || reduceMotion || elapsed > REVEAL_SWEEP_MS + REVEAL_FADE_MS;
       if (isPan && revealDone) {
         if (!settledPanCanvas) {
           settledPanCanvas = document.createElement("canvas");
@@ -193,7 +194,7 @@ export function OctopusDotCloud({ src, framing = "bottom", motion = "tilt", onAs
       } else {
         for (let i = 0; i < dots.length; i += 1) {
           const d = dots[i];
-          const revealA = reduceMotion ? 1 : revealAlpha(i, elapsed, REVEAL_SWEEP_MS, REVEAL_FADE_MS);
+          const revealA = skipReveal || reduceMotion ? 1 : revealAlpha(i, elapsed, REVEAL_SWEEP_MS, REVEAL_FADE_MS);
           if (revealA <= 0) continue;
           const nx = d.x - cxN;
           const ny = d.y - cyN;
@@ -271,7 +272,7 @@ export function OctopusDotCloud({ src, framing = "bottom", motion = "tilt", onAs
         dots = result.dots;
         srcAspect = result.aspect;
         brightIdx = collectBrightDots(dots);
-        if (reduceMotion) {
+        if (skipReveal || reduceMotion) {
           assembledRef.current = true;
           onAssembledRef.current?.();
         }
@@ -363,7 +364,7 @@ export function OctopusDotCloud({ src, framing = "bottom", motion = "tilt", onAs
       }
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [src, framing, replayKey, motion]);
+  }, [src, framing, replayKey, motion, skipReveal]);
 
   return <canvas ref={canvasRef} className={`octopus-cloud ${className}`.trim()} aria-hidden="true" />;
 }

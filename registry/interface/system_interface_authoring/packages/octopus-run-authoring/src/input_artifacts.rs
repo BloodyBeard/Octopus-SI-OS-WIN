@@ -14,11 +14,11 @@ impl InputArtifactBinding {
             return Err("input artifact binding is not an exact manifest identity".into());
         }
         if let Some(bound) = context.iter().find(|bound| bound.id == self.artifact.id) {
-            if bound.access != octopus_runtime::ArtifactAccess::read_only() {
+            if bound.access != octopus_policy::ArtifactAccess::read_only() {
                 return Err("input artifact binding cannot replace existing object rights".into());
             }
         } else {
-            context.push(ArtifactBinding { id: self.artifact.id.clone(), access: octopus_runtime::ArtifactAccess::read_only() });
+            context.push(ArtifactBinding { id: self.artifact.id.clone(), access: octopus_policy::ArtifactAccess::read_only() });
         }
         Ok(context)
     }
@@ -151,9 +151,6 @@ pub(super) fn owner_sources(record: &RunRecord, provider: &InterfaceId) -> Resul
 
 pub fn bound_sources(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId, admitted: &[ArtifactRef]) -> Result<Vec<ArtifactRef>, String> {
     let mut sources = Vec::new();
-    if let Some(source) = result_inputs::bound_source(record, provider, checkpoint)? {
-        sources.push(source);
-    }
     for source in owner_sources(record, provider)? {
         if !sources.contains(&source) { sources.push(source); }
     }
@@ -162,10 +159,6 @@ pub fn bound_sources(record: &RunRecord, provider: &InterfaceId, checkpoint: &Ch
     sources.retain(|source| checkpoint.artifact_bindings.iter().any(|binding| binding.id == source.id)
         || admitted.iter().any(|reference| reference.id == source.id));
     Ok(sources)
-}
-
-pub fn result_source(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId) -> Result<Option<ArtifactRef>, String> {
-    result_inputs::bound_source(record, provider, checkpoint)
 }
 
 pub fn result_call(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId) -> Result<Option<ArtifactRef>, String> {

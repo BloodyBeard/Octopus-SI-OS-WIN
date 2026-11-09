@@ -168,6 +168,7 @@ impl CodexAppServerInterfaceDriver {
                                     }
                                 }
                                 ThreadItem::UserMessage { .. }
+                                | ThreadItem::FunctionCallOutput { .. }
                                 | ThreadItem::AgentMessage { .. }
                                 | ThreadItem::Reasoning { .. } => {}
                                 item => {
@@ -201,6 +202,7 @@ impl CodexAppServerInterfaceDriver {
                                 compaction_completed = true;
                             }
                             ThreadItem::UserMessage { .. }
+                            | ThreadItem::FunctionCallOutput { .. }
                             | ThreadItem::AgentMessage { .. }
                             | ThreadItem::Reasoning { .. } => {}
                             item => {
@@ -343,7 +345,7 @@ impl CodexAppServerInterfaceDriver {
                         ServerNotification::TurnCompleted(turn)
                             if turn.thread_id == thread_id && turn.turn.id == turn_id =>
                         {
-                            context.sink.set_pending(None);
+                            context.sink.clear_pending();
                             let completion = serialized_client_output(TURN_COMPLETED_LABEL, &turn)?;
                             if turn.turn.status == TurnStatus::Interrupted && terminal_error.is_none() {
                                 context.sink.send_terminal(completion)?;
@@ -409,7 +411,7 @@ impl CodexAppServerInterfaceDriver {
                 }
                 Some(AppServerEvent::Disconnected { message }) => {
                     if let Some(error) = terminal_error.take() {
-                        context.sink.set_pending(None);
+                        context.sink.clear_pending();
                         context.control.finish();
                         context.sink.send_terminal(error)?;
                         return Ok(());
@@ -425,7 +427,7 @@ impl CodexAppServerInterfaceDriver {
                 }
                 None => {
                     if let Some(error) = terminal_error.take() {
-                        context.sink.set_pending(None);
+                        context.sink.clear_pending();
                         context.control.finish();
                         context.sink.send_terminal(error)?;
                         return Ok(());

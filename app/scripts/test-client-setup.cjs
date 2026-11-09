@@ -18,10 +18,12 @@ async function main() {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-client-setup-")));
   try {
     if (process.argv[2] === "--plan-admission") return await rendererPlanAdmission(path.join(temporary, "renderer"));
+    if (process.argv[2] === "--live-progress") return await readWhileApplying(path.join(temporary, "live-progress"));
     await relaunchSelection(path.join(temporary, "launch"));
     await rendererPlanAdmission(path.join(temporary, "renderer"));
     await coldPresetLoader(path.join(temporary, "cold-preset"));
     await normalLifecycle(path.join(temporary, "normal"));
+    await readWhileApplying(path.join(temporary, "live-progress"));
     await explicitSignInBoundary(path.join(temporary, "sign-in"));
     await checkpointEphemeralOwnerCandidate(path.join(temporary, "owner-candidate"));
     await currentOperationRecovery(path.join(temporary, "current"));
@@ -314,6 +316,45 @@ async function normalLifecycle(root) {
     operationId,
     plan: { ...plan, provider: { interface_id: "world_provider_other", required_state: "account_readable" } },
   }), /another immutable plan/);
+}
+
+async function readWhileApplying(root) {
+  const ownerState = path.join(root, "owners.json");
+  const operationId = "workspace_live_progress_001";
+  let release, entered;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const applying = new Promise(resolve => { entered = resolve; });
+  const ownerSet = owners(ownerState);
+  const apply = ownerSet.extensions.apply;
+  ownerSet.extensions.apply = async (...args) => { entered(); await blocked; return apply(...args); };
+  const options = { root: path.join(root, "setup-state"), owners: ownerSet };
+  const store = createClientSetupStore(options);
+  await store.begin({ operationId, plan: setupPlan(operationId) });
+  const originalProgress = [], reopenedProgress = [];
+  const running = store.resume(operationId, { onProgress: event => originalProgress.push(event) });
+  await applying;
+  const reopened = createClientSetupStore(options);
+  const repeated = reopened.resume(operationId, { onProgress: event => reopenedProgress.push(event) });
+  let timer;
+  try {
+    const reads = await Promise.race([
+      Promise.all([reopened.read(operationId), reopened.readCurrent()]),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Setup status waits for the installation to finish")), 1000); }),
+    ]);
+    for (const state of reads) {
+      assert.equal(state.status, "in_progress");
+      assert.equal(state.operationId, operationId);
+      assert.deepEqual(state.steps.map(step => step.state), ["complete", "pending", "pending", "pending"]);
+    }
+    assert.deepEqual(reopenedProgress, [originalProgress.at(-1)], "a returning window receives the current installation phase");
+  } finally {
+    clearTimeout(timer);
+    release();
+    await Promise.all([running, repeated]);
+  }
+  assert.equal((await reopened.readCurrent()).status, "complete");
+  assert.equal(reopenedProgress.at(-1).phase, "sealed", "the returning window receives completion");
+  assert.deepEqual(await readOwnerState(ownerState), Object.fromEntries(STEPS.map(step => [step, 1])));
 }
 
 async function explicitSignInBoundary(root) {

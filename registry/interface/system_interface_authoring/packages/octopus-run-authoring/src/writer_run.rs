@@ -735,6 +735,9 @@ impl OwnerWriterEvidence {
             .map_err(|e| e.to_string())?;
         let config = owner_config(&before, &attempt.writer)?;
         let progress = history(ctx, &self.0, &config)?;
+        if let Some(refusal) = progress.refused.get(&entry.after_hash()) {
+            return Err(format!("owner ordered file write was refused before any effect: {refusal}"));
+        }
         let result = progress
             .completed
             .get(&ContentHash::of_bytes(entry.content(maximum)?.as_bytes()).to_hex())
@@ -1037,40 +1040,49 @@ impl OrderedArguments {
                         && details["failure_details"]["effect_state"].as_str() == Some("in_flight_outcome_unknown")
                 })
         });
+        let unresolved = indeterminate || definite_refusal(result).is_some();
+        let stopped = writer_stop(result);
         let writer_unadvanced = snapshot == decoded[0].0.as_bytes();
-        if (snapshot != decoded[0].1.as_bytes() && !(indeterminate && writer_unadvanced))
-            || runtime.run != record.id
-            || runtime.ee != record.ee
-            || runtime.worker != record.worker
-            || runtime.interface != writer.owner
-            || runtime.epoch != cp.epoch.0
-            || !record.active_checkpoints.contains(&cp.id)
-            || inbound.interface != writer.door
-            || !cp.outbound_interfaces().eq([&writer.owner])
-            || metadata.checkpoint_binding_policy.as_ref()
+        let mismatches = [
+            (snapshot != decoded[0].1.as_bytes() && !((unresolved || stopped.is_some()) && writer_unadvanced), "run record bytes"),
+            (runtime.run != record.id, "run"),
+            (runtime.ee != record.ee, "execution environment"),
+            (runtime.worker != record.worker, "worker"),
+            (runtime.interface != writer.owner, "owner interface"),
+            (runtime.epoch != cp.epoch.0, "checkpoint epoch"),
+            (!record.active_checkpoints.contains(&cp.id), "active checkpoint"),
+            (inbound.interface != writer.door, "inbound door"),
+            (!cp.outbound_interfaces().eq([&writer.owner]), "checkpoint outbound"),
+            (metadata.checkpoint_binding_policy.as_ref()
                 != Some(&CheckpointBindingPolicySnapshot {
                     inbound,
                     outbound: cp.outbound_interface_bindings.clone(),
-                })
-            || metadata.outbound_interface_bindings != [writer.owner.clone()]
-            || metadata.verification_failure.is_some()
-            || !metadata.required_verified_artifacts.is_empty()
-            || !cp.required_verified_artifacts.is_empty()
-            || !artifact_refs_match_bindings(&metadata.artifact_binding_refs, &cp.artifact_bindings)
-            || !metadata.checkpoint_admission.as_ref().is_some_and(|a| {
+                }), "binding policy"),
+            (metadata.outbound_interface_bindings != [writer.owner.clone()], "invocation outbound"),
+            (metadata.verification_failure.is_some(), "verification failure"),
+            (!metadata.required_verified_artifacts.is_empty() || !cp.required_verified_artifacts.is_empty(), "required verified artifacts"),
+            (!artifact_refs_match_bindings(&metadata.artifact_binding_refs, &cp.artifact_bindings), "artifact bindings"),
+            (!metadata.checkpoint_admission.as_ref().is_some_and(|a| {
                 a.complete
                     && a.artifact_label == writer.result_label
                     && a.required_artifact_labels.is_empty()
-            })
-        {
-            return Err(
-                "ordered result differs from its newly admitted exact writer checkpoint".into(),
-            );
+            }), "checkpoint admission"),
+        ];
+        let differing = mismatches.iter().filter(|(differs, _)| *differs).map(|(_, field)| *field).collect::<Vec<_>>();
+        if !differing.is_empty() {
+            let reported = match result.error.as_ref().filter(|_| !result.ok && !indeterminate) {
+                Some(error) => format!("; {} reported {}: {}", writer.tool, error.code, error.message),
+                None => String::new(),
+            };
+            return Err(format!(
+                "ordered result differs from its newly admitted exact writer checkpoint in: {}{reported}",
+                differing.join(", ")
+            ));
         }
         if result.tool != writer.tool || result.label != writer.result_label {
             return Err("ordered result changed tool or label".into());
         }
-        if indeterminate {
+        if unresolved {
             return Ok(if writer_unadvanced { OrderedTargetEffect::UncertainWriter } else { OrderedTargetEffect::Uncertain });
         }
         let body = if result.ok {
@@ -1116,7 +1128,11 @@ impl OrderedArguments {
             }
         }
         if body.writes[0].outcome != "applied" {
-            return Err("ordered writer Run was not advanced".into());
+            return match (stopped, writer_unadvanced) {
+                (Some(_), true) => Ok(OrderedTargetEffect::UncertainWriter),
+                (Some("uncertain"), false) => Ok(OrderedTargetEffect::Uncertain),
+                _ => Err("ordered writer Run was not advanced".into()),
+            };
         }
         match body.writes[1].outcome.as_str() {
             "applied" if result.ok => Ok(OrderedTargetEffect::Applied),
@@ -1140,6 +1156,29 @@ pub(super) enum OrderedTargetEffect {
     UncertainWriter,
 }
 
+pub(super) fn definite_refusal(result: &ToolResultArtifact) -> Option<String> {
+    let error = result.error.as_ref().filter(|_| !result.ok && result.body.is_none())?;
+    (!matches!(error.code.as_str(), "tool_effect_indeterminate" | "file_write_incomplete"))
+        .then(|| format!("{}: {}", error.code, error.message))
+}
+
+fn writer_stop(result: &ToolResultArtifact) -> Option<&str> {
+    let error = result.error.as_ref().filter(|error| !result.ok && result.body.is_none() && error.code == "file_write_incomplete")?;
+    let writes = error.details.as_ref()?.get("file_write")?.get("writes")?.as_array()?;
+    let [writer, target] = writes.as_slice() else { return None };
+    (target["outcome"].as_str() == Some("not_attempted"))
+        .then(|| writer["outcome"].as_str()).flatten().filter(|outcome| matches!(*outcome, "refused" | "uncertain"))
+}
+
+pub(super) fn target_untouched(result: &ToolResultArtifact, effect: OrderedTargetEffect) -> bool {
+    writer_stop(result).is_some() || (effect == OrderedTargetEffect::UncertainWriter && definite_refusal(result).is_some())
+}
+
+pub(super) fn untouched_refusal(result: &ToolResultArtifact) -> Option<String> {
+    definite_refusal(result).or_else(|| (writer_stop(result) == Some("refused")).then(|| result.error.as_ref()
+        .map(|error| format!("{}: {}", error.code, error.message))).flatten())
+}
+
 #[derive(Clone)]
 struct UnresolvedTarget {
     seq: u64,
@@ -1160,6 +1199,7 @@ pub(super) struct WriterHistory {
     last_applied_target: Option<(u64, Vec<u8>)>,
     unresolved: Option<UnresolvedTarget>,
     voided: BTreeMap<u64, u64>,
+    refused: BTreeMap<String, String>,
     cursor: Option<(u64, u64, ContentHash)>,
 }
 
@@ -1197,6 +1237,7 @@ fn history(
         last_applied_target: None,
         unresolved: None,
         voided: BTreeMap::new(),
+        refused: BTreeMap::new(),
         cursor: None,
     });
     if saved.binding.run != binding.run || saved.binding.initial_record != binding.initial_record || saved.binding.initial_record_format != binding.initial_record_format {
@@ -1242,16 +1283,30 @@ fn history(
     }
     let mut last_start = None;
     let declared = writer(config)?;
+    let mut indexed = reader.indexed_outbound_edges(&[
+        (&declared.source, &declared.door), (&declared.door, &declared.owner),
+    ])?;
     let target_path = ctx
         .root_slot("run_records_root")?
         .canonicalize()
         .map_err(|e| e.to_string())?
         .join(format!("{}.json", config.run));
     loop {
+        if let Some(row) = indexed.as_mut().and_then(|rows| rows.pop_front()) {
+            reader.reader.seek(std::io::SeekFrom::Start(row.start_offset)).map_err(|error| error.to_string())?;
+            reader.next_seq = row.seq;
+        }
         let seq = reader.next_seq;
         let start = reader.reader.stream_position().map_err(|e| e.to_string())?;
         reader.snapshot_bytes = 0;
-        let Some(movement) = reader.movement(seq)? else {
+        let Some(movement) = reader.movement_with_grant_if(seq, |movement| {
+            movement.kind == MovementKind::InterfaceOutbound
+                && movement.runtime().is_some_and(|runtime| runtime.run == binding.run)
+                && ((movement.from == Endpoint::Interface(declared.source.clone())
+                    && movement.to == Endpoint::Interface(declared.door.clone()))
+                    || (movement.from == Endpoint::Interface(declared.door.clone())
+                        && movement.to == Endpoint::Interface(declared.owner.clone())))
+        })? else {
             break;
         };
         last_start = Some(start);
@@ -1376,7 +1431,14 @@ fn history(
             }
             let effect = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes, call.seq.0)?;
             current.current = snapshot;
-            let attempt = UnresolvedTarget { seq, args, call, result: movement.clone(), writer_advanced: effect != OrderedTargetEffect::UncertainWriter };
+            if target_untouched(&result, effect) {
+                let writer = RunRecord::from_bytes(args.writes[0].content(limits.max_payload_bytes)?.as_bytes()).map_err(|e| e.to_string())?;
+                current.voided.insert(seq, target(&writer, &config.provider_interface)?.generation);
+                if let Some(refusal) = untouched_refusal(&result) { current.refused.insert(args.writes[1].after_hash(), refusal); }
+                continue;
+            }
+            let attempt = UnresolvedTarget { seq, args, call, result: movement.clone(),
+                writer_advanced: effect != OrderedTargetEffect::UncertainWriter };
             if matches!(effect, OrderedTargetEffect::Uncertain | OrderedTargetEffect::UncertainWriter) {
                 current.unresolved = Some(attempt);
             } else {
@@ -1607,14 +1669,14 @@ impl ProviderOutputHandoff {
             let original_config = attempt_config(&original, &self.config)?;
             if !result_inputs::saved_definition_transition(&original, &record, &original_config)? {
                 source_settlement::validate_transition(&original, &record, &original_config)?;
+                source_continuation::validate_transition(&original, &record, &original_config)?;
                 source_withdrawal::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
                 rejected_final::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
             }
             let candidate_config = result_inputs::saved_attempt_config(&record, &original_config)?;
             validate_bound_run_authoring_topology(&record, &candidate_config, None)?;
             result_inputs::validate_saved(&self.ctx, &original, &record, &original_config)?;
-            let source_movement_seq = result_inputs::definition_source(&original, &record, &original_config)?
-                .unwrap_or(pending.source_movement_seq);
+            let source_movement_seq = pending.source_movement_seq;
             let result_template = original_config
                 .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;
             let result = writer_record
@@ -1763,6 +1825,9 @@ impl ProviderOutputHandoff {
                 return Err("provider ordered file write awaits its admitted result".into());
             }
             let progress = history(&self.ctx, &self.session.writer_history, &self.config)?;
+            if let Some(refusal) = progress.refused.get(&planned.after_hash) {
+                return Err(format!("provider ordered file write was refused before any effect: {refusal}"));
+            }
             if known.as_ref().is_none_or(|(after_hash, _, _, generation)| {
                 *after_hash != planned.after_hash || progress.voided.values().any(|voided| voided == generation)
             }) {

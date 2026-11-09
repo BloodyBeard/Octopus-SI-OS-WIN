@@ -95,6 +95,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   const settledEdits = [];
   editTarget.current = "latest";
   const { submitSteeringMessage: raceEdit } = workspaceActions(["submitSteeringMessage"], {
+    deliveryContextRef: { current: { storageBlockReason: "" } }, interfaceFailureReason: () => "", readDraft: () => undefined,
     activeRun: { runId: "run-a", turnOpen: true, chatInterfaceId: "chat" }, queueOwner: { active: true, id: "owner" },
     queueReady: true, enabled: true, runtimeReady: true, canSteer: true, chatDraftKey: id => id,
     activeRunIdRef: { current: "run-a" }, steeringComposerRef: { current: new Set() }, steerableMessageIdRef: editTarget,
@@ -108,6 +109,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.equal(settledEdits[0][2], "failed");
   const submissions = [];
   const busyDraft = workspaceActions(["submitDraft"], {
+    deliveryContextRef: { current: { storageBlockReason: "" } }, interfaceFailureReason: () => "", resolvedProviderInterfaceId: "provider",
     runtimeReady: true, queueReady: true, editingQueuedTurn: false, replyOpen: true,
     queuedTurnsRef: { current: [] }, activeRunIdRef: { current: "run-a" }, chatDraftKey: (id) => id,
     text: "follow-up", attachments: [{ id: "file", name: "proof.txt" }], draftMessageId: "", draftMessageHadAttachments: false,
@@ -258,6 +260,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   let records, dispatched, restoredDraft;
   const activeRunIdRef = { current: "run-a" };
   const actionBindings = {
+    deliveryContextRef: { current: { storageBlockReason: "" } }, interfaceFailureReason: () => "",
     activeRunIdRef, chatDraftKey: (id) => id || "new", queueOwner: { id: "sender", active: true }, canSendQueued: true,
     deliveryScopeCurrent: () => true, queuedTurnsRef: { get current() { return records; } },
     replaceQueuedTurns: async (update) => { records = update(records); return records; },
@@ -439,6 +442,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   const markdownDependencies = Object.fromEntries(await Promise.all(["micromark", "micromark-core-commonmark", "remark-parse", "remark-gfm", "remark-math", "unified"].map(async (id) => [id, await import(id)])));
   const markdown = load("src/components/chat/markdownPresentation.ts", markdownDependencies);
   const messageContent = load("src/components/chat/MessageContent.tsx", {
+    "../../clientBrowser": load("src/clientBrowser.ts", { "./toasts": { appToast: { danger: noop } } }),
     "react-markdown": await import("react-markdown"), "rehype-katex": await import("rehype-katex"),
     "../../appearance": { useAppearance: () => ({}) }, "../../runtimeFormat": { copyText: noop },
     "../../design-system/components": { OcButton: empty, OcDialog: empty, OcDialogFooter: empty, OcDialogHeader: empty },
@@ -469,9 +473,15 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   await act(async () => host.render(React.createElement(messageContent.MessageContent, { text: "[Report](/workspace/report.md)" })));
   assert.ok(document.querySelector("a") === null, "a surface without a Files owner does not navigate a local link");
   await act(async () => host.render(React.createElement(messageContent.MessageContent, { text: "[Website](https://example.com/)" })));
+  const webLinks = [];
+  const openWebLink = event => { event.preventDefault(); webLinks.push(event.detail.url); };
+  window.addEventListener("octopus:open-web-link", openWebLink);
   const externalClick = new window.MouseEvent("click", { bubbles: true, cancelable: true });
   await act(async () => document.querySelector("a").dispatchEvent(externalClick));
-  assert.equal(externalClick.defaultPrevented, true, "external links still require their existing confirmation");
+  assert.equal(externalClick.defaultPrevented, true, "web links never navigate the app document");
+  assert.deepEqual(webLinks, ["https://example.com/"], "web links open in the client browser");
+  assert.equal(document.querySelector('[role="dialog"]'), null, "ordinary links do not prompt for an external browser");
+  window.removeEventListener("octopus:open-web-link", openWebLink);
   const realNow = performance.now;
   let streamNow = 1_000;
   Object.defineProperty(performance, "now", { configurable: true, value: () => streamNow });
@@ -588,6 +598,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   const commands = load("src/clientActions.ts");
   let sendShortcut = "enter";
   const composer = load("src/components/chat/ChatComposer.tsx", {
+    "./DictationIcon": load("src/components/chat/DictationIcon.tsx"),
     "../IconGlyphs": { Glyph: empty }, "./ProviderModelPicker": { ProviderModelPicker: empty },
     "./ChatAttachmentCard": { ChatAttachmentStrip: empty },
     "../icon-glyphs/geometric-primitives": load("src/components/icon-glyphs/geometric-primitives.tsx"),

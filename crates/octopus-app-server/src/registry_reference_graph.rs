@@ -624,7 +624,7 @@ pub struct RegistryCandidateStage<'a> {
 impl RegistryCandidateStage<'_> {
     pub fn run_grant(
         &self,
-        record: &octopus_runtime::run_record::RunRecord,
+        record: &octopus_run_record::RunRecord,
         checkpoint: &octopus_descriptors::CheckpointId,
     ) -> Result<octopus_interfaces::GrantProjection, String> {
         crate::spine_root::prospective_run_grant(record, checkpoint, || self.snapshot.as_ref().map_err(Clone::clone))
@@ -785,7 +785,7 @@ pub fn validate_registry_candidate_with_inspector(
 struct CandidateView {
     root: PathBuf,
     roots: RegistryValidationRoots,
-    records: BTreeMap<String, octopus_runtime::run_record::RunRecord>,
+    records: BTreeMap<String, octopus_run_record::RunRecord>,
     record_issues: BTreeMap<String, RegistryValidationIssue>,
     run_issues: Vec<RegistryValidationIssue>,
     dependencies: BTreeMap<String, BTreeSet<String>>,
@@ -956,7 +956,7 @@ impl CandidateView {
         let result = std::fs::read(path)
             .map_err(|error| error.to_string())
             .and_then(|bytes| {
-                octopus_runtime::run_record::RunRecord::from_bytes(&bytes)
+                octopus_run_record::RunRecord::from_bytes(&bytes)
                     .map_err(|error| error.to_string())
             });
         match result {
@@ -1146,6 +1146,9 @@ fn load_kind<T: Descriptor>(
                 root.display()
             )
         })?;
+        if entry.file_name() == octopus_file_storage::publication::COORDINATION_DIRECTORY {
+            continue;
+        }
         if entry
             .file_type()
             .map_err(|error| {
@@ -1227,6 +1230,9 @@ fn load_artifacts(registry_root: &Path, graph: &mut RegistryReferenceGraph) -> R
     };
     for entry in entries {
         let entry = entry.map_err(|error| format!("artifact registry entry failed: {error}"))?;
+        if entry.file_name() == octopus_file_storage::publication::COORDINATION_DIRECTORY {
+            continue;
+        }
         if !entry
             .file_type()
             .map_err(|error| {
@@ -1628,6 +1634,33 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("scratch path has a parent"))
             .expect("scratch dir writes");
         std::fs::write(path, body).expect("scratch file writes");
+    }
+
+    #[test]
+    fn registry_inventory_excludes_publication_metadata_but_reports_missing_descriptors() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = RegistryValidationRoots {
+            registry_root: temp.path().join("registry"),
+            ee_instances_root: temp.path().join("ee"),
+            run_records_root: temp.path().join("runs"),
+        };
+        let kinds = ["interface", "tool", "worker_environment_kind", "ee_template", "mark", "verifier", "artifact"];
+        for kind in kinds {
+            let root = roots.registry_root.join(kind);
+            std::fs::create_dir_all(root.join(".octopus-publication-other")).unwrap();
+        }
+        let baseline = validate_registry_candidate(&roots, &[]).unwrap().stages.remove(0);
+        let expected = kinds.map(|kind| format!("{kind}/.octopus-publication-other"))
+            .into_iter().collect::<BTreeSet<_>>();
+        for kind in kinds {
+            std::fs::create_dir(roots.registry_root.join(kind)
+                .join(octopus_file_storage::publication::COORDINATION_DIRECTORY)).unwrap();
+        }
+        let packages = RegistryPackages::load(&roots.registry_root).unwrap();
+        assert_eq!(packages.graph.unavailable.keys().map(ToString::to_string).collect::<BTreeSet<_>>(), expected);
+        let installed = validate_registry_candidate(&roots, &[]).unwrap().stages.remove(0);
+        assert_eq!(installed.issues, baseline.issues);
+        assert_eq!(installed.available, baseline.available);
     }
 
     #[test]

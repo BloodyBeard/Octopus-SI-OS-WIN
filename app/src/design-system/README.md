@@ -4,10 +4,14 @@ This folder is the first-party UI contract for the Electron/operator app.
 
 Use these primitives for shared UI anatomy:
 
-- `OcButton` for command buttons with optional icon and meta text.
-- `OcIconButton` for icon-only commands.
+- `OcButton` for command buttons with optional icon and meta text. `busy`
+  disables it at full opacity while an operation it started is running; its
+  content is then an `OcInlineProgress` ring and label.
+- `OcIconButton` for icon-only commands; dialog headers use its `dialog-close` appearance.
 - `OcSegmented` for two-or-more mutually exclusive view modes.
-- `OcStatus` for compact live/reading/error state.
+- `OcStatus` for compact state: a neutral outlined badge, or a soft colored pill
+  for success, warning, danger and accent. The color is the state; it never
+  carries a second dot.
 - `OcPaneGroup` for main/detail pane layouts.
 - `OcSurfaceHeader` for repeated surface headers.
 - `OcKbd` for keyboard hints.

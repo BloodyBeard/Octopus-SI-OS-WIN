@@ -6,7 +6,7 @@ use octopus_interfaces::InterfaceArtifactFile;
 use octopus_ledger::ArtifactRef;
 use octopus_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome, ProviderHandoffSession,
-    ProviderSourceRecovery, RunAuthoringResultIdentity, SessionContextArtifact,
+    ProviderSourceRecovery, RejectedFinalOutput, RunAuthoringResultIdentity, SessionContextArtifact,
     snapshot_projection::{
         SnapshotInputOrigin, SnapshotInputRoute, SnapshotSourceScope, SnapshotWindowBounds,
         resolve_session_snapshot_window, verify_selected_source_input, verify_source_bound_entry,
@@ -49,7 +49,10 @@ pub struct ProjectionBounds {
 #[serde(deny_unknown_fields)]
 pub struct ProjectionRule {
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pointers: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whole_payload: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<SnapshotInputOrigin>,
 }
@@ -154,17 +157,22 @@ impl ContextProjectionConfig {
         if self.input_rules.is_empty() || self.input_routes.is_empty() {
             return Err("projection requires explicit source input rules and routes".into());
         }
-        for rule in self.input_rules.iter().chain(&self.evidence_rules) {
+        let input_rules = self.input_rules.iter().map(|rule| (rule, true));
+        for (rule, input) in input_rules.chain(self.evidence_rules.iter().map(|rule| (rule, false))) {
             if rule.labels.is_empty()
-                || rule.pointers.is_empty()
+                || rule.pointers.is_empty() != rule.whole_payload
+                || rule.whole_payload && (!input || rule.origin.is_some())
                 || rule
                     .labels
                     .iter()
                     .any(|label| !exact(label) || !labels.insert(label))
             {
                 return Err(
-                    "projection rules require disjoint exact labels and explicit fields".into(),
+                    "projection rules require disjoint exact labels and explicit fields; only an input without origin may select its whole payload".into(),
                 );
+            }
+            if rule.whole_payload {
+                continue;
             }
             validate_pointers(&rule.pointers)?;
             if let Some(origin) = &rule.origin {
@@ -220,6 +228,23 @@ fn validate_pointers(pointers: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn input_pointers(rule: &ProjectionRule, payload: &Value) -> Result<Vec<String>, String> {
+    if !rule.whole_payload {
+        return Ok(rule.pointers.clone());
+    }
+    let pointers = payload
+        .as_object()
+        .ok_or("a whole-payload input must be a JSON object")?
+        .keys()
+        .filter(|key| key.as_str() != "session_context")
+        .map(|key| format!("/{}", key.replace('~', "~0").replace('/', "~1")))
+        .collect::<Vec<_>>();
+    if pointers.is_empty() {
+        return Err("a whole-payload input carries no members".into());
+    }
+    Ok(pointers)
 }
 
 fn fields(
@@ -347,31 +372,30 @@ fn project_window(
         .iter()
         .find(|rule| rule.labels.contains(&input.label))
         .ok_or("selected input has no declared fields")?;
+    let selected_pointers = input_pointers(input_rule, &input.payload)?;
     let (input_fields, input_trimmed) = fields(
         &input.payload,
-        &input_rule.pointers,
+        &selected_pointers,
         config.bounds.max_field_bytes,
         true,
     )?;
     let mut evidence = Vec::new();
     let mut omitted = Vec::new();
     let mut refs = BTreeSet::new();
-    let mut last_seq = sequence;
     for entry in &entries[input_index..] {
         let seq = entry
             .source_movement_seq
             .ok_or("selected source context has no movement evidence")?;
-        if seq < last_seq
+        if seq < sequence
             || !refs.insert((
                 entry.source_artifact.id.clone(),
                 entry.source_artifact.content,
             ))
         {
             return Err(
-                "selected source context has conflicting order or duplicate evidence".into(),
+                "selected source context has evidence before its selected input or duplicate evidence".into(),
             );
         }
-        last_seq = seq;
         if let Some(rule) = config
             .evidence_rules
             .iter()
@@ -399,7 +423,7 @@ fn project_window(
             "omission":{"before_selected_input":true,"unselected_fields":true,"unselected_labels":true,
                 "selected_fields_trimmed":false,"selected_evidence_trimmed":trimmed_entries > 0,
                 "trimmed_evidence_entries":trimmed_entries,"unselected_entries":omitted,
-                "input_pointers":input_rule.pointers,"terminal_pointers":config.terminal_pointers,
+                "input_pointers":selected_pointers,"terminal_pointers":config.terminal_pointers,
                 "evidence_rules":config.evidence_rules},
         });
     if !input_trimmed.is_empty() { output["selected_input"]["trimmed_fields"] = json!(input_trimmed); }
@@ -605,10 +629,10 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
             let envelope = reader.envelope(&own)?;
             let manifest = envelope.artifact_file.read_manifest().map_err(|e| e.to_string())?;
             if !authoring_result
-                .consume_if_matches(&ctx, &own.movement, &envelope, &manifest.label)
+                .consume_if_matches(&ctx, &session, &own.movement, &envelope, &manifest.label)
                 .await?
             {
-                process_admitted_input(&ctx, &session, &config, &envelope, &own.movement).await?;
+                settle_admitted_input(&ctx, &session, &config, &envelope, &own.movement).await?;
             }
             reader.commit_through(&own)?;
         }
@@ -657,6 +681,7 @@ fn project_outcome(
     artifact: &ArtifactRef,
     payload_bytes: &[u8],
     movement: &octopus_ledger::Movement,
+    rejected: Option<&RejectedFinalOutput>,
 ) -> Result<(&'static str, Value), String> {
     let limits = ctx.required_host_io_limits()?;
     let scope = SnapshotSourceScope {
@@ -718,14 +743,17 @@ fn project_outcome(
         Ok(value) => (value, None),
         Err(error) => (Value::Null, Some(error)),
     };
-    let label = if decision_error.is_some() { OUTCOME_ERROR_LABEL } else { OUTCOME_LABEL };
-    let output = json!({"schema_version":1,"label":label,
+    let label = if decision_error.is_some() || rejected.is_some() { OUTCOME_ERROR_LABEL } else { OUTCOME_LABEL };
+    let mut output = json!({"schema_version":1,"label":label,
                 "source":{"run":config.source_run,"ee":observed_ee,"observer_run":config.observer_run,
                     "provider_interface":outcome.provider_interface,"terminal_artifact":artifact,
                     "terminal_source_movement_seq":source_seq},
                 "experience":{"source_artifact":selected.source_artifact,"source_movement_seq":selected.source_movement_seq},
                 "outcome":decision,"outcome_parse_error":decision_error,"evidence":evidence,
                 "omission":{"before_current_experience":true,"unselected_entries":omitted,"selected_evidence_trimmed":false}});
+    if let Some(rejected) = rejected {
+        output["outcome_refusal"] = json!({"refusal_movement_seqs":rejected.refusal_movement_seqs()});
+    }
     Ok((label, output))
 }
 
@@ -735,6 +763,27 @@ pub async fn process_admitted_input(
     config: &ContextProjectionConfig,
     envelope: &octopus_interfaces::InterfaceInvocationEnvelope,
     movement: &octopus_ledger::Movement,
+) -> Result<(), String> {
+    process(ctx, session, config, envelope, movement, false).await
+}
+
+pub async fn settle_admitted_input(
+    ctx: &InterfaceLiftContext,
+    session: &ProviderHandoffSession,
+    config: &ContextProjectionConfig,
+    envelope: &octopus_interfaces::InterfaceInvocationEnvelope,
+    movement: &octopus_ledger::Movement,
+) -> Result<(), String> {
+    process(ctx, session, config, envelope, movement, true).await
+}
+
+async fn process(
+    ctx: &InterfaceLiftContext,
+    session: &ProviderHandoffSession,
+    config: &ContextProjectionConfig,
+    envelope: &octopus_interfaces::InterfaceInvocationEnvelope,
+    movement: &octopus_ledger::Movement,
+    settle_unprojectable: bool,
 ) -> Result<(), String> {
     config.validate()?;
     let descriptor = ctx.resolved_interface_descriptor()?;
@@ -765,7 +814,6 @@ pub async fn process_admitted_input(
     }
     let rejected = handoff.rejected_final_output().await?;
     if rejected.is_none() { match handoff.recover_source().await? {
-        ProviderSourceRecovery::Bridged { .. } => return Ok(()),
         ProviderSourceRecovery::Completed => {
             return Ok(());
         }
@@ -777,6 +825,77 @@ pub async fn process_admitted_input(
             );
         }
     } }
+    let emission = projected_emission(ctx, config, envelope, movement, rejected.as_ref(), limits, settle_unprojectable)?;
+    let outcome = match rejected {
+        Some(rejected) => handoff.hand_replacement_final(&rejected, emission).await?,
+        None => match handoff.hand_final(emission).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let Ok(observed) = session
+                    .from_invocation_when_ready(
+                        ctx,
+                        &descriptor,
+                        &octopus_descriptors::RunId::new(&config.projection_run),
+                        envelope,
+                        movement.seq.0,
+                        &pinned,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                let Ok(Some(rejected)) = observed.rejected_final_output().await else {
+                    return Err(error);
+                };
+                let emission = projected_emission(ctx, config, envelope, movement, Some(&rejected), limits, settle_unprojectable)?;
+                observed.hand_replacement_final(&rejected, emission).await?
+            }
+        },
+    };
+    if !matches!(outcome, ProviderHandoffOutcome::Admitted { .. }) {
+        return Err("projection final output was not admitted".into());
+    }
+    Ok(())
+}
+
+fn projected_emission(
+    ctx: &InterfaceLiftContext,
+    config: &ContextProjectionConfig,
+    envelope: &octopus_interfaces::InterfaceInvocationEnvelope,
+    movement: &octopus_ledger::Movement,
+    rejected: Option<&RejectedFinalOutput>,
+    limits: octopus_interface_transport::InterfaceHostIoLimits,
+    settle_unprojectable: bool,
+) -> Result<ProviderEmission, String> {
+    let (output_label, bytes) =
+        match project_source(ctx, config, envelope, movement, rejected, limits) {
+            Ok(projected) => projected,
+            Err(error) if !settle_unprojectable => return Err(error),
+            Err(error) => (
+                OUTCOME_ERROR_LABEL,
+                projection_bytes(
+                    &json!({"schema_version":1,"label":OUTCOME_ERROR_LABEL,
+                        "source":{"run":config.source_run,"projection_run":config.projection_run,
+                            "terminal_artifact":envelope.artifact,"projection_source_movement_seq":movement.seq.0},
+                        "projection_error":error}),
+                    config.bounds.max_output_bytes,
+                )?,
+            ),
+        };
+    let artifact =
+        InterfaceArtifactFile::write(ctx.var_dir.join("projected-context"), output_label, &bytes)
+            .map_err(|e| e.to_string())?;
+    Ok(ProviderEmission { artifact, route: ProviderEmissionRoute::ClientProjection })
+}
+
+fn project_source(
+    ctx: &InterfaceLiftContext,
+    config: &ContextProjectionConfig,
+    envelope: &octopus_interfaces::InterfaceInvocationEnvelope,
+    movement: &octopus_ledger::Movement,
+    rejected: Option<&RejectedFinalOutput>,
+    limits: octopus_interface_transport::InterfaceHostIoLimits,
+) -> Result<(&'static str, Vec<u8>), String> {
     let captured = envelope
         .artifact_file
         .read_bounded(limits.max_manifest_bytes, config.bounds.max_input_bytes)
@@ -790,7 +909,7 @@ pub async fn process_admitted_input(
                 &outcome.relay_interface,
             ))
     }) {
-        project_outcome(ctx, config, outcome, &envelope.artifact, &captured.payload_bytes, movement)?
+        project_outcome(ctx, config, outcome, &envelope.artifact, &captured.payload_bytes, movement, rejected)?
     } else {
         if movement.from
             != octopus_ledger::Endpoint::Interface(octopus_descriptors::InterfaceId::new(
@@ -800,6 +919,13 @@ pub async fn process_admitted_input(
             return Err(
                 "projection input differs from both declared exact relay boundaries".into(),
             );
+        }
+        if let Some(rejected) = rejected {
+            let output = json!({"schema_version":1,"label":OUTCOME_ERROR_LABEL,
+                "source":{"run":config.source_run,"projection_run":config.projection_run,
+                    "terminal_artifact":envelope.artifact,"projection_source_movement_seq":movement.seq.0},
+                "input_refusal":{"rejected_input":rejected.rejected_artifact(),"refusal_movement_seqs":rejected.refusal_movement_seqs()}});
+            return Ok((OUTCOME_ERROR_LABEL, projection_bytes(&output, config.bounds.max_output_bytes)?));
         }
         let scope = SnapshotSourceScope {
             run: config.source_run.clone(),
@@ -899,17 +1025,5 @@ pub async fn process_admitted_input(
         render_task(config, &mut output)?;
         (OUTPUT_LABEL, output)
     };
-    let bytes = projection_bytes(&output, config.bounds.max_output_bytes)?;
-    let artifact =
-        InterfaceArtifactFile::write(ctx.var_dir.join("projected-context"), output_label, &bytes)
-            .map_err(|e| e.to_string())?;
-    let emission = ProviderEmission { artifact, route: ProviderEmissionRoute::ClientProjection };
-    let outcome = match rejected {
-        Some(rejected) => handoff.hand_replacement_final(&rejected, emission).await?,
-        None => handoff.hand_final(emission).await?,
-    };
-    if !matches!(outcome, ProviderHandoffOutcome::Admitted { .. }) {
-        return Err("projection final output was not admitted".into());
-    }
-    Ok(())
+    Ok((output_label, projection_bytes(&output, config.bounds.max_output_bytes)?))
 }

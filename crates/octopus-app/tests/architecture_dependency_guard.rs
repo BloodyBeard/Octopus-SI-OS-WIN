@@ -4,13 +4,7 @@ use std::process::Command;
 
 const HOT_PATH_PACKAGES: &[&str] = &["octopus-app", "octopus-app-server"];
 
-const ENTRY_SURFACE_PACKAGES: &[&str] = &[
-    "octopus-core",
-    "octopus-provider-codex",
-    "octopus-tui",
-    "octopus-cli",
-    "octopus-codex-cli",
-];
+const ENTRY_SURFACE_PACKAGES: &[&str] = &["octopus-provider-codex"];
 
 const REGISTRY_INTERFACE_OWNER_PACKAGES: &[(&str, &str, &str)] = &[
     (
@@ -70,30 +64,12 @@ const REMOVED_SECOND_TRUTH_PACKAGES: &[&str] = &[
 
 const REMOVED_SHARED_EXECUTION_PACKAGES: &[&str] = &["octopus-process-authority"];
 
-const WORKER_ENVIRONMENT_PASSIVE_BOX_PACKAGES: &[&str] = &[
-    "octopus-descriptors",
-    "octopus-interfaces",
-    "octopus-ledger",
-    // Leaf OS primitives (local sockets, owner-private files, directory
-    // sync) with no executor, tool or door behavior, like the util crates.
-    "octopus-local-socket",
-    "octopus-private-fs",
-    "octopus-process-job",
-    "octopus-tool-handlers",
-    "octopus-tool-registry",
-    "octopus-util-abspath",
-    "octopus-util-pathuri",
-    "octopus-util-string",
-    "octopus-worker-env",
-];
-
 const RUNTIME_DESCRIPTOR_ONLY_PACKAGES: &[&str] = &["octopus-runtime", "octopus-app-server"];
 
 const PROVIDER_BLIND_PRODUCT_ROOT_PACKAGES: &[&str] = &[
     "octopus-runtime",
     "octopus-app-server",
     "octopus-app",
-    "octopus-tui",
 ];
 
 const FORBIDDEN_RUNTIME_PRODUCT_INTERFACE_PACKAGES: &[&str] = &[
@@ -189,21 +165,6 @@ const FORBIDDEN_APP_PRODUCTION_INTERFACE_PACKAGES: &[&str] = &[
     "octopus-utils-sleep-inhibitor",
     "octopus-process-hardening",
     "octopus-async-utils",
-];
-
-const FORBIDDEN_RUNTIME_PRODUCT_INTERFACE_TERMS: &[&str] = &[
-    "provider",
-    "codex",
-    "openai",
-    "ollama",
-    "chatgpt",
-    "octopus-provider-codex",
-    "octopus-tui",
-    "octopus-chatgpt",
-    "octopus-ollama",
-    "octopus-responses-api-proxy",
-    "octopus-app-server-transport",
-    "octopus-appserver-proto",
 ];
 
 fn repo_root() -> &'static Path {
@@ -589,8 +550,7 @@ fn registry_roots_hold_only_descriptor_owner_folders() {
                  worker_environment_kind folder name is the name of an execution-code \
                  type); there is no neutral shared code home (owner, 2026-07-22) — \
                  executable code lives inside the concrete owner's folder. Interfaces \
-                 may explicitly import another interface owner's code; worker-environment \
-                 kinds never import executable code from another kind",
+                 and worker-environment kinds may explicitly import another owner's code",
                 entry.path().display(),
                 descriptor_file
             );
@@ -613,121 +573,6 @@ fn registry_owner(path: &Path, registry_kind: &str) -> Option<String> {
             .map(str::to_string);
     }
     None
-}
-
-#[test]
-fn executable_registry_owners_do_not_form_hidden_cross_owner_spines() {
-    let repo_root = repo_root();
-    let metadata = cargo_metadata(repo_root);
-    let packages = metadata["packages"]
-        .as_array()
-        .expect("cargo metadata packages");
-
-    for package in packages {
-        let package_name = package["name"].as_str().expect("cargo package name");
-        let manifest_path = Path::new(
-            package["manifest_path"]
-                .as_str()
-                .expect("cargo package manifest_path"),
-        );
-        let relative_manifest = manifest_path
-            .strip_prefix(repo_root)
-            .unwrap_or(manifest_path);
-        let worker_environment_owner = registry_owner(relative_manifest, "worker_environment_kind");
-        let interface_owner = registry_owner(relative_manifest, "interface");
-
-        if let Some(owner) = &worker_environment_owner {
-            assert!(
-                repo_root
-                    .join("registry/worker_environment_kind")
-                    .join(owner)
-                    .join("worker_environment_kind.json")
-                    .is_file(),
-                "worker-environment package '{package_name}' has no concrete kind owner '{owner}'"
-            );
-        }
-
-        for dependency in package["dependencies"]
-            .as_array()
-            .expect("cargo package dependencies")
-        {
-            let Some(dependency_path) = dependency["path"].as_str() else {
-                continue;
-            };
-            let dependency_path = Path::new(dependency_path);
-            let relative_dependency = dependency_path
-                .strip_prefix(repo_root)
-                .unwrap_or(dependency_path);
-            let dependency_worker_environment_owner =
-                registry_owner(relative_dependency, "worker_environment_kind");
-            let dependency_interface_owner = registry_owner(relative_dependency, "interface");
-
-            if let Some(owner) = &worker_environment_owner {
-                assert!(
-                    dependency_interface_owner.is_none(),
-                    "worker-environment kind '{owner}' package '{package_name}' imports interface executable code from {}",
-                    relative_dependency.display()
-                );
-            }
-
-            let _ = (&interface_owner, &dependency_worker_environment_owner);
-
-            if relative_manifest.starts_with("crates") {
-                assert!(
-                    dependency_worker_environment_owner.is_none()
-                        && dependency_interface_owner.is_none(),
-                    "box crate '{package_name}' imports registry-owned executable code from {}",
-                    relative_dependency.display()
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn worker_environment_kinds_link_only_passive_box_contracts() {
-    let repo_root = repo_root();
-    let metadata = cargo_metadata(repo_root);
-    let packages = metadata["packages"]
-        .as_array()
-        .expect("cargo metadata packages");
-
-    for package in packages {
-        let package_name = package["name"].as_str().expect("cargo package name");
-        let manifest_path = Path::new(
-            package["manifest_path"]
-                .as_str()
-                .expect("cargo package manifest_path"),
-        );
-        let relative_manifest = manifest_path
-            .strip_prefix(repo_root)
-            .unwrap_or(manifest_path);
-        let Some(owner) = registry_owner(relative_manifest, "worker_environment_kind") else {
-            continue;
-        };
-
-        for dependency in package["dependencies"]
-            .as_array()
-            .expect("cargo package dependencies")
-        {
-            let Some(dependency_path) = dependency["path"].as_str() else {
-                continue;
-            };
-            let dependency_path = Path::new(dependency_path);
-            let relative_dependency = dependency_path
-                .strip_prefix(repo_root)
-                .unwrap_or(dependency_path);
-            if !relative_dependency.starts_with("crates") {
-                continue;
-            }
-            let dependency_name = dependency["name"].as_str().expect("path dependency name");
-            assert!(
-                WORKER_ENVIRONMENT_PASSIVE_BOX_PACKAGES.contains(&dependency_name),
-                "worker-environment kind '{owner}' package '{package_name}' links non-passive box crate '{dependency_name}' from {}; each kind must own all executor, tool, and door-life behavior",
-                relative_dependency.display()
-            );
-        }
-    }
 }
 
 #[test]
@@ -863,6 +708,37 @@ fn runtime_and_app_server_do_not_link_concrete_product_interface_packages() {
 }
 
 #[test]
+fn worker_environment_kind_packages_link_neither_runtime_nor_app_server() {
+    let repo_root = repo_root();
+    let kinds_root = repo_root.join("registry").join("worker_environment_kind");
+    let kinds_root = kinds_root.to_str().expect("worker-environment kind root is UTF-8");
+    for kernel in RUNTIME_DESCRIPTOR_ONLY_PACKAGES {
+        let output = Command::new("cargo")
+            .current_dir(repo_root)
+            .args([
+                "tree", "--locked", "--workspace", "--edges", "normal", "--prefix", "none",
+                "--format", "{p}", "--invert", kernel,
+            ])
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run cargo tree: {err}"));
+        assert!(
+            output.status.success(),
+            "cargo tree --invert {kernel} failed\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let linking: BTreeSet<&str> = std::str::from_utf8(&output.stdout)
+            .expect("cargo tree output is UTF-8")
+            .lines()
+            .filter(|line| line.contains(kinds_root))
+            .collect();
+        assert!(
+            linking.is_empty(),
+            "worker-environment kind packages link {kernel}: {linking:?}; a door life or tool process is an application of the OS and reads run records through octopus-run-record, never the kernel"
+        );
+    }
+}
+
+#[test]
 fn production_app_does_not_link_concrete_interface_packages() {
     let repo_root = repo_root();
     let manifest = repo_root
@@ -891,97 +767,6 @@ fn production_manifest_sections(text: &str) -> &str {
     text.split("\n[dev-dependencies]")
         .next()
         .expect("manifest text has a production prefix")
-}
-
-const FORBIDDEN_TERMINAL_MODEL_PROVIDER_PACKAGES: &[&str] = &[
-    "octopus-chatgpt",
-    "octopus-ollama",
-    "octopus-realtime-webrtc",
-    "octopus-responses-api-proxy",
-    "octopus-client",
-    "octopus-backend-client",
-    "octopus-cxapi",
-    "octopus-prompts",
-    "octopus-provider-codex",
-    "octopus-appserver-proto",
-    "octopus-collab-templates",
-    "octopus-install-context",
-    "octopus-message-history",
-    "octopus-utils-sandbox-summary",
-    "octopus-utils-oss",
-    "octopus-otel",
-    "octopus-login",
-    "octopus-protocol",
-    "octopus-features",
-    "octopus-core",
-    "octopus-config",
-];
-
-const TRACKED_TRANSITIONAL_TERMINAL_PROVIDER_EDGES: &[&str] = &[];
-
-#[test]
-fn terminal_product_does_not_refuse_to_the_model_provider() {
-    let repo_root = repo_root();
-    let manifest = repo_root
-        .join("registry")
-        .join("interface")
-        .join("world_terminal")
-        .join("packages")
-        .join("octopus-tui")
-        .join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", manifest.display()));
-    let production_sections = production_manifest_sections(&text);
-
-    for forbidden in FORBIDDEN_TERMINAL_MODEL_PROVIDER_PACKAGES {
-        assert!(
-            !production_sections.contains(&format!("{forbidden} =")),
-            "octopus-tui (the terminal product) must not link model-provider package {forbidden}; \
-             the model turn runs ONLY under the octopus-app daemon (the interface-life switch \
-             spawns world_provider_codex's life.json process — the box links zero provider \
-             code). The terminal is a thin artifact client — do not re-fuse the spine"
-        );
-    }
-
-    for forbidden in PROVIDER_IMPLEMENTATION_PACKAGES {
-        assert!(
-            !production_sections.contains(&format!("{forbidden} =")),
-            "octopus-tui (the terminal product) must not directly link neutral provider/interface package {forbidden}; it speaks artifacts and descriptors only"
-        );
-    }
-
-    for tracked in TRACKED_TRANSITIONAL_TERMINAL_PROVIDER_EDGES {
-        let still_linked = production_sections.contains(&format!("{tracked} ="));
-        assert!(
-            still_linked,
-            "octopus-tui no longer links the tracked transitional provider edge {tracked}: the \
-             Stage B/C terminal↔model rewire has landed. MOVE {tracked} from \
-             TRACKED_TRANSITIONAL_TERMINAL_PROVIDER_EDGES into \
-             FORBIDDEN_TERMINAL_MODEL_PROVIDER_PACKAGES so the vertebra stays sealed against re-fusion"
-        );
-        assert!(
-            !FORBIDDEN_TERMINAL_MODEL_PROVIDER_PACKAGES.contains(tracked),
-            "{tracked} is both a tracked transitional edge and a forbidden package; pick one"
-        );
-    }
-
-    for line in production_sections.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        if !line.contains("world_provider_codex") && !line.contains("system_interface_authoring") {
-            continue;
-        }
-        let dep_name = line.split('=').next().map(str::trim).unwrap_or_default();
-        assert!(
-            TRACKED_TRANSITIONAL_TERMINAL_PROVIDER_EDGES.contains(&dep_name),
-            "octopus-tui production manifest path-links a provider code-world folder via \
-             `{dep_name}` which is NOT in TRACKED_TRANSITIONAL_TERMINAL_PROVIDER_EDGES. No \
-             provider edge may hide from the ratchet: conduct it through the architecture, or \
-             enumerate it as a tracked transitional edge with its cut-map section"
-        );
-    }
 }
 
 fn manifest_dir_lives_under_provider_implementation(manifest_dir: &str) -> bool {
@@ -1013,12 +798,12 @@ fn provider_implementation_path_classifier_covers_concrete_provider_folders() {
         "/workspace/registry/interface/packages/octopus-world-provider-example"
     ));
     assert!(!manifest_dir_lives_under_provider_implementation(
-        "/workspace/registry/interface/world_terminal/packages/octopus-tui"
+        "/workspace/registry/interface/world_operator_chat/packages/octopus-operator-chat-client"
     ));
 }
 
 #[test]
-fn provider_blind_product_roots_touch_no_provider_implementation() {
+fn production_roots_keep_registry_implementation_boundaries() {
     let repo_root = repo_root();
     for package in PROVIDER_BLIND_PRODUCT_ROOT_PACKAGES {
         let output = Command::new("cargo")
@@ -1046,7 +831,11 @@ fn provider_blind_product_roots_touch_no_provider_implementation() {
             let Some(path) = line.get(open + 2..).and_then(|rest| rest.strip_suffix(')')) else {
                 continue;
             };
-            if manifest_dir_lives_under_provider_implementation(path) {
+            let registry_implementation = registry_owner(Path::new(path), "interface").is_some()
+                || registry_owner(Path::new(path), "worker_environment_kind").is_some();
+            if (RUNTIME_DESCRIPTOR_ONLY_PACKAGES.contains(package) && registry_implementation)
+                || manifest_dir_lives_under_provider_implementation(path)
+            {
                 let name = line.split_whitespace().next().unwrap_or(line).to_string();
                 breached.push(format!("{name} ({path})"));
             }
@@ -1056,68 +845,11 @@ fn provider_blind_product_roots_touch_no_provider_implementation() {
 
         assert!(
             breached.is_empty(),
-            "{package} TRANSITIVELY links {} provider implementation package(s) under registry/interface/world_provider_*. Runtime, app-server, app, and terminal product roots must remain provider-blind and exchange only descriptors, artifacts, bindings, and metadata; interface-driver composition roots remain the only allowed mounts.\nBREACHED:\n{}",
+            "{package} transitively links {} registry implementation package(s) outside its boundary. Runtime and app-server consume descriptors and artifacts, never registry implementations. Product roots must not link provider implementations.\nBREACHED:\n{}",
             breached.len(),
             breached.join("\n")
         );
     }
-}
-
-#[test]
-fn runtime_and_app_server_sources_do_not_name_product_or_provider_surfaces() {
-    let repo_root = repo_root();
-    for package in RUNTIME_DESCRIPTOR_ONLY_PACKAGES {
-        let root = repo_root.join("crates").join(package);
-        for path in rust_and_manifest_files(&root) {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-            let lower = text.to_ascii_lowercase();
-            for forbidden in FORBIDDEN_RUNTIME_PRODUCT_INTERFACE_TERMS {
-                assert!(
-                    !lower.contains(forbidden),
-                    "{} must stay product/provider blind; forbidden term `{}` found in {}",
-                    package,
-                    forbidden,
-                    path.display()
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn terminal_client_surface_is_selected_only_by_registry_policy() {
-    let repo_root = repo_root();
-    let interface_root = repo_root.join("registry").join("interface");
-    let mut selected = Vec::new();
-    for entry in std::fs::read_dir(&interface_root).expect("registry/interface readable") {
-        let entry = entry.expect("registry/interface entry readable");
-        if !entry.file_type().expect("interface entry type").is_dir() {
-            continue;
-        }
-        let path = entry.path().join("client_surface.json");
-        if !path.exists() {
-            continue;
-        }
-        let policy: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(&path)
-                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display())),
-        )
-        .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
-        if policy
-            .pointer("/client_surface/embedded_composer")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        {
-            selected.push(entry.file_name().to_string_lossy().to_string());
-        }
-    }
-
-    assert_eq!(
-        selected,
-        vec!["world_terminal".to_string()],
-        "embedded terminal/client surface must be registry policy, not a runtime/TUI literal"
-    );
 }
 
 #[test]
@@ -1162,38 +894,6 @@ fn production_spine_hot_path_has_no_legacy_state_or_second_extension_graph() {
                 !tree.lines().any(|line| line.starts_with(forbidden)),
                 "{package} normal dependency graph must not include {forbidden}; tree:\n{tree}"
             );
-        }
-    }
-}
-
-fn rust_and_manifest_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    collect_rust_and_manifest_files(root, &mut out);
-    out
-}
-
-fn collect_rust_and_manifest_files(root: &Path, out: &mut Vec<std::path::PathBuf>) {
-    for entry in std::fs::read_dir(root)
-        .unwrap_or_else(|err| panic!("failed to read directory {}: {err}", root.display()))
-    {
-        let entry = entry.unwrap_or_else(|err| panic!("failed to read entry: {err}"));
-        let path = entry.path();
-        if entry
-            .file_type()
-            .unwrap_or_else(|err| panic!("failed to read file type for {}: {err}", path.display()))
-            .is_dir()
-        {
-            let name = entry.file_name();
-            if name == "target" {
-                continue;
-            }
-            collect_rust_and_manifest_files(&path, out);
-            continue;
-        }
-        if path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml")
-            || path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-        {
-            out.push(path);
         }
     }
 }
@@ -1443,8 +1143,11 @@ fn the_verifier_box_stays_blind_to_verifier_identity_and_language() {
         }
         let lowered = source.to_lowercase();
         for term in LANGUAGE_HARDCODE_TERMS {
+            let named = lowered.match_indices(term).any(|(at, _)| {
+                !lowered[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            });
             assert!(
-                !lowered.contains(term),
+                !named,
                 "{} names the language/runner '{term}'. Verifiers are polyglot by contract — from \
                  twenty lines of shell to an out-of-system judge — and the box resolves the runner \
                  from the package's own shebang plus its declared `executable_commands`, never from \

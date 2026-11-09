@@ -315,6 +315,7 @@ impl ProviderHandoffSession {
                 consumed_context_free_independent_input,
                 consumed_verified_input,
                 deferred_context_generations: 0,
+                result_rebase: None,
             })),
             config,
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
@@ -333,10 +334,86 @@ impl ProviderOutputHandoff {
         {
             return Err("failed source cannot supersede this pending handoff".into());
         }
-        if !self.pending_source_fully_refused(record, pending)? {
+        if !self.pending_source_fully_refused(record, pending)?
+            && !self.pending_source_unsubmitted(record, pending)? {
             return Err("failed source pending handoff has no exact refusal for every artifact".into());
         }
         Ok(())
+    }
+
+    pub(super) fn pending_source_unsubmitted(
+        &self, record: &RunRecord, pending: &PendingHandoff,
+    ) -> Result<bool, String> {
+        if !pending.terminal || !pending.dispatch_fenced || pending.source_without_context
+            || pending.withdrawal.is_some() || pending.replacement.is_some()
+            || pending.deferred_publication
+        { return Ok(false); }
+        validate_pending_items_are_active(record, &self.config.provider_interface, pending)?;
+        if !pending.standing.is_empty() {
+            let all = pending.with_standing_items();
+            if self.pending_handoff_evidence(&all)?.iter().take(pending.standing.len()).any(Option::is_none) {
+                return Ok(false);
+            }
+        }
+        for item in &pending.items {
+            if !self.config.checkpoints.iter().any(|template| {
+                template.role == RunAuthoringCheckpointRole::ProviderArtifactOutput
+                    && template.result_receiving.is_empty()
+                    && pending_output_matches_template(item, template)
+            }) { return Ok(false); }
+            if source_withdrawal::dispatch_path(&self.ctx, record, item)
+                .try_exists().map_err(|error| error.to_string())?
+                || self.pending_output_has_submission(pending, item)?
+            { return Ok(false); }
+        }
+        Ok(true)
+    }
+
+    // A failure sent through the standing provider route can predate a checked
+    // failure write (for example, capture failed before any hand-in). It closes
+    // only an exact, fenced, never-submitted final projection. A native tool
+    // request, a dispatched result or an ambiguous outcome cannot use this proof.
+    pub(super) fn unsubmitted_source_failure_before(
+        &self, pending: &PendingHandoff, before_seq: u64,
+    ) -> Result<bool, String> {
+        if !pending.terminal || !pending.dispatch_fenced || pending.source_without_context
+            || pending.deferred_publication || pending.source_movement_seq >= before_seq
+        { return Ok(false); }
+        for item in &pending.items {
+            if self.pending_output_has_submission(pending, item)? { return Ok(false); }
+        }
+        let limits = self.ctx.required_host_io_limits()?;
+        let evidence = CheckedRunEvidence {
+            movements_path: &self.ctx.movements_path, ledger_index_path: &self.ctx.ledger_index_path,
+            blobs_dir: &self.ctx.blobs_dir, max_control_frame_bytes: limits.max_control_frame_bytes,
+            max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let mut reader = FileCheckedRunReader::open(&evidence, Some(pending.source_movement_seq))?;
+        while let Some(row) = reader.movement(reader.next_seq)? {
+            if row.seq.0 >= before_seq { break; }
+            if row.seq.0 <= pending.source_movement_seq || row.kind != MovementKind::InterfaceArrival
+                || row.from != Endpoint::Interface(self.config.provider_interface.clone())
+                || row.to != Endpoint::Interface(self.config.worker.clone())
+                || row.run() != Some(&self.config.run)
+            { continue; }
+            if row.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+                .is_none_or(|metadata| metadata.verification_failure.is_some()) { continue; }
+            let Some(reference) = row.artifact.as_ref().filter(|reference| reference.id.as_str().starts_with("turn.error:")) else { continue; };
+            let (manifest, payload) = read_pinned_artifact(&self.ctx, reference)?;
+            if manifest.label != "turn.error" { continue; }
+            let value: serde_json::Value = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+            if value.get("will_retry").and_then(serde_json::Value::as_bool) != Some(false)
+                || value.pointer("/additional_details/source_movement_seq").and_then(serde_json::Value::as_u64) != Some(pending.source_movement_seq)
+            { continue; }
+            let hash = row.runtime().and_then(|runtime| runtime.run_record_hash.as_deref())
+                .and_then(ContentHash::from_hex).ok_or("source failure has no exact pinned run record")?;
+            let (_, record) = pinned_run_record(&self.ctx, &hash, "unsubmitted source failure")?;
+            if record.id != self.config.run || record.worker != self.config.worker
+                || persisted_pending_handoff(&record, &self.config.provider_interface)?.as_ref() != Some(pending)
+            { continue; }
+            if self.pending_source_unsubmitted(&record, pending)? { return Ok(true); }
+        }
+        Ok(false)
     }
 
     pub(super) fn pending_source_fully_refused(

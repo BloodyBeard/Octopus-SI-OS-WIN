@@ -146,10 +146,21 @@ fn direct_tool_envelope(
     tool: &str,
     arguments: Value,
 ) -> InterfaceInvocationEnvelope {
+    policy_tool_envelope(root, sequence, tool, arguments, "on-request")
+}
+
+fn policy_tool_envelope(
+    root: &Path,
+    sequence: u64,
+    tool: &str,
+    arguments: Value,
+    approval_policy: &str,
+) -> InterfaceInvocationEnvelope {
     let payload = serde_json::to_vec(&json!({
         "operation": tool,
         "arguments": arguments,
-        "correlation_id": format!("direct-{sequence}")
+        "correlation_id": format!("direct-{sequence}"),
+        "approval_policy": approval_policy
     }))
     .unwrap();
     let artifact_file = InterfaceArtifactFile::write(
@@ -392,7 +403,11 @@ fn write_registry(root: &Path, base_url: &str) {
         "id": "mcp.example.search",
         "request_label": "mcp.operation.request",
         "output_label": "mcp.tool.result",
-        "handler_config": { "operation": "call_tool", "mcp_tool_name": "search" },
+        "handler_config": {
+            "operation": "call_tool",
+            "mcp_tool_name": "search",
+            "annotations": { "readOnlyHint": true }
+        },
         "description": "search",
         "input_schema": {
             "type": "object",
@@ -407,6 +422,36 @@ fn write_registry(root: &Path, base_url: &str) {
     std::fs::write(
         operations_dir.join("mcp.example.search.json"),
         serde_json::to_vec_pretty(&search).unwrap(),
+    )
+    .unwrap();
+    let mut publish = search.clone();
+    publish["id"] = json!("mcp.example.publish");
+    publish["handler_config"] = json!({
+        "operation": "call_tool",
+        "mcp_tool_name": "publish",
+        "annotations": { "title": "Publish", "destructiveHint": true }
+    });
+    std::fs::write(
+        operations_dir.join("mcp.example.publish.json"),
+        serde_json::to_vec_pretty(&publish).unwrap(),
+    )
+    .unwrap();
+    let generic = json!({
+        "id": "mcp.example.call_tool",
+        "request_label": "mcp.operation.request",
+        "output_label": "mcp.tool.result",
+        "handler_config": { "operation": "call_tool" },
+        "description": "call a server tool by name",
+        "input_schema": {
+            "type": "object",
+            "properties": { "name": { "type": "string" }, "arguments": { "type": "object" } },
+            "required": ["name"],
+            "additionalProperties": false
+        }
+    });
+    std::fs::write(
+        operations_dir.join("mcp.example.call_tool.json"),
+        serde_json::to_vec_pretty(&generic).unwrap(),
     )
     .unwrap();
 
@@ -510,16 +555,7 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
         .canonicalize()
         .unwrap();
     let repository_root = registry_root.parent().unwrap();
-    let expected: [(&str, &str, Option<&str>, usize); 2] = [
-        ("world_mcp_example", "mcp.example", None, 22),
-        (
-            "world_mcp_github",
-            "github",
-            Some("artifact-application-mcp-github-context"),
-            21,
-        ),
-    ];
-    let generic_operations = [
+    let generic_operations: &[&str] = &[
         "call_tool",
         "cancel_request",
         "close",
@@ -542,17 +578,59 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
         "subscribe_resource",
         "unsubscribe_resource",
     ];
+    let tool_filtered_operations: &[&str] = &["call_tool", "close", "list_tools", "status"];
+    let expected: [(&str, &str, Option<&str>, usize, &[&str]); 5] = [
+        (
+            "world_mcp_example",
+            "mcp.example",
+            None,
+            22,
+            generic_operations,
+        ),
+        (
+            "world_mcp_firecrawl",
+            "firecrawl",
+            Some("artifact-application-mcp-firecrawl-context"),
+            21,
+            generic_operations,
+        ),
+        (
+            "world_mcp_github",
+            "github",
+            Some("artifact-application-mcp-github-context"),
+            4,
+            tool_filtered_operations,
+        ),
+        (
+            "world_google_drive",
+            "google_drive",
+            Some("artifact-application-google-drive-context"),
+            4,
+            tool_filtered_operations,
+        ),
+        (
+            "world_gmail",
+            "gmail",
+            Some("artifact-application-gmail-context"),
+            4,
+            tool_filtered_operations,
+        ),
+    ];
     let mut total = 0;
-    for (interface, prefix, artifact_id, expected_count) in expected {
+    for (interface, prefix, artifact_id, expected_count, operations) in expected {
         let interface_dir = registry_root.join("interface").join(interface);
         let bytes = std::fs::read(interface_dir.join("interface.json")).unwrap();
         let descriptor: InterfaceDescriptor = octopus_descriptors::parse_strict(&bytes).unwrap();
         assert_eq!(descriptor.id.as_str(), interface);
         assert_eq!(descriptor.interface_driver_ref, "mcp_client");
+        load_interface_config(&interface_dir, &descriptor.id).unwrap();
+        octopus_interface_transport::validate_spawn_life_config(&registry_root, &descriptor.id)
+            .unwrap()
+            .expect("remote MCP interface declares its life");
         let catalog = load_operation_catalog(&interface_dir, &descriptor).unwrap();
         assert_eq!(catalog.operations.len(), expected_count, "{interface}");
         assert_eq!(catalog.affordances.len(), expected_count, "{interface}");
-        for suffix in generic_operations {
+        for suffix in operations {
             assert!(
                 catalog
                     .operations
@@ -616,12 +694,6 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
             let context = artifact["text"].as_str().unwrap();
             for required in [
                 interface,
-                "mcp.operation_catalog",
-                "mcp.tool_catalog",
-                "mcp.resource_catalog",
-                "mcp.resource_templates",
-                "mcp.prompt_catalog",
-                "mcp.operation.request",
                 &format!("{prefix}.call_tool"),
                 &format!("{prefix}.status"),
             ] {
@@ -654,7 +726,7 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
         }
         total += catalog.operations.len();
     }
-    assert_eq!(total, 43);
+    assert_eq!(total, 55);
 }
 
 #[test]
@@ -710,9 +782,458 @@ fn reconnect_replay_never_duplicates_effectful_operations() {
     assert!(McpOperation::ListTools.replay_safe_after_reconnect());
     assert!(McpOperation::ReadResource.replay_safe_after_reconnect());
     assert!(!McpOperation::CallTool {
-        mcp_tool_name: Some("search".to_string())
+        mcp_tool_name: Some("search".to_string()),
+        annotations: None,
     }
     .replay_safe_after_reconnect());
     assert!(!McpOperation::Respond.replay_safe_after_reconnect());
     assert!(!McpOperation::SendProgress.replay_safe_after_reconnect());
+}
+
+type RecordedRequests = Arc<std::sync::Mutex<Vec<Value>>>;
+
+fn spawn_account_mcp_server(
+    unauthorized: Arc<std::sync::atomic::AtomicBool>,
+) -> (String, RecordedRequests) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let requests: RecordedRequests = Arc::default();
+    let recorded = Arc::clone(&requests);
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_len = loop {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break None;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(end) = find_headers_end(&buf) {
+                    break Some(end);
+                }
+            };
+            let Some(header_len) = header_len else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..header_len]).to_string();
+            let header = |name: &str| {
+                head.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_string())
+                })
+            };
+            let length = header("content-length")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < header_len + length {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+            }
+            let request: Value = serde_json::from_slice(&buf[header_len..]).unwrap_or(Value::Null);
+            recorded.lock().unwrap().push(json!({
+                "method": request["method"],
+                "tool": request.pointer("/params/name"),
+                "authorization": header("authorization"),
+                "account": header("chatgpt-account-id"),
+            }));
+            let reply = |status: &str, body: Option<Value>| match body {
+                Some(body) => {
+                    let body = serde_json::to_vec(&body).unwrap();
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        String::from_utf8(body).unwrap()
+                    )
+                }
+                None => {
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                }
+            };
+            let response = if unauthorized.load(std::sync::atomic::Ordering::SeqCst) {
+                reply("401 Unauthorized", None)
+            } else if request.get("id").is_none() {
+                reply("202 Accepted", None)
+            } else {
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "initialize" => json!({
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": { "tools": {}, "resources": {} },
+                        "serverInfo": { "name": "plugin-runtime-mock", "version": "1" }
+                    }),
+                    "tools/list" => json!({ "tools": [
+                        { "name": "mail.search", "inputSchema": { "type": "object" },
+                          "_meta": { "connector_id": "connector_mail", "link_id": "link_1" } },
+                        { "name": "other.post", "inputSchema": { "type": "object" },
+                          "_meta": { "connector_id": "connector_other" } },
+                        { "name": "bare", "inputSchema": { "type": "object" } }
+                    ] }),
+                    "tools/call" => json!({
+                        "content": [{ "type": "text", "text": request["params"]["name"] }],
+                        "isError": false
+                    }),
+                    other => json!({ "echo": other }),
+                };
+                reply(
+                    "200 OK",
+                    Some(json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })),
+                )
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (base, requests)
+}
+
+fn write_account_registry(root: &Path, base_url: &str, auth_file_env: &str) -> McpOperationCatalog {
+    let interface_dir = root.join("registry/interface/world_account_mail");
+    let operations = interface_dir.join("operations");
+    std::fs::create_dir_all(&operations).unwrap();
+    let descriptor = json!({
+        "id": "world_account_mail",
+        "interface_type": "world",
+        "role": "service",
+        "direction": "bidirectional",
+        "source_names": ["mcp"],
+        "interface_driver_ref": "mcp_client",
+        "interface_driver_config": {
+            "private_config": {
+                "protocol_versions": ["2025-11-25"],
+                "client_name": "octopus-mcp-client-test",
+                "client_version": "1",
+                "operation_catalog_dir": "operations",
+                "operation_catalog_label": "mcp.operation_catalog",
+                "operation_request_label": "mcp.operation.request",
+                "max_catalog_pages": 8,
+                "max_catalog_items": 64,
+                "max_catalog_bytes": 65536,
+                "event_journal_segment_bytes": 1048576,
+                "event_journal_retained_segments": 8,
+                "reconnect_backoff_ms": 20,
+                "auth": {
+                    "mode": "chatgpt_account",
+                    "auth_file_env": auth_file_env,
+                    "account_header": "ChatGPT-Account-ID"
+                },
+                "tool_filter": { "meta_key": "connector_id", "values": ["connector_mail"] }
+            },
+            "transport": { "base_url": base_url, "wire": "mcp_streamable_http" }
+        }
+    });
+    std::fs::write(
+        interface_dir.join("interface.json"),
+        serde_json::to_vec(&descriptor).unwrap(),
+    )
+    .unwrap();
+    for (id, output_label, handler_config) in [
+        ("mail.call_tool", "mcp.tool.result", json!({ "operation": "call_tool" })),
+        ("mail.list_tools", "mcp.result", json!({ "operation": "list_tools" })),
+        ("mail.list_resources", "mcp.result", json!({ "operation": "list_resources" })),
+        ("mail.search", "mcp.tool.result", json!({
+            "operation": "call_tool", "mcp_tool_name": "mail.search",
+            "annotations": { "readOnlyHint": true }
+        })),
+        ("mail.other_post", "mcp.tool.result", json!({
+            "operation": "call_tool", "mcp_tool_name": "other.post",
+            "annotations": { "readOnlyHint": true }
+        })),
+    ] {
+        std::fs::write(
+            operations.join(format!("{id}.json")),
+            serde_json::to_vec(&json!({
+                "id": id,
+                "request_label": "mcp.operation.request",
+                "output_label": output_label,
+                "handler_config": handler_config,
+                "description": id,
+                "input_schema": { "type": "object" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let descriptor =
+        load_interface_descriptor(&interface_dir, &InterfaceId::new("world_account_mail")).unwrap();
+    load_operation_catalog(&interface_dir, &descriptor).unwrap()
+}
+
+async fn run_operation(
+    process: &McpInterfaceProcess,
+    catalog: &McpOperationCatalog,
+    root: &Path,
+    sequence: u64,
+    operation: &str,
+    arguments: Value,
+) -> Value {
+    let spec = catalog.operations.get(operation).unwrap();
+    let envelope = direct_tool_envelope(root, sequence, operation, arguments);
+    let artifact = process_artifact(process.receive(spec, envelope, &root.join("results")).await);
+    serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn chatgpt_account_auth_and_tool_filter_gate_the_remote_surface() {
+    let unauthorized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (base, requests) = spawn_account_mcp_server(Arc::clone(&unauthorized));
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let auth_file_env = "OCTOPUS_MCP_CLIENT_TEST_CHATGPT_AUTH_FILE";
+    let auth_file = root.join("auth.json");
+    std::env::set_var(auth_file_env, &auth_file);
+    let write_auth = |payload: &str| {
+        let document = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": format!("e30.{payload}.sig"),
+                "account_id": "account-1",
+                "refresh_token": "refresh-never-used"
+            }
+        });
+        std::fs::write(&auth_file, serde_json::to_vec(&document).unwrap()).unwrap();
+    };
+    let catalog = write_account_registry(root, &base, auth_file_env);
+    let interface = InterfaceId::new("world_account_mail");
+    let config = load_interface_config(
+        &root.join("registry/interface/world_account_mail"),
+        &interface,
+    )
+    .unwrap();
+    let process = mcp_interface_process(interface, config, root.join("var/remote-mcp"));
+
+    write_auth("eyJleHAiOjF9");
+    let expired = run_operation(&process, &catalog, root, 1, "mail.list_tools", json!({})).await;
+    assert_eq!(
+        expired["error"]["code"], "account_sign_in_expired",
+        "{expired}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "an expired sign-in reached the network"
+    );
+
+    write_auth("eyJleHAiOjQxMDI0NDQ4MDB9");
+    let signed_in = std::fs::read(&auth_file).unwrap();
+    let listed = run_operation(&process, &catalog, root, 2, "mail.list_tools", json!({})).await;
+    assert_eq!(
+        listed["result"]["tools"],
+        json!([{
+            "name": "mail.search", "inputSchema": { "type": "object" },
+            "_meta": { "connector_id": "connector_mail", "link_id": "link_1" }
+        }])
+    );
+    let call = |name: &str| json!({ "name": name, "arguments": {} });
+    let called = run_operation(
+        &process,
+        &catalog,
+        root,
+        3,
+        "mail.call_tool",
+        call("mail.search"),
+    )
+    .await;
+    assert_eq!(
+        called["result"]["content"][0]["text"], "mail.search",
+        "{called}"
+    );
+    let refused = run_operation(
+        &process,
+        &catalog,
+        root,
+        4,
+        "mail.call_tool",
+        call("other.post"),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], "tool_not_admitted", "{refused}");
+    let resources = run_operation(
+        &process,
+        &catalog,
+        root,
+        5,
+        "mail.list_resources",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        resources["error"]["code"], "surface_not_admitted",
+        "{resources}"
+    );
+    {
+        let requests = requests.lock().unwrap();
+        assert!(requests.iter().all(|request| {
+            request["authorization"] == json!("Bearer e30.eyJleHAiOjQxMDI0NDQ4MDB9.sig")
+                && request["account"] == json!("account-1")
+        }));
+        let called = requests
+            .iter()
+            .filter(|request| request["method"] == "tools/call")
+            .map(|request| request["tool"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(called, vec![json!("mail.search")]);
+    }
+
+    unauthorized.store(true, std::sync::atomic::Ordering::SeqCst);
+    let rejected = run_operation(
+        &process,
+        &catalog,
+        root,
+        6,
+        "mail.call_tool",
+        call("mail.search"),
+    )
+    .await;
+    assert_eq!(
+        rejected["error"]["code"], "account_sign_in_expired",
+        "{rejected}"
+    );
+    assert_eq!(
+        rejected["error"]["message"],
+        "ChatGPT sign-in expired — sign in again in Octopus"
+    );
+    assert_eq!(std::fs::read(&auth_file).unwrap(), signed_in);
+}
+
+fn decision_envelope(root: &Path, request: &Value, decision: &str, admitted: bool) -> InterfaceInvocationEnvelope {
+    use octopus_descriptors::{CheckpointId, EeId, RunId};
+    use octopus_interfaces::{
+        CheckpointAdmissionMetadata, GrantProjection, InvocationMetadata, RequiredVerifiedArtifact,
+        RuntimeInvocationMetadata,
+    };
+    let label = "operator.approval.response";
+    let payload = serde_json::to_vec(&json!({"operator_approval_response": {
+        "request_id": request["request_id"], "call_id": request["call_id"], "decision": decision
+    }}))
+    .unwrap();
+    let artifact_file = InterfaceArtifactFile::write(root.join(format!("decision-{decision}")), label, &payload)
+        .and_then(|artifact| artifact.capture_bounded(1024 * 1024, 1024 * 1024))
+        .unwrap();
+    let (mark, verifier) = if decision == "accept" {
+        ("operator.approval", "operator_approval")
+    } else {
+        ("operator.input.provided", "operator_input")
+    };
+    let bindings = serde_json::from_value(json!({
+        "inbound": {"interface": "world_client_test", "config": {"artifact_policy": {"mode": "allow", "names": [label], "namespaces": []}}},
+        "outbound": [
+            {"interface": "world_provider_test", "config": {"artifact_policy": {"mode": "allow", "names": [label], "namespaces": []}}},
+            {"interface": "world_mcp_example", "config": {"artifact_policy": {"mode": "allow", "names": [label], "namespaces": []}}}
+        ]
+    }))
+    .unwrap();
+    let mut metadata = InvocationMetadata::new(GrantProjection {
+        interfaces: vec!["world_mcp_example".into(), "world_client_test".into()],
+        mark_outcomes: vec![mark.into()],
+        ..Default::default()
+    })
+    .with_runtime(RuntimeInvocationMetadata {
+        run: RunId::new("run-1"),
+        ee: EeId::new("ee-1"),
+        worker: InterfaceId::new("system_worker_test"),
+        checkpoint: CheckpointId::new("verified"),
+        interface: InterfaceId::new("world_mcp_example"),
+        epoch: 0,
+        run_record_hash: None,
+    })
+    .with_outbound_interface_bindings(vec![
+        InterfaceId::new("world_provider_test"),
+        InterfaceId::new("world_mcp_example"),
+    ])
+    .with_checkpoint_binding_policy(bindings)
+    .with_required_verified_artifacts(vec![RequiredVerifiedArtifact {
+        mark: octopus_descriptors::MarkId::new(mark),
+        artifact_label: label.into(),
+        verifier: octopus_descriptors::VerifierId::new(verifier),
+        params: json!({"request_id": request["request_id"], "call_id": request["call_id"]}),
+    }]);
+    if admitted {
+        metadata = metadata.with_checkpoint_admission(CheckpointAdmissionMetadata {
+            artifact_label: label.into(),
+            required_artifact_labels: vec![label.into()],
+            complete: true,
+        });
+    }
+    let content = ContentHash::of_bytes(&payload);
+    InterfaceInvocationEnvelope {
+        artifact: ArtifactRef { id: ArtifactId::new(format!("decision-{decision}")), content },
+        artifact_file,
+        artifact_binding_payloads: Vec::new(),
+        metadata: Some(metadata),
+    }
+}
+
+#[tokio::test]
+async fn effectful_server_tools_run_only_after_a_verifier_admitted_operator_decision() {
+    use octopus_descriptors::{CheckpointId, EeId, RunId};
+    use octopus_interfaces::{GrantProjection, InvocationMetadata, RuntimeInvocationMetadata};
+    let (base, server) = spawn_mock_mcp_server();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_registry(root, &base);
+    let interface = InterfaceId::new("world_mcp_example");
+    let interface_dir = root.join("registry/interface/world_mcp_example");
+    let process = mcp_interface_process(
+        interface.clone(),
+        load_interface_config(&interface_dir, &interface).unwrap(),
+        root.join("var/remote-mcp"),
+    );
+    let descriptor = load_interface_descriptor(&interface_dir, &interface).unwrap();
+    let catalog = load_operation_catalog(&interface_dir, &descriptor).unwrap();
+    let request_for = |sequence: u64| {
+        let mut envelope = direct_tool_envelope(root, sequence, "mcp.example.publish", json!({ "query": "launch" }));
+        envelope.metadata = Some(InvocationMetadata::new(GrantProjection::default()).with_runtime(RuntimeInvocationMetadata {
+            run: RunId::new("run-1"),
+            ee: EeId::new("ee-1"),
+            worker: InterfaceId::new("system_worker_test"),
+            checkpoint: CheckpointId::new("request"),
+            interface: interface.clone(),
+            epoch: 0,
+            run_record_hash: None,
+        }));
+        envelope
+    };
+    let output = root.join("results");
+    let receive = |envelope| process.receive(&catalog.operations["mcp.example.publish"], envelope, &output);
+    let read = |artifact: InterfaceArtifactFile| serde_json::from_slice::<Value>(&artifact.read_payload_bytes().unwrap()).unwrap();
+
+    let unproven = process
+        .receive(&catalog.operations["mcp.example.publish"], direct_tool_envelope(root, 1, "mcp.example.publish", json!({ "query": "x" })), &output)
+        .await;
+    assert!(unproven.unwrap_err().contains("no run provenance"));
+    let generic = read(process_artifact(process
+        .receive(&catalog.operations["mcp.example.call_tool"], direct_tool_envelope(root, 2, "mcp.example.call_tool", json!({ "name": "search", "arguments": { "query": "free" } })), &output)
+        .await));
+    assert_eq!(generic["ok"], true, "{generic}");
+    assert_eq!(generic["result"]["content"][0]["text"], "results for: free");
+
+    let asked = read(process_artifact(receive(request_for(3)).await));
+    let request = asked["result"]["operator_request"].clone();
+    assert_eq!(asked["result"]["effect_performed"], false, "{asked}");
+    assert_eq!(request["approval_scope"], "interface_operation");
+    assert_eq!(request["tool"], "publish");
+    assert_eq!(request["annotations"], json!({"title": "Publish", "destructiveHint": true}));
+    assert_eq!(read(process_artifact(receive(request_for(3)).await))["result"]["operator_request"], request);
+
+    let unadmitted = process.decide(&catalog, decision_envelope(root, &request, "accept", false), &output).await;
+    assert!(unadmitted.unwrap_err().contains("no completed checkpoint admission"));
+    let approved = read(process_artifact(process.decide(&catalog, decision_envelope(root, &request, "accept", true), &output).await));
+    assert_eq!(approved["correlation_id"], "direct-3");
+    assert_eq!(approved["result"]["content"][0]["text"], "results for: launch", "{approved}");
+    let replayed = read(process_artifact(process.decide(&catalog, decision_envelope(root, &request, "accept", true), &output).await));
+    assert_eq!(replayed, approved);
+    assert!(process.decide(&catalog, decision_envelope(root, &request, "decline", true), &output).await.is_err());
+
+    let full_access = read(process_artifact(process
+        .receive(&catalog.operations["mcp.example.publish"], policy_tool_envelope(root, 5, "mcp.example.publish", json!({ "query": "direct" }), "never"), &output)
+        .await));
+    assert_eq!(full_access["result"]["content"][0]["text"], "results for: direct", "{full_access}");
+
+    let other = read(process_artifact(receive(request_for(4)).await))["result"]["operator_request"].clone();
+    let declined = read(process_artifact(process.decide(&catalog, decision_envelope(root, &other, "decline", true), &output).await));
+    assert_eq!(declined["ok"], false);
+    assert_eq!(declined["error"]["code"], "operator_declined");
+    drop(server);
 }

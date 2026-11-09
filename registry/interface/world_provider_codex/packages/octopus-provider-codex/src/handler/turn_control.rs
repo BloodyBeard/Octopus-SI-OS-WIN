@@ -55,6 +55,7 @@ pub(crate) enum CodexTurnControlTarget {
         turn_interrupted: Arc<std::sync::atomic::AtomicBool>,
         thread_id: String,
         turn_id: String,
+        late_calls: Option<Arc<LateCallWake>>,
     },
     InterruptedPending {
         output: std::sync::Weak<ProviderOutputStream>,
@@ -175,6 +176,15 @@ impl CodexTurnControlBroker {
 
     pub(crate) fn is_starting(&self) -> bool {
         matches!(*self.state.borrow(), CodexTurnControlTarget::Starting)
+    }
+
+    pub(crate) fn late_call_wake(&self) -> Option<Arc<LateCallWake>> {
+        match &*self.state.borrow() {
+            CodexTurnControlTarget::Suspended { late_calls, .. } => {
+                late_calls.clone().filter(|wake| wake.armed())
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn is_recovered_pending(&self) -> bool {
@@ -515,12 +525,16 @@ impl CodexTurnControlBroker {
                     turn_interrupted,
                     thread_id,
                     turn_id,
+                    late_calls,
                 } => {
                     let output = output.upgrade();
                     let effect_guard = effect_gate.lock_owned().await;
                     if state.has_changed().unwrap_or(true) {
                         drop(effect_guard);
                         continue;
+                    }
+                    if let Some(wake) = &late_calls {
+                        wake.hold_for_control(control.control_id());
                     }
                     let continuity = match output.as_ref() {
                         Some(output) => output.continuity_snapshot(),
@@ -628,20 +642,24 @@ pub(crate) async fn validate_pending_steer_target(
     if state.interrupted_pending.is_some() || turn_interrupted.load(std::sync::atomic::Ordering::Acquire) {
         return Err("the interrupted provider turn cannot accept steering".into());
     }
-    let Some(durable) = state.pending.as_ref() else { return Ok(()); };
+    if state.pending.is_none() { return Ok(()); }
     let requests = pending_requests.lock().await;
-    let mut matching = requests.iter().filter(|((candidate, _), pending)| {
-        candidate == scope && pending_coordinates_match(Some(durable), pending)
-    });
-    let Some(((_, key), pending)) = matching.next() else {
+    let live = requests.iter().filter(|((candidate, _), _)| candidate == scope).collect::<Vec<_>>();
+    if live.len() != state.outstanding_len() {
         return Err("steering has no exact live pending app-server request".into());
-    };
-    if matching.next().is_some() || key != &pending.key || state.thread_id != thread_id
-        || pending.thread_id != thread_id || pending.turn_id != turn_id
-        || !Arc::ptr_eq(&pending.effect_gate, tokio::sync::OwnedMutexGuard::mutex(effect_guard))
-        || !Arc::ptr_eq(&pending.turn_interrupted, turn_interrupted)
-    {
-        return Err("steering target differs from the exact pending app-server request".into());
+    }
+    for durable in state.outstanding() {
+        let mut matching = live.iter().filter(|(_, pending)| pending_coordinates_match(Some(durable), pending));
+        let Some(((_, key), pending)) = matching.next() else {
+            return Err("steering has no exact live pending app-server request".into());
+        };
+        if matching.next().is_some() || key != &pending.key || state.thread_id != thread_id
+            || pending.thread_id != thread_id || pending.turn_id != turn_id
+            || !Arc::ptr_eq(&pending.effect_gate, tokio::sync::OwnedMutexGuard::mutex(effect_guard))
+            || !Arc::ptr_eq(&pending.turn_interrupted, turn_interrupted)
+        {
+            return Err("steering target differs from the exact pending app-server request".into());
+        }
     }
     Ok(())
 }
@@ -778,7 +796,7 @@ pub(crate) async fn apply_control_to_target(
                     match terminal {
                         Ok(Some(terminal)) => {
                             let (mut continuity, retained_effect) = interrupted_continuity(continuity)?;
-                            if let Some(continuity) = &mut continuity {
+                            if let Some(continuity) = continuity.as_mut().filter(|state| state.parallel_pending.is_empty()) {
                                 continuity.native_terminal = Some(terminal.clone());
                             }
                             CodexTurnControlResult {
@@ -1055,6 +1073,7 @@ pub(crate) fn reconcile_durable_interrupted_continuity(
         || recovered.static_context_fingerprint != durable.static_context_fingerprint
         || recovered.interrupted_pending.is_some()
         || recovered.pending.as_ref() != durable.interrupted_pending.as_ref()
+        || recovered.parallel_pending != durable.parallel_pending
         || durable.context_generation != next_generation
     {
         return Err(InterfaceDriverError::FailedClosed(

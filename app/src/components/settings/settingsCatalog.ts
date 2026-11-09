@@ -12,6 +12,7 @@ export type SettingsSectionId =
   | "shortcuts"
   | "access"
   | "extensions"
+  | "experiments"
   | "connections"
   | "surfaces"
   | "worker-environments"
@@ -56,12 +57,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDefinition[] = [
   { id: "general", label: "General", glyph: "settings", group: "Personal" },
   { id: "account", label: "Account", glyph: "user", group: "Personal", profile: "live" },
   { id: "appearance", label: "Appearance", glyph: "sun", group: "Personal" },
-  { id: "voice-audio", label: "Voice & Audio", glyph: "microphone", group: "Interaction" },
+  { id: "voice-audio", label: "Voice", glyph: "microphone", group: "Interaction" },
   { id: "computer-use", label: "Computer use", glyph: "desktop", group: "Interaction", profile: "live" },
   { id: "gestures", label: "Gestures", glyph: "hand", group: "Interaction" },
   { id: "shortcuts", label: "Keyboard shortcuts", glyph: "keyboard", group: "Interaction" },
   { id: "access", label: "Access & Privacy", glyph: "dataControls", group: "Octopus" },
   { id: "extensions", label: "Extensions", glyph: "widgets", group: "Octopus" },
+  { id: "experiments", label: "Experiments", glyph: "flask", group: "Octopus" },
   { id: "connections", label: "Connections", glyph: "interfaces", group: "Octopus", profile: "live" },
   { id: "surfaces", label: "Surfaces", glyph: "descriptor", group: "Octopus" },
   { id: "worker-environments", label: "Worker Environments", glyph: "ee", group: "Octopus" },
@@ -71,8 +73,9 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDefinition[] = [
 
 export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   destination("account.identity", "account", "ChatGPT account", "Review the native account email and subscription plan.", "destination", ["identity", "email", "subscription", "plan"], "live"),
+  destination("account.workspace", "account", "ChatGPT workspace", "Choose the ChatGPT workspace that Octopus and your Codex CLI use.", "setting", ["workspace", "switch account", "team", "business", "enterprise"], "live"),
   destination("account.usage", "account", "Usage limits", "Review remaining account limits, credits, and reset times.", "destination", ["rate limits", "weekly", "5-hour", "credits"], "live"),
-  destination("account.logout", "account", "Log out of ChatGPT", "Sign out of the shared native account and require sign-in to continue.", "action", ["sign out", "sign in", "login"], "live"),
+  destination("account.logout", "account", "Log out of ChatGPT", "Sign out of the shared native account and require sign-in to continue.", "action", ["sign out", "sign in", "login", "add account"], "live"),
   destination("general.first-surface", "general", "First surface", "Choose the launch destination in Octopus.", "setting", ["launch", "startup", "open"]),
   destination("general.internal-runs", "general", "Internal runs", "Include read-only runs that have no exact client interface.", "setting", ["show internal runs"]),
   destination("general.task-pane-width", "general", "Task pane width", "Set the default width of the secondary task pane.", "setting", ["split", "resize"]),
@@ -85,6 +88,7 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   destination("general.on-launch", "general", "On launch", "Restore the last active surface when the client opens.", "destination", ["startup"]),
   destination("general.open-at-login", "general", "Open at login", "Launch the packaged Octopus client after operating-system sign-in.", "setting", ["startup", "macos"]),
   destination("general.keep-awake", "general", "Keep awake", "Prevent the device from sleeping while a run is executing.", "setting", ["sleep", "run"]),
+  destination("general.export-setup", "general", "Export setup", "Save this Home's space, projects and capabilities as a setup file another Octopus can import.", "action", ["setup file", "import", "template", "share", "backup"], "live"),
   destination("notifications.mark-activity", "general", "Inbox notifications", "Notify about new messages, requests, and marks selected in Inbox.", "setting", ["notifications", "messages", "requests", "marks", "worker", "unfocused"]),
   destination("notifications.sound", "general", "Notification sound", "Choose the sound played with desktop notifications.", "setting", ["system", "silent", "activity"]),
 
@@ -100,11 +104,11 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   destination("voice.global-dictation", "voice-audio", "Global quick dictation", "Enable the desktop shortcut that opens the active composer and starts dictation.", "setting", ["hotkey"]),
   destination("voice.hold-dictate", "voice-audio", "Hold to dictate", "Review press-and-hold composer dictation behavior.", "destination", ["microphone"]),
   destination("voice.dictionary", "voice-audio", "Dictation dictionary", "Add replacements applied before a transcript enters the composer.", "setting", ["phrase", "replacement"]),
-  destination("voice.history", "voice-audio", "Recent dictations", "Review and copy recent local dictation results.", "action", ["history", "transcript"]),
   destination("voice.floating-call", "voice-audio", "Floating call widget", "Choose whether an active call follows you outside Home.", "setting", ["voice", "home"]),
   destination("voice.incoming-audio", "voice-audio", "Incoming audio artifacts", "Choose how audio artifacts behave while a voice surface is open.", "setting", ["autoplay"]),
-  destination("voice.recordings", "voice-audio", "Recordings", "Review how captured audio follows admitted artifact files.", "destination", ["storage"]),
-  destination("voice.transcripts", "voice-audio", "Transcripts", "Review projected call transcripts and bounded local dictation history.", "destination", ["storage", "history"]),
+  destination("voice.recordings", "voice-audio", "Recent recordings", "Your last 20 recordings are saved on this device.", "destination", ["dictation", "history", "audio"]),
+
+  destination("experiments.list", "experiments", "Experiments", "Turn the product experiments running in this client on or off.", "setting", ["beta", "labs", "try"]),
 
   destination("gestures.controls", "gestures", "Gesture controls", "Configure local camera-based gesture mappings and sensitivity.", "setting", ["camera", "hand", "mapping", "sensitivity"]),
 
@@ -114,7 +118,6 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   destination("access.administrator", "access", "Administrator password", "Change the local Administrator credential and revoke other sessions.", "action", ["security", "login"]),
   destination("access.touch-id", "access", "Touch ID", "Enable or disable Touch ID for Administrator unlock on this Mac.", "action", ["security", "biometric", "fingerprint"]),
   destination("access.test", "access", "Test password", "Set the credential for the isolated Test profile.", "action", ["lab", "security"]),
-  destination("access.recordings", "access", "Recordings and transcripts", "Review the client-local and artifact-governed privacy boundary.", "destination", ["audio", "privacy"]),
   destination("access.camera", "access", "Camera", "Review or request camera access for gestures and client surfaces.", "action", ["permission"]),
   destination("access.microphone", "access", "Microphone", "Review or request microphone access for dictation and Voice.", "action", ["permission"]),
   destination("access.browser-permissions", "access", "Saved browser permissions", "Remove saved Always choices for file uploads and browsing history.", "action", ["browser", "upload", "history", "approval"], "live"),

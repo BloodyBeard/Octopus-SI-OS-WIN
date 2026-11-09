@@ -2,6 +2,7 @@ module.exports = { operatorChatIndexProjection };
 
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
+const { setImmediate: yieldToClient } = require("node:timers/promises");
 const { isHomeVoiceInput } = require("./operatorChatVoiceInput.cjs");
 const { indexedMovementRunId, indexedUnsignedInteger, ledgerRowsForRun, movementBoundaryInterface, movementKindText, movementRunId, normalizeIndexedProjectionMovement, openValidatedLedgerIndex } = require("./movementRows.cjs");
 const { operatorChatEventIdentity } = require("./operatorChatEvents.cjs");
@@ -172,13 +173,15 @@ function operatorChatIndexProjection(store) {
         ORDER BY seq ASC`,
       );
       for (const requestedRunId of runIds) {
-        const rows = statement.all(requestedRunId, index.watermark);
-        for (const row of rows) {
+        let count = 0;
+        for (const row of statement.iterate(requestedRunId, index.watermark)) {
           const projected = normalizeIndexedProjectionMovement(row, index.ledgerPath);
           const runId = indexedMovementRunId(row);
           if (!runIds.has(runId)) continue;
           rowsByRun.get(runId).push(projected);
+          if (++count % 256 === 0) await yieldToClient();
         }
+        await yieldToClient();
       }
       const tail = await readIndexedLedgerTail(
         index.ledgerPath,
@@ -274,8 +277,10 @@ function operatorChatIndexProjection(store) {
           AND seq < ?
           AND kind IN ('InterfaceArrival', 'InterfaceOutbound')
         ORDER BY seq ASC`,
-      ).all(afterSeq, index.watermark);
+      ).iterate(afterSeq, index.watermark);
+      let count = 0;
       for (const row of rows) {
+        if (++count % 256 === 0) await yieldToClient();
         const runId = indexedMovementRunId(row);
         if (!runIds.has(runId)) continue;
         rowsByRun.get(runId).push(normalizeIndexedProjectionMovement(row, index.ledgerPath));

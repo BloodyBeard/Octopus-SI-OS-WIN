@@ -98,6 +98,8 @@ They use the same user-facing operations as interactive chat.
 ```sh
 ./octopus up
 ./octopus projects --json
+./octopus project create "Research" --json
+./octopus project folders <project-id> ~/work/research --json
 ./octopus models --agent <agent-id> --json
 ./octopus exec --agent <agent-id> --json "Summarize the attached notes" \
   --attach ./notes.txt
@@ -107,6 +109,12 @@ They use the same user-facing operations as interactive chat.
 ./octopus inspect <run-id> --json
 ./octopus stop <task-id>
 ```
+
+`exec --access project_access|full_access` chooses the new task's access; the
+default comes from the Project. `agent create --application <id>` (repeatable)
+connects Applications to a new Agent. `project delete <id> --yes` and
+`agent delete <id> --yes` remove a Project or an Agent through the same
+operations as the desktop client.
 
 Exact IDs, unique ID prefixes, or unambiguous names select existing tasks.
 `resume last` and `resume home` are available. For automation, prefer exact IDs.

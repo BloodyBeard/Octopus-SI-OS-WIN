@@ -5,8 +5,9 @@ export type VoiceSpatialInteraction = Readonly<{
   clientY: number;
   corner?: VoiceSpatialCorner;
   documentId: string;
-  kind?: "drag" | "resize";
+  kind?: "drag" | "resize" | "transform";
   phase: "begin" | "move" | "end";
+  scale?: number;
 }>;
 
 const VOICE_SPATIAL_INTERACTION_EVENT = "octopus:voice-spatial-interaction";

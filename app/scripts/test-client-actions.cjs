@@ -235,18 +235,28 @@ test('widget controls use actual extension receipts, exact document revisions an
   const bundled = require('esbuild').buildSync({ stdin: { contents: 'export * from "./src/client-surfaces/homeWidgetControls"; export {materializeClientExtensions} from "./src/extensions/useClientExtensions";', resolveDir: path.resolve(__dirname, '..') }, bundle: true, platform: 'node', format: 'cjs', write: false, external: ['react'], loader: { '.css': 'empty' }, define: { 'import.meta.env.DEV': 'false' } });
   const module = { exports: {} }; Function('module', 'exports', 'require', bundled.outputFiles[0].text)(module, module.exports, require);
   const { applyHomeWidgetAction, materializeClientExtensions, homeWidgetHiddenKey } = module.exports;
-  window.octopusTransport = { clientExtensions: () => store.snapshot() };
+  const document = structuredClone(require('../src/client-surfaces/home-widget-authoring.json').example);
+  document.id = 'hello'; document.title = 'Hello'; delete document.data.home_presentation;
+  const published = (revision, runId = scope.runId, id = 'hello') => {
+    const text = JSON.stringify({ ...document, revision, id });
+    return { path: `artifact:widget-${revision}`, artifactId: `widget-${revision}`, text, bytes: Buffer.byteLength(text),
+      digest: `sha256:${require('node:crypto').createHash('sha256').update(text).digest('hex')}`,
+      runId, interfaceId: scope.interfaceId, sequence: revision, modifiedAt: new Date().toISOString() };
+  };
+  let snapshot = { generation: 1, root: 'artifact://ledger', errors: [], documents: [published(1), published(1, 'foreign', 'foreign')] };
+  window.octopusTransport = { clientExtensions: () => store.snapshot(), projectionRead: async request => {
+    assert.equal(request.method, 'projection.client_surfaces.list'); return snapshot;
+  } };
   const lifecycle = async (id, operationId, action) => store.applyLifecycle({ id, operationId, action, expectedGeneration: (await store.snapshot()).generation, expectedRevision: store.builtinRevision(id) });
   const extensionState = async () => ({ ...materializeClientExtensions(await store.snapshot(), 'live', ''), hydrated: true,
     install: (id, op) => lifecycle(id, op, 'install'), uninstall: (id, op) => lifecycle(id, op, 'remove') });
-  const item = { sourceDigest: 'sha256:document', sourceRunId: scope.runId, sourceInterfaceId: scope.interfaceId, sourceArtifactId: 'client.surface.document:original', sourceSequence: 1,
-    document: { id: 'hello', title: 'Hello', revision: 1, target: { kind: 'voice.widget', slot: 'right' } } };
-  const options = { ...scope, accessProfile: 'live', surfaces: [item, { ...item, sourceRunId: 'foreign', document: { ...item.document, id: 'foreign' } }], extensions: await extensionState() };
+  const options = { ...scope, accessProfile: 'live', surfaces: [], extensions: await extensionState() };
   const query = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'list' };
   const list = () => applyHomeWidgetAction(options, query, 'widget_inventory');
   const change = (widget, state) => applyHomeWidgetAction(options, { ...query, action: 'set_widget', changes: [{ widget_id: widget.widget_id, source_digest: widget.source_digest, state }] }, `widget_${state}_fixture`);
   let rows = await list(); assert.ok(!rows.some(row => row.widget_id === 'foreign'));
   const hello = rows.find(row => row.widget_id === 'hello'), builtin = rows.find(row => row.widget_id === 'builtin.voice.live-context');
+  assert.ok(hello, 'controls must read the publication delivered after the renderer snapshot');
   for (const state of ['hidden', 'visible', 'removed', 'visible']) assert.equal((await change(hello, state)).find(row => row.widget_id === 'hello').state, state);
   await assert.rejects(change({ ...hello, source_digest: 'foreign' }, 'removed'), /revision changed/);
   await change(builtin, 'removed'); options.extensions = await extensionState();
@@ -256,6 +266,12 @@ test('widget controls use actual extension receipts, exact document revisions an
   assert.equal(rows.find(row => row.widget_id === builtin.widget_id).installed, true);
   rows = await applyHomeWidgetAction(options, { ...query, action: 'set_widget', changes: [hello, builtin].map(widget => ({ widget_id: widget.widget_id, source_digest: widget.source_digest, state: 'hidden' })) }, 'widget_batch_fixture');
   assert.deepEqual([hello, builtin].map(widget => rows.find(row => row.widget_id === widget.widget_id).state), ['hidden', 'hidden']);
+  snapshot = { ...snapshot, generation: 2, documents: [published(2)] };
+  await assert.rejects(change(hello, 'removed'), /revision changed/);
+  assert.notEqual((await list()).find(row => row.widget_id === 'hello').source_digest, hello.source_digest);
+  snapshot = { ...snapshot, errors: ['publication unreadable'] };
+  await assert.rejects(list(), /publication unreadable/);
+  snapshot = { ...snapshot, errors: [] };
   window.localStorage.setItem(homeWidgetHiddenKey('live'), '{}'); await assert.rejects(list(), /malformed/);
 });
 

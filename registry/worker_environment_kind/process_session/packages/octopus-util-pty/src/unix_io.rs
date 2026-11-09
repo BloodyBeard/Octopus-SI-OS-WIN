@@ -30,8 +30,12 @@ impl PtyIo {
         {
             return Err(io::Error::last_os_error());
         }
-        let fd = std::panic::catch_unwind(move || AsyncFd::new(File::from(fd)))
-            .map_err(|_| io::Error::other("PTY I/O requires a Tokio runtime with I/O enabled"))??;
+        // SAFETY: the `File` owns this descriptor, so it stays open and names the
+        // same file description for as long as the `AsyncFd` holds it.
+        let fd = std::panic::catch_unwind(move || {
+            unsafe { AsyncFd::register(File::from(fd)) }.map_err(io::Error::from)
+        })
+        .map_err(|_| io::Error::other("PTY I/O requires a Tokio runtime with I/O enabled"))??;
         Ok(Self { fd: Arc::new(fd) })
     }
 

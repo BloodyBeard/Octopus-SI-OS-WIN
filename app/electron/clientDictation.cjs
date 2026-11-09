@@ -2,11 +2,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const dictation = require("./clientDictationLimits.json");
 
 const CHATGPT_TRANSCRIPTION_URL = new URL("https://chatgpt.com/backend-api/transcribe");
-const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 44 + dictation.maxDurationMs / 1_000 * 24_000 * 2;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
-const MAX_DURATION_MS = 120_000;
 const AUTH_TIMEOUT_MS = 10_000;
 const AUTH_CACHE_MS = 60_000;
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
@@ -14,6 +14,23 @@ let authCache = null;
 
 async function transcribeClientDictation(request, options = {}) {
   const audio = decodeAudio(request);
+  let auth = await resolveClientDictationAuth(options);
+  let response = await requestTranscription(audio, auth, request.timeoutMs, options.fetch, options.signal);
+  if (response.statusCode === 401 || response.statusCode === 403) {
+    auth = await resolveClientDictationAuth(options, true);
+    response = await requestTranscription(audio, auth, request.timeoutMs, options.fetch, options.signal);
+  }
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const code = response.statusCode === 401 || response.statusCode === 403 ? "authorization" : response.statusCode === 429 ? "rate-limit" : "transcription";
+    throw Object.assign(new Error(transcriptionError(response.statusCode, response.body)), { code });
+  }
+  const payload = parseJsonObject(response.body);
+  const text = nonEmptyString(payload.text) || nonEmptyString(payload.transcript);
+  if (!text) throw Object.assign(new Error("No speech was recognized. Try again or record a new dictation."), { code: "empty-transcript" });
+  return { provider: "codex", model: "ChatGPT transcription", text };
+}
+
+async function resolveClientDictationAuth(options = {}, forceRefresh = false) {
   const executable = options.codexExecutable || resolveCodexExecutable(options.env || process.env);
   const authInput = {
     executable,
@@ -21,19 +38,7 @@ async function transcribeClientDictation(request, options = {}) {
     env: options.env || process.env,
     clientVersion: options.clientVersion || "0.1.0",
   };
-  let auth = await resolveCodexAuth(authInput, false);
-  let response = await requestTranscription(audio, auth, request.timeoutMs, options.fetch);
-  if (response.statusCode === 401 || response.statusCode === 403) {
-    auth = await resolveCodexAuth(authInput, true);
-    response = await requestTranscription(audio, auth, request.timeoutMs, options.fetch);
-  }
-  if (response.statusCode < 200 || response.statusCode >= 300) {
-    throw new Error(transcriptionError(response.statusCode, response.body));
-  }
-  const payload = parseJsonObject(response.body);
-  const text = nonEmptyString(payload.text) || nonEmptyString(payload.transcript);
-  if (!text) throw new Error("The transcription response did not include any text.");
-  return { provider: "codex", model: "ChatGPT transcription", text };
+  return resolveCodexAuth(authInput, forceRefresh);
 }
 
 function decodeAudio(request) {
@@ -43,12 +48,12 @@ function decodeAudio(request) {
   if (request.mediaType !== "audio/wav" || request.sampleRateHz !== 24_000) {
     throw new Error("Dictation requires 24 kHz mono WAV audio.");
   }
-  if (!Number.isFinite(request.durationMs) || request.durationMs <= 0 || request.durationMs > MAX_DURATION_MS) {
-    throw new Error("Dictation recordings must be between 1 ms and 120 seconds.");
+  if (!Number.isFinite(request.durationMs) || request.durationMs <= 0 || request.durationMs > dictation.maxDurationMs) {
+    throw new Error("Dictation recordings can be up to 10 minutes long.");
   }
   const audio = toBuffer(request.bytes);
   if (!audio.length || audio.length > MAX_AUDIO_BYTES) {
-    throw new Error("Dictation audio must be non-empty and no larger than 10 MB.");
+    throw new Error("Dictation audio must be non-empty and fit within 10 minutes of 24 kHz mono WAV audio.");
   }
   if (audio.length < 44 || audio.toString("ascii", 0, 4) !== "RIFF" || audio.toString("ascii", 8, 12) !== "WAVE") {
     throw new Error("The recorded audio is not a valid WAV file.");
@@ -68,8 +73,8 @@ function resolveCodexExecutable(env) {
   const candidates = [
     nonEmptyString(env.OCTOPUS_CODEX_PATH),
     ...(nonEmptyString(env.PATH)?.split(path.delimiter).map((entry) => path.join(entry, binary)) ?? []),
-    process.platform === "darwin" ? "/Applications/ChatGPT.app/Contents/Resources/codex" : "",
-    process.platform === "darwin" ? path.join(os.homedir(), "Applications/ChatGPT.app/Contents/Resources/codex") : "",
+    process.platform === "darwin" ? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex" : "",
+    process.platform === "darwin" ? path.join(os.homedir(), "Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex") : "",
   ].filter(Boolean);
   for (const candidate of [...new Set(candidates)]) {
     try {
@@ -79,7 +84,7 @@ function resolveCodexExecutable(env) {
       continue;
     }
   }
-  throw new Error("Codex CLI was not found. Install Codex, sign in with ChatGPT, and try dictation again.");
+  throw Object.assign(new Error("Codex CLI was not found. Install Codex, sign in with ChatGPT, and try dictation again."), { code: "authorization" });
 }
 
 async function resolveCodexAuth(input, forceRefresh) {
@@ -146,18 +151,18 @@ function discoverCodexAuth(input, refresh) {
         }
         if (message.id !== 2) continue;
         if (message.error) {
-          finish(new Error("Codex could not read the local ChatGPT authorization."));
+            finish(Object.assign(new Error("Codex could not read the local ChatGPT authorization."), { code: "authorization" }));
           return;
         }
         const result = object(message.result);
         const authMethod = nonEmptyString(result.authMethod);
         const token = nonEmptyString(result.authToken);
         if (!token) {
-          finish(new Error("No ChatGPT session token is available. Sign in to ChatGPT in Codex."));
+          finish(Object.assign(new Error("No ChatGPT session token is available. Sign in to ChatGPT in Codex."), { code: "authorization" }));
           return;
         }
         if (authMethod !== "chatgpt" && authMethod !== "chatgptAuthTokens") {
-          finish(new Error("Dictation requires a ChatGPT-authenticated Codex session."));
+          finish(Object.assign(new Error("Dictation requires a ChatGPT-authenticated Codex session."), { code: "authorization" }));
           return;
         }
         finish(null, {
@@ -178,7 +183,7 @@ function discoverCodexAuth(input, refresh) {
   });
 }
 
-async function requestTranscription(audio, auth, timeoutMs, fetchOverride) {
+async function requestTranscription(audio, auth, timeoutMs, fetchOverride, signal) {
   if (typeof fetchOverride !== "function") {
     throw new Error("Electron networking is unavailable for client dictation.");
   }
@@ -186,7 +191,7 @@ async function requestTranscription(audio, auth, timeoutMs, fetchOverride) {
   body.append("file", new Blob([audio], { type: "audio/wav" }), "voice.wav");
   const abortController = new AbortController();
   const timeout = setTimeout(
-    () => abortController.abort(new Error("Voice transcription timed out.")),
+    () => abortController.abort(new DOMException("Voice transcription timed out.", "TimeoutError")),
     Math.min(120_000, Math.max(5_000, Number(timeoutMs) || 30_000)),
   );
   timeout.unref?.();
@@ -194,7 +199,7 @@ async function requestTranscription(audio, auth, timeoutMs, fetchOverride) {
     const response = await fetchOverride(CHATGPT_TRANSCRIPTION_URL.toString(), {
       method: "POST",
       redirect: "error",
-      signal: abortController.signal,
+      signal: signal ? AbortSignal.any([abortController.signal, signal]) : abortController.signal,
       headers: {
         Authorization: `Bearer ${auth.token}`,
         ...(auth.accountId ? { "ChatGPT-Account-Id": auth.accountId } : {}),
@@ -281,4 +286,20 @@ module.exports = {
   decodeAudio,
   resolveCodexExecutable,
   transcribeClientDictation,
+  resolveClientDictationAuth,
+  dictationFailure,
 };
+
+function dictationFailure(error) {
+  const code = ["empty-transcript", "authorization", "rate-limit"].includes(error?.code)
+    ? error.code : error?.name === "AbortError" ? "cancelled" : error?.name === "TimeoutError" ? "timeout" : "transcription";
+  const messages = {
+    "empty-transcript": "No speech was recognized. Try again or record a new dictation.",
+    authorization: "Sign in to ChatGPT to transcribe this recording.",
+    "rate-limit": "Dictation is temporarily limited. Try again shortly.",
+    cancelled: "Transcription cancelled.",
+    timeout: "Transcription took too long. Try again.",
+    transcription: "Couldn't transcribe this recording. Check your connection and try again.",
+  };
+  return { code, message: messages[code] };
+}

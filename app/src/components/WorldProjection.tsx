@@ -49,7 +49,7 @@ const ZONE_PAD = 38;
 const ZONE_GAP = 30;
 const ZONE_HEAD = 36;
 const MIN_INNER = 150;
-const WORLD_ELEVATION = 330;
+const MIN_WORLD_ELEVATION = 480;
 const DEFAULT_YAW = -14;
 const DEFAULT_PITCH = 50;
 const DEFAULT_ZOOM = 1.08;
@@ -70,9 +70,10 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
     () => buildScene(environments, registeredWorldInterfaces, mode),
     [environments, registeredWorldInterfaces, mode],
   );
-  const project = useMemo(() => makeProjector(yawDeg, pitchDeg), [yawDeg, pitchDeg]);
 
   function onPointerDown(event: ReactPointerEvent<SVGSVGElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
     dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
@@ -101,6 +102,14 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
   const worldRows = Math.max(1, Math.ceil(scene.worldNodes.length / worldColumns));
   const worldGridHalfWidth = ((worldColumns - 1) * WORLD_GRID_GAP_X) / 2;
   const worldGridHalfDepth = ((worldRows - 1) * WORLD_GRID_GAP_Y) / 2;
+  const worldSurfaceHalfExtent = Math.max(
+    WORLD_SURFACE_MIN_HALF,
+    scene.systemHalfWidth * 0.82,
+    worldGridHalfWidth + WORLD_SURFACE_PAD,
+    worldGridHalfDepth + WORLD_SURFACE_PAD,
+  );
+  const worldElevation = Math.max(MIN_WORLD_ELEVATION, worldSurfaceHalfExtent * 0.65);
+  const project = useMemo(() => makeProjector(yawDeg, pitchDeg, worldElevation), [yawDeg, pitchDeg, worldElevation]);
   const worldDots = useMemo(() => scene.worldNodes.map((node, index) => {
     const row = Math.floor(index / worldColumns);
     const column = index % worldColumns;
@@ -109,9 +118,9 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
     const y = (row - (worldRows - 1) / 2) * WORLD_GRID_GAP_Y;
     return {
       ...node,
-      point: project(x, y, WORLD_ELEVATION),
+      point: project(x, y, worldElevation),
     };
-  }), [project, scene.worldNodes, worldColumns, worldRows]);
+  }), [project, scene.worldNodes, worldColumns, worldRows, worldElevation]);
   const worldDotByName = useMemo(() => {
     const byName = new Map<string, (typeof worldDots)[number]>();
     for (const dot of worldDots) {
@@ -127,18 +136,12 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
     point: project(run.x, run.y, 0),
   }))), [project, scene.zones]);
   const boundNodeCount = worldDots.filter((dot) => dot.bound).length;
-  const worldSurfaceHalfExtent = Math.max(
-    WORLD_SURFACE_MIN_HALF,
-    scene.systemHalfWidth * 0.82,
-    worldGridHalfWidth + WORLD_SURFACE_PAD,
-    worldGridHalfDepth + WORLD_SURFACE_PAD,
-  );
 
   // The viewBox frames the content at the DEFAULT orientation and then stays FIXED — it is
   // NOT recomputed as you rotate, so rotating just turns the scene inside a stable frame
   // (no "strange enlarging" from the frame re-fitting on every drag). Zoom is separate.
   const viewBox = useMemo(() => {
-    const fit = makeProjector(DEFAULT_YAW, DEFAULT_PITCH, 1);
+    const fit = makeProjector(DEFAULT_YAW, DEFAULT_PITCH, worldElevation);
     // Frame the ACTUAL visible content — the zones (there is no drawn system surface) plus
     // the world surface above — so the projection centers instead of hugging the top.
     const points = [
@@ -148,10 +151,10 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
         fit(zone.x + zone.width, zone.y + zone.height, 0),
         fit(zone.x, zone.y + zone.height, 0),
       ]),
-      fit(-worldSurfaceHalfExtent, -worldSurfaceHalfExtent, WORLD_ELEVATION),
-      fit(worldSurfaceHalfExtent, -worldSurfaceHalfExtent, WORLD_ELEVATION),
-      fit(worldSurfaceHalfExtent, worldSurfaceHalfExtent, WORLD_ELEVATION),
-      fit(-worldSurfaceHalfExtent, worldSurfaceHalfExtent, WORLD_ELEVATION),
+      fit(-worldSurfaceHalfExtent, -worldSurfaceHalfExtent, worldElevation),
+      fit(worldSurfaceHalfExtent, -worldSurfaceHalfExtent, worldElevation),
+      fit(worldSurfaceHalfExtent, worldSurfaceHalfExtent, worldElevation),
+      fit(-worldSurfaceHalfExtent, worldSurfaceHalfExtent, worldElevation),
     ];
     if (!points.length) return "-640 -430 1280 860";
     const xs = points.map((point) => point.x);
@@ -164,7 +167,7 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
     const padTop = 30; // world-dot labels sit above the top surface
     const padBottom = 34; // run labels sit below their zone
     return `${minX - padX} ${minY - padTop} ${maxX - minX + padX * 2} ${maxY - minY + padTop + padBottom}`;
-  }, [scene.zones, worldSurfaceHalfExtent]);
+  }, [scene.zones, worldSurfaceHalfExtent, worldElevation]);
 
   return (
     <div className="world-projection">
@@ -185,12 +188,12 @@ export const WorldProjection = memo(function WorldProjection({ environments, reg
 
           {worldDots.length > 0 ? (
             <>
-              <polygon className="wp-surface wp-surface-world" points={surfacePoints(project, worldSurfaceHalfExtent, worldSurfaceHalfExtent, WORLD_ELEVATION)} />
+              <polygon className="wp-surface wp-surface-world" points={surfacePoints(project, worldSurfaceHalfExtent, worldSurfaceHalfExtent, worldElevation)} />
               <SurfaceLabel
                 project={project}
                 x={-worldSurfaceHalfExtent + 30}
                 y={worldSurfaceHalfExtent - 26}
-                z={WORLD_ELEVATION}
+                z={worldElevation}
                 text={mode === "routeSets"
                   ? `World Surface · ${worldDots.length} route sets · ${boundNodeCount} bound`
                   : `World Surface · ${worldDots.length} registered · ${scene.boundWorldInterfaces.size} bound`}
@@ -474,7 +477,7 @@ function groupWorldInterfaceRouteSets(
 
 type Projector = (x: number, y: number, z: number) => { x: number; y: number };
 
-function makeProjector(yawDeg: number, pitchDeg: number, zoom = 1): Projector {
+function makeProjector(yawDeg: number, pitchDeg: number, worldElevation: number): Projector {
   const yaw = (yawDeg * Math.PI) / 180;
   const pitch = (pitchDeg * Math.PI) / 180;
   const cosYaw = Math.cos(yaw);
@@ -485,8 +488,8 @@ function makeProjector(yawDeg: number, pitchDeg: number, zoom = 1): Projector {
     const u = x * cosYaw - y * sinYaw;
     const v = x * sinYaw + y * cosYaw;
     return {
-      x: u * zoom,
-      y: (v * cosPitch - (z - WORLD_ELEVATION / 2) * sinPitch) * zoom,
+      x: u,
+      y: v * cosPitch - (z - worldElevation / 2) * sinPitch,
     };
   };
 }
@@ -563,8 +566,16 @@ function zoneRoutes(
       // at any rotation/zoom instead of overshooting into the centers.
       const from = trimToCircle(dot.point, runPoint, 8);
       const to = trimToCircle(runPoint, dot.point, 7);
+      const interfaces = run.world.filter((member) => worldDotByName.get(member)?.id === dot.id);
+      const endpoints = `System: ${run.run.worker}\nWorld: ${interfaces.join(", ")}`;
+      const label = `System: ${compactDashboardLabel(run.run.worker, 32)}\nWorld: ${compactDashboardLabel(interfaces.join(", "), 32)}`;
       routes.push(
-        <line className="wp-route" x1={from.x} y1={from.y} x2={to.x} y2={to.y} key={`route:${zone.env.id}:${run.run.id}:${dot.id}`} />,
+        <DashboardTooltip asChild compact text={label} key={`route:${zone.env.id}:${run.run.id}:${dot.id}`}>
+          <g className="wp-route-target" role="img" aria-label={endpoints}>
+            <line className="wp-route" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+            <line className="wp-route-hit" x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+          </g>
+        </DashboardTooltip>,
       );
     }
   }

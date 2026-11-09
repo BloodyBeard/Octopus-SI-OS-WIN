@@ -1,4 +1,21 @@
 export const ONBOARDING_STORAGE_KEY = "octopus.onboarding.v1";
+const WELCOME_PROGRESS_KEY = "octopus.welcome-progress.v1";
+
+export type WelcomeProgress = { step: number; heroSeen: boolean };
+
+export function readWelcomeProgress(): WelcomeProgress {
+  const raw = window.localStorage.getItem(WELCOME_PROGRESS_KEY);
+  if (raw === null) return { step: 0, heroSeen: false };
+  const value = JSON.parse(raw) as WelcomeProgress;
+  if (!value || !Number.isInteger(value.step) || value.step < 0 || value.step > 3 || typeof value.heroSeen !== "boolean") {
+    throw new Error("Saved welcome progress is invalid.");
+  }
+  return value;
+}
+
+export function saveWelcomeProgress(progress: WelcomeProgress) {
+  window.localStorage.setItem(WELCOME_PROGRESS_KEY, JSON.stringify(progress));
+}
 
 export type OnboardingState = {
   version: 1;
@@ -57,6 +74,7 @@ function writeStoredState(state: OnboardingState) {
 export function resetOnboardingState() {
   try {
     window.localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+    window.localStorage.removeItem(WELCOME_PROGRESS_KEY);
   } catch (error) {
     throw new Error(`Cannot reset ${ONBOARDING_STORAGE_KEY}: ${error instanceof Error ? error.message : String(error)}`);
   }

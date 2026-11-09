@@ -162,6 +162,9 @@ test('steering binds owned attachments and cleans up partially consumed selectio
   const dependencies = {
     ipcMain: { handle: (_name, callback) => { handler = callback; } },
     getClientAccessController: () => ({ requireSession: () => ({ profile: 'live' }) }),
+    ensureRuntimeHost: () => ({ assertStorageWritable: async () => {} }), runtimeHost: null,
+    retainChatAttachmentsAfterStorageFailure: () => {},
+    ...require('../electron/operatorChatSubmitResult.cjs'),
     prepareLiveProjectionRead: async () => {}, resolveOctopusHome: () => '/fixture', path,
     getClientAttachmentStagingStore: () => ({ consume: async (_owner, stage) => { if (stage === 'bad') throw new Error('invalid stage'); return consumed; }, discard: async value => { discarded.push(value); } }),
     resolveInstallationRoot: () => '/installation', payloadArtifactBindings: value => value,
@@ -176,7 +179,7 @@ test('steering binds owned attachments and cleans up partially consumed selectio
   Function(...Object.keys(dependencies), source.slice(start, end))(...Object.values(dependencies));
   await assert.rejects(handler({}, 'owner', { attachments: [{ stage: 'good' }, { stage: 'bad' }] }), /invalid stage/);
   assert.deepEqual(discarded, [consumed]); assert.equal(submitted, 0);
-  assert.equal((await handler({}, 'owner', { attachments: [{ stage: 'good' }], reasoningEffort: 'high' })).attachmentCount, 1);
+  assert.equal((await handler({}, 'owner', { attachments: [{ stage: 'good' }], reasoningEffort: 'high' })).value.attachmentCount, 1);
   assert.deepEqual(discarded, [consumed, consumed]); assert.equal(submitted, 1);
 });
 

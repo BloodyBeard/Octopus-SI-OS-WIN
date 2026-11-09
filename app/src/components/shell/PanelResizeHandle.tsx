@@ -1,7 +1,8 @@
 import {
   animate,
+  cancelFrame,
+  frame,
   useMotionValue,
-  useMotionValueEvent,
   useReducedMotion,
   useTransform,
   type MotionValue,
@@ -36,10 +37,15 @@ export function useAnimatedPanelSize(
   ));
   const [mounted, setMounted] = useState(open);
 
-  useMotionValueEvent(animatedSize, "change", (value) => mirroredSize?.set(value));
-
   useLayoutEffect(() => {
-    mirroredSize?.set(animatedSize.get());
+    if (!mirroredSize) return;
+    const sync = () => mirroredSize.set(animatedSize.get());
+    const unsubscribe = animatedSize.on("change", () => frame.preRender(sync, false, true));
+    sync();
+    return () => {
+      unsubscribe();
+      cancelFrame(sync);
+    };
   }, [animatedSize, mirroredSize]);
 
   useLayoutEffect(() => {

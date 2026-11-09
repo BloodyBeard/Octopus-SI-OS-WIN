@@ -92,8 +92,8 @@ pub(crate) fn config_from_persisted_profile(
     })?;
     let value = provider_state.get(RUN_AUTHORING_BINDING).ok_or_else(|| {
         format!(
-            "provider run '{}' authoring result has no durable run_authoring_binding",
-            record.id.as_str()
+            "provider run '{}' interface '{}' authoring result has no durable run_authoring_binding",
+            record.id.as_str(), provider.as_str()
         )
     })?;
     let topology: BoundRunAuthoringTopology =
@@ -315,7 +315,7 @@ pub(crate) fn derive_bound_run_authoring_topology(
 #[cfg(test)]
 pub(crate) fn derived_checkpoint_template(
     role: RunAuthoringCheckpointRole,
-    checkpoint: &octopus_runtime::run_record::CheckpointRecord,
+    checkpoint: &octopus_run_record::CheckpointRecord,
 ) -> Result<RunAuthoringCheckpoint, String> {
     let interface_binding = checkpoint.interface_binding.clone().ok_or_else(|| {
         format!(
@@ -485,9 +485,8 @@ pub(crate) fn validate_checkpoint_topology(
                 checkpoint_id.as_str()
             )
         })?;
-        if (checkpoint.inbound_interface() == Some(authoring_call.interface())
+        if checkpoint.inbound_interface() == Some(authoring_call.interface())
             || checkpoint.inbound_interface() == Some(authoring_result.interface())
-        ) && result_inputs::bound_source(record, provider, &checkpoint.id)?.is_none()
         {
             return Err(format!(
                 "provider run '{}' active checkpoint '{}' shares a provider-owned authoring interface outside the frontier",
@@ -655,7 +654,7 @@ pub(crate) fn validate_checkpoint_topology(
 }
 
 pub(crate) fn checkpoint_record_matches_template(
-    checkpoint: &octopus_runtime::run_record::CheckpointRecord,
+    checkpoint: &octopus_run_record::CheckpointRecord,
     template: &RunAuthoringCheckpoint,
     run: &RunId,
 ) -> bool {
@@ -666,7 +665,7 @@ pub(crate) fn checkpoint_record_matches_template(
 }
 
 pub(crate) fn canonical_role_bindings(
-    frontier: &[&octopus_runtime::run_record::CheckpointRecord],
+    frontier: &[&octopus_run_record::CheckpointRecord],
     authoring_call: &RunAuthoringCheckpoint,
     authoring_result: &RunAuthoringCheckpoint,
     run: &RunId,
@@ -709,7 +708,7 @@ pub(crate) fn canonical_role_bindings(
 }
 
 pub(crate) fn checkpoint_role_bindings_match(
-    checkpoint: &octopus_runtime::run_record::CheckpointRecord,
+    checkpoint: &octopus_run_record::CheckpointRecord,
     mandatory_role_bindings: &[ArtifactBinding],
     template: &RunAuthoringCheckpoint,
 ) -> bool {

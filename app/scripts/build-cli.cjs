@@ -26,7 +26,7 @@ async function buildCli({ runtime = false } = {}) {
     const packager = require("./runtime-package.cjs").createRuntimePackager({ repoRoot, appRoot, outputRoot: path.join(outdir, "runtime") });
     const provider = path.join(registry, "interface/world_provider_codex/packages/octopus-provider-codex");
     const bridge = path.join(provider, "opencodex-bridge");
-    run("npm", ["ci", "--ignore-scripts"], bridge);
+    run("npm", ["ci"], bridge);
     run("npm", ["run", "build"], bridge);
     const desktop = path.join(registry, "worker_environment_kind/desktop_session/packages/octopus-system-gui-env/native");
     require(path.join(desktop, "build.cjs")).buildDesktopNative(path.join(desktop, "bin/octopus-desktop-native"));

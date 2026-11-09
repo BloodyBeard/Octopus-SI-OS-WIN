@@ -16,18 +16,24 @@
 }
 
 .chat-tooltip {
+  --font-ui-weight: 430;
   position: fixed;
   width: fit-content;
   max-height: calc(100vh - 16px);
-  max-width: min(20rem, calc(100vw - 16px));
+  max-width: min(320px, calc(100vw - 16px));
   transform: translate(-50%, calc(-100% - 2px));
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-2xl);
+  border: 1px solid color-mix(in oklab, currentColor 5%, transparent);
+  border-radius: var(--radius-3xl);
   background: var(--color-surface-elevated-secondary);
-  padding: calc(var(--spacing) * 1.5) calc(var(--spacing) * 2);
+  padding: 5px 12px;
   color: var(--color-text);
+  corner-shape: var(--octopus-corner-shape, round);
+  box-shadow: 0 8px 18px #0f172a33;
   font-size: var(--text-sm);
-  line-height: var(--text-sm--line-height);
+  font-weight: var(--font-ui-weight);
+  line-height: 18px;
+  letter-spacing: -.15px;
+  text-align: center;
   white-space: normal;
   overflow: auto;
   overflow-wrap: break-word;
@@ -35,18 +41,21 @@
   pointer-events: none;
 }
 
+:root[data-theme="light"] .chat-tooltip {
+  background: var(--color-background-primary-solid);
+  color: var(--color-text-primary-solid);
+}
+
 .chat-tooltip[data-side="bottom"] {
   transform: translate(-50%, 2px);
 }
 
 .chat-tooltip[data-side="right"] {
-  transform: translate(8px, -50%);
-  border-radius: var(--radius-md);
+  transform: translate(2px, -50%);
 }
 
 .chat-tooltip[data-side="left"] {
-  transform: translate(calc(-100% - 8px), -50%);
-  border-radius: var(--radius-md);
+  transform: translate(calc(-100% - 2px), -50%);
 }
 
 .chat-tooltip.is-activity-target code {

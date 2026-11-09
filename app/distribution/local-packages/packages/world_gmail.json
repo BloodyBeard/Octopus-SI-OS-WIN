@@ -1,0 +1,30 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_gmail",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_gmail",
+  "release_status": "optional",
+  "display": {
+    "name": "Gmail",
+    "description": "Search, read, draft and send email with the Gmail app connected to your ChatGPT account.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "mail"
+  },
+  "required_packages": [
+    "world_mcp_example"
+  ],
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_gmail",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-gmail-context"
+    }
+  ]
+}

@@ -23,9 +23,6 @@ mod rustls_provider;
 mod spawn;
 use octopus_local_socket as uds;
 
-#[cfg(feature = "embed-support")]
-mod embed_support;
-
 use std::error::Error;
 use std::fmt;
 use std::io::Error as IoError;
@@ -42,7 +39,6 @@ use octopus_appserver_proto::ServerRequest;
 use octopus_util_abspath::AbsolutePathBuf;
 use serde::de::DeserializeOwned;
 
-pub use crate::auth::{CredentialError, ProviderCredential, resolve_credential};
 pub use crate::compatibility::{CodexCompatibilityEvidence, CodexCompatibilityRequirements, CODEX_SCHEMA_BASELINE};
 pub use crate::managed_cli::{verify_managed_cli, ManagedCliImport, ManagedCliReceipt, ManagedCliSigning, MANAGED_CLI_RECEIPT};
 pub use crate::config::{
@@ -69,9 +65,6 @@ pub use crate::spawn::SpawnAppServerClient;
 pub use crate::spawn::SpawnAppServerRequestHandle;
 pub use crate::spawn::SpawnConfig;
 
-#[cfg(feature = "embed-support")]
-pub use crate::embed_support::*;
-
 pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const DEFAULT_IN_PROCESS_CHANNEL_CAPACITY: usize = 256;
@@ -93,6 +86,52 @@ impl AppServerEvent {
             Ok(notification) => Self::ServerNotification(notification),
             Err(_) => Self::UnknownServerNotification(notification),
         }
+    }
+}
+
+pub(crate) struct AppServerEventSender {
+    events: tokio::sync::mpsc::UnboundedSender<AppServerEvent>,
+    arrivals: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+pub(crate) struct AppServerEventReceiver {
+    events: tokio::sync::mpsc::UnboundedReceiver<AppServerEvent>,
+    arrivals: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+pub(crate) fn app_server_event_channel() -> (AppServerEventSender, AppServerEventReceiver) {
+    let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let arrivals = std::sync::Arc::new(tokio::sync::watch::Sender::new(0));
+    (
+        AppServerEventSender { events, arrivals: arrivals.clone() },
+        AppServerEventReceiver { events: receiver, arrivals },
+    )
+}
+
+impl AppServerEventSender {
+    pub(crate) fn send(
+        &self,
+        event: AppServerEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<AppServerEvent>> {
+        self.events.send(event)?;
+        self.arrivals.send_modify(|count| *count = count.wrapping_add(1));
+        Ok(())
+    }
+}
+
+impl AppServerEventReceiver {
+    pub(crate) async fn recv(&mut self) -> Option<AppServerEvent> {
+        self.events.recv().await
+    }
+
+    pub(crate) fn try_recv(
+        &mut self,
+    ) -> Result<AppServerEvent, tokio::sync::mpsc::error::TryRecvError> {
+        self.events.try_recv()
+    }
+
+    pub(crate) fn arrivals(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.arrivals.subscribe()
     }
 }
 
@@ -295,6 +334,13 @@ impl AppServerClient {
         match self {
             Self::Remote(client) => client.restore_ready_events(events),
             Self::Spawn(client) => client.restore_ready_events(events),
+        }
+    }
+
+    pub(crate) fn event_arrivals(&self) -> tokio::sync::watch::Receiver<u64> {
+        match self {
+            Self::Remote(client) => client.event_arrivals(),
+            Self::Spawn(client) => client.event_arrivals(),
         }
     }
 

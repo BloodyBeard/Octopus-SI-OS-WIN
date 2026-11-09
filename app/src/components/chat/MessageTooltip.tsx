@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import "./messageTooltip.css";
 
 const TooltipTriggerContext = createContext(false);
+let currentTooltip: { id: string; close: () => void } | null = null;
 type TooltipTriggerProps = HTMLAttributes<HTMLElement> & { disabled?: boolean; ref?: Ref<HTMLElement> };
 
 type Anchor = {
@@ -78,15 +79,29 @@ export function MessageTooltip({ children, asChild = false, className, delayMs, 
     };
   }, [side]);
 
+  const close = useCallback(() => {
+    openEpochRef.current += 1;
+    clearTimer();
+    if (currentTooltip?.id === tooltipId) currentTooltip = null;
+    setAnchor(null);
+  }, [clearTimer, tooltipId]);
+
+  const claim = useCallback(() => {
+    if (currentTooltip?.id !== tooltipId) currentTooltip?.close();
+    currentTooltip = { id: tooltipId, close };
+  }, [close, tooltipId]);
+
   const openImmediately = useCallback(() => {
     clearTimer();
     openEpochRef.current += 1;
     if (inactive || !tooltipInteractionActive(interactionRef.current) || document.visibilityState === "hidden") return;
+    claim();
     setAnchor(measureAnchor());
-  }, [clearTimer, inactive, measureAnchor]);
+  }, [claim, clearTimer, inactive, measureAnchor]);
 
   const scheduleOpen = useCallback(() => {
     if (inactive || anchor || timerRef.current !== null) return;
+    claim();
     const openEpoch = ++openEpochRef.current;
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
@@ -97,18 +112,13 @@ export function MessageTooltip({ children, asChild = false, className, delayMs, 
       ) return;
       setAnchor(measureAnchor());
     }, resolvedDelayMs);
-  }, [anchor, inactive, measureAnchor, resolvedDelayMs]);
-
-  const close = useCallback(() => {
-    openEpochRef.current += 1;
-    clearTimer();
-    setAnchor(null);
-  }, [clearTimer]);
+  }, [anchor, claim, inactive, measureAnchor, resolvedDelayMs]);
 
   useEffect(() => () => {
     openEpochRef.current += 1;
     clearTimer();
-  }, [clearTimer]);
+    if (currentTooltip?.id === tooltipId) currentTooltip = null;
+  }, [clearTimer, tooltipId]);
 
   useEffect(() => {
     if (inactive) {
@@ -157,7 +167,7 @@ export function MessageTooltip({ children, asChild = false, className, delayMs, 
     const update = () => {
       const measured = measureAnchor();
       setAnchor((current) => {
-        if (!measured || !current) return measured;
+        if (!measured || !current) return null;
         const geometryChanged = Math.abs(measured.triggerBottom - current.triggerBottom) >= 0.5
           || Math.abs(measured.triggerTop - current.triggerTop) >= 0.5
           || Math.abs(measured.triggerX - current.triggerX) >= 0.5
@@ -237,7 +247,7 @@ export function MessageTooltip({ children, asChild = false, className, delayMs, 
       close();
     },
     onPointerMove: (event) => {
-      if (inactive || event.pointerType === "touch" || interactionRef.current.hoverLatched) return;
+      if (inactive || event.buttons !== 0 || event.pointerType === "touch" || interactionRef.current.hoverLatched) return;
       interactionRef.current.hoverLatched = true;
       scheduleOpen();
     },

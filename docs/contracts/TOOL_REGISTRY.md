@@ -88,10 +88,16 @@ A tool process starts with a cleared environment and receives only:
   descriptor declares;
 - the invocation artifact and bound artifacts over stdin.
 
-A tool whose path comes in its arguments declares that argument as a path
-within specific root slots. The process is then created with exact authority
-for that one call; a path outside the allowed roots is refused before anything
-runs. A whole writable room is never handed out for the sake of one file.
+A tool whose path comes in its arguments declares that argument as a path within
+specific root slots. The process is then created with exact authority for that
+one call; a path outside the allowed roots is refused before anything runs. A
+whole writable room is never handed out for the sake of one file. A path
+argument resolves only against the root slots its own declaration names, in no
+particular order; a candidate slot that cannot be resolved never refuses a path
+inside another one, and a refusal names it. A coordinate the process needs
+without access to it, such as the installation root a packaged MCP program is
+found under, is declared in `coordinate_root_slots`; no other slot reaches the
+process.
 
 Physical isolation uses the default enforced sandbox mode. An explicit
 `sandbox_mode: "disabled"` opts out of the OS sandbox; policy checks alone do
@@ -120,6 +126,48 @@ hash before decoding. Symlinks, cross-request references and changed bytes fail
 closed. Input retirement pins this file with the primary request and removes it
 only after the outcome is retained. Package updates replace both protocol peers;
 accepted output recovery retains its existing invocation and result evidence.
+
+A failed tool process result names its failure class and the first line of
+its diagnostic in the error message; the bounded details keep the full
+evidence. A call the door refuses before it invokes the tool process — a tool
+outside the grant, an unavailable or foreign descriptor, arguments its schema
+rejects, a formation the call cannot have — fails as `tool_invocation_refused`,
+which proves the tool had no effect. A failure after the process was invoked
+is `tool_process_failure`, and an unknown outcome is
+`tool_effect_indeterminate`. A call re-delivered after a restart may have run
+before it, so its refusal stays `tool_process_failure`.
+
+## Persistent commands and recovery
+
+A persistent command belongs to its formed worker environment. Its keeper and
+retained call results are reached through that environment's durable state,
+independently of the process serving a tool call. Tools behind the same door can
+use different process authority or recovery declarations while continuing,
+listing, signalling, or releasing the same commands. Their executable and
+handler operation must still belong to the declared worker-environment kind.
+
+Workspace command tools declare their output wait limits in
+`handler_config.max_yield_time_ms`. A longer requested wait is capped to the
+configured window instead of rejecting the command: 30,000 ms for
+`workspace.exec` and 300,000 ms for `workspace.write_stdin`. Both return early
+when the command exits. The process deadline is separate; subsequent reads
+continue the same process. Descriptor changes take effect without restarting
+the runtime or replaying commands.
+
+`process.interrupted_effect_recovery` controls whether an invocation whose
+outcome is unknown may be executed again. `reinvoke_exact_artifact` requires the
+tool to recover that exact call safely. An omitted value is `indeterminate`:
+the door reports the uncertain outcome instead of repeating the effect. A
+retained completed output is replayed without executing the tool again.
+
+While the original fan-out of a retained output has pending edges, or its
+current source is still settling, the door hands in the same artifact under the
+same delivery identity again, after each ledger change or a short interval,
+until the delivery settles or the door is cancelled. A changed scope or
+conflicting evidence fails closed and leaves the output retained for recovery.
+Streamed outputs, failure results and environment release results hand in
+again the same way while their refusal only awaits the current source; every
+other refusal stays terminal.
 
 ## What ships
 

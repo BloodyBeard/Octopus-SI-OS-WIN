@@ -66,8 +66,12 @@
   "outcome_verifier": "memory_capture_outcome",
   "additional_input_rules": [
     {
+      "labels": ["realtime.delegation"],
+      "pointers": ["/input_text"]
+    },
+    {
       "labels": ["cron.current_time"],
-      "pointers": ["/task", "/last_activity"]
+      "whole_payload": true
     },
     {
       "labels": [

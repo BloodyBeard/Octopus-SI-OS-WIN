@@ -77,6 +77,7 @@ function resolveEnvironment(options = {}) {
     OCTOPUS_INSTALLATION_ROOT: installationRoot,
     OCTOPUS_RUNTIME_BIN: runtimeBinary,
     OCTOPUS_MACHINE_CODEX_AUTH_FILE: path.join(codexHome, "auth.json"),
+    OCTOPUS_MACHINE_CODEX_AUTH_LOCK_FILE: path.join(codexHome, "auth.lock"),
     PATH: [path.dirname(runtimeBinary), path.join(installationRoot, "bin"), merged.PATH ?? ""].join(path.delimiter),
   };
   const endpoint = normalizedEndpoint(options.endpoint ?? merged.OCTOPUS_APP_LISTEN ?? "", home, "world_operator_chat");
@@ -140,6 +141,8 @@ async function status(environment, options = {}, currentProjection) {
     phase: observed.phase, runtimeReady: observed.ready, clientReady: false, ready: false,
     pid: observed.pid, ownership: observed.ownership, home: environment.home,
     endpoint: environment.endpoint, logPath: environment.logPath,
+    storageHealth: observed.storageHealth,
+    interfaceFailures: observed.interfaceFailures,
     reason: observed.error ?? (observed.ready ? "Home setup has not been verified." : "Octopus runtime is not ready."),
   };
   if (!observed.ready) return result;

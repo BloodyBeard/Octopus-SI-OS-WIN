@@ -1,0 +1,55 @@
+import type { ReactNode } from "react";
+import { cx } from "../../design-system/components";
+import { Glyph, type GlyphName } from "../IconGlyphs";
+import type { ApplicationRecord } from "./applicationModel";
+
+export function ApplicationLogo({ application, className, logoSize }: { application: ApplicationRecord; className?: string; logoSize: number }) {
+  const lightArtwork = application.logo_data_url?.trim();
+  const darkArtwork = application.logo_dark_data_url?.trim();
+  const artwork = lightArtwork || darkArtwork;
+  const hasThemeArtwork = Boolean(lightArtwork && darkArtwork && lightArtwork !== darkArtwork);
+  return (
+    <span className={cx(
+      "flex shrink-0 items-center justify-center text-secondary",
+      className,
+    )}>
+      {artwork ? (
+        <>
+          <img alt="" className={cx("size-full rounded-2xs object-contain", hasThemeArtwork && "application-artwork-light")} draggable={false} src={artwork} />
+          {hasThemeArtwork ? <img alt="" className="application-artwork-dark size-full rounded-2xs object-contain" draggable={false} src={darkArtwork} /> : null}
+        </>
+      ) : <Glyph name={applicationGlyph(application)} size={logoSize} />}
+    </span>
+  );
+}
+
+export function ApplicationMiniLogo({ application }: { application: ApplicationRecord }) {
+  return <ApplicationLogo application={application} className="size-[13px] overflow-hidden rounded-[4px] bg-surface ring-1 ring-border ring-inset" logoSize={8} />;
+}
+
+export function ConnectLogoRow({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex items-center gap-3">
+      <img alt="" className="-m-[7px] size-[70px] shrink-0" draggable={false} src="./octopus-dev-dock-icon.png" />
+      <span aria-hidden="true" className="flex items-center gap-1">
+        <span className="size-1.5 rounded-full bg-border" />
+        <span className="size-1.5 rounded-full bg-border" />
+        <span className="size-1.5 rounded-full bg-border" />
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function applicationGlyph(application: ApplicationRecord): GlyphName {
+  const known = new Set<GlyphName>(["plugins", "image", "voice", "file", "artifact", "interfaces", "binding", "chat", "send", "scheduled", "folder"]);
+  const candidate = application.icon as GlyphName;
+  if (known.has(candidate)) return candidate;
+  if (application.icon === "message") return "chat";
+  if (application.icon === "email") return "send";
+  if (application.icon === "files") return "folder";
+  if (application.icon === "calendar") return "scheduled";
+  if (application.category === "plugin") return "plugins";
+  if (application.category === "artifact") return "artifact";
+  return "interfaces";
+}

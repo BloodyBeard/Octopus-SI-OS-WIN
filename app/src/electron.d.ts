@@ -1,3 +1,4 @@
+import type { ClientBrowserRequest, ClientBrowserState } from "./clientBrowser";
 import type {
   ClientExtensionActionOutcome,
   ClientExtensionActionRequest,
@@ -91,6 +92,8 @@ declare global {
       requestMicrophoneAccess(): Promise<OctopusMicrophoneAccess>;
       requestCameraAccess(): Promise<OctopusCameraAccess>;
       cameraAccessStatus(): Promise<OctopusCameraAccess>;
+      saveGestureTrace(text: string): Promise<OctopusGestureTraceSaved>;
+      revealGestureTrace(path: string): Promise<{ revealed: boolean; path: string }>;
       clientWindowBootstrap(): ClientWindowBootstrap | null;
       openClientWindow(request?: ClientWindowOpenRequest): Promise<ClientWindowOpenOutcome>;
       clientWindowReady(request: ClientWindowReadyRequest): Promise<ClientWindowOpenOutcome>;
@@ -146,6 +149,8 @@ declare global {
       bootStatus(): Promise<OctopusRuntimeHostState>;
       chatgptAccount(): Promise<OctopusChatgptAccount>;
       chatgptRateLimits(): Promise<OctopusChatgptUsage>;
+      chatgptAccountSessions(): Promise<OctopusChatgptAccountSessions>;
+      chatgptSwitchWorkspace(request: { sessionId: string; accountId: string }): Promise<OctopusChatgptWorkspaceSwitch>;
       chatgptLogout(): Promise<OctopusChatgptAccount>;
       onChatgptAccountChanged(listener: () => void): () => void;
       chatgptSignInStart(): Promise<{ loginId: string; authUrl: string }>;
@@ -162,6 +167,8 @@ declare global {
       validateRuntimeEndpoint(request: OctopusRuntimeEndpointValidationRequest): Promise<OctopusRuntimeEndpointValidation>;
       projectionRead(request: OctopusProjectionReadRequest): Promise<unknown>;
       workspaceSetupState(): Promise<OctopusWorkspaceSetupState>;
+      saveSetupFile(request: { text: string; suggestedName: string }): Promise<{ saved: false } | { saved: true; name: string }>;
+      openSetupFile(): Promise<{ opened: false } | { opened: true; name: string; text: string }>;
       clientSetupRead(request: { operationId: string }): Promise<OctopusClientSetupState | null>;
       clientSetupReadCurrent(): Promise<OctopusClientSetupState | null>;
       clientSetupBegin(request: OctopusClientSetupBeginRequest): Promise<OctopusClientSetupState>;
@@ -169,7 +176,14 @@ declare global {
       clientSetupProviderConfiguration(request: { interfaceId: string }): Promise<OctopusProviderConfiguration>;
       mutateScheduledInterface(request: OctopusScheduledMutationRequest): Promise<OctopusScheduledMutationOutcome>;
       mutateApplicationPrivateConfiguration(request: OctopusApplicationPrivateConfigurationMutation): Promise<OctopusApplicationPrivateConfigurationOutcome>;
+      applicationConnectionProbe(request: { applicationId: string }): Promise<OctopusApplicationConnectionProbe>;
+      applicationConnectionConnect(request: OctopusApplicationConnectionRequest): Promise<OctopusApplicationConnectionState>;
+      applicationConnectionCancel(request: { operationId: string }): Promise<{ cancelled: boolean }>;
+      applicationConnectionDisconnect(request: { applicationId: string; interfaceId: string }): Promise<OctopusApplicationConnectionState>;
       mutateOctopusOsWorkspace(request: OctopusOsWorkspaceMutationRequest): Promise<OctopusOsWorkspaceMutationOutcome>;
+      clientBrowser(request: ClientBrowserRequest): Promise<ClientBrowserState | null>;
+      onClientBrowserState(listener: (state: ClientBrowserState) => void): () => void;
+      onClientBrowserOpened(listener: (state: ClientBrowserState) => void): () => void;
       openCdpViewer(request: OctopusCdpViewerOpenRequest): Promise<OctopusCdpViewerState>;
       prepareNativeBrowserViewer(request: OctopusNativeBrowserViewerPrepareRequest): Promise<OctopusNativeBrowserViewerPrepared>;
       acknowledgeNativeBrowserViewer(request: OctopusNativeBrowserViewerSyncRequest): Promise<OctopusNativeBrowserViewerState>;
@@ -223,6 +237,17 @@ declare global {
       submitChatSteer(request: OctopusChatSteerRequest): Promise<OctopusChatSteerResponse>;
       updateChatPins(request: OctopusChatPinsRequest): Promise<OctopusChatPinsResponse>;
       transcribeDictation(request: OctopusDictationRequest): Promise<OctopusDictationResponse>;
+      startDictationStream(request: { attemptId: string; sampleRateHz: number }): Promise<OctopusDictationLocalResult<null>>;
+      appendDictationAudio(attemptId: string, bytes: ArrayBuffer): void;
+      finishDictationStream(attemptId: string): Promise<OctopusDictationResponse>;
+      onDictationStreamEvent(listener: (event: OctopusDictationStreamEvent) => void): () => void;
+      cancelDictation(attemptId: string): Promise<void>;
+      readDictationRecordings(): Promise<OctopusDictationLocalResult<OctopusDictationRecordingState>>;
+      configureDictationRecordings(enabled: boolean): Promise<OctopusDictationLocalResult<OctopusDictationRecordingState>>;
+      saveDictationRecording(request: OctopusDictationRequest): Promise<OctopusDictationLocalResult<OctopusDictationRecording | null>>;
+      readDictationRecording(id: string): Promise<OctopusDictationLocalResult<{ entry: OctopusDictationRecording; bytes: Uint8Array }>>;
+      updateDictationRecording(request: { id: string; text: string; status: "transcribed" | "failed" }): Promise<OctopusDictationLocalResult<OctopusDictationRecording>>;
+      deleteDictationRecording(id: string | null): Promise<OctopusDictationLocalResult<null>>;
       submitInterfaceArtifact(request: OctopusInterfaceArtifactRequest): Promise<OctopusInterfaceArtifactResponse>;
       beginInterfaceArtifactStream(request: OctopusArtifactStreamBeginRequest): Promise<OctopusArtifactStreamHandle>;
       appendInterfaceArtifactStream(request: OctopusArtifactStreamAppendRequest): Promise<OctopusArtifactStreamProgress>;
@@ -248,6 +273,7 @@ declare global {
       onClientSurfaceDocumentsChanged(listener: (change: OctopusClientSurfaceDocumentChange) => void): () => void;
       onClientExtensionsChanged(listener: (change: OctopusClientExtensionChange) => void): () => void;
       onApplicationLifecycleProgress(listener: (progress: OctopusApplicationLifecycleProgress) => void): () => void;
+      onApplicationConnectionProgress(listener: (progress: OctopusApplicationConnectionProgress) => void): () => void;
       onWorkspaceSetupProgress(listener: (progress: OctopusWorkspaceSetupProgress) => void): () => void;
       onClientSetupProgress(listener: (progress: OctopusClientSetupProgress) => void): () => void;
     };
@@ -1030,6 +1056,7 @@ export type OctopusInterfaceArtifactRequest = {
 };
 
 export type OctopusDictationRequest = {
+  attemptId: string;
   bytes: ArrayBuffer;
   durationMs: number;
   mediaType: "audio/wav";
@@ -1038,10 +1065,33 @@ export type OctopusDictationRequest = {
   timeoutMs?: number;
 };
 
-export type OctopusDictationResponse = {
+export type OctopusDictationResponse = OctopusDictationLocalResult<{
   provider: "codex";
   text: string;
   model: string;
+}>;
+
+export type OctopusDictationStreamEvent = { attemptId: string } & (
+  { type: "transcript"; text: string } | { type: "stop-requested" } | { type: "error"; error: { code: string; message: string } }
+);
+
+export type OctopusDictationLocalResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
+
+export type OctopusDictationRecording = {
+  version: 1;
+  id: string;
+  createdAtMs: number;
+  durationMs: number;
+  byteLength: number;
+  status: "recorded" | "transcribed" | "failed";
+  text: string;
+};
+
+export type OctopusDictationRecordingState = {
+  version: 1;
+  enabled: boolean;
+  recordings: OctopusDictationRecording[];
+  maxRecordings: number;
 };
 
 export type OctopusInterfaceArtifactResponse = {
@@ -1193,6 +1243,12 @@ export type OctopusCameraAccess = {
   status: string;
 };
 
+export type OctopusGestureTraceSaved = {
+  path: string;
+  filename: string;
+  bytes: number;
+};
+
 export type OctopusTransportDefaults = {
   endpoint: string;
   repoRoot?: string | null;
@@ -1219,6 +1275,16 @@ export type OctopusRuntimeStatus = {
   hostError?: string | null;
 };
 
+export type OctopusHomeStorageHealth = {
+  status: "writable" | "blocked" | "unavailable";
+  availableBytes: number | null;
+  minimumBytes: number;
+  code: string | null;
+  message: string | null;
+};
+
+export type OctopusInterfaceFailure = { interfaceId: string; message: string };
+
 export type OctopusRuntimeHostState = {
   phase: string;
   ready: boolean;
@@ -1233,6 +1299,8 @@ export type OctopusRuntimeHostState = {
   launchEnv: Record<string, string>;
   endpoint: string;
   error: string | null;
+  storageHealth: OctopusHomeStorageHealth | null;
+  interfaceFailures: OctopusInterfaceFailure[];
   updatedAtMs: number;
 };
 
@@ -1287,12 +1355,39 @@ export type OctopusRuntimeEndpointValidation = {
 
 export type OctopusChatgptAccount = {
   signedIn: boolean;
-  authType: "chatgpt" | "apiKey" | "amazonBedrock" | null;
+  authType: "chatgpt" | "apiKey" | "amazonBedrock" | "gcp" | null;
   email: string | null;
   planType: string | null;
+  workspaceName: string | null;
   credentialHome: string;
   octopusHome: string | null;
 };
+
+export type OctopusChatgptWorkspace = {
+  accountId: string;
+  name: string | null;
+  kind: "personal" | "workspace" | null;
+};
+
+export type OctopusChatgptAccountSession = {
+  sessionId: string;
+  email: string | null;
+  displayName: string | null;
+  active: boolean;
+  selectedWorkspaceId: string | null;
+  workspaces: OctopusChatgptWorkspace[];
+};
+
+export type OctopusChatgptAccountSessions = {
+  activeSessionId: string | null;
+  sessions: OctopusChatgptAccountSession[];
+  credentialHome: string;
+  octopusHome: string | null;
+};
+
+export type OctopusChatgptWorkspaceSwitch =
+  | { state: "switched"; account: OctopusChatgptAccount; sessions: OctopusChatgptAccountSessions }
+  | { state: "browser"; loginId: string; authUrl: string };
 
 export type OctopusChatgptLimit = {
   limitId: string | null;
@@ -1448,6 +1543,7 @@ export type OctopusScheduledMutationRequest =
   | {
       action: "undo_changes";
       runId: string;
+      firing: string;
       expectedJournalDigest: string;
     };
 
@@ -1475,6 +1571,34 @@ export type OctopusApplicationPrivateConfigurationMutation = {
   expectedDigest: string | null;
   updates: Record<string, string>;
   clears: string[];
+};
+
+export type OctopusApplicationConnectionState = {
+  state: "connected" | "not_connected" | "expired" | "error";
+  account?: { label: string; detail?: string };
+  manage?: { label: string; url: string };
+  message?: string;
+};
+
+export type OctopusApplicationConnectionProbe = {
+  applicationId: string;
+  interfaces: Array<{ interfaceId: string; state: OctopusApplicationConnectionState }>;
+};
+
+export type OctopusApplicationConnectionRequest = {
+  operationId: string;
+  applicationId: string;
+  interfaceId: string;
+  input: Record<string, string>;
+};
+
+export type OctopusApplicationConnectionProgress = {
+  operationId: string;
+  applicationId: string;
+  interfaceId: string;
+  message: string;
+  url?: string;
+  code?: string;
 };
 
 export type OctopusApplicationPrivateConfigurationOutcome = {
@@ -1622,7 +1746,7 @@ export type OctopusOsWorkspaceMutationRequest =
         eeId: string;
         sourceFolders?: string[];
         expectedProjectDigest?: string;
-        name: string;
+        name?: string;
         icon: string;
         color: string;
       }>;

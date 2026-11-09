@@ -27,6 +27,7 @@ const stubbed = {
   PasswordGate: 'export function PasswordGate() { return createElement("div", { "data-password-gate": "" }); }',
   ChatGptSignInGate: "export function ChatGptSignInGate() { return null; }",
   MorphVideoDotCloud: "export function StateMorphDotCloud() { return null; }",
+  OctopusDotCloud: 'export function OctopusDotCloud({ skipReveal }) { return createElement("div", { "data-skip-reveal": String(skipReveal) }); }',
   TrafficLights: "export function TrafficLights() { return null; }",
   QuickTaskWindow: "export function QuickTaskWindow() { return null; } export function QuickTaskAccessUnavailable() { return null; }",
   WorkerEnvironmentWindow: "export function WorkerEnvironmentWindow() { return null; } export function WorkerEnvironmentWindowAccessUnavailable() { return null; }",
@@ -56,6 +57,7 @@ const appBundle = bundle([
   'export { OctopusLoadingState } from "./src/components/OctopusLoadingLogo";',
 ].join("\n"), Object.keys(stubbed).filter((name) => name !== "WorkspaceSetupGate").concat("WorkspaceSetupGate"));
 const gateBundle = bundle('export { WorkspaceSetupGate } from "./src/components/onboarding/WorkspaceSetupGate";', ["OctopusTerminal", "shellSession"]);
+const welcomeBundle = bundle('export { WelcomeOverlay } from "./src/components/onboarding/WelcomeOverlay"; export * from "./src/onboarding/onboardingStorage";', ["OctopusDotCloud"]);
 
 const container = document.getElementById("root");
 const root = createRoot(container);
@@ -159,4 +161,26 @@ test("a live workspace gate opens behind the logo until its workspace is read; a
   assert.ok(!query('[aria-label="Opening Octopus"]'));
   root.render(null);
   await settle();
+});
+
+test("reopening unfinished onboarding keeps its page and does not replay the hero reveal", async () => {
+  const { WelcomeOverlay, resetOnboardingState, readWelcomeProgress } = await welcomeBundle;
+  resetOnboardingState();
+  const reopen = async () => {
+    root.render(null); await settle();
+    root.render(React.createElement(WelcomeOverlay, { visitCount: 1, onComplete() {} })); await settle();
+  };
+  await reopen();
+  assert.equal(query("main").dataset.step, "hero");
+  assert.equal(query("[data-skip-reveal]").dataset.skipReveal, "false");
+  await reopen();
+  assert.equal(query("[data-skip-reveal]").dataset.skipReveal, "true");
+  assert.equal(query(".welcome-footer").dataset.hidden, "false");
+  w.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter" })); await settle();
+  assert.equal(query("main").dataset.step, "preview");
+  assert.equal(readWelcomeProgress().step, 1);
+  await reopen();
+  assert.equal(query("main").dataset.step, "preview");
+  assert.ok(!query("[data-skip-reveal]"));
+  root.render(null); await settle();
 });

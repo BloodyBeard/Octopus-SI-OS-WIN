@@ -5,19 +5,21 @@
 }
 
 .loading-shimmer-pure-text {
-  --shimmer-text-primary: var(--color-token-description-foreground);
-  --shimmer-text-secondary: color-mix(in srgb, var(--shimmer-text-primary) 55%, transparent);
-  --shimmer-contrast: rgb(255 255 255 / 75%);
+  --shimmer-text-secondary: var(--loading-shimmer-base, color-mix(in srgb, var(--loading-shimmer-foreground, var(--color-token-description-foreground)) 55%, transparent));
+  --shimmer-contrast: var(--loading-shimmer-highlight, #ffffffbf);
   display: inline-block;
-}
-
-:is([data-theme="dark"], .dark, .electron-dark) .loading-shimmer-pure-text {
-  --shimmer-text-secondary: color-mix(in srgb, var(--shimmer-text-primary) 45%, transparent);
-  --shimmer-contrast: rgb(0 0 0 / 60%);
+  vertical-align: top;
+  text-fill-color: currentColor;
+  -webkit-text-fill-color: currentColor;
 }
 
 .octopus-cadenced-shimmer {
   position: relative;
+}
+:where(.octopus-cadenced-shimmer) {
+  --loading-shimmer-foreground: initial;
+  --loading-shimmer-base: initial;
+  --loading-shimmer-highlight: initial;
 }
 .octopus-cadenced-shimmer, .octopus-cadenced-shimmer * {
   color: var(--shimmer-text-secondary) !important;
@@ -28,6 +30,8 @@
   inset: 0;
   pointer-events: none;
   visibility: hidden;
+  text-overflow: inherit;
+  overflow: hidden;
   mask-image: linear-gradient(90deg,
     transparent calc(var(--octopus-shimmer-center) - 25%),
     black calc(var(--octopus-shimmer-center) - 5%),
@@ -37,6 +41,10 @@
 .octopus-cadenced-shimmer-highlight {
   display: block;
   inline-size: 100%;
+  text-overflow: inherit;
+  overflow: hidden;
+  text-fill-color: currentColor;
+  -webkit-text-fill-color: currentColor;
 }
 .octopus-cadenced-shimmer .octopus-cadenced-shimmer-highlight,
 .octopus-cadenced-shimmer .octopus-cadenced-shimmer-highlight * {

@@ -11,8 +11,6 @@ import {
 } from "../agentPresets";
 import {
   clientProjectScopeIds,
-  clientTaskAttentionRank,
-  clientTaskAttentionState,
   clientTaskTitle,
   clientTaskUnread,
   ensureClientTaskReadBaseline,
@@ -22,7 +20,6 @@ import {
   setClientTaskSortMode,
   useClientTaskOrganization,
   type ClientChatProject,
-  type ClientTaskOrganization,
   type ClientTaskSortMode,
 } from "../shell/clientWorkspaces";
 import type { ClientSurfaceDescriptor } from "../shell/surfaceTypes";
@@ -45,6 +42,7 @@ import {
 } from "./navigation/SidebarDnd";
 import type { RuntimeHostView } from "../runtimeHost";
 import type { OctopusOsProjectWorkspace } from "../shell/useOctopusOsProjects";
+import { ProjectionResourceIssue, type ProjectionResourcePhase } from "./projectionResource";
 import { ProjectSourceFolders } from "./project/ProjectSourceFolders";
 import { ProjectAppearancePicker } from "./navigation/ProjectAppearancePicker";
 import type { OctopusProviderInterface } from "../electron";
@@ -66,7 +64,9 @@ type Props = {
   activeSurfaceId: string;
   activeChatRunId: string;
   chatRuns: ChatRun[];
-  chatRunsLoading: boolean;
+  chatRunsPhase: ProjectionResourcePhase;
+  chatRunListError: string;
+  onRetryChatRuns: () => Promise<void>;
   homeRunId: string;
   activityContent: ReactNode;
   agentPinnedChatIds: string[];
@@ -132,7 +132,9 @@ export function Sidebar({
   activeSurfaceId,
   activeChatRunId,
   chatRuns,
-  chatRunsLoading,
+  chatRunsPhase,
+  chatRunListError,
+  onRetryChatRuns,
   homeRunId,
   activityContent,
   agentPinnedChatIds,
@@ -190,7 +192,9 @@ export function Sidebar({
               activeSurfaceId={activeSurfaceId}
               chatOrderIds={agentChatOrderIds}
               chatRuns={chatRuns}
-              chatRunsLoading={chatRunsLoading}
+              chatRunsPhase={chatRunsPhase}
+              chatRunListError={chatRunListError}
+              onRetryChatRuns={onRetryChatRuns}
               homeRunId={homeRunId}
               pinnedChatIds={agentPinnedChatIds}
               projectWorkspace={agentProjectWorkspace}
@@ -225,7 +229,9 @@ function TaskNavigation({
   activeSurfaceId,
   chatOrderIds,
   chatRuns,
-  chatRunsLoading,
+  chatRunsPhase,
+  chatRunListError,
+  onRetryChatRuns,
   homeRunId,
   pinnedChatIds,
   projectWorkspace,
@@ -252,7 +258,9 @@ function TaskNavigation({
   activeSurfaceId: string;
   chatOrderIds: string[];
   chatRuns: ChatRun[];
-  chatRunsLoading: boolean;
+  chatRunsPhase: ProjectionResourcePhase;
+  chatRunListError: string;
+  onRetryChatRuns: () => Promise<void>;
   homeRunId: string;
   pinnedChatIds: string[];
   projectWorkspace: OctopusOsProjectWorkspace;
@@ -347,7 +355,7 @@ function TaskNavigation({
       && (!selectedScopeRunIds || selectedScopeRunIds.has(chat.runId))
     )),
     chatOrderIds,
-    organization,
+    organization.sortMode,
   );
   const archivedChats = allTaskChats.filter((chat) => (
     chat.archived && (!selectedScopeRunIds || selectedScopeRunIds.has(chat.runId))
@@ -535,11 +543,13 @@ function TaskNavigation({
   const canCreateRootProject = accessProfile !== "live" || Boolean(
     projectWorkspace.rootContext && allowedProjectPolicies(projectWorkspace.templates, projectWorkspace.rootAllowedChildTemplateIds).length > 0,
   );
-  const rootProjectUnavailableReason = projectWorkspace.loading
+  const rootProjectUnavailableReason = projectWorkspace.phase === "initial-loading"
     ? "Loading project policies…"
-    : !canCreateRootProject
-      ? "The parent has no installed policy available for a new project"
-      : undefined;
+    : projectWorkspace.phase === "failed"
+      ? `Project policies could not be loaded: ${projectWorkspace.error}`
+      : !canCreateRootProject
+        ? "The parent has no installed policy available for a new project"
+        : undefined;
   const deletingProject = deletingProjectId ? projectById.get(deletingProjectId) ?? null : null;
   const deletingProjectScopeIds = deletingProject ? clientProjectScopeIds(projects, deletingProject.id) : null;
   const deletingProjectAgentCount = deletingProjectScopeIds
@@ -600,7 +610,14 @@ function TaskNavigation({
             onContextMenu={(event) => openTaskMenu(chat.runId, event)}
             title={clientTaskTitle(chat.runId, chat.title, organization)}
           />)}
-          {archivedChats.length === 0 ? chatRunsLoading ? <OcLoadingRows label="Loading archived tasks…" /> : <div className="p-2 text-base text-token-description-foreground opacity-50">No archived tasks</div> : null}
+          <TaskListState
+            empty={archivedChats.length === 0}
+            emptyLabel="No archived tasks"
+            error={chatRunListError}
+            loadingLabel="Loading archived tasks…"
+            onRetry={onRetryChatRuns}
+            phase={chatRunsPhase}
+          />
         </OctopusNavSection>
       ) : <>
       <div className="shrink-0 px-row-x">
@@ -805,13 +822,16 @@ function TaskNavigation({
               </SidebarSortableItem>
             ))}
           </SidebarSortableList>
-          {visibleChats.length === 0 ? chatRunsLoading ? <OcLoadingRows label="Loading tasks…" /> : (
-            <div className="p-2 text-base text-token-description-foreground opacity-50">
-              {selectedProject
-                  ? "No tasks in this project"
-                  : taskChats.length === 0 ? "No tasks yet" : "All visible tasks are pinned"}
-            </div>
-          ) : null}
+          <TaskListState
+            empty={visibleChats.length === 0}
+            emptyLabel={selectedProject
+              ? "No tasks in this project"
+              : taskChats.length === 0 ? "No tasks yet" : "All visible tasks are pinned"}
+            error={chatRunListError}
+            loadingLabel="Loading tasks…"
+            onRetry={onRetryChatRuns}
+            phase={chatRunsPhase}
+          />
         </OctopusNavSection>
       </SidebarDropContainer>
       <div className="shrink-0 px-row-x">
@@ -978,14 +998,6 @@ function TaskSortMenu({
       surfaceRef={menuRef}
     >
       <div className="px-2 py-1 text-sm text-token-description-foreground">Sort by</div>
-      <OcMenuItem
-        aria-checked={sortMode === "attention"}
-        description="Needs input and unread tasks first"
-        label="Priority"
-        onClick={() => onSelect("attention")}
-        role="menuitemradio"
-        selected={sortMode === "attention"}
-      />
       <OcMenuItem
         aria-checked={sortMode === "recent"}
         label="Last updated"
@@ -1224,6 +1236,42 @@ function ProjectDialog({
   );
 }
 
+function TaskListState({
+  empty,
+  emptyLabel,
+  error,
+  loadingLabel,
+  onRetry,
+  phase,
+}: {
+  empty: boolean;
+  emptyLabel: string;
+  error: string;
+  loadingLabel: string;
+  onRetry: () => Promise<void>;
+  phase: ProjectionResourcePhase;
+}) {
+  const [retrying, setRetrying] = useState(false);
+  if (phase === "initial-loading") return empty ? <OcLoadingRows label={loadingLabel} /> : null;
+  return (
+    <>
+      {empty && phase !== "failed" ? <div className="p-2 text-base text-token-description-foreground opacity-50">{emptyLabel}</div> : null}
+      {phase === "failed" || phase === "degraded" ? (
+        <ProjectionResourceIssue
+          className="mt-1"
+          detail={error}
+          onRetry={() => {
+            setRetrying(true);
+            void onRetry().finally(() => setRetrying(false));
+          }}
+          retrying={retrying}
+          title={phase === "failed" ? "Tasks could not be loaded" : "Tasks could not be refreshed"}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function FadeLabel({ className, text }: { className?: string; text: string }) {
   const ref = useRef<HTMLSpanElement>(null);
   const [overflowing, setOverflowing] = useState(false);
@@ -1346,21 +1394,14 @@ function moveBefore(values: string[], item: string, before: string | null): stri
 function orderChats(
   chats: ChatRun[],
   orderIds: string[],
-  organization: ClientTaskOrganization,
+  sortMode: ClientTaskSortMode,
 ): ChatRun[] {
-  if (organization.sortMode === "manual") {
+  if (sortMode === "manual") {
     const manualRank = new Map(orderIds.map((runId, index) => [runId, index]));
     const rankOf = (chat: ChatRun) => manualRank.get(chat.runId) ?? Number.MAX_SAFE_INTEGER;
     return [...chats].sort((left, right) => rankOf(left) - rankOf(right));
   }
-  if (organization.sortMode === "recent") {
-    return [...chats].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-  }
-  return [...chats].sort((left, right) => (
-    clientTaskAttentionRank(clientTaskAttentionState(left, organization))
-      - clientTaskAttentionRank(clientTaskAttentionState(right, organization))
-    || right.updatedAtMs - left.updatedAtMs
-  ));
+  return [...chats].sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 }
 
 function orderProjects(projects: ClientChatProject[], orderIds: string[]): ClientChatProject[] {

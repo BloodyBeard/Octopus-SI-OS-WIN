@@ -1,0 +1,52 @@
+{
+  "schema_version": 3,
+  "id": "world_mcp_firecrawl",
+  "name": "Firecrawl",
+  "description": "Search the web, scrape and crawl pages into clean markdown, and extract structured data.",
+  "category": "plugin",
+  "developer": "Firecrawl",
+  "version": "1.0.1",
+  "icon": "globe",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_mcp_firecrawl"
+  ],
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-mcp-firecrawl-context",
+      "label": "Firecrawl capability contract"
+    }
+  ],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_mcp_firecrawl",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Firecrawl API key",
+        "kind": "secret",
+        "required": true,
+        "placeholder": "fc-\u2026"
+      }
+    ]
+  },
+  "connection": {
+    "disclosure": [
+      "Tasks you connect can search the web and scrape, map and crawl pages through Firecrawl, and pass what they read to their model.",
+      "Requests use the credits of the Firecrawl team that owns the key.",
+      "Connect checks the key with Firecrawl before saving it. The key stays on this Mac, readable only by the Firecrawl interface."
+    ],
+    "help": {
+      "label": "Get a Firecrawl API key",
+      "url": "https://www.firecrawl.dev/app/api-keys"
+    }
+  }
+}

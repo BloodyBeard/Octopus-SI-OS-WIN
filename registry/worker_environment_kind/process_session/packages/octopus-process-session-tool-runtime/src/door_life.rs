@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::io::{BufRead, Seek};
 // The Unix output reader; Windows refuses that read for now (see below).
@@ -25,7 +25,7 @@ use octopus_interfaces::{
     InvocationMetadata,
 };
 use octopus_ledger::{
-    ArtifactRef, ContentHash, Endpoint, LedgerError, LedgerResult, Movement, MovementKind,
+    ArtifactRef, ContentHash, DurableMetadataContent, Endpoint, LedgerError, LedgerResult, Movement, MovementKind,
     decode_durable_movement_route, decode_durable_movement_row,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -60,18 +60,18 @@ const ENDPOINT_INTERFACE_OUTBOUND_CANDIDATE_SQL: &str = "SELECT seq, start_offse
 
 struct DurableMovementDecoder {
     metadata_dir: PathBuf,
-    last_grant: Mutex<Option<(ContentHash, GrantFileFingerprint, serde_json::Value)>>,
+    last_metadata: Mutex<HashMap<DurableMetadataContent, (ContentHash, MetadataFileFingerprint, serde_json::Value)>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct GrantFileFingerprint {
+struct MetadataFileFingerprint {
     len: u64,
     modified: std::time::SystemTime,
     #[cfg(unix)]
     identity_and_change: (u64, u64, i64, i64),
 }
 
-impl GrantFileFingerprint {
+impl MetadataFileFingerprint {
     fn of(path: &Path, hash: ContentHash) -> LedgerResult<Self> {
         let metadata = std::fs::symlink_metadata(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -86,7 +86,7 @@ impl GrantFileFingerprint {
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(LedgerError::Io {
                 path: path.display().to_string(),
-                message: "movement metadata grant is not a regular file".to_string(),
+                message: "movement metadata content is not a regular file".to_string(),
             });
         }
         Ok(Self {
@@ -119,29 +119,29 @@ impl DurableMovementDecoder {
             .join("metadata");
         Self {
             metadata_dir,
-            last_grant: Mutex::new(None),
+            last_metadata: Mutex::new(HashMap::new()),
         }
     }
 
     fn decode(&self, row: &[u8], line: usize) -> LedgerResult<Movement> {
-        decode_durable_movement_row(row, line, |hash| self.grant_value(hash, line))
+        decode_durable_movement_row(row, line, |kind, hash| self.metadata_value(kind, hash, line))
     }
 
-    fn grant_value(&self, hash: ContentHash, line: usize) -> LedgerResult<serde_json::Value> {
+    fn metadata_value(&self, kind: DurableMetadataContent, hash: ContentHash, line: usize) -> LedgerResult<serde_json::Value> {
         let path = self.metadata_dir.join(hash.to_hex());
-        let fingerprint = GrantFileFingerprint::of(&path, hash)?;
-        let mut last_grant =
-            self.last_grant
+        let fingerprint = MetadataFileFingerprint::of(&path, hash)?;
+        let mut last_metadata =
+            self.last_metadata
                 .lock()
                 .map_err(|_| LedgerError::MalformedMovementMetadata {
                     line,
-                    message: "movement metadata grant cache is poisoned".to_string(),
+                    message: "movement metadata value cache is poisoned".to_string(),
                 })?;
-        if let Some((cached_hash, cached_fingerprint, grant)) = last_grant.as_ref()
+        if let Some((cached_hash, cached_fingerprint, value)) = last_metadata.get(&kind)
             && *cached_hash == hash
             && *cached_fingerprint == fingerprint
         {
-            return Ok(grant.clone());
+            return Ok(value.clone());
         }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -162,20 +162,20 @@ impl DurableMovementDecoder {
                 actual,
             });
         }
-        if GrantFileFingerprint::of(&path, hash)? != fingerprint {
+        if MetadataFileFingerprint::of(&path, hash)? != fingerprint {
             return Err(LedgerError::Io {
                 path: path.display().to_string(),
-                message: "movement metadata grant changed while being read".to_string(),
+                message: "movement metadata content changed while being read".to_string(),
             });
         }
-        let grant = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
             LedgerError::MalformedMovementMetadata {
                 line,
-                message: format!("content-addressed invocation grant is malformed: {error}"),
+                message: format!("content-addressed {} is malformed: {error}", kind.describe()),
             }
         })?;
-        *last_grant = Some((hash, fingerprint, grant.clone()));
-        Ok(grant)
+        last_metadata.insert(kind, (hash, fingerprint, value.clone()));
+        Ok(value)
     }
 }
 
@@ -1542,7 +1542,7 @@ fn spawned_context_from_env(
         blobs_dir: optional_spawned_env_path("OCTOPUS_BLOBS_DIR"),
         ledger_index_path: optional_spawned_env_path("OCTOPUS_LEDGER_INDEX_SQLITE"),
         root_slots: serde_json::from_str(
-            &std::env::var("OCTOPUS_ROOT_SLOTS_JSON").unwrap_or_else(|_| "{}".to_string()),
+            &std::env::var("OCTOPUS_ROOT_SLOTS_JSON").map_err(|_| "OCTOPUS_ROOT_SLOTS_JSON is required by the process env contract".to_string())?,
         )
         .map_err(|error| format!("OCTOPUS_ROOT_SLOTS_JSON is malformed: {error}"))?,
         host_io_limits: Some(host_io_limits),
@@ -3004,19 +3004,23 @@ mod tests {
     }
 
     #[test]
-    fn kind_owned_decoder_resolves_and_checks_content_addressed_grants() {
+    fn kind_owned_decoder_resolves_and_checks_content_addressed_metadata() {
         let root = tempfile::tempdir().unwrap();
         let movements_path = root.path().join("movements.jsonl");
         let metadata_dir = root.path().join("metadata");
         std::fs::create_dir(&metadata_dir).unwrap();
-        let movement = outbound(
+        let mut movement = outbound(
             0,
             Endpoint::Interface(InterfaceId::new("world_provider_codex")),
             "system_exec",
             "system_exec",
         );
+        let Some(octopus_ledger::MovementMetadata::Invocation(metadata)) = movement.invocation_metadata.as_mut() else { panic!("invocation") };
+        metadata.artifact_binding_refs = vec![
+            octopus_ledger::ArtifactRef { id: octopus_descriptors::ArtifactId::new("bound"), content: ContentHash::of_bytes(b"bound") }
+        ];
         let mut pinned = None;
-        let row = encode_durable_movement_row(&movement, 0, |bytes| {
+        let row = encode_durable_movement_row(&movement, 0, |_, bytes| {
             let hash = ContentHash::of_bytes(bytes);
             std::fs::write(metadata_dir.join(hash.to_hex()), bytes).unwrap();
             pinned = Some(hash);
@@ -3026,6 +3030,7 @@ mod tests {
         let decoder = DurableMovementDecoder::for_log(&movements_path);
         let decoded = decoder.decode(row.as_bytes(), 0).unwrap();
         assert_eq!(decoded, movement);
+        assert_eq!(decoder.decode(row.as_bytes(), 0).unwrap(), movement);
 
         let hash = pinned.unwrap();
         std::fs::write(metadata_dir.join(hash.to_hex()), b"corrupt").unwrap();

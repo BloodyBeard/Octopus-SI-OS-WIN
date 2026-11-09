@@ -49,6 +49,19 @@ impl ProviderHandoffSession {
         &self, ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId,
         input: &InterfaceInvocationEnvelope, source_movement_seq: u64, pinned_run_record: &[u8],
     ) -> Result<ProviderOutputHandoff, CheckedRunError> {
+        self.validate_context(ctx)?;
+        ProviderOutputHandoff::from_invocation_with_session(
+            self.clone(),
+            ctx,
+            descriptor,
+            run,
+            input,
+            source_movement_seq,
+            pinned_run_record,
+        )
+    }
+
+    pub(crate) fn validate_context(&self, ctx: &InterfaceLiftContext) -> Result<(), String> {
         let movements_path = ctx.movements_path.canonicalize().map_err(|error| {
             format!(
                 "provider ledger '{}' cannot be canonicalized: {error}",
@@ -62,17 +75,9 @@ impl ProviderHandoffSession {
                 self.movements_path.display(),
                 ctx.interface.as_str(),
                 movements_path.display()
-            ).into());
+            ));
         }
-        ProviderOutputHandoff::from_invocation_with_session(
-            self.clone(),
-            ctx,
-            descriptor,
-            run,
-            input,
-            source_movement_seq,
-            pinned_run_record,
-        )
+        Ok(())
     }
 
     pub(crate) fn index(&self) -> Result<std::sync::MutexGuard<'_, ProviderLedgerEvidenceIndex>, String> {

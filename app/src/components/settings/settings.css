@@ -61,6 +61,68 @@
   overscroll-behavior: contain;
 }
 
+.settings-page .oc-settings-row,
+.settings-preference-row {
+  container: settings-row / inline-size;
+}
+
+.settings-page .oc-settings-row > .oc-field-row__control,
+.settings-preference-row > :last-child {
+  min-width: min(calc(var(--spacing) * 40), 40cqw);
+  justify-content: flex-end;
+}
+
+.settings-page .oc-settings-row > .oc-field-row__control:empty,
+.settings-preference-row > :last-child:empty {
+  min-width: 0;
+}
+
+.settings-page .oc-settings-row .oc-field-row__label {
+  overflow-wrap: break-word;
+}
+
+.settings-page .oc-settings-row .oc-field-row__description {
+  text-wrap: wrap;
+  overflow-wrap: break-word;
+}
+
+.settings-page :is(.oc-card__content, .account-row-list) > :not(:last-child)::after {
+  height: 1px;
+}
+
+.settings-theme-row > :last-child {
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.settings-theme-import-dialog {
+  position: relative;
+}
+
+.settings-theme-import-header {
+  padding: 20px 48px 0 20px;
+}
+
+.settings-theme-import-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+  letter-spacing: normal;
+}
+
+.settings-theme-import-header > button {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+
+.settings-theme-import-footer {
+  min-height: 0;
+  padding: 12px 20px 20px;
+  border: 0;
+}
+
 .settings-section {
   display: flex;
   width: 100%;
@@ -761,14 +823,10 @@
   color: var(--color-token-text-secondary);
 }
 
-.gesture-preview-inline {
-  position: relative;
-  overflow: hidden;
-  width: 100%;
-  aspect-ratio: var(--gesture-camera-ratio, 1.7778);
-  border: 1px solid var(--color-token-border);
-  border-radius: 12px;
-  background: var(--color-token-main-surface-primary, #181818);
+.gesture-action-label {
+  font-size: 13px;
+  white-space: nowrap;
+  color: var(--color-token-text-secondary);
 }
 
 .gesture-restore-row {
@@ -781,45 +839,6 @@
   color: var(--color-token-text-secondary);
 }
 
-.gesture-preview-inline canvas {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.gesture-preview-note {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 90%;
-  font-size: 13px;
-  text-align: center;
-  color: var(--color-token-text-secondary);
-  translate: -50% -50%;
-}
-
-.gesture-preview-badge {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-token-main-surface-primary, #181818) 72%, transparent);
-  backdrop-filter: blur(8px);
-  font-size: 12px;
-  color: var(--color-token-text-secondary);
-}
-
-.gesture-preview-badge.is-recognized {
-  color: var(--color-token-text-primary);
-}
-
 .gesture-camera-rate {
   display: block;
   margin-top: 8px;
@@ -827,37 +846,28 @@
   color: var(--color-token-text-secondary);
 }
 
-.gesture-preview-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-token-text-tertiary);
+.gesture-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px 14px;
 }
 
-.gesture-preview-dot.is-live {
-  background: var(--color-accent-green);
+.gesture-trace-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--color-token-text-secondary);
 }
 
-.gesture-preview-pip {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 60;
-  overflow: hidden;
-  width: 220px;
-  aspect-ratio: var(--gesture-camera-ratio, 1.7778);
-  border: 1px solid var(--color-token-border);
-  border-radius: 14px;
-  background: var(--color-token-main-surface-primary, #181818);
-  box-shadow: 0 18px 44px -20px rgb(0 0 0 / 62%);
+.gesture-trace-status.is-live {
+  color: var(--color-token-text-primary);
 }
 
-.gesture-preview-pip canvas {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
+.gesture-trace-status.is-error {
+  color: var(--color-text-warning, var(--color-token-text-primary));
 }
 
 .gesture-simulate-row {

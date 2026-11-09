@@ -124,7 +124,10 @@ const chatRunsModule = typescriptModule("src/chatRuns.ts", { "./projectionClient
   "./components/chat/taskAccess": typescriptModule("src/components/chat/taskAccess.ts") });
 const threadVirtualizer = typescriptModule("src/components/chat/threadVirtualizer.ts");
 const clientWindowModel = typescriptModule("src/shell/clientWindowModel.ts", {
-  "../components/files/filesPaneSnapshot": typescriptModule("src/components/files/filesPaneSnapshot.ts"),
+  "../components/files/artifactFilesTarget": typescriptModule("src/components/files/artifactFilesTarget.ts"),
+  "../components/files/filesPaneSnapshot": typescriptModule("src/components/files/filesPaneSnapshot.ts", {
+    "./artifactFilesTarget": typescriptModule("src/components/files/artifactFilesTarget.ts"),
+  }),
 });
 const {
   assertOperatorChatArtifactBatch,
@@ -784,7 +787,7 @@ async function verifyTranscriptLayout() {
   const previousNavigator = Object.getOwnPropertyDescriptor(global, "navigator");
   Object.defineProperty(global, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(global, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
-  const frames = new Map(), completions = [], artifactReads = [], artifactErrors = [];
+  const frames = new Map(), completions = [], artifactReads = [], artifactErrors = [], filesOpened = [];
   let reducedMotion = true;
   let artifactResponse;
   let frameId = 0;
@@ -802,7 +805,7 @@ async function verifyTranscriptLayout() {
     MessageTooltip: ({ children, label, onActivate }) => React.createElement("span", { "data-tooltip-target": label?.props?.children, "data-activates-file": Boolean(onActivate), onClick: onActivate }, children),
     readProjection: async (method, params) => { assert.equal(method, "projection.artifact.bytes.read"); artifactReads.push(params); return artifactResponse; },
     appToast: { warning: (error) => artifactErrors.push(error) },
-    TraceArtifactWorkbench: ({ reference }) => React.createElement("div", { "data-artifact-preview": reference.artifactId }, reference.inlinePayload),
+    useOpenArtifactFiles: () => (reference) => filesOpened.push(reference),
     motion: { div: ({ animate, initial, transition, onAnimationComplete, ...props }) => {
       React.useEffect(() => { if (onAnimationComplete) completions.push(onAnimationComplete); }, [animate?.height]);
       return React.createElement("div", { ...props, style: { ...props.style, ...animate } });
@@ -978,9 +981,13 @@ async function verifyTranscriptLayout() {
       assert.equal(history(), null);
     }
     reducedMotion = true;
-    await render([], false); await render([message("thought", "reasoning", "", { summary: ["Comparing the two files"] })], false, finalResponse, true);
-    assert.match(query(".octopus-worked-for-boundary").textContent, /^Worked for /, "a turn that only thought still says how long it worked");
-    assert.equal(all(".octopus-agent-activity").length, 0);
+    await render([], false); await render([message("thought", "reasoning", "", { summary: ["Comparing the two files"] }),
+      message("content-thought", "reasoning", "", { summary: [], content: ["**Planning the merge**\n\nThe totals differ"] })], false, finalResponse, true);
+    assert.match(historyToggle().textContent, /^Worked for /, "a turn that only thought still says how long it worked");
+    await click(historyToggle());
+    assert.deepEqual(all(".octopus-agent-activity-toggle").map((node) => node.getAttribute("aria-label")), ["Thought", "Thought"], "settled thoughts stay in the turn history");
+    await click(all(".octopus-agent-activity-toggle")[1]);
+    assert.equal(query(".octopus-reasoning-detail").textContent, "The totals differ", "reasoning projected only as content is shown");
     await render([], false); await render([], false, finalResponse, true);
     assert.equal(container.childElementCount, 0, "a turn without work or thought renders nothing");
     await render([operation, message("interrupted", "interrupted_result", "", {})], false, undefined, true);
@@ -1043,19 +1050,22 @@ async function verifyTranscriptLayout() {
     assert.equal(query("[data-tooltip-target]").getAttribute("data-activates-file"), "true");
     await click(query("[data-tooltip-target]"));
     assert.deepEqual(artifactReads, [{ call_id: "artifact", run_id: "run-test" }]);
-    assert.equal(query("[data-artifact-preview]").textContent, "Historical content");
+    assert.equal(filesOpened.at(-1).inlinePayload, "Historical content");
+    assert.equal(filesOpened.at(-1).artifactId, artifactMessage.artifactId);
+    assert.equal(query('[role="dialog"]'), null, "an admitted artifact opens through Files without a modal");
     assert.deepEqual(artifactErrors, []);
     const artifactPresentation = toolPresentation.dynamicToolPresentation(artifactMessage, {});
     assert.throws(() => events.traceReadArtifactReference(artifactMessage, artifactPresentation, { ...artifactResponse, run_id: "another-run" }), /coordinates/);
     assert.throws(() => events.traceReadArtifactReference(artifactMessage, artifactPresentation, { ...artifactResponse, base64: Buffer.from(JSON.stringify({ ...readResult, body: { ...readResult.body, id: "different-artifact" } })).toString("base64") }), /target/);
     const entry = { id: "guide", content: { text: "Retained instructions" } }, revision = "b".repeat(64);
-    const contextMessage = { ...artifactMessage, eventData: { ...artifactMessage.eventData, tool: `context.read__${workspaceToolSuffix}`, arguments: { source: "library", entry_id: entry.id, revision } } };
+    const contextSource = { id: "library", content: Array(32).fill(1) };
+    const contextMessage = { ...artifactMessage, eventData: { ...artifactMessage.eventData, tool: `context.read__${workspaceToolSuffix}`, arguments: { source: contextSource, entry_id: entry.id, revision } } };
     const contextPresentation = toolPresentation.dynamicToolPresentation(contextMessage, {});
-    const contextResult = { ...readResult, tool: contextMessage.eventData.tool, body: { entry, pin: { source: { id: "library", content: Array(32).fill(1) }, entry_id: entry.id, revision } } };
+    const contextResult = { ...readResult, tool: contextMessage.eventData.tool, body: { entry, pin: { source: contextSource, entry_id: entry.id, revision } } };
     const contextBytes = value => ({ ...artifactResponse, base64: Buffer.from(JSON.stringify(value)).toString("base64") });
     assert.deepEqual(JSON.parse(events.traceReadArtifactReference(contextMessage, contextPresentation, contextBytes(contextResult)).inlinePayload), entry);
     assert.throws(() => events.traceReadArtifactReference(contextMessage, contextPresentation, contextBytes({ ...contextResult, correlation_id: "another-call" })), /target/);
-    for (const changed of [{ revision: "c".repeat(64) }, { source: { id: "another-library" } }, { entry_id: "another-entry" }]) {
+    for (const changed of [{ revision: "c".repeat(64) }, { source: { id: "another-library", content: contextSource.content } }, { source: { ...contextSource, content: Array(32).fill(2) } }, { entry_id: "another-entry" }]) {
       assert.throws(() => events.traceReadArtifactReference(contextMessage, contextPresentation, contextBytes({ ...contextResult, body: { ...contextResult.body, pin: { ...contextResult.body.pin, ...changed } } })), /source and revision/);
     }
     const navigation = message("navigate", "dynamic_tool", "", {

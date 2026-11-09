@@ -111,6 +111,7 @@
     --radius-4xl: calc(var(--radius-4xl-base) * var(--corner-radius-scale));
     --radius-token-row: 9999px;
     --radius-full: 9999px;
+    --composer-radius: calc(var(--spacing) * 5.5);
     --shadow-sm: 0 1px 2px -1px #00000014;
     --shadow-md: 0 2px 4px -1px #00000014;
     --shadow-lg: 0 4px 8px -2px #0000001a;

@@ -10,6 +10,7 @@
     "write_paths": [],
     "executable_paths": [],
     "executable_commands": ["/bin/sh", "/bin/cat", "python3"],
+    "read_executable_relative_paths": [{"executable": "python3", "relative_path": "../lib"}],
     "read_env_paths": [],
     "write_env_paths": [],
     "executable_env_paths": [],

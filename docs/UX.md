@@ -172,6 +172,18 @@ bindings; there is no preset template in the runtime. Apply is a resumable
 client transaction, repeating it creates no duplicates, and your first real
 message stays the first message in Home.
 
+**A setup travels as a file.** The choices onboarding collects - the space,
+its project tree with names, goals, icons and colors, the capabilities and the
+projects each one serves, and optionally the Home model - export as one
+`*.octopus-setup.json` file (`"schema": "octopus.setup"`, version 1) and import
+on another machine at the first step. Setup's review step exports its choices;
+**Settings → General → Setup file** exports a Home that is already running, as
+the client shows it: its projects, the capabilities installed, and the projects
+each one is available in. Importing fills the steps for review; it
+does not set anything up by itself. A file that names a component or a model
+this Octopus does not offer is refused with that name, never trimmed silently.
+The file carries no keys, accounts, runs or history.
+
 **States stay honest.** Available, installed, configured, available in a
 project, connected to a task, and live are separate facts. No earlier one is
 presented as proof of the next.
@@ -222,8 +234,8 @@ finding what is worth building on it takes creativity.
 The System review package ships that configuration as a trigger template, and
 setup arms it: a new Home starts with a live trigger that waits for an hour
 without work. In Triggers you change the quiet period and whether all work or
-one project counts; when that much time passes without work, one ordinary task
-starts with the review prompt. It reads what actually happened and may change memory,
+one project counts; when that much time passes without work, the System review
+task receives the review prompt. It reads what actually happened and may change memory,
 knowledge and skills, Home widgets, runs, triggers, interfaces or package
 code - or nothing, which is often the right answer. The task keeps a change
 journal with the exact earlier bytes of every file it touched and the checks

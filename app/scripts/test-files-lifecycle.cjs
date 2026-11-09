@@ -45,11 +45,15 @@ test("host and renderer snapshot parsers agree and preserve exact data", () => {
   const good = lifecycle.captureFilesPane(key);
   const boundary = "é".repeat(1024 * 1024);
   const cases = [good, { ...good, revision: Number.MAX_SAFE_INTEGER }, { ...good, file: null, draft: "" }, { ...good, file: file(boundary), draft: boundary }];
+  const readTarget = { kind: "artifact", artifactId: "read:exact", interfaceId: "provider", label: "self-improvement", runId: "run", previewText: '{"content":{"text":"line 1\\nline 2 · Ω"}}' };
+  cases.push({ ...good, file: null, draft: "", target: readTarget });
+  assert.deepEqual(host.validateTransferableWorkspacePaneTarget({ kind: "files", workspaceKey: "octopus-os", openTarget: readTarget }).openTarget, readTarget);
   const firstInvalid = cases.length;
   for (const [field, value] of [["version", 2], ["id", ""], ["id", "  "], ["revision", -1], ["revision", 1.5], ["revision", Number.MAX_SAFE_INTEGER + 1], ["rootPath", ""], ["rootPath", "/test/\nroot"], ["draft", boundary + "é"], ["extra", true]]) cases.push({ ...good, [field]: value });
   for (const [field, value] of [["digest", "bad"], ["rootId", "elsewhere"], ["modifiedAt", "yesterday"], ["size", -1], ["truncated", true], ["kind", "other"], ["text", boundary + "é"]]) cases.push({ ...good, file: { ...good.file, [field]: value } });
   for (const offset of [-1, Infinity, NaN, "0"]) cases.push({ ...good, view: { scrollTop: offset, scrollLeft: 0 } });
   cases.push({ ...good, target: { kind: "artifact", artifactId: "a", interfaceId: "i", label: "l", runId: "r" } });
+  cases.push({ ...good, file: null, draft: "", target: { ...readTarget, previewText: boundary + "é" } });
   const afterInvalid = cases.length;
   for (let i = 0; i < 40; i++) cases.push({ ...good, revision: i, view: { scrollTop: i * 17.5, scrollLeft: i }, draft: `${i}\n  Ω  ` });
   for (const [index, candidate] of cases.entries()) {

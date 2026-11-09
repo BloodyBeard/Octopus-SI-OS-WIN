@@ -130,7 +130,7 @@ test("unchanged project discovery preserves an in-flight capability read during 
       if (method === "projection.operator.os.scope") {
         scopeReads++;
         return { status: "ready", root_ee_id: "root", root_environment: { ee_id: "root" }, home_run_id: "home",
-          home_interface_id: "home-port", projects: [{ ee_id: "project", parent_ee_id: "root", client_run_ids: [`run-${scopeReads}`] }],
+          home_interface_id: "home-port", projects: [{ ee_id: "project", name: projectName, parent_ee_id: "root", client_run_ids: [`run-${scopeReads}`] }],
           project_presentations: [{ ee_id: "project", name: projectName, icon: "folder", color: "#123456" }] };
       }
       if (method === "projection.operator.chat.contexts") return new Promise(resolve => contextReads.push(resolve));

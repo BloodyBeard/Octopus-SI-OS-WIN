@@ -1,0 +1,331 @@
+.gesture-art {
+  --gesture-art-accent: var(--color-token-focus-border);
+  --gesture-art-fill: color-mix(in srgb, currentColor 10%, var(--color-token-main-surface-primary));
+  display: block;
+  flex: none;
+  overflow: visible;
+  color: var(--color-token-text-secondary);
+}
+
+.gesture-art.is-small {
+  width: 72px;
+  height: 45px;
+}
+
+.gesture-art.is-large {
+  width: 100%;
+  max-width: 320px;
+  height: auto;
+  aspect-ratio: 160 / 100;
+  color: var(--color-token-text-primary);
+}
+
+.gesture-art__finger,
+.gesture-art__palm,
+.gesture-art__thumb {
+  fill: var(--gesture-art-fill);
+  stroke: currentColor;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.gesture-art__finger,
+.gesture-art__thumb {
+  transform-box: fill-box;
+  transform-origin: 50% 92%;
+}
+
+.gesture-art__thumb {
+  transform: rotate(-38deg);
+}
+
+.gesture-art__hand.is-pinch .gesture-art__thumb {
+  transform: rotate(6deg);
+}
+
+.gesture-art__hand.is-pinch .gesture-art__finger.is-index {
+  transform: rotate(-30deg);
+}
+
+.gesture-art__hand.is-fist .gesture-art__thumb {
+  transform: rotate(62deg);
+}
+
+.gesture-art__spark {
+  fill: var(--gesture-art-accent);
+  opacity: 0.45;
+}
+
+.gesture-art__focus {
+  fill: none;
+  stroke: var(--gesture-art-accent);
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.gesture-art__tile,
+.gesture-art__button,
+.gesture-art__zone {
+  fill: none;
+  stroke: currentColor;
+  stroke-opacity: 0.45;
+  stroke-width: 1.4;
+}
+
+.gesture-art__zone {
+  stroke-dasharray: 4 3;
+}
+
+.gesture-art__card {
+  fill: color-mix(in srgb, currentColor 16%, var(--color-token-main-surface-primary));
+  stroke: currentColor;
+  stroke-width: 1.4;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.gesture-art__box {
+  fill: color-mix(in srgb, var(--gesture-art-accent) 14%, transparent);
+  stroke: var(--gesture-art-accent);
+  stroke-width: 1.6;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.gesture-art__trail {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-opacity: 0;
+  stroke-width: 1.4;
+}
+
+.gesture-art__ring-track,
+.gesture-art__ring {
+  fill: none;
+  stroke-width: 3;
+}
+
+.gesture-art__ring-track {
+  stroke: currentColor;
+  stroke-opacity: 0.15;
+}
+
+.gesture-art__ring {
+  stroke: var(--gesture-art-accent);
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .gesture-art.is-point .gesture-art__mover {
+    animation: gesture-art-point-hand 3.2s ease-in-out infinite;
+  }
+
+  .gesture-art.is-point .gesture-art__focus {
+    animation: gesture-art-point-focus 3.2s ease-in-out infinite;
+  }
+
+  .gesture-art__hand.is-pinch.is-animated .gesture-art__thumb {
+    animation: gesture-art-pinch-thumb 2.4s ease-in-out infinite;
+  }
+
+  .gesture-art__hand.is-pinch.is-animated .gesture-art__finger.is-index {
+    animation: gesture-art-pinch-index 2.4s ease-in-out infinite;
+  }
+
+  .gesture-art__hand.is-pinch.is-animated .gesture-art__spark {
+    animation: gesture-art-pinch-spark 2.4s ease-in-out infinite;
+  }
+
+  .gesture-art.is-pinch .gesture-art__button {
+    animation: gesture-art-press 2.4s ease-in-out infinite;
+  }
+
+  .gesture-art.is-carry .gesture-art__mover {
+    animation: gesture-art-carry 3.2s ease-in-out infinite;
+  }
+
+  .gesture-art.is-carry .gesture-art__zone {
+    animation: gesture-art-zone 3.2s ease-in-out infinite;
+  }
+
+  .gesture-art.is-throw .gesture-art__mover {
+    animation: gesture-art-throw-hand 2.6s ease-in infinite;
+  }
+
+  .gesture-art.is-throw .gesture-art__card {
+    animation: gesture-art-throw-card 2.6s ease-in infinite;
+  }
+
+  .gesture-art.is-throw .gesture-art__thumb {
+    animation: gesture-art-throw-thumb 2.6s ease-in infinite;
+  }
+
+  .gesture-art.is-throw .gesture-art__finger.is-index {
+    animation: gesture-art-throw-index 2.6s ease-in infinite;
+  }
+
+  .gesture-art.is-throw .gesture-art__spark {
+    animation: gesture-art-throw-spark 2.6s ease-in infinite;
+  }
+
+  .gesture-art.is-resize .gesture-art__spread.is-left {
+    animation: gesture-art-spread-left 3s ease-in-out infinite;
+  }
+
+  .gesture-art.is-resize .gesture-art__spread.is-right {
+    animation: gesture-art-spread-right 3s ease-in-out infinite;
+  }
+
+  .gesture-art.is-resize .gesture-art__box {
+    animation: gesture-art-grow 3s ease-in-out infinite;
+  }
+
+  .gesture-art.is-swipe_left .gesture-art__mover {
+    animation: gesture-art-swipe-left 2s ease-in infinite;
+  }
+
+  .gesture-art.is-swipe_right .gesture-art__mover {
+    animation: gesture-art-swipe-right 2s ease-in infinite;
+  }
+
+  .gesture-art.is-swipe_left .gesture-art__trail,
+  .gesture-art.is-swipe_right .gesture-art__trail {
+    animation: gesture-art-trail 2s ease-in infinite;
+  }
+
+  .gesture-art.is-fist .gesture-art__ring {
+    animation: gesture-art-ring 2.6s linear infinite;
+  }
+}
+
+@keyframes gesture-art-point-hand {
+  0% { opacity: 0; transform: translateX(0); }
+  8%, 14% { opacity: 1; transform: translateX(0); }
+  38%, 46% { transform: translateX(32px); }
+  70%, 86% { opacity: 1; transform: translateX(64px); }
+  96%, 100% { opacity: 0; transform: translateX(64px); }
+}
+
+@keyframes gesture-art-point-focus {
+  0%, 26% { transform: translateX(0); }
+  30%, 58% { transform: translateX(32px); }
+  62%, 100% { transform: translateX(64px); }
+}
+
+@keyframes gesture-art-pinch-thumb {
+  0%, 15% { transform: rotate(-30deg); }
+  35%, 60% { transform: rotate(6deg); }
+  80%, 100% { transform: rotate(-30deg); }
+}
+
+@keyframes gesture-art-pinch-index {
+  0%, 15% { transform: rotate(-12deg); }
+  35%, 60% { transform: rotate(-30deg); }
+  80%, 100% { transform: rotate(-12deg); }
+}
+
+@keyframes gesture-art-pinch-spark {
+  0%, 30% { opacity: 0; }
+  38%, 58% { opacity: 0.55; }
+  66%, 100% { opacity: 0; }
+}
+
+@keyframes gesture-art-press {
+  0%, 60% { fill: transparent; }
+  66%, 78% { fill: color-mix(in srgb, var(--gesture-art-accent) 35%, transparent); }
+  92%, 100% { fill: transparent; }
+}
+
+@keyframes gesture-art-carry {
+  0% { opacity: 0; transform: translateX(0); }
+  8%, 15% { opacity: 1; transform: translateX(0); }
+  68%, 86% { opacity: 1; transform: translateX(90px); }
+  100% { opacity: 0; transform: translateX(90px); }
+}
+
+@keyframes gesture-art-zone {
+  0%, 64% { stroke: currentColor; stroke-opacity: 0.45; }
+  70%, 88% { stroke: var(--gesture-art-accent); stroke-opacity: 1; }
+  100% { stroke: currentColor; stroke-opacity: 0.45; }
+}
+
+@keyframes gesture-art-throw-hand {
+  0% { opacity: 0; transform: translateX(0); }
+  8%, 22% { opacity: 1; transform: translateX(0); }
+  52% { transform: translateX(52px); }
+  62%, 84% { opacity: 1; transform: translateX(60px); }
+  100% { opacity: 0; transform: translateX(60px); }
+}
+
+@keyframes gesture-art-throw-card {
+  0% { opacity: 0; transform: translateX(0) rotate(0); }
+  8%, 22% { opacity: 1; transform: translateX(0) rotate(0); }
+  52% { opacity: 1; transform: translateX(52px) rotate(0); }
+  76% { opacity: 0; transform: translateX(118px) rotate(18deg); }
+  100% { opacity: 0; transform: translateX(118px) rotate(18deg); }
+}
+
+@keyframes gesture-art-throw-thumb {
+  0%, 52% { transform: rotate(6deg); }
+  60%, 100% { transform: rotate(-30deg); }
+}
+
+@keyframes gesture-art-throw-index {
+  0%, 52% { transform: rotate(-30deg); }
+  60%, 100% { transform: rotate(-12deg); }
+}
+
+@keyframes gesture-art-throw-spark {
+  0%, 50% { opacity: 0.45; }
+  56%, 100% { opacity: 0; }
+}
+
+@keyframes gesture-art-spread-left {
+  0%, 15% { transform: translateX(0); }
+  55%, 75% { transform: translateX(-18px); }
+  100% { transform: translateX(0); }
+}
+
+@keyframes gesture-art-spread-right {
+  0%, 15% { transform: translateX(0); }
+  55%, 75% { transform: translateX(18px); }
+  100% { transform: translateX(0); }
+}
+
+@keyframes gesture-art-grow {
+  0%, 15% { transform: scale(1); }
+  55%, 75% { transform: scale(1.6); }
+  100% { transform: scale(1); }
+}
+
+@keyframes gesture-art-swipe-left {
+  0%, 10% { opacity: 0; transform: translateX(36px); }
+  16% { opacity: 1; transform: translateX(36px); }
+  36% { opacity: 1; transform: translateX(-36px); }
+  46%, 100% { opacity: 0; transform: translateX(-44px); }
+}
+
+@keyframes gesture-art-swipe-right {
+  0%, 10% { opacity: 0; transform: translateX(-36px); }
+  16% { opacity: 1; transform: translateX(-36px); }
+  36% { opacity: 1; transform: translateX(36px); }
+  46%, 100% { opacity: 0; transform: translateX(44px); }
+}
+
+@keyframes gesture-art-trail {
+  0%, 16% { stroke-opacity: 0; }
+  26%, 34% { stroke-opacity: 0.35; }
+  46%, 100% { stroke-opacity: 0; }
+}
+
+@keyframes gesture-art-ring {
+  0%, 10% { stroke-dashoffset: 100; opacity: 1; }
+  70%, 88% { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
+}

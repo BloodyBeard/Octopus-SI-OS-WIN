@@ -27,7 +27,7 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false, o
     <section aria-label="Triggers" className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" data-scheduled-content="">
       {navigationInPane ? <div className="flex flex-none items-center px-3 py-2">
         <OcButton buttonRef={navigationRef} leadingIcon="scheduled" onClick={() => setNavigationOpen(!navigationOpen)} trailingIcon="chevronDown" variant="ghost">Triggers</OcButton>
-        <OcDropdown anchorRef={navigationRef} aria-label="Triggers" className="flex h-[min(560px,calc(100vh-80px))] w-[340px] flex-col py-3" onOpenChange={setNavigationOpen} open={navigationOpen} role="dialog" surface="opaque">
+        <OcDropdown anchorRef={navigationRef} aria-label="Triggers" className="flex h-[min(560px,calc(100vh-80px))] flex-col py-3" onOpenChange={setNavigationOpen} open={navigationOpen} role="dialog" style={{ width: 340 }} surface="opaque">
           <ScheduledSidebar onNavigate={() => setNavigationOpen(false)} onSelectChat={onSelectChat} />
         </OcDropdown>
       </div> : null}
@@ -42,6 +42,7 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false, o
       ) : selected ? (
         <ScheduledDetail
           canEdit={canEdit}
+          onSelectChat={onSelectChat}
           key={selected.interfaceId}
           onDelete={() => workspace.requestDelete(selected)}
           onEdit={() => workspace.startEdit(selected)}

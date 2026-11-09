@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {JSDOM} from 'jsdom';
 import {build} from 'esbuild';
+import postcss from 'postcss';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -10,7 +11,12 @@ const output=await fs.mkdtemp(path.join(os.tmpdir(), 'octopus-model-menu-dom-'))
 await build({stdin:{contents:`import './src/components/icon-glyphs/shell'; export {ProviderModelPicker} from './src/components/chat/ProviderModelPicker'; export {OcButton,OcIconButton,OcSelect,OcStatus} from './src/design-system/components'; export {MessageTooltip} from './src/components/chat/MessageTooltip'; export {ShellTooltip} from './src/components/shell/ShellTooltip'; export * as React from 'react'; export {createRoot} from 'react-dom/client';`,resolveDir:app,sourcefile:'selector-tests.tsx',loader:'tsx'},bundle:true,platform:'browser',format:'esm',outfile:path.join(output,'components.mjs'),loader:{'.css':'empty'},plugins:[{name:'test-motion-preference',setup(b){b.onResolve({filter:/appearance$/},()=>({path:'appearance',namespace:'test-preferences'}));b.onLoad({filter:/.*/,namespace:'test-preferences'},()=>({contents:`export function useShouldReduceMotion(){return ${process.env.MODEL_PICKER_REDUCED_MOTION!=='false'};}`,loader:'js'}));}}],define:{'process.env.NODE_ENV':'"development"'},logLevel:'silent'});
 const sharedAssets=await build({stdin:{contents:`export {OcIconButton} from './src/design-system/components';`,resolveDir:app,sourcefile:'shared-controls.tsx',loader:'tsx'},bundle:true,platform:'browser',format:'esm',outfile:path.join(output,'shared.mjs'),write:false,metafile:true,logLevel:'silent'});
 const startupCss=sharedAssets.outputFiles.find(f=>f.path.endsWith('.css')).text;
-assert.ok(Object.keys(sharedAssets.metafile.inputs).some(f=>f.endsWith('/messageTooltip.css')));assert.ok(Object.keys(sharedAssets.metafile.inputs).every(f=>!f.endsWith('/chat.css')));assert.equal(startupCss.match(/\.chat-tooltip\s*\{/g).length,1);assert.match(startupCss,/\.chat-tooltip \{\s*position: fixed/);assert.match(startupCss,/\.chat-tooltip\.is-shell/);
+assert.ok(Object.keys(sharedAssets.metafile.inputs).some(f=>f.endsWith('/messageTooltip.css')));assert.ok(Object.keys(sharedAssets.metafile.inputs).every(f=>!f.endsWith('/chat.css')));
+const baseTooltips=[];
+postcss.parse(startupCss).walkRules(rule=>{if(rule.selector==='.chat-tooltip')baseTooltips.push(rule)});
+assert.equal(baseTooltips.length,1);
+assert.equal(baseTooltips[0].nodes.find(node=>node.prop==='position')?.value,'fixed');
+assert.match(startupCss,/\.chat-tooltip\.is-shell/);
 console.log('PASS shared-control-only startup bundles base and shell tooltip CSS exactly once without loading chat');
 const dom=new JSDOM('<!doctype html><html><body><div id="root"></div><button id="outside">Outside</button></body></html>',{url:'http://localhost',pretendToBeVisual:true});
 const {window:w}=dom;

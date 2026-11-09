@@ -43,11 +43,11 @@ function nextTextMatch(items: readonly string[], search: string, current: string
   return match === current ? undefined : match;
 }
 
-function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bottom">, width: number, height: number, viewportWidth: number, viewportHeight: number, align: "start" | "center" | "end", sideOffset = 1, alignOffset = 0, preferredSide: "top" | "bottom" | "right" = "bottom"): Placement {
+function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bottom">, width: number, height: number, viewportWidth: number, viewportHeight: number, align: "start" | "center" | "end", sideOffset: number, alignOffset = 0, preferredSide: "top" | "bottom" | "right" = "bottom"): Placement {
   const maxWidth = Math.max(0, viewportWidth - 16);
   if (preferredSide === "right") {
-    const right = Math.max(0, viewportWidth - anchor.right - sideOffset - 8);
-    const leftSpace = Math.max(0, anchor.left - sideOffset - 8);
+    const right = Math.max(0, viewportWidth - anchor.right - sideOffset - 6);
+    const leftSpace = Math.max(0, anchor.left - sideOffset - 6);
     const side = width > right && leftSpace > right ? "left" : "right";
     const availableWidth = Math.min(maxWidth, side === "left" ? leftSpace : right);
     const renderedWidth = Math.min(width, availableWidth);
@@ -57,7 +57,7 @@ function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bot
       : align === "center" ? (anchor.top + anchor.bottom - renderedHeight) / 2 + alignOffset : anchor.top + alignOffset;
     return {
       left: side === "right" ? anchor.right + sideOffset : anchor.left - renderedWidth - sideOffset,
-      top: Math.max(8, Math.min(alignedTop, viewportHeight - renderedHeight - 8)),
+      top: Math.max(6, Math.min(alignedTop, viewportHeight - renderedHeight - 6)),
       maxHeight,
       maxWidth: availableWidth,
       side,
@@ -75,7 +75,7 @@ function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bot
   return { left, top, maxHeight, maxWidth, side };
 }
 
-export function OcDropdown({ open, onOpenChange, anchorRef, align = "start", side = "bottom", contentWidth = "menu", sideOffset = 1, alignOffset = 0, modal = false, role = "menu", surface = "menu", onOpenAutoFocus, onCloseAutoFocus, className = "", style, children, onKeyDown, onClick, onPointerMove, ...props }: OcDropdownProps) {
+export function OcDropdown({ open, onOpenChange, anchorRef, align = "start", side = "bottom", contentWidth = "menu", sideOffset, alignOffset = 0, modal = false, role = "menu", surface = "menu", onOpenAutoFocus, onCloseAutoFocus, className = "", style, children, onKeyDown, onClick, onPointerMove, ...props }: OcDropdownProps) {
   const generatedId = useId();
   const id = props.id ?? generatedId;
   const contentRef = useRef<HTMLDivElement>(null);
@@ -148,7 +148,8 @@ export function OcDropdown({ open, onOpenChange, anchorRef, align = "start", sid
     restoreFocusRef.current = true;
     const update = () => {
       const bounds = anchor.getBoundingClientRect();
-      const next = dropdownPlacement(bounds, content.getBoundingClientRect().width, content.scrollHeight, window.innerWidth, window.innerHeight, align, sideOffset, alignOffset, side);
+      const offset = sideOffset ?? (5 - (window.octopusTransport ? window.octopusTransport.windowZoomFactor() : 1));
+      const next = dropdownPlacement(bounds, content.getBoundingClientRect().width, content.scrollHeight, window.innerWidth, window.innerHeight, align, offset, alignOffset, side);
       if (contentWidth !== "menu") next.maxWidth = Math.min(next.maxWidth, contentWidth === "menuBounded" ? 320 : contentWidth === "modelPicker" ? 254 : 240);
       setPlacement((current) => current && Object.keys(next).every((key) => current[key as keyof Placement] === next[key as keyof Placement]) ? current : next);
     };

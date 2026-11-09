@@ -18,7 +18,7 @@ pub(crate) struct SelectedFileProjection {
 }
 
 pub(crate) fn admitted_payload_context(
-    record: &octopus_runtime::run_record::RunRecord,
+    record: &octopus_run_record::RunRecord,
     input: &InterfaceInvocationEnvelope,
 ) -> Result<(Vec<octopus_interfaces::ArtifactBindingPayload>, Vec<ArtifactRef>), InterfaceDriverError> {
     let metadata = input.metadata()?;
@@ -34,35 +34,8 @@ pub(crate) fn admitted_payload_context(
     Ok((context, selected))
 }
 
-pub(crate) fn continuity_input_sources(
-    record: &octopus_runtime::run_record::RunRecord,
-    input: &InterfaceInvocationEnvelope,
-) -> Result<Vec<ArtifactRef>, InterfaceDriverError> {
-    let metadata = input.metadata()?;
-    let runtime = invocation_runtime_metadata(input)?;
-    let mut sources = vec![input.artifact.clone()];
-    if let Some(source) = octopus_run_authoring::input_artifacts::result_source(record, &runtime.interface, &runtime.checkpoint)
-        .map_err(InterfaceDriverError::FailedClosed)? {
-        let bound = input.artifact_binding_payloads.iter().find(|bound| bound.artifact == source)
-            .ok_or_else(|| InterfaceDriverError::FailedClosed("result invocation lost its admitted source payload".into()))?;
-        if !metadata.artifact_binding_refs.contains(&source)
-            || metadata.grant.artifact_access.get(source.id.as_str()) != Some(&octopus_runtime::ArtifactAccess::read_only()) {
-            return Err(InterfaceDriverError::FailedClosed("result invocation lost its exact source read grant".into()));
-        }
-        let original: serde_json::Value = serde_json::from_slice(&bound.read_bytes().map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?)
-            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
-        let incoming: serde_json::Value = serde_json::from_slice(&input.read_artifact_payload()?)
-            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
-        if original != incoming {
-            return Err(InterfaceDriverError::FailedClosed("result invocation changed its admitted source payload".into()));
-        }
-        sources.push(source);
-    }
-    Ok(sources)
-}
-
 pub(crate) fn continuity_context_payloads(
-    record: &octopus_runtime::run_record::RunRecord,
+    record: &octopus_run_record::RunRecord,
     input: &InterfaceInvocationEnvelope,
     context: &[octopus_interfaces::ArtifactBindingPayload],
 ) -> Result<Vec<octopus_interfaces::ArtifactBindingPayload>, InterfaceDriverError> {
@@ -83,7 +56,7 @@ pub(crate) fn continuity_context_payloads(
 }
 
 pub(crate) fn reconcile_input_session_continuity(
-    record: &octopus_runtime::run_record::RunRecord,
+    record: &octopus_run_record::RunRecord,
     input: &InterfaceInvocationEnvelope,
     bound: Option<CodexContinuityState>,
     current: Option<CodexContinuityState>,
@@ -114,8 +87,14 @@ pub(crate) fn reconcile_input_session_continuity(
                 }
             }
             let mut settled = bound.clone();
-            settled.pending = None;
-            settled.tool_operator_request = None;
+            let call = if bound.parallel_pending.is_empty() {
+                bound.pending.as_ref().map(pending_request_key)
+            } else {
+                value.get("correlation_id").and_then(serde_json::Value::as_str).map(|call| format!("tool:{call}"))
+            };
+            if let Some(call) = call {
+                settled.settle_outstanding(&call);
+            }
             if !recorded_generation && &settled == current {
                 return Ok(Some(bound.clone()));
             }
@@ -125,7 +104,7 @@ pub(crate) fn reconcile_input_session_continuity(
 }
 
 pub(crate) fn selected_file_projection(
-    record: &octopus_runtime::run_record::RunRecord,
+    record: &octopus_run_record::RunRecord,
     input: &InterfaceInvocationEnvelope,
     source_artifact: &ArtifactRef,
     source_label: &str,
@@ -402,9 +381,10 @@ pub(crate) fn decode_provider_input(
             if let Some(result) = decode_tool_result_artifact(&value)? {
                 return Ok(ProviderInput::ToolResult(result));
             }
-            let source_is_operation_interface = interface_operations
-                .values()
-                .any(|operation| source_interface == Some(&operation.interface));
+            let source_is_operation_interface = interface_operations.values().any(|operation| {
+                source_interface == Some(&operation.interface)
+                    && !operation.input_labels.contains(manifest_label)
+            });
             if source_is_operation_interface {
                 let source_interface = source_interface.ok_or_else(|| {
                     InterfaceDriverError::Protocol(
@@ -448,18 +428,29 @@ pub(crate) fn decode_provider_input(
             let input = if turn_envelope {
                 extract_turn_input_from_value(&value, selected_files)?
             } else {
-                vec![UserInput::Text {
+                let (payload, images) = match crate::result_media::project(&value)? {
+                    Some(media) => (media.value, media.images),
+                    None => (value, Vec::new()),
+                };
+                let mut input = vec![UserInput::Text {
                     text: serde_json::to_string_pretty(&serde_json::json!({
                         "artifact": {
                             "label": manifest_label,
                             "source_interface": source_interface,
-                            "payload": value,
+                            "payload": payload,
                         }
                     })).map_err(|error| InterfaceDriverError::Protocol(
                         format!("interface input artifact failed to render: {error}")
                     ))?,
                     text_elements: Vec::new(),
-                }]
+                }];
+                input.extend(images.into_iter().filter_map(|image| match image {
+                    DynamicToolCallOutputContentItem::InputImage { image_url } => {
+                        Some(UserInput::Image { detail: None, url: image_url })
+                    }
+                    _ => None,
+                }));
+                input
             };
             Ok({
                 ProviderInput::Turn(prepend_context_block_to_turn_input(
@@ -598,7 +589,7 @@ pub(crate) fn decode_inflight_turn_control(
             "operator steering has no source-pinned run record".into(),
         ))?;
         let runtime = invocation_runtime_metadata(input)?;
-        let record = octopus_runtime::run_record::RunRecord::from_bytes(pinned_run_record)
+        let record = octopus_run_record::RunRecord::from_bytes(pinned_run_record)
             .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
         if runtime.interface != descriptor.id || runtime.run != record.id
             || runtime.ee != record.ee || runtime.worker != record.worker

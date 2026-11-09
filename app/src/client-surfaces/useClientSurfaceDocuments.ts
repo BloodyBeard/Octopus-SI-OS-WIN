@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { readClientSurfaceDocuments, subscribeClientSurfaceDocuments } from "./transport";
 import { readProjection } from "../projectionClient";
 import { useProjectionGeneration } from "../projectionLive";
@@ -36,35 +36,50 @@ export function useClientSurfaceDocuments(accessProfile: "live" | "lab"): Client
   const [snapshotState, setSnapshotState] = useState({ profile: accessProfile, value: EMPTY_SNAPSHOT });
   const [readError, setReadError] = useState("");
   const [loading, setLoading] = useState(true);
+  const refresh = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let disposed = false;
-    let request = 0;
+    let running = false;
+    let requested = false;
     setLoading(true);
-    const refresh = () => {
-      const current = ++request;
-      void readSurfaceDocumentSnapshot(accessProfile)
-        .then((next) => {
-          if (disposed || current !== request) return;
-          setSnapshotState({ profile: accessProfile, value: next });
-          setReadError("");
-          setLoading(false);
-        })
-        .catch((error) => {
-          if (disposed || current !== request) return;
-          setSnapshotState({ profile: accessProfile, value: EMPTY_SNAPSHOT });
-          setReadError(error instanceof Error ? error.message : String(error));
-          setLoading(false);
-        });
+    const request = () => {
+      if (disposed) return;
+      requested = true;
+      if (running) return;
+      running = true;
+      setLoading(true);
+      void (async () => {
+        while (!disposed && requested) {
+          requested = false;
+          try {
+            const next = await readSurfaceDocumentSnapshot(accessProfile);
+            if (disposed) return;
+            setSnapshotState({ profile: accessProfile, value: next });
+            setReadError("");
+          } catch (error) {
+            if (disposed) return;
+            setSnapshotState({ profile: accessProfile, value: EMPTY_SNAPSHOT });
+            setReadError(error instanceof Error ? error.message : String(error));
+          }
+        }
+        running = false;
+        if (!disposed) setLoading(false);
+      })();
     };
-    refresh();
+    refresh.current = request;
     const unsubscribe = accessProfile === "lab"
-      ? subscribeClientSurfaceDocuments(refresh)
+      ? subscribeClientSurfaceDocuments(request)
       : () => {};
     return () => {
       disposed = true;
       unsubscribe();
+      if (refresh.current === request) refresh.current = null;
     };
+  }, [accessProfile]);
+
+  useEffect(() => {
+    refresh.current?.();
   }, [accessProfile, projectionGeneration]);
 
   return useMemo(() => ({ ...materializeRegistry(

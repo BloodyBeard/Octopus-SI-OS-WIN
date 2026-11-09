@@ -91,7 +91,30 @@ fn same_future_contract(before: &BoundRunAuthoringTopology, after: &BoundRunAuth
     before == after
 }
 
-fn validate_templates(before: &BoundRunAuthoringTopology, after: &BoundRunAuthoringTopology) -> Result<(), String> {
+fn successors<'a>(prior: &RunAuthoringCheckpoint, after: &'a BoundRunAuthoringTopology) -> Vec<&'a RunAuthoringCheckpoint> {
+    after.checkpoints.iter().filter(|next| next.name == prior.name
+        || (prior.role == RunAuthoringCheckpointRole::ProviderToolOutput && next.role == prior.role
+            && next.interface_binding == prior.interface_binding
+            && next.outbound_interface_bindings == prior.outbound_interface_bindings)).collect()
+}
+
+fn retired<'a>(before: &'a BoundRunAuthoringTopology, after: &'a BoundRunAuthoringTopology) -> impl Iterator<Item = &'a RunAuthoringCheckpoint> {
+    before.checkpoints.iter().filter(move |prior| successors(prior, after).is_empty())
+}
+
+fn retirable_standing_input(record: &RunRecord, template: &RunAuthoringCheckpoint, before: &BoundRunAuthoringTopology, after: &BoundRunAuthoringTopology) -> bool {
+    let interface = template.interface();
+    template.role == RunAuthoringCheckpointRole::Stable
+        && template.owner_authoring.is_none()
+        && template.required_verified_artifacts.is_empty() && template.result_receiving.is_empty()
+        && *interface != record.worker && *interface != before.provider_interface && *interface != before.authoring_source_interface
+        && !record.interface_state.contains_key(interface)
+        && !after.checkpoints.iter().any(|next| next.interface() == interface || next.outbound_interfaces().any(|target| target == interface))
+        && (!template.include_context || after.checkpoints.iter().any(|next|
+            next.role == RunAuthoringCheckpointRole::Stable && next.include_context))
+}
+
+fn validate_templates(record: &RunRecord, before: &BoundRunAuthoringTopology, after: &BoundRunAuthoringTopology) -> Result<(), String> {
     let mut old_header = before.clone();
     let mut new_header = after.clone();
     old_header.checkpoints.clear();
@@ -107,12 +130,14 @@ fn validate_templates(before: &BoundRunAuthoringTopology, after: &BoundRunAuthor
         if !names.insert(&next.name) { return Err("capability amendment repeats a checkpoint template name".into()); }
     }
     for prior in &before.checkpoints {
-        let matches = after.checkpoints.iter().filter(|next| next.name == prior.name
-            || (prior.role == RunAuthoringCheckpointRole::ProviderToolOutput && next.role == prior.role
-                && next.interface_binding == prior.interface_binding
-                && next.outbound_interface_bindings == prior.outbound_interface_bindings)).collect::<Vec<_>>();
+        let matches = successors(prior, after);
+        if matches.is_empty() && retirable_standing_input(record, prior, before, after) { continue; }
         let [next] = matches.as_slice() else { return Err(format!("capability amendment removes or duplicates retained template '{}' ({:?}: {} -> {:?})", prior.name,prior.role,prior.interface(),prior.outbound_interfaces().collect::<Vec<_>>())); };
         let next = *next;
+        if !prior.include_context && matches!(prior.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput)
+            && prior.static_artifact_bindings != next.static_artifact_bindings {
+            return Err(format!("capability amendment cannot change the static artifacts of context-free input '{}': an arrival it already admitted must keep its exact checkpoint", prior.name));
+        }
         let mut old = prior.clone();
         let mut new = next.clone();
         if !extends(&old.static_artifact_bindings, &new.static_artifact_bindings) {
@@ -151,7 +176,7 @@ fn validate_templates(before: &BoundRunAuthoringTopology, after: &BoundRunAuthor
     Ok(())
 }
 
-fn provider_owned(record: &RunRecord, topology: &BoundRunAuthoringTopology, cp: &octopus_runtime::run_record::CheckpointRecord) -> bool {
+fn provider_owned(record: &RunRecord, topology: &BoundRunAuthoringTopology, cp: &octopus_run_record::CheckpointRecord) -> bool {
     record.interface_state.get(&topology.provider_interface)
         .and_then(|state| state.get(FRONTIER_CHECKPOINT_IDS)).and_then(Value::as_array)
         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(cp.id.as_str())))
@@ -166,7 +191,7 @@ fn context(record: &RunRecord, topology: &BoundRunAuthoringTopology) -> Result<V
         let rows = record.checkpoints.iter().filter(|cp| record.active_checkpoints.contains(&cp.id)
             && checkpoint_record_matches_template(cp, template, &record.id)).collect::<Vec<_>>();
         let [row] = rows.as_slice() else { return Err(format!("capability context '{}' has no exact active checkpoint", template.name)); };
-        if row.artifact_bindings.iter().any(|binding| binding.access != octopus_runtime::ArtifactAccess::read_only()) {
+        if row.artifact_bindings.iter().any(|binding| binding.access != octopus_policy::ArtifactAccess::read_only()) {
             return Err("capability context must retain exact read-only bindings".into());
         }
         let ids = row.artifact_bindings.iter().map(|binding| binding.id.clone()).collect::<Vec<_>>();
@@ -191,7 +216,7 @@ fn validate_delta(before: &RunRecord, delta: &CapabilityDelta, profile: &RunAuth
     let provider = &delta.before.provider_interface;
     if !same_future_contract(&topology(before, provider)?, &delta.before) { return Err("capability amendment has stale baseline topology".into()); }
     delta.after.validate_identity(before, provider)?;
-    validate_templates(&delta.before, &delta.after)?;
+    validate_templates(before, &delta.before, &delta.after)?;
     for topology in [&delta.before, &delta.after] { topology.config(profile).validate(provider, &before.id)?; }
     let prior_context = context(before, &delta.before)?;
     let mut added = BTreeSet::new();
@@ -210,7 +235,7 @@ fn validate_delta(before: &RunRecord, delta: &CapabilityDelta, profile: &RunAuth
     }
     let mut candidate = json!(before);
     for cp in &delta.checkpoints {
-        let cp: octopus_runtime::run_record::CheckpointRecord = serde_json::from_value(cp.clone()).map_err(|e|e.to_string())?;
+        let cp: octopus_run_record::CheckpointRecord = serde_json::from_value(cp.clone()).map_err(|e|e.to_string())?;
         if before.checkpoint(&cp.id).is_some() || cp.inbound_interface().is_none_or(|owner|
             retained_owners.contains(owner) || !delta.interface_state.contains_key(owner)) {
             return Err(format!("capability amendment added checkpoint '{}' outside a new declared owner", cp.id));
@@ -230,7 +255,7 @@ fn delta(amendment: &ProviderCapabilityAmendment) -> Result<CapabilityDelta, Str
     let provider = &amendment.provider_interface;
     let old = topology(&before, provider)?;
     let new = topology(&after, provider)?;
-    validate_templates(&old, &new)?;
+    validate_templates(&before, &old, &new)?;
     let mut old_root = amendment.before.clone();
     let mut new_root = amendment.after.clone();
     for key in ["checkpoints", "active_checkpoints", "interface_state", "status"] {
@@ -302,6 +327,37 @@ pub fn rebase_plan(current: &RunRecord, amendment: ProviderCapabilityAmendment) 
         if key != RUN_AUTHORING_BINDING && key != FRONTIER_CHECKPOINT_IDS { state.insert(key.clone(),value.clone()); }
     }
     prepare_plan(ProviderCapabilityAmendment {before, after, ..amendment})
+}
+
+pub fn rearmed_frontier_view(current: &RunRecord, provider: &InterfaceId, profile: &RunAuthoringProfile) -> Result<RunRecord, String> {
+    let topology = topology(current, provider)?;
+    let config = topology.config(profile);
+    let roles = current_mandatory_role_bindings(current, &config)?.into_iter()
+        .map(|binding| serde_json::to_value(binding).map_err(|e| e.to_string())).collect::<Result<Vec<_>, _>>()?;
+    let state = current.interface_state.get(provider).ok_or("capability provider state absent")?;
+    let previous = raw_frontier_checkpoint_ids(state)?;
+    let mut rows = Vec::new();
+    let mut ids = Vec::new();
+    for template in topology.checkpoints.iter().filter(|template| matches!(template.role,
+        RunAuthoringCheckpointRole::ProviderArtifactOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput
+        | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderTransportDispatch
+        | RunAuthoringCheckpointRole::ProviderHandoffCompletion)
+        || (topology.writer_run.is_none() && matches!(template.role, RunAuthoringCheckpointRole::AuthoringCall | RunAuthoringCheckpointRole::AuthoringResult))) {
+        let id = format!("cp_rearmed_view_{}", template.name);
+        rows.push(materialize_checkpoint(template, &id, &current.id, &roles));
+        ids.push(id);
+    }
+    let mut value = json!(current);
+    let root = value.as_object_mut().ok_or("run is not an object")?;
+    root.insert("status".into(), json!("idle"));
+    replace_owned_frontier(root, &previous, rows, &ids)?;
+    let state = root.get_mut("interface_state").and_then(|states| states.get_mut(provider.as_str()))
+        .and_then(Value::as_object_mut).ok_or("capability provider state absent")?;
+    state.remove("pending_handoff");
+    state.insert(FRONTIER_CHECKPOINT_IDS.into(), json!(ids));
+    let view = record(&value)?;
+    validate_checkpoint_topology(&view, provider, &config.checkpoints, None)?;
+    Ok(view)
 }
 
 pub fn prospective_capability_record(amendment: &ProviderCapabilityAmendment) -> Result<RunRecord, String> {
@@ -454,6 +510,7 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
     let root = ordinary.as_object_mut().ok_or("capability candidate is not an object")?;
     if !delta.static_artifact_additions.is_empty() {
         let mut context_config = config.clone();
+        context_config.checkpoints.retain(|template| !retired(&delta.before, &delta.after).any(|old| old.name == template.name));
         for template in &mut context_config.checkpoints {
             if let Some(next) = delta.after.checkpoints.iter().find(|next| next.name == template.name) {
                 *template = next.clone();
@@ -462,7 +519,38 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
         replace_context_checkpoints(root, &context_config, &initial.id, &prefix, &bindings)?;
     }
     let mut frontier = raw_frontier_checkpoint_ids(state)?.into_iter().collect::<Vec<_>>();
+    for retired in retired(&delta.before, &delta.after) {
+        let ids = initial.checkpoints.iter().filter(|cp| checkpoint_record_matches_template(cp, retired, &initial.id))
+            .map(|cp| cp.id.as_str().to_string()).collect::<BTreeSet<_>>();
+        root.get_mut("checkpoints").and_then(Value::as_array_mut).ok_or("capability checkpoints absent")?
+            .retain(|cp| cp.get("id").and_then(Value::as_str).is_none_or(|id| !ids.contains(id)));
+        root.get_mut("active_checkpoints").and_then(Value::as_array_mut).ok_or("capability active checkpoints absent")?
+            .retain(|id| id.as_str().is_none_or(|id| !ids.contains(id)));
+        frontier.retain(|id| !ids.contains(id.as_str()));
+    }
+    let pending = pending_handoff(&initial, provider)?;
+    let pending_items = pending.as_ref().map(|pending| pending.items.as_slice()).unwrap_or_default();
+    let unclaimed = |template: &RunAuthoringCheckpoint| retains_future_output(template)
+        && !pending_items.iter().any(|item| pending_output_serves_template(item, template));
     let mut rows = Vec::new();
+    for prior in delta.before.checkpoints.iter().filter(|template| retains_future_output(template)) {
+        let next = successors(prior, &delta.after);
+        let [next] = next.as_slice() else { continue };
+        if *next == prior { continue; }
+        let armed = initial.checkpoints.iter().filter(|cp| frontier.iter().any(|id| id == cp.id.as_str())
+            && !pending_items.iter().any(|item| item.checkpoint.id == cp.id)
+            && checkpoint_record_matches_template(cp, prior, &initial.id)).map(|cp| cp.id.as_str().to_string()).collect::<BTreeSet<_>>();
+        root.get_mut("checkpoints").and_then(Value::as_array_mut).ok_or("capability checkpoints absent")?
+            .retain(|cp| cp.get("id").and_then(Value::as_str).is_none_or(|id| !armed.contains(id)));
+        root.get_mut("active_checkpoints").and_then(Value::as_array_mut).ok_or("capability active checkpoints absent")?
+            .retain(|id| id.as_str().is_none_or(|id| !armed.contains(id)));
+        frontier.retain(|id| !armed.contains(id.as_str()));
+        if next.name == prior.name && unclaimed(next) {
+            let id = format!("{prefix}_{}", next.name);
+            rows.push(materialize_checkpoint(next, &id, &initial.id, &role_bindings));
+            frontier.push(id);
+        }
+    }
     for template in delta.after.checkpoints.iter().filter(|cp| !delta.before.checkpoints.iter().any(|old| old.name == cp.name)) {
         let id = format!("{prefix}_{}", template.name);
         match template.role {
@@ -470,8 +558,10 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
                 rows.push(materialize_checkpoint(template, &id, &initial.id, if template.include_context { &bindings } else { &role_bindings }));
             }
             _ if retains_future_output(template) => {
-                rows.push(materialize_checkpoint(template, &id, &initial.id, &role_bindings));
-                frontier.push(id);
+                if unclaimed(template) {
+                    rows.push(materialize_checkpoint(template, &id, &initial.id, &role_bindings));
+                    frontier.push(id);
+                }
             }
             RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderArtifactOutput => {}
             _ => return Err("capability amendment contains an unsupported new authoring role".into()),

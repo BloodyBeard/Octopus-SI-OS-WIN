@@ -79,6 +79,43 @@ impl CheckpointIdentity {
     }
 }
 
+/// Read-only retained-delivery projection for one emitting interface.
+/// The reader validates its complete ledger cursor; this projection receives
+/// only that interface's real movements, in their original sequence order.
+/// It exposes no kernel admission decisions.
+pub struct InterfaceArrivalProjection {
+    interface: InterfaceId,
+    last_sequence: Option<u64>,
+    index: ArrivalDedupIndex,
+}
+
+impl InterfaceArrivalProjection {
+    pub fn new(interface: InterfaceId) -> Self {
+        Self { interface, last_sequence: None, index: ArrivalDedupIndex::new() }
+    }
+
+    pub fn observe(&mut self, movement: &Movement) -> Result<(), LedgerIndexError> {
+        if movement.from != Endpoint::Interface(self.interface.clone())
+            || self.last_sequence.is_some_and(|last| movement.seq.0 <= last)
+        {
+            return Err(LedgerIndexError::InvalidArrivalScope(
+                "interface projection received a different source or unordered movement".into(),
+            ));
+        }
+        self.index.note(movement);
+        self.last_sequence = Some(movement.seq.0);
+        Ok(())
+    }
+
+    pub fn retained_arrival_scope(&self, identity: &str) -> Result<Option<Movement>, LedgerIndexError> {
+        self.index.retained_arrival_scope(&self.interface, identity)
+    }
+
+    pub fn retained_arrival_edges(&self, scope_seq: u64) -> Result<Vec<(RuntimeInvocationMetadata, RetainedArrivalState)>, LedgerIndexError> {
+        self.index.retained_arrival_edges(scope_seq)
+    }
+}
+
 impl ArrivalDedupIndex {
     pub fn new() -> Self {
         Self::default()

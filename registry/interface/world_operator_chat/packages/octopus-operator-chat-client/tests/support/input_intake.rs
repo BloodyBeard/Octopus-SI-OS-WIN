@@ -2,6 +2,52 @@ use super::*;
 use serde_json::{Value, json};
 
 #[test]
+fn retained_context_keeps_rearmed_output_payload_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = temp.path().join("registry");
+    tests::copy_planner_descriptors(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry"), &registry,
+    );
+    let ee = temp.path().join("ee");
+    std::fs::create_dir(&ee).unwrap();
+    tests::boot_operator_space_ee_instances(&ee);
+    let mut request: OperatorChatPlanRequest = serde_json::from_value(json!({
+        "registry_root":registry,"ee_instances_root":ee,"run_records_root":temp.path().join("runs"),
+        "interface_private_state_root":temp.path().join("private"),"write_hash_algorithm":"sha256",
+        "chat_id":"payload_order","provider_interface_id":"world_provider_codex",
+        "ee_id":"ee_operator_space","worker_interface_id":"system_worker_coder_max",
+        "client_surface_role":"task","cycle":"before","conversation":{"ledger_offset":0},
+        "selected_worker_environment_kinds":["code_mode","desktop_session","system_room","filesystem_workspace"],
+        "context_artifact_bindings":[{"id":"artifact-code-mode-cua-prelude"}]
+    })).unwrap();
+    let first = plan_operator_chat_topology(&request).unwrap();
+    let mut previous: Value = serde_json::from_str(&first.run_record_content).unwrap();
+    let provider = &first.model_interface_id;
+    // A completed handoff no longer has its one-shot tool outputs. Their
+    // templates remain, so the next input composes new checkpoints for them.
+    let templates = previous["interface_state"][provider]["run_authoring_binding"]["checkpoints"]
+        .as_array().unwrap().clone();
+    let retired = previous["checkpoints"].as_array().unwrap().iter().filter(|row|
+        templates.iter().any(|t| t["role"] == "provider_tool_output" && t["include_context"] != true
+            && row["interface_binding"] == t["interface_binding"]
+            && row["outbound_interface_bindings"] == t["outbound_interface_bindings"]))
+        .map(|row| row["id"].clone()).collect::<Vec<_>>();
+    assert!(!retired.is_empty());
+    previous["checkpoints"].as_array_mut().unwrap().retain(|row| !retired.contains(&row["id"]));
+    previous["active_checkpoints"].as_array_mut().unwrap().retain(|id| !retired.contains(id));
+    previous["interface_state"][provider]["frontier_checkpoint_ids"].as_array_mut().unwrap().retain(|id| !retired.contains(id));
+    request.cycle = "after".into();
+    request.payload_artifact_bindings = serde_json::from_value(json!([
+        {"id":"fixture.image","content":vec![1;32]}
+    ])).unwrap();
+    let composed = plan_operator_chat_topology(&request).unwrap();
+    let retained = context_bindings::retain_context_access(composed.run_record_content, &previous, provider).unwrap();
+    let record = RunRecord::from_bytes(retained.as_bytes()).unwrap();
+    let context = octopus_run_authoring::provider_context_bindings(&record, &InterfaceId::new(provider)).unwrap();
+    assert!(context.iter().any(|binding| binding.id.as_str() == "fixture.image" && binding.access.read));
+}
+
+#[test]
 fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context() {
     let temp = tempfile::tempdir().unwrap();
     let registry = temp.path().join("registry");

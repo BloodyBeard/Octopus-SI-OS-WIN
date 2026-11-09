@@ -11,14 +11,23 @@ use octopus_interfaces::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::account_auth::AccountAuthSettings;
 use crate::mcp_client::{resolve_base_url, McpClient, McpClientError};
 use crate::oauth::{
     authorization_status, complete_authorization, start_authorization, OAuthSettings,
 };
+use crate::operator_approval::{
+    admit_decision, approval_request_body, read_response, ApprovalPolicy, ApprovalStore, CallApproval,
+    McpToolAnnotations, OPERATOR_APPROVAL_RESPONSE_LABEL,
+};
+use crate::tool_filter::ToolMetaFilter;
 
+mod account_auth;
 mod life;
 mod mcp_client;
 mod oauth;
+mod operator_approval;
+mod tool_filter;
 pub use life::{catalog_interface_life, operation_interface_life};
 
 const MCP_TOOL_RESULT_LABEL: &str = "mcp.tool.result";
@@ -50,6 +59,8 @@ pub(crate) struct McpInterfaceConfig {
     event_journal_retained_segments: usize,
     reconnect_backoff: std::time::Duration,
     oauth: Option<OAuthSettings>,
+    account_auth: Option<AccountAuthSettings>,
+    tool_filter: Option<ToolMetaFilter>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -76,13 +87,16 @@ struct McpOperationRequest {
     arguments: Value,
     #[serde(default)]
     correlation_id: Option<String>,
+    approval_policy: ApprovalPolicy,
 }
 
 struct McpOperationSpec {
     id: String,
     request_label: String,
     output_label: String,
+    description: String,
     operation: McpOperation,
+    approval: CallApproval,
     validator: jsonschema::Validator,
 }
 
@@ -110,6 +124,8 @@ enum McpOperation {
     CallTool {
         #[serde(default)]
         mcp_tool_name: Option<String>,
+        #[serde(default)]
+        annotations: Option<McpToolAnnotations>,
     },
     ListTools,
     ListResources,
@@ -160,13 +176,39 @@ impl McpOperation {
             serde_json::from_value::<Self>(handler_config.clone()).map_err(|error| {
                 format!("MCP operation '{id}' handler_config is malformed: {error}")
             })?;
-        if let Self::CallTool {
-            mcp_tool_name: Some(mcp_tool_name),
-        } = &operation
-        {
-            require_trimmed("handler_config.mcp_tool_name", mcp_tool_name)?;
+        match &operation {
+            Self::CallTool {
+                mcp_tool_name: Some(mcp_tool_name),
+                ..
+            } => require_trimmed("handler_config.mcp_tool_name", mcp_tool_name)?,
+            Self::CallTool {
+                mcp_tool_name: None,
+                annotations: Some(_),
+            } => {
+                return Err(format!(
+                    "MCP operation '{id}' declares annotations without a fixed mcp_tool_name"
+                ))
+            }
+            _ => {}
         }
         Ok(operation)
+    }
+
+    fn server_tool(&self, arguments: &Value) -> Option<String> {
+        match self {
+            Self::CallTool {
+                mcp_tool_name: Some(name),
+                ..
+            } => Some(name.clone()),
+            Self::CallTool {
+                mcp_tool_name: None,
+                ..
+            } => arguments
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        }
     }
 
     fn artifact_label(&self) -> &'static str {
@@ -183,6 +225,7 @@ impl McpOperation {
         match self {
             Self::CallTool {
                 mcp_tool_name: Some(mcp_tool_name),
+                ..
             } => {
                 let forwarded =
                     require_object_or_null("fixed MCP tools/call arguments", arguments.clone())?;
@@ -190,6 +233,7 @@ impl McpOperation {
             }
             Self::CallTool {
                 mcp_tool_name: None,
+                ..
             } => {
                 let call = serde_json::from_value::<GenericCallArguments>(arguments.clone())
                     .map_err(|error| {
@@ -434,74 +478,126 @@ impl McpInterfaceProcess {
         if let Some(correlation_id) = call.correlation_id.as_deref() {
             require_trimmed("correlation_id", correlation_id)?;
         }
-        let validation_errors = spec
-            .validator
-            .iter_errors(&call.arguments)
-            .take(8)
-            .map(|error| {
-                format!(
-                    "{} at instance '{}' against schema '{}'",
-                    error, error.instance_path, error.schema_path
-                )
-            })
-            .collect::<Vec<_>>();
-        if !validation_errors.is_empty() {
-            return Err(format!(
-                "MCP operation '{}' arguments are invalid: {}",
-                spec.id,
-                validation_errors.join("; ")
-            ));
+        validate_arguments(spec, &call.arguments)?;
+        let gated = match call.approval_policy {
+            ApprovalPolicy::OnRequest => spec.approval.gated(&call.arguments),
+            ApprovalPolicy::Never => None,
+        };
+        if let Some((tool, annotations)) = gated {
+            let request = self.approvals().open_request(
+                &self.interface,
+                &envelope,
+                &spec.id,
+                &spec.description,
+                tool,
+                annotations,
+                &call.arguments,
+                call.correlation_id.as_deref(),
+            )?;
+            let body = approval_request_body(
+                &spec.output_label,
+                &call.operation,
+                call.correlation_id.as_deref(),
+                &request,
+            );
+            return materialize_emitted_artifact(output_root, &spec.output_label, &body);
         }
+        let body = self.execute(spec, &call).await;
+        materialize_emitted_artifact(output_root, &spec.output_label, &body)
+    }
+
+    async fn decide(
+        &self,
+        catalog: &McpOperationCatalog,
+        envelope: InterfaceInvocationEnvelope,
+        output_root: &Path,
+    ) -> Result<InterfaceArtifactFile, String> {
+        let response = read_response(&envelope)?;
+        let approvals = self.approvals();
+        let pending = approvals.pending(&response.request_id)?;
+        let decision = admit_decision(&self.interface, &envelope, &pending, response)?;
+        let request = &pending.request;
+        let spec = catalog.operations.get(&request.operation);
+        let label = spec
+            .map(|spec| spec.output_label.as_str())
+            .unwrap_or(MCP_TOOL_RESULT_LABEL);
+        let correlation_id = pending.correlation_id.as_deref();
+        if !approvals.record_decision(&decision)? {
+            let body = match approvals.retained_result(&request.request_id)? {
+                Some(body) => body,
+                None => closed_body(
+                    label,
+                    &request.operation,
+                    correlation_id,
+                    json!({
+                        "code": "indeterminate_external_effect",
+                        "message": format!("The approved call to {} may have reached the server before Octopus stopped. Check its current state before asking again.", request.tool),
+                    }),
+                ),
+            };
+            return materialize_emitted_artifact(output_root, label, &body);
+        }
+        let body = match spec {
+            _ if !decision.approved() => closed_body(
+                label,
+                &request.operation,
+                correlation_id,
+                json!({
+                    "code": "operator_declined",
+                    "message": format!("The operator did not approve {}; nothing was sent to the server.", request.tool),
+                }),
+            ),
+            Some(spec)
+                if spec.operation.server_tool(&request.arguments).as_deref()
+                    == Some(request.tool.as_str())
+                    && validate_arguments(spec, &request.arguments).is_ok() =>
+            {
+                let call = McpOperationRequest {
+                    operation: request.operation.clone(),
+                    arguments: request.arguments.clone(),
+                    correlation_id: pending.correlation_id.clone(),
+                    approval_policy: ApprovalPolicy::OnRequest,
+                };
+                self.execute(spec, &call).await
+            }
+            _ => closed_body(
+                label,
+                &request.operation,
+                correlation_id,
+                json!({
+                    "code": "operation_unavailable",
+                    "message": format!("{} no longer offers {} with the approved arguments; nothing was sent to the server.", self.interface, request.operation),
+                }),
+            ),
+        };
+        approvals.retain_result(&request.request_id, &body)?;
+        materialize_emitted_artifact(output_root, label, &body)
+    }
+
+    fn approvals(&self) -> ApprovalStore {
+        ApprovalStore::new(self.state_dir.join("operator-approvals"))
+    }
+
+    async fn execute(&self, spec: &McpOperationSpec, call: &McpOperationRequest) -> Value {
         let operation = &spec.operation;
         let artifact_label = spec.output_label.as_str();
+        let correlation_id = call.correlation_id.as_deref();
         if operation.is_oauth() {
-            let result = self.invoke_oauth(&operation, &call.arguments).await;
-            let body = match result {
-                Ok(result) => ok_body(
-                    artifact_label,
-                    &call.operation,
-                    call.correlation_id.as_deref(),
-                    "oauth",
-                    result,
-                ),
-                Err(error) => closed_body(
-                    artifact_label,
-                    &call.operation,
-                    call.correlation_id.as_deref(),
-                    error.structured(),
-                ),
+            return match self.invoke_oauth(operation, &call.arguments).await {
+                Ok(result) => ok_body(artifact_label, &call.operation, correlation_id, "oauth", result),
+                Err(error) => closed_body(artifact_label, &call.operation, correlation_id, error.structured()),
             };
-            return materialize_emitted_artifact(output_root, artifact_label, &body);
         }
         if matches!(operation, McpOperation::Close) {
-            let result = self.close_current().await;
-            let body = match result {
-                Ok(result) => ok_body(
-                    artifact_label,
-                    &call.operation,
-                    call.correlation_id.as_deref(),
-                    "closed",
-                    result,
-                ),
-                Err(error) => closed_body(
-                    artifact_label,
-                    &call.operation,
-                    call.correlation_id.as_deref(),
-                    error.structured(),
-                ),
+            return match self.close_current().await {
+                Ok(result) => ok_body(artifact_label, &call.operation, correlation_id, "closed", result),
+                Err(error) => closed_body(artifact_label, &call.operation, correlation_id, error.structured()),
             };
-            return materialize_emitted_artifact(output_root, artifact_label, &body);
         }
         let (mut client, mut disposition) = match self.acquire_client().await {
             Ok(client) => client,
             Err(error) => {
-                let body = closed_body(
-                    artifact_label,
-                    &call.operation,
-                    call.correlation_id.as_deref(),
-                    error.structured(),
-                );
-                return materialize_emitted_artifact(output_root, artifact_label, &body);
+                return closed_body(artifact_label, &call.operation, correlation_id, error.structured());
             }
         };
         let mut result = operation.invoke(&client, &call.arguments).await;
@@ -523,31 +619,14 @@ impl McpInterfaceProcess {
                 disposition = "replay_refused_effectful_operation".to_string();
             }
         }
-        let body = match result {
-            Ok(result) => ok_body(
-                artifact_label,
-                &call.operation,
-                call.correlation_id.as_deref(),
-                &disposition,
-                result,
-            ),
+        match result {
+            Ok(result) => ok_body(artifact_label, &call.operation, correlation_id, &disposition, result),
             Err(error) if error.is_reconnectable() => {
                 self.retire_current(&client).await;
-                closed_body(
-                    artifact_label,
-                    &call.operation,
-                    call.correlation_id.as_deref(),
-                    error.structured(),
-                )
+                closed_body(artifact_label, &call.operation, correlation_id, error.structured())
             }
-            Err(error) => closed_body(
-                artifact_label,
-                &call.operation,
-                call.correlation_id.as_deref(),
-                error.structured(),
-            ),
-        };
-        materialize_emitted_artifact(output_root, artifact_label, &body)
+            Err(error) => closed_body(artifact_label, &call.operation, correlation_id, error.structured()),
+        }
     }
 
     async fn acquire_client(&self) -> Result<(Arc<McpClient>, String), McpClientError> {
@@ -762,6 +841,29 @@ fn mcp_interface_process(
     }
 }
 
+fn validate_arguments(spec: &McpOperationSpec, arguments: &Value) -> Result<(), String> {
+    let errors = spec
+        .validator
+        .iter_errors(arguments)
+        .take(8)
+        .map(|error| {
+            format!(
+                "{} at instance '{}' against schema '{}'",
+                error, error.instance_path, error.schema_path
+            )
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "MCP operation '{}' arguments are invalid: {}",
+            spec.id,
+            errors.join("; ")
+        ))
+    }
+}
+
 fn ok_body(
     label: &str,
     operation: &str,
@@ -845,7 +947,7 @@ pub(crate) async fn emit_catalog_as_inbound_artifacts(
         .await?;
     }
 
-    if client.capabilities().resources {
+    if client.capabilities().resources && config.tool_filter.is_none() {
         let mut templates = Vec::new();
         let mut template_bytes = 0;
         let mut cursor = None;
@@ -944,7 +1046,7 @@ pub(crate) async fn emit_catalog_as_inbound_artifacts(
         )
         .await?;
     }
-    if client.capabilities().prompts {
+    if client.capabilities().prompts && config.tool_filter.is_none() {
         let mut prompts = Vec::new();
         let mut prompt_bytes = 0;
         let mut cursor = None;
@@ -1065,10 +1167,20 @@ async fn emit_inbound_value(
             .map_err(|error| {
                 McpProjectionError::Delivery(format!("{label} artifact write failed: {error}"))
             })?;
-    ctx.hand_admitted_arrival(artifact, Vec::new())
+    match ctx
+        .hand_arrival(artifact, Vec::new())
         .await
-        .map_err(McpProjectionError::Delivery)?;
-    Ok(())
+        .map_err(McpProjectionError::Delivery)?
+    {
+        octopus_interfaces::DeliveryVerdict::Admitted { .. }
+        | octopus_interfaces::DeliveryVerdict::Refused {
+            reason: octopus_interfaces::RefusedReason::NoBinding | octopus_interfaces::RefusedReason::Policy,
+            ..
+        } => Ok(()),
+        octopus_interfaces::DeliveryVerdict::Refused { reason, detail } => Err(McpProjectionError::Delivery(
+            format!("runtime refused {label} projection as '{}': {detail}", reason.as_str()),
+        )),
+    }
 }
 
 fn materialize_emitted_artifact(
@@ -1254,11 +1366,20 @@ fn load_operation_catalog(
             "request_label": file.request_label.clone(),
             "output_label": file.output_label.clone(),
         }));
+        let approval = match &operation {
+            McpOperation::CallTool {
+                mcp_tool_name: Some(tool),
+                annotations,
+            } => CallApproval::fixed(tool, annotations.as_ref()),
+            _ => CallApproval::Free,
+        };
         let spec = McpOperationSpec {
             id: file.id.clone(),
             request_label: file.request_label,
             output_label: file.output_label,
+            description: file.description,
             operation,
+            approval,
             validator,
         };
         if operations.insert(file.id.clone(), spec).is_some() {
@@ -1270,6 +1391,26 @@ fn load_operation_catalog(
             "MCP interface '{}' operation catalog is empty",
             descriptor.id
         ));
+    }
+    let declared_tools = CallApproval::declared_tools(operations.values().filter_map(|spec| {
+        match &spec.operation {
+            McpOperation::CallTool {
+                mcp_tool_name: Some(tool),
+                annotations,
+            } => Some((tool.as_str(), annotations.as_ref())),
+            _ => None,
+        }
+    }));
+    for spec in operations.values_mut() {
+        if matches!(
+            spec.operation,
+            McpOperation::CallTool {
+                mcp_tool_name: None,
+                ..
+            }
+        ) {
+            spec.approval = CallApproval::Named(Arc::clone(&declared_tools));
+        }
     }
     Ok(McpOperationCatalog {
         catalog_label: catalog_label.to_string(),
@@ -1386,6 +1527,34 @@ pub(crate) fn load_interface_config_from_descriptor(
     if let Some(oauth) = oauth.as_ref() {
         oauth.validate().map_err(|error| error.to_string())?;
     }
+    let account_auth = match config.private_config.get("auth") {
+        None => None,
+        Some(value) => {
+            let settings =
+                serde_json::from_value::<AccountAuthSettings>(value.clone()).map_err(|error| {
+                    format!(
+                        "MCP interface '{}' private_config.auth is malformed: {error}",
+                        interface
+                    )
+                })?;
+            settings
+                .validate()
+                .map_err(|error| format!("MCP interface '{}' {error}", interface))?;
+            if oauth.is_some() || transport.auth_env_key.is_some() {
+                return Err(format!(
+                    "MCP interface '{}' private_config.auth excludes private_config.oauth and transport.auth_env_key",
+                    interface
+                ));
+            }
+            Some(settings)
+        }
+    };
+    let tool_filter = config
+        .private_config
+        .get("tool_filter")
+        .map(ToolMetaFilter::parse)
+        .transpose()
+        .map_err(|error| format!("MCP interface '{}' {error}", interface))?;
     Ok(McpInterfaceConfig {
         transport,
         protocol_versions,
@@ -1398,6 +1567,8 @@ pub(crate) fn load_interface_config_from_descriptor(
         event_journal_retained_segments,
         reconnect_backoff: std::time::Duration::from_millis(reconnect_backoff_ms),
         oauth,
+        account_auth,
+        tool_filter,
     })
 }
 

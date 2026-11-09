@@ -24,7 +24,7 @@ function projectionTruthChange(filename) {
     return segments.length === 3 && segments[2].endsWith(".json") ? "runs" : null;
   }
   if (segments[0] === "state" && segments[1] === "change-journals") {
-    return segments.length === 4 && segments[3] === "journal.json" ? "runs" : null;
+    return segments.length === 5 && segments[4] === "journal.json" ? "runs" : null;
   }
   if (segments[0] === "state" && segments[1] === "ee_instances") {
     return segments.length === 3 && segments[2].endsWith(".json") ? "policy" : null;
@@ -54,7 +54,7 @@ function projectionTruthChange(filename) {
       && /^ledger-cursor(?:\.[A-Za-z0-9_-]+)?\.json$/.test(segments[2])
     ) return null;
     if (segments.length === 3 && segments[2].endsWith(".json")) {
-      return segments[2] === INTERFACE_PRIVATE_ENVIRONMENT_FILE ? "structure" : "runs";
+      return segments[2] === INTERFACE_PRIVATE_ENVIRONMENT_FILE ? "structure" : "state";
     }
     return segments[2] === "worker-environments"
       && segments.length === 5
@@ -466,6 +466,7 @@ async function readEeInstanceRecords(eeInstancesRoot, warnings = []) {
       || !stringValue(record.ee_id)
       || !stringValue(record.template_name)
       || !stringValue(record.goal)
+      || (record.name != null && (typeof record.name !== "string" || !record.name.trim()))
       || (
         Object.prototype.hasOwnProperty.call(record, "config")
         && (!record.config || typeof record.config !== "object" || Array.isArray(record.config))
@@ -477,7 +478,7 @@ async function readEeInstanceRecords(eeInstancesRoot, warnings = []) {
     try {
       exactObjectKeys(
         record,
-        ["ee_id", "template_name", "parent_ee_id", "goal", "config", "policy_narrowing"],
+        ["ee_id", "name", "template_name", "parent_ee_id", "goal", "config", "policy_narrowing"],
         ["ee_id", "template_name", "parent_ee_id", "goal"],
         `EE instance ${file}`,
       );
@@ -775,7 +776,7 @@ function operatorOsProjectRows(scope, environments) {
     const presentation = objectOrEmpty(presentations.get(stringValue(environment.ee_id)));
     return {
       ee_id: stringValue(environment.ee_id),
-      name: stringValue(presentation.name) || stringValue(environment.goal),
+      name: stringValue(environment.name) || stringValue(environment.ee_id),
       icon: stringValue(presentation.icon),
       color: stringValue(presentation.color),
       goal: stringValue(environment.goal),
@@ -825,12 +826,17 @@ function applicationPrivateConfigurationProjection(manifest, interfaceIds, descr
         digest: stringValue(configuration.document_digest),
       });
       for (const { presentation, declaration: projected } of resolved) {
+        const authoredIndex = authoredFields.indexOf(presentation);
         fields.push({
+          order: authoredIndex >= 0 ? authoredIndex : authoredFields.length,
           interface_id: interfaceId,
           name: stringValue(projected.name),
           label: stringValue(presentation.label),
           kind: stringValue(presentation.kind),
           required: presentation.required === true,
+          authored: presented.length > 0,
+          placeholder: stringValue(presentation.placeholder),
+          help: stringValue(presentation.help),
           configured: projected.configured === true,
           private_saved: projected.private_saved === true,
           source: stringValue(projected.source) || "unknown",
@@ -840,7 +846,10 @@ function applicationPrivateConfigurationProjection(manifest, interfaceIds, descr
       errors.push(error.message);
     }
   }
-  fields.sort((left, right) => left.interface_id.localeCompare(right.interface_id) || left.name.localeCompare(right.name));
+  fields.sort((left, right) => left.order - right.order
+    || left.interface_id.localeCompare(right.interface_id)
+    || left.name.localeCompare(right.name));
+  for (const field of fields) delete field.order;
   const requiredFields = fields.filter((field) => field.required);
   const conflict = fields.some((field) => field.source === "conflict");
   const provenMissing = requiredFields.some((field) => field.source === "missing");
@@ -969,6 +978,7 @@ function eeInstanceRows(projection, includeLedger = true) {
     const template = templates.get(templateName);
     byEe.set(eeId, {
       ee_id: eeId,
+      name: stringValue(record.name),
       template_name: templateName,
       status: "projected",
       goal_id: "",

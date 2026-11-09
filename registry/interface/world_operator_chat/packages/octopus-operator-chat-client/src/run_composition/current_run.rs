@@ -32,7 +32,94 @@ pub struct CurrentRunRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<CurrentRunSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<CurrentRunChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub authored: Option<AuthoredCurrentRun>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentRunSelectionEntries {
+    #[serde(default)]
+    pub selected_tools: Vec<SelectedToolSeed>,
+    #[serde(default)]
+    pub selected_worker_environment_kinds: Vec<String>,
+    #[serde(default)]
+    pub door_host_slots: BTreeMap<String, BTreeMap<String, PathBuf>>,
+    #[serde(default)]
+    pub external_inputs: Vec<ExternalInputSeed>,
+    #[serde(default)]
+    pub external_relays: Vec<ExternalRelaySeed>,
+    #[serde(default)]
+    pub model_outputs: Vec<ModelOutputSeed>,
+    #[serde(default)]
+    pub context_artifact_bindings: Vec<ArtifactBindingSeed>,
+    #[serde(default)]
+    pub payload_artifact_bindings: Vec<ArtifactRef>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentRunChange {
+    #[serde(default)]
+    pub add: CurrentRunSelectionEntries,
+    #[serde(default)]
+    pub remove: CurrentRunSelectionEntries,
+}
+
+fn change_list<T: PartialEq + std::fmt::Debug>(field: &str, current: &mut Vec<T>, add: Vec<T>, remove: Vec<T>) -> Result<bool, String> {
+    let changed = !add.is_empty() || !remove.is_empty();
+    for entry in remove {
+        let index = current.iter().position(|item| item == &entry)
+            .ok_or_else(|| format!("change removes {field} entry {entry:?} that the current selection does not hold"))?;
+        current.remove(index);
+    }
+    for entry in add {
+        if current.contains(&entry) {
+            return Err(format!("change adds {field} entry {entry:?} that the current selection already holds"));
+        }
+        current.push(entry);
+    }
+    Ok(changed)
+}
+
+pub fn apply_current_run_change(mut selection: CurrentRunSelection, change: CurrentRunChange) -> Result<CurrentRunSelection, String> {
+    let CurrentRunChange { add, remove } = change;
+    let mut changed = false;
+    changed |= change_list("selected_tools", &mut selection.selected_tools, add.selected_tools, remove.selected_tools)?;
+    changed |= change_list("selected_worker_environment_kinds", &mut selection.selected_worker_environment_kinds,
+        add.selected_worker_environment_kinds, remove.selected_worker_environment_kinds)?;
+    changed |= change_list("external_inputs", &mut selection.external_inputs, add.external_inputs, remove.external_inputs)?;
+    changed |= change_list("external_relays", &mut selection.external_relays, add.external_relays, remove.external_relays)?;
+    changed |= change_list("model_outputs", &mut selection.model_outputs, add.model_outputs, remove.model_outputs)?;
+    changed |= change_list("context_artifact_bindings", &mut selection.context_artifact_bindings,
+        add.context_artifact_bindings, remove.context_artifact_bindings)?;
+    changed |= change_list("payload_artifact_bindings", &mut selection.payload_artifact_bindings,
+        add.payload_artifact_bindings, remove.payload_artifact_bindings)?;
+    for (door, slots) in remove.door_host_slots {
+        changed = true;
+        let held = selection.door_host_slots.get_mut(&door)
+            .ok_or_else(|| format!("change removes host slots of door '{door}' that the current selection does not hold"))?;
+        for (slot, path) in slots {
+            if held.get(&slot) != Some(&path) {
+                return Err(format!("change removes host slot '{slot}' of door '{door}' that the current selection does not hold at that path"));
+            }
+            held.remove(&slot);
+        }
+        if held.is_empty() { selection.door_host_slots.remove(&door); }
+    }
+    for (door, slots) in add.door_host_slots {
+        changed = true;
+        let held = selection.door_host_slots.entry(door.clone()).or_default();
+        for (slot, path) in slots {
+            if held.contains_key(&slot) {
+                return Err(format!("change adds host slot '{slot}' of door '{door}' that the current selection already holds"));
+            }
+            held.insert(slot, path);
+        }
+    }
+    if !changed { return Err("change adds and removes nothing".into()); }
+    Ok(selection)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,7 +145,7 @@ fn parse<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, String> {
 
 fn retain_selection<T: PartialEq>(prior: &[T], next: &[T], field: &str) -> Result<(), String> {
     if prior.iter().any(|value| !next.contains(value)) {
-        return Err(format!("current-run amendment cannot remove or change retained {field} during its accepted effect"));
+        return Err(format!("current-run amendment cannot remove or change retained {field}; only a standing external input can be removed"));
     }
     Ok(())
 }
@@ -266,7 +353,7 @@ pub(crate) fn form_current_worker(capabilities: &CapabilityRegistry, ee_root: &P
     for (base,descriptor) in &tools {
         let binding=projected.get_mut(&descriptor.interface).ok_or("current tool lost its exact owner")?;
         let [kind]=descriptor.supported_worker_environment_kinds.as_slice() else {return Err("current tool has no unique formed code-world".into());};
-        binding.tools.push(octopus_world_terminal_client::FormedToolCapability {tool:octopus_descriptors::ToolId::new(base),worker_environment_kind:kind.clone()});
+        binding.tools.push(crate::capability_formation::FormedToolCapability {tool:octopus_descriptors::ToolId::new(base),worker_environment_kind:kind.clone()});
         if origins[base].1 {selected_tools.push(SelectedToolSeed {tool:base.clone(),interface:descriptor.interface.to_string(),worker_environment_kind:kind.to_string()});}
     }
     projected.retain(|_,binding|!binding.tools.is_empty());
@@ -306,8 +393,21 @@ fn current_selection_with_worker(roots: &CompositionRoots, current: &RunRecord, 
     }, (capabilities, worker))))
 }
 
+fn pending_turn(record: &RunRecord, provider: &InterfaceId) -> bool {
+    record.interface_state.get(provider).and_then(|state| state.get("pending_handoff")).is_some_and(|pending| !pending.is_null())
+}
+
 fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, key: &str, selection: CurrentRunSelection,
     publications: Vec<octopus_context_collections::CollectionSelection>, native_metadata: Option<&InvocationMetadata>) -> Result<(AuthoredCurrentRun, Vec<crate::publication_selection::PublicationSelectionEvidence>), String> {
+    let idle;
+    let rebased = pending_turn(current, provider);
+    let current = if rebased {
+        let descriptor = load_interface_descriptor(&roots.registry_root.join("interface"), provider.as_str())?;
+        let profile = parse(descriptor.interface_driver_config.as_ref()
+            .and_then(|config| config.private_config.get("run_authoring_profile")).ok_or("current provider has no declared run authoring profile")?)?;
+        idle = octopus_run_authoring::capability_amendment::rearmed_frontier_view(current, provider, &profile)?;
+        &idle
+    } else { current };
     let (previous, selected_worker) = current_selection_with_worker(roots, current, provider)?.ok_or("this run has no client selection owner; supply its exact authored future record")?;
     let clients = current.interface_state.iter().filter(|(_, state)| state.get("provider_runtime_interface").and_then(Value::as_str) == Some(provider.as_str())
         && state.contains_key("client_surface_role")).collect::<Vec<_>>();
@@ -336,7 +436,6 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
     let selected = &plan.authoring_profile;
     retain_selection(&previous.selected_tools, &selected.selected_tools, "tools")?;
     retain_selection(&previous.selected_worker_environment_kinds, &selected.selected_worker_environment_kinds, "worker environment kinds")?;
-    retain_selection(&previous.external_inputs, &selected.external_inputs, "external inputs")?;
     retain_selection(&previous.external_relays, &selected.external_relays, "external relays")?;
     retain_selection(&previous.model_outputs, &selected.model_outputs, "model outputs")?;
     retain_selection(&previous.context_artifact_bindings, &selected.context_artifact_bindings, "context artifacts")?;
@@ -412,6 +511,42 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
             if current.active_checkpoints.contains(&cp.id) { active.push(json!(cp.id)); }
         }
     }
+    if rebased {
+        let prior = current_value["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array().ok_or("current templates absent")?;
+        for template in candidate["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array_mut().ok_or("planned templates absent")? {
+            let Some(old) = prior.iter().find(|old| old["name"] == template["name"]) else { continue; };
+            let (Some(old_ids), Some(new_ids)) = (old["static_artifact_bindings"].as_array(), template["static_artifact_bindings"].as_array()) else { continue; };
+            let mut ordered = old_ids.iter().filter(|id| new_ids.contains(id)).cloned().collect::<Vec<_>>();
+            ordered.extend(new_ids.iter().filter(|id| !old_ids.contains(id)).cloned());
+            template["static_artifact_bindings"] = json!(ordered);
+        }
+    }
+    let prior_templates = current_topology["checkpoints"].as_array().ok_or("current templates absent")?.clone();
+    let mut kept = Vec::new();
+    for template in candidate["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array_mut().ok_or("planned templates absent")? {
+        let Some(old) = prior_templates.iter().find(|old| old["name"] == template["name"]) else { continue; };
+        let context_free = matches!(template["role"].as_str(), Some("stable" | "independent_input")) && template["include_context"] != true;
+        if !context_free && template["role"] != "owner_input" { continue; }
+        let fields = template.as_object_mut().ok_or("planned template is not an object")?;
+        match old.get("static_artifact_bindings") {
+            Some(ids) => { fields.insert("static_artifact_bindings".into(), ids.clone()); }
+            None => { fields.remove("static_artifact_bindings"); }
+        }
+        if context_free { kept.push(template.clone()); }
+    }
+    for template in kept {
+        let same = |cp: &Value| cp["interface_binding"] == template["interface_binding"]
+            && cp["outbound_interface_bindings"] == template["outbound_interface_bindings"]
+            && cp["required_verified_artifacts"] == template["required_verified_artifacts"];
+        let rows = candidate["checkpoints"].as_array_mut().ok_or("candidate checkpoints absent")?;
+        let replaced = rows.iter().filter(|cp| same(cp)).map(|cp| cp["id"].clone()).collect::<Vec<_>>();
+        rows.retain(|cp| !same(cp));
+        let retained = current_value["checkpoints"].as_array().ok_or("current checkpoints absent")?.iter().filter(|cp| same(cp)).cloned().collect::<Vec<_>>();
+        rows.extend(retained.iter().cloned());
+        let active = candidate["active_checkpoints"].as_array_mut().ok_or("candidate active checkpoints absent")?;
+        active.retain(|id| !replaced.contains(id) && !retained.iter().any(|cp| &cp["id"] == id));
+        active.extend(retained.iter().filter(|cp| current.active_checkpoints.iter().any(|id| cp["id"] == json!(id))).map(|cp| cp["id"].clone()));
+    }
     let provider_owner = roots.registry_root.join("interface").join(provider.as_str());
     let catalog_pin = private.pointer("/run_affordances/catalog_artifact").map(parse::<ArtifactRef>).transpose()?;
     let planned = plan.interface_writes.iter().chain(&plan.run_writes).collect::<Vec<_>>();
@@ -482,11 +617,17 @@ fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &Ru
     bridge: ProviderCapabilityBridge, retained_tools: &[(String, InterfaceId)], native_metadata: Option<&InvocationMetadata>) -> Result<CurrentRunPlan, String> {
     safe_segment(&request.amendment_key, "amendment_key")?;
     let exact_authored = request.authored.is_some();
-    let (authored, publication_evidence) = match (request.selection, request.authored) {
-        (Some(selection), None) => plan_selection(roots, current, provider, &request.amendment_key, selection, request.publications, native_metadata)?,
-        (None, Some(authored)) if request.publications.is_empty() => (authored, Vec::new()),
-        (None, Some(_)) => return Err("exact authored current-run records cannot also request publication selection".into()),
-        _ => return Err("current-run amendment requires exactly one complete selection or authored record".into()),
+    let (authored, publication_evidence) = match (request.selection, request.change, request.authored) {
+        (Some(selection), None, None) => plan_selection(roots, current, provider, &request.amendment_key, selection, request.publications, native_metadata)?,
+        (None, Some(change), None) => {
+            let selection = current_selection(roots, current, provider)?
+                .ok_or("this run has no client selection owner to change; supply its exact authored future record")?;
+            let selection = apply_current_run_change(selection, change)?;
+            plan_selection(roots, current, provider, &request.amendment_key, selection, request.publications, native_metadata)?
+        }
+        (None, None, Some(authored)) if request.publications.is_empty() => (authored, Vec::new()),
+        (None, None, Some(_)) => return Err("exact authored current-run records cannot also request publication selection".into()),
+        _ => return Err("current-run amendment requires exactly one of a complete selection, a change or an authored record".into()),
     };
     let descriptor = load_interface_descriptor(&roots.registry_root.join("interface"), provider.as_str())?;
     let authoring_profile = parse(descriptor.interface_driver_config.as_ref()
@@ -495,7 +636,7 @@ fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &Ru
         return Err("authored current-run baseline requires an exact content hash".into());
     }
     let amendment = ProviderCapabilityAmendment { amendment_key: request.amendment_key, provider_interface: provider.clone(), before:authored.expected_before, after:authored.run_record, bridge, authoring_profile };
-    let amendment = if exact_authored { rebase_plan(current,amendment)? } else { prepare_plan(amendment)? };
+    let amendment = if exact_authored || pending_turn(current, provider) { rebase_plan(current,amendment)? } else { prepare_plan(amendment)? };
     let future = RunRecord::from_bytes(&serde_json::to_vec(&amendment.after).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let bridge_inputs = retained_tools.iter().map(|(tool, door)| Ok((
         prospective_bridge_inputs(current, provider, tool, door)?,

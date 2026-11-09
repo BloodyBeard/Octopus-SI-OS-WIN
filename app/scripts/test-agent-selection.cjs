@@ -21,6 +21,8 @@ test('An existing task continues through its exact provider without a saved Agen
   const run = { ...selection, workerInterfaceId: 'concrete-worker', workerChoiceInterfaceId: 'custom-template', providerInterfaceId: 'provider', providerBoundInterfaceId: 'private-provider', writable: true, archived: false };
   assert.equal(providerInExecutionContext([], 'project', 'custom-template', provider), null);
   assert.equal(providerForExistingRun(provider, run, selection), provider);
+  assert.equal(providerForExistingRun(provider, run, { ...selection, workerInterfaceId: 'concrete-worker' }), provider);
+  for (const workerInterfaceId of ['other', '']) assert.equal(providerForExistingRun(provider, run, { ...selection, workerInterfaceId }), null);
   for (const patch of [{ providerInterfaceId: 'other' }, { providerBoundInterfaceId: '' }, { eeId: 'other' }, { runId: 'other' }, { workerChoiceInterfaceId: 'other' }, { writable: false }, { archived: true }]) assert.equal(providerForExistingRun(provider, { ...run, ...patch }, selection), null);
   assert.equal(providerForExistingRun(provider, undefined, selection), null);
 });

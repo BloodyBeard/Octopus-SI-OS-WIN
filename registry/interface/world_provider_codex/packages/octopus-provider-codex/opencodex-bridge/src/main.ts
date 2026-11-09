@@ -2,12 +2,14 @@ import { spawn } from "node:child_process";
 import { createAnthropicAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/anthropic.ts";
 import { createAzureAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/azure.ts";
 import type { ProviderAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/base.ts";
-import { createClaudeCliAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/claude-cli/adapter.ts";
+import { createClaudeCliAdapter } from "./claude-cli.ts";
+import { createReasoningDetailsReplay } from "./reasoning-details.ts";
+import { createGrokCliAdapter, runGrokCaptureMcpServer } from "./grok-cli.ts";
 import { runCodeBuddyMcpServer } from "../node_modules/@bitkyc08/opencodex/src/adapters/codebuddy/mcp-server.ts";
 import { createGoogleAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/google.ts";
 import { createOpenAIChatAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/openai-chat.ts";
 import { createResponsesPassthroughAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/openai-responses.ts";
-import { createAdapterEventQueue } from "../node_modules/@bitkyc08/opencodex/src/adapters/run-turn-queue.ts";
+import { COALESCE_MAX_CHUNK_LENGTH, createAdapterEventQueue } from "../node_modules/@bitkyc08/opencodex/src/adapters/run-turn-queue.ts";
 import {
   bridgeToResponsesSSE,
   buildResponseJSON,
@@ -25,6 +27,8 @@ import {
   assertProviderDestinationAllowed,
   providerDestinationResolvedError,
 } from "../node_modules/@bitkyc08/opencodex/src/lib/destination-policy.ts";
+import { isLocalUpstream } from "../node_modules/@bitkyc08/opencodex/src/lib/local-upstream.ts";
+import { redactSecretString } from "../node_modules/@bitkyc08/opencodex/src/lib/redact.ts";
 import { parseRequest } from "../node_modules/@bitkyc08/opencodex/src/responses/parser.ts";
 import type {
   AdapterEvent,
@@ -32,7 +36,7 @@ import type {
   OcxProviderConfig,
 } from "../node_modules/@bitkyc08/opencodex/src/types.ts";
 
-type AdapterName = "anthropic" | "azure" | "claude-cli" | "google" | "openai-chat" | "openai-responses";
+type AdapterName = "anthropic" | "azure" | "claude-cli" | "google" | "grok-cli" | "openai-chat" | "openai-responses";
 
 type ProviderOptions = {
   annotate_empty_tool_outputs?: boolean;
@@ -84,6 +88,7 @@ const adapterNames = new Set<AdapterName>([
   "azure",
   "claude-cli",
   "google",
+  "grok-cli",
   "openai-chat",
   "openai-responses",
 ]);
@@ -351,6 +356,7 @@ function adapterFor(config: RuntimeProvider): ProviderAdapter {
     });
   }
   if (config.adapter === "google") return createGoogleAdapter(provider);
+  if (config.adapter === "grok-cli") return createGrokCliAdapter(provider);
   if (config.adapter === "openai-chat") return createOpenAIChatAdapter(provider);
   return createResponsesPassthroughAdapter(provider);
 }
@@ -486,6 +492,7 @@ function deliver(
   maps: ReturnType<typeof buildToolBridgeMaps>,
   budget: TranslatorBudget,
   abort: AbortController,
+  stallTimeoutSec: number | undefined,
 ): Promise<Response> | Response {
   const options = {
     translatorBudget: budget,
@@ -507,7 +514,7 @@ function deliver(
       maps.toolSearchToolNames,
       () => abort.abort("client cancelled"),
       2000,
-      options,
+      { ...options, stallTimeoutSec },
     );
     return new Response(disposingStream(stream, budget, abort), { headers: SSE_HEADERS });
   }
@@ -529,6 +536,69 @@ function deliver(
     }
   })();
 }
+
+function flattenRootSchemaAlternatives(parsed: OcxParsedRequest): void {
+  for (const tool of parsed.context.tools ?? []) {
+    const schema = tool.parameters;
+    if (!isObject(schema) || !("oneOf" in schema || "anyOf" in schema || "allOf" in schema)) continue;
+    const { oneOf, anyOf, allOf, ...rest } = schema;
+    const properties: Record<string, unknown> = isObject(rest.properties) ? { ...rest.properties } : {};
+    const required = new Set(stringList(rest.required));
+    const notes: string[] = [];
+    for (const branch of Array.isArray(allOf) ? allOf.filter(isObject) : []) {
+      mergeBranchProperties(properties, branch);
+      for (const name of stringList(branch.required)) required.add(name);
+    }
+    for (const [alternatives, quantity] of [[oneOf, "exactly one"], [anyOf, "at least one"]] as const) {
+      if (!Array.isArray(alternatives)) continue;
+      const shapes = alternatives.filter(isObject).map(branch => {
+        mergeBranchProperties(properties, branch);
+        const names = stringList(branch.required);
+        return names.length ? `(${names.join(" + ")})` : "(no further fields)";
+      });
+      notes.push(`Arguments must include ${quantity} of these field sets: ${shapes.join(" | ")}.`);
+    }
+    tool.parameters = { ...rest, type: "object", properties, ...(required.size ? { required: [...required] } : {}) };
+    if (notes.length) tool.description = [tool.description, ...notes].filter(Boolean).join("\n\n");
+  }
+}
+
+function mergeBranchProperties(properties: Record<string, unknown>, branch: Record<string, unknown>): void {
+  if (!isObject(branch.properties)) return;
+  for (const [name, value] of Object.entries(branch.properties)) {
+    if (!(name in properties)) properties[name] = value;
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function upstreamErrorReason(text: string, detail: string): string {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return detail;
+  }
+  const metadata = isObject(body) && isObject(body.error) && isObject(body.error.metadata) ? body.error.metadata : undefined;
+  const raw = typeof metadata?.raw === "string" ? metadata.raw.trim() : "";
+  if (!raw) return detail;
+  let reason = raw;
+  try {
+    const inner: unknown = JSON.parse(raw);
+    const message = isObject(inner) && isObject(inner.error) && typeof inner.error.message === "string"
+      ? inner.error.message
+      : isObject(inner) && typeof inner.message === "string" ? inner.message : undefined;
+    if (message) reason = message;
+  } catch {
+    reason = raw;
+  }
+  reason = redactSecretString(reason).slice(0, 600);
+  return detail && detail !== reason ? `${detail}: ${reason}` : reason;
+}
+
+const reasoningDetailsReplay = createReasoningDetailsReplay(4096);
 
 async function responsesRequest(request: Request, config: BridgeConfig, adapter: ProviderAdapter): Promise<Response> {
   let raw: unknown;
@@ -553,6 +623,7 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
   try {
     parsed = parseRequest(modelId === responseModel ? raw : { ...raw, model: modelId });
     if (parsed.modelId !== modelId) throw new Error("parsed model disagrees with the exact interface model grant");
+    flattenRootSchemaAlternatives(parsed);
     maps = buildToolBridgeMaps(parsed, budget);
   } catch (error) {
     budget.dispose();
@@ -562,11 +633,14 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
     return formatErrorResponse(isTranslatorBudgetExceededError(error) ? 413 : 400, "invalid_request_error", message);
   }
   const abort = new AbortController();
+  const stallTimeoutSec = isLocalUpstream(config.provider.base_url)
+    ? Math.ceil(config.limits.request_timeout_ms / 1000)
+    : undefined;
   if (adapter.localTerminal?.(parsed)) {
-    return deliver(parsed, responseModel, [{ type: "done", endTurn: true, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }], maps, budget, abort);
+    return deliver(parsed, responseModel, [{ type: "done", endTurn: true, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }], maps, budget, abort, stallTimeoutSec);
   }
   if (adapter.runTurn !== undefined) {
-    return deliver(parsed, responseModel, turnEvents(adapter, parsed, budget, abort, config.limits.request_timeout_ms), maps, budget, abort);
+    return deliver(parsed, responseModel, turnEvents(adapter, parsed, budget, abort, config.limits.request_timeout_ms), maps, budget, abort, stallTimeoutSec);
   }
   const timer = setTimeout(() => abort.abort("request timeout"), config.limits.request_timeout_ms);
   let upstream: Response;
@@ -581,13 +655,22 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
     const target = new URL(built.url);
     const declared = new URL(config.provider.base_url);
     if (target.origin !== declared.origin) throw new Error("adapter target escaped the declared provider origin");
+    const replaysReasoning = config.provider.adapter === "openai-chat";
+    const body = replaysReasoning ? reasoningDetailsReplay.restore(built.body) : built.body;
+    const headers = new Headers(built.headers);
+    if (body !== built.body) headers.delete("content-length");
     upstream = await fetch(target, {
       method: built.method,
-      headers: built.headers,
-      body: built.body,
+      headers,
+      body,
       signal: abort.signal,
       redirect: "error",
     });
+    if (replaysReasoning && upstream.ok && upstream.body) {
+      const [forAdapter, forReplay] = upstream.body.tee();
+      reasoningDetailsReplay.observe(forReplay, parsed.stream).catch(() => {});
+      upstream = new Response(forAdapter, { status: upstream.status, statusText: upstream.statusText, headers: upstream.headers });
+    }
   } catch (error) {
     clearTimeout(timer);
     built?.releaseBodyObservation?.();
@@ -602,7 +685,7 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
   if (!upstream.ok) {
     try {
       const text = await boundedText(upstream, Math.min(config.limits.max_response_bytes, 1024 * 1024));
-      const detail = adapter.formatErrorBody?.(upstream.status, upstream.headers, text) ?? "";
+      const detail = upstreamErrorReason(text, adapter.formatErrorBody?.(upstream.status, upstream.headers, text) ?? "");
       return formatErrorResponse(upstream.status, "upstream_error", detail || `Provider error ${upstream.status}`, {
         retryAfter: upstream.headers.get("retry-after"),
       });
@@ -615,13 +698,13 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
   const bounded = boundedStream(upstream, config.limits.max_response_bytes, abort);
   if (!parsed.stream && adapter.parseResponse) {
     try {
-      return deliver(parsed, responseModel, await adapter.parseResponse(bounded, budget, built.tierLog), maps, budget, abort);
+      return deliver(parsed, responseModel, await adapter.parseResponse(bounded, budget, built.tierLog), maps, budget, abort, stallTimeoutSec);
     } catch (error) {
       budget.dispose();
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : "provider response translation failed");
     }
   }
-  return deliver(parsed, responseModel, adapter.parseStream(bounded, budget, built.tierLog), maps, budget, abort);
+  return deliver(parsed, responseModel, adapter.parseStream(bounded, budget, built.tierLog), maps, budget, abort, stallTimeoutSec);
 }
 
 function turnEvents(
@@ -632,23 +715,49 @@ function turnEvents(
   timeoutMs: number,
 ): AsyncIterable<AdapterEvent> {
   const queue = createAdapterEventQueue({ onBacklogExceeded: () => abort.abort("adapter event backlog exceeded") });
+  let pendingArguments = "";
+  let flushScheduled = false;
+  const flushArguments = () => {
+    if (pendingArguments.length === 0) return;
+    const argumentsText = pendingArguments;
+    pendingArguments = "";
+    queue.push({ type: "tool_call_delta", arguments: argumentsText });
+  };
+  const emit = (event: AdapterEvent) => {
+    if (event.type !== "tool_call_delta") {
+      flushArguments();
+      queue.push(event);
+      return;
+    }
+    if (pendingArguments.length + event.arguments.length > COALESCE_MAX_CHUNK_LENGTH) flushArguments();
+    if (event.arguments.length >= COALESCE_MAX_CHUNK_LENGTH) {
+      queue.push(event);
+      return;
+    }
+    pendingArguments += event.arguments;
+    if (!flushScheduled && pendingArguments.length > 0) {
+      flushScheduled = true;
+      queueMicrotask(() => {
+        flushScheduled = false;
+        flushArguments();
+      });
+    }
+  };
   const timer = setTimeout(() => abort.abort("request timeout"), timeoutMs);
-  adapter.runTurn!(parsed, { headers: new Headers(), translatorBudget: budget, abortSignal: abort.signal }, (event) => {
-    queue.push(event);
-  })
+  adapter.runTurn!(parsed, { headers: new Headers(), translatorBudget: budget, abortSignal: abort.signal }, emit)
     .catch((error) => {
-      queue.push({ type: "error", message: error instanceof Error ? error.message : "provider turn failed", retryable: false });
+      emit({ type: "error", message: error instanceof Error ? error.message : "provider turn failed", retryable: false });
     })
     .finally(() => {
       clearTimeout(timer);
+      flushArguments();
       queue.close();
     });
   return queue.stream();
 }
 
 async function serve(config: BridgeConfig): Promise<void> {
-  const adapter = adapterFor(config.provider);
-  if (adapter.fetchResponse !== undefined) {
+  if (adapterFor(config.provider).fetchResponse !== undefined) {
     throw new Error(`adapter ${config.provider.adapter} requires an undeclared retry surface`);
   }
   const server = Bun.serve({
@@ -666,7 +775,7 @@ async function serve(config: BridgeConfig): Promise<void> {
         });
       }
       if (request.method === "POST" && url.pathname === "/v1/responses") {
-        return responsesRequest(request, config, adapter);
+        return responsesRequest(request, config, adapterFor(config.provider));
       }
       return formatErrorResponse(404, "not_found", "route is not declared by this provider interface");
     },
@@ -684,6 +793,11 @@ async function serve(config: BridgeConfig): Promise<void> {
 if (process.argv[2] === "__codebuddy-mcp") {
   await runCodeBuddyMcpServer(process.argv[3] ?? "");
   await new Promise<never>(() => undefined);
+}
+
+if (process.argv[2] === "__grok-mcp") {
+  await runGrokCaptureMcpServer(process.argv[3] ?? "");
+  process.exit(0);
 }
 
 try {

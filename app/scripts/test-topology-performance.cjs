@@ -54,6 +54,14 @@ test("topology retains ordered joins, focused details, refusal rows and input da
   assert.ok(result.eventLog.some(row => row.kind === "DeliveryRefused" && row.tone === "amber"));
   assert.ok(result.projection.detail.includes("retained warning"));
   assert.equal(project({ ...payload, eeRaw: {} }).environments.length, 0);
+  const named = structuredClone(payload);
+  Object.assign(named.eeRaw.ee_instances[0], { template_name: "project", name: "LIFE", display_name: "Presentation alias", goal: "Maintain the toolchain" });
+  assert.equal(project(named).environments[0].name, "LIFE");
+  assert.equal(project(named).environments[0].goal, "Maintain the toolchain");
+  named.eeRaw.ee_instances[0].name = "Renamed project";
+  assert.equal(project(named).environments[0].name, "Renamed project");
+  delete named.eeRaw.ee_instances[0].name;
+  assert.equal(project(named).environments[0].name, "ee-0");
   const { topologyArtifactRow } = require("../electron/projection.cjs");
   const heavy = Object.fromEntries(["routes", "module_source", "source_content", "text", "operations", "authoring"].map(key => [key, "payload".repeat(256)]));
   payload.artifactsRaw.artifacts.push(...["recorded_at_unix_ms", "created_at_unix_ms", "ts_unix_ms", "created_at", "ts", "time"].map(field => ({ name: field, route_label: "metadata", meta: { run_id: "run-0", ee_id: "ee-1", ...heavy }, [field]: "2026-10-17T00:00:00Z" })));
@@ -82,6 +90,7 @@ test("60 voice parent updates preserve topology output and skip unrelated stage 
     } }).outputText;
     const mocks = {
       "./IconGlyphs": { Glyph: () => null }, "./WorldProjection": {}, "../toasts": { useAppErrorToast() {} },
+      "./OctopusLoadingLogo": { OctopusLoadingState: () => null },
       "./DashboardLabel": { DashboardLabel: ({ text }) => text, DashboardTooltip: ({ children }) => children },
       "./ArtifactTransferAnimation": { SystemArtifactTransfers: () => null, useArtifactTransferFeed: () => { renders++; return { feed: {}, error: "" }; } },
     };

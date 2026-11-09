@@ -50,7 +50,7 @@ impl Inputs {
         Ok(())
     }
 
-    fn capture(owner: &RegistryRunGrantResolver, record: &octopus_runtime::run_record::RunRecord, marks: &[Mark]) -> Result<Self, String> {
+    fn capture(owner: &RegistryRunGrantResolver, record: &octopus_run_record::RunRecord, marks: &[Mark]) -> Result<Self, String> {
         let mut inputs = Self::default();
         let snapshot = owner.live_registry.read().map_err(|_| "registry snapshot lock is poisoned")?;
         let mut roots = vec![RegistryNode::interface(record.worker.as_str())];
@@ -91,7 +91,7 @@ impl Inputs {
     }
 }
 
-pub(super) fn acquire(owner: &RegistryRunGrantResolver, record: &octopus_runtime::run_record::RunRecord, marks: &[Mark]) -> Result<RegistryCommitGuard, String> {
+pub(super) fn acquire(owner: &RegistryRunGrantResolver, record: &octopus_run_record::RunRecord, marks: &[Mark]) -> Result<RegistryCommitGuard, String> {
     let before = Inputs::capture(owner, record, marks)?;
     let guard = ReadGuard::try_acquire(
         &before.files.iter().cloned().collect::<Vec<_>>(),
@@ -100,8 +100,11 @@ pub(super) fn acquire(owner: &RegistryRunGrantResolver, record: &octopus_runtime
     if before != Inputs::capture(owner, record, marks)? {
         return Err("admission registry dependency set changed while acquiring ownership".into());
     }
-    let observed = registry_descriptor_fingerprint(&owner.registry_root, &owner.ee_instances_root)
-        .map_err(|error| error.to_string())?;
+    let observed = {
+        let mut files = owner.files.lock().map_err(|_| "registry file cache lock is poisoned")?;
+        registry_descriptor_fingerprint(&owner.registry_root, &owner.ee_instances_root, &mut files)
+            .map_err(|error| error.to_string())?
+    };
     if *owner.fingerprint.lock().map_err(|_| "registry fingerprint lock is poisoned")? != Some(observed) {
         return Err("admission registry snapshot no longer matches its source files".into());
     }

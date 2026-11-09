@@ -209,10 +209,10 @@ impl CodexAppServerInterfaceDriver {
                 "the exact provider interface descriptor does not declare this operation artifact",
             ));
         }
-        let admitted_record = octopus_runtime::run_record::RunRecord::from_bytes(admitted_run_record)
+        let admitted_record = octopus_run_record::RunRecord::from_bytes(admitted_run_record)
             .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
         let (context_payloads, payload_selection) = admitted_payload_context(&admitted_record, &input)?;
-        let continuity_sources = continuity_input_sources(&admitted_record, &input)?;
+        let continuity_sources = vec![input.artifact.clone()];
         let complete_context_payloads = context_payloads;
         let instructions = resolve_instruction_context(input.metadata()?, &complete_context_payloads)
             .map_err(InterfaceDriverError::FailedClosed)?;
@@ -338,12 +338,14 @@ impl CodexAppServerInterfaceDriver {
             manifest_label: mut effective_manifest_label,
             source_artifact: effective_source_artifact,
             start_turn: resumed_start_turn,
+            start_tool_output: resumed_tool_output,
             additional_context: resumed_additional_context,
             resumed_provider_input: lifecycle_resumed_provider_input,
             resume_boundary: lifecycle_resume_boundary,
             prompt_event: lifecycle_prompt_event,
         } = resumption;
         let lifecycle_start_resumed = resumed_start_turn.is_some();
+        let lifecycle_start_decided = lifecycle_start_resumed && lifecycle_prompt_event.is_none();
         let selected_files = selected_file_projection(
             &admitted_record,
             &input,
@@ -424,16 +426,18 @@ impl CodexAppServerInterfaceDriver {
                     .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?);
             assembled_context.session_context_available = true;
         }
-        let authored_context_generation = read_codex_context_generation(&run_record, &runtime.interface)?
+        let authored_source_generation = read_codex_context_generation(&run_record, &runtime.interface)?;
+        let authored_context_generation = authored_source_generation
             .checked_add(deferred_context_generations)
             .ok_or_else(|| InterfaceDriverError::FailedClosed("Codex authored context generation overflowed".to_string()))?;
-        let context_generation = if durable_interrupt_override {
-            recovered
+        let (source_context_generation, context_generation) = if durable_interrupt_override {
+            let generation = recovered
                 .as_ref()
                 .map(|state| state.context_generation)
-                .unwrap_or(authored_context_generation)
+                .unwrap_or(authored_context_generation);
+            (generation, generation)
         } else {
-            authored_context_generation
+            (authored_source_generation, authored_context_generation)
         };
         let invocation_context_generation = if input_changes_context {
             context_generation.checked_add(1).ok_or_else(|| {
@@ -469,7 +473,7 @@ impl CodexAppServerInterfaceDriver {
         } else { None };
         let effect_gate = Arc::new(tokio::sync::Mutex::new(()));
         let turn_interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let native_parent_record = octopus_runtime::run_record::RunRecord::from_bytes(current_run_record)
+        let native_parent_record = octopus_run_record::RunRecord::from_bytes(current_run_record)
             .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
         let turn_context = TurnContext {
             run_invocation: run_affordances.as_ref().map(|affordances| NativeRunInvocation {
@@ -491,12 +495,14 @@ impl CodexAppServerInterfaceDriver {
             lifecycle_prompt: lifecycle_prompt_event.as_ref(),
         };
         if let Some(model_context) = &early_model_context
+            && recovered.as_ref().is_none_or(|state| state.outstanding_len() <= 1)
             && self.refresh_native_context(
-                turn_context, &provider_input, recovered.as_ref(), context_generation,
+                turn_context, &provider_input, recovered.as_ref(), source_context_generation,
                 CurrentNativeContext {
                     model: &model_context.model, instructions: &model_context.bound_instructions, tools: &native_catalog.specs,
                     static_fingerprint: &model_context.static_context_fingerprint,
                     conversation: model_context.conversation_block.as_deref(), obligations: model_context.obligations_grant_block.as_deref(),
+                    checkpoint_bindings: model_context.checkpoint_bindings_block.as_deref(),
                     session_available: assembled_context.session_context_available,
                     reasoning_effort: model_context.reasoning_effort.clone(), reasoning_summary: model_context.reasoning_summary.clone(),
                     recovered_dispatches: &recovered_turn_start_dispatches,
@@ -520,26 +526,15 @@ impl CodexAppServerInterfaceDriver {
             )?;
         }
         let mut continuations = ArrivalContinuations::default();
-        let interrupted_result_recovery = matches!(
-            (
-                &provider_input,
-                recovered
-                    .as_ref()
-                    .and_then(|state| state.interrupted_pending.as_ref())
-            ),
-            (
-                ProviderInput::ToolResult(_),
-                Some(CodexPendingContinuity::DynamicTool { .. })
-            ) | (
-                ProviderInput::InterfaceOperationResult(_),
-                Some(CodexPendingContinuity::InterfaceOperation { .. })
-            )
-        );
-        let pending_result_recovery = matches!(
-            (
-                &provider_input,
-                recovered.as_ref().and_then(|state| state.pending.as_ref())
-            ),
+        let result_target = match &provider_input {
+            ProviderInput::ToolResult(result) => result.correlation_id.as_ref().map(|call| format!("tool:{call}")),
+            ProviderInput::InterfaceOperationResult(result) => Some(format!("tool:{}", result.correlation_id)),
+            _ => None,
+        }
+        .and_then(|call| recovered.as_ref()?.outstanding_call(&call))
+        .or_else(|| recovered.as_ref().and_then(|state| state.pending.as_ref().or(state.interrupted_pending.as_ref())));
+        let result_recovery = matches!(
+            (&provider_input, result_target),
             (
                 ProviderInput::ToolResult(_),
                 Some(CodexPendingContinuity::DynamicTool { .. })
@@ -548,6 +543,10 @@ impl CodexAppServerInterfaceDriver {
                 Some(CodexPendingContinuity::InterfaceOperation { .. })
             )
         );
+        let interrupted_result_recovery = result_recovery
+            && recovered.as_ref().is_some_and(|state| state.interrupted_pending.is_some());
+        let pending_result_recovery = result_recovery
+            && recovered.as_ref().is_some_and(|state| state.pending.is_some());
         if recovered
             .as_ref()
             .is_some_and(|state| state.interrupted_pending.is_some())
@@ -583,7 +582,7 @@ impl CodexAppServerInterfaceDriver {
             lifecycle_payloads: &lifecycle_payloads,
             lifecycle_resumed_provider_input,
             recovered: &recovered,
-            context_generation,
+            source_context_generation,
             current_session_context: &current_session_context,
             effective_manifest_label: &effective_manifest_label,
             effective_request_bytes: &effective_request_bytes,
@@ -601,7 +600,7 @@ impl CodexAppServerInterfaceDriver {
         } = continuations;
 
         let context_refresh::ResolvedModelContext { model, reasoning_effort, reasoning_summary,
-            static_context_fingerprint, bound_instructions, conversation_block, obligations_grant_block } = match early_model_context {
+            static_context_fingerprint, bound_instructions, conversation_block, obligations_grant_block, checkpoint_bindings_block } = match early_model_context {
                 Some(context) => context,
                 None => self.resolve_model_context(&input, &assembled_context).await?,
             };
@@ -618,7 +617,7 @@ impl CodexAppServerInterfaceDriver {
                 response,
                 recovered,
                 &pending,
-                context_generation,
+                source_context_generation,
                 &model,
                 &bound_instructions,
                 native_affordances,
@@ -653,7 +652,11 @@ impl CodexAppServerInterfaceDriver {
                         || resume_control_id.is_some()
                         || cut_turn_continuation.is_some(),
                     context_generation: invocation_context_generation,
-                    input_changes_context,
+                    covered_context_generation: if recovered_tool_continuation.is_some() || cut_turn_continuation.is_some() {
+                        source_context_generation
+                    } else {
+                        context_generation
+                    },
                     model: Some(model.clone()),
                     bound_instructions: &bound_instructions,
                     native_affordances,
@@ -700,6 +703,7 @@ impl CodexAppServerInterfaceDriver {
                 .as_ref()
                 .and_then(|_| recovered.as_ref().and_then(|state| state.pending.clone())),
             interrupted_pending: None,
+            parallel_pending: BTreeMap::new(),
             native_terminal: None,
             context_refresh: retained_refresh,
             native_history_retirement,
@@ -772,11 +776,23 @@ impl CodexAppServerInterfaceDriver {
         let additional_context = if let Some(context) = resumed_additional_context {
             context
         } else if let Some(cut) = cut_turn_continuation.as_ref() {
-            native_turn_context(Some(cut.context.clone()), obligations_grant_block)
+            native_turn_context(Some(cut.context.clone()), obligations_grant_block, checkpoint_bindings_block)
         } else if recovered_tool_continuation.is_some() || resume_control_id.is_some() {
             BTreeMap::new()
         } else {
-            native_turn_context(if cold_thread { conversation_block } else { recovered_result_context }, obligations_grant_block)
+            native_turn_context(if cold_thread { conversation_block } else { recovered_result_context }, obligations_grant_block, checkpoint_bindings_block)
+        };
+        let arrival_opens_turn = !lifecycle_start_decided
+            && !lifecycle_resume_boundary
+            && recovered_tool_continuation.is_none()
+            && cut_turn_continuation.is_none()
+            && resume_control_id.is_none();
+        let (turn_input, tool_output) = match resumed_tool_output {
+            Some(tool_output) => (turn_input, Some(tool_output)),
+            None => match self.retained_tool_output()?.filter(|declared| arrival_opens_turn && declared.opens(&manifest.label)) {
+                Some(declared) => (Vec::new(), Some(declared.output(&native_namespace, &native_catalog.tool_names, turn_input)?)),
+                None => (turn_input, None),
+            },
         };
         if !thread_compact_requested
             && recovered_tool_continuation.is_none()
@@ -794,7 +810,7 @@ impl CodexAppServerInterfaceDriver {
                 cold_thread,
                 first_turn_of_run,
             };
-            if start.held(&turn_input, &additional_context)? {
+            if start.held(&turn_input, tool_output.as_ref(), &additional_context)? {
                 return Ok(());
             }
         }
@@ -808,22 +824,25 @@ impl CodexAppServerInterfaceDriver {
         }
         let turn = ClientRequest::TurnStart {
             request_id: self.mint_request_id(),
-            params: fresh_turn_start_params(
-                thread_id.clone(),
-                turn_input,
-                model.clone(),
-                reasoning_effort.clone(),
-                self.bound_service_tier()?,
-                reasoning_summary,
-                additional_context,
-                if resume_control_id.is_some() || cut_turn_continuation.is_some() {
-                    TURN_TRIGGER_RESUME_INTERRUPTED_TASK
-                } else if recovered_tool_continuation.is_some() {
-                    TURN_TRIGGER_TOOL_RESULT_RECOVERY
-                } else {
-                    TURN_TRIGGER_INPUT
-                },
-            ),
+            params: TurnStartParams {
+                tool_output: tool_output.map(Box::new),
+                ..fresh_turn_start_params(
+                    thread_id.clone(),
+                    turn_input,
+                    model.clone(),
+                    reasoning_effort.clone(),
+                    self.bound_service_tier()?,
+                    reasoning_summary,
+                    additional_context,
+                    if resume_control_id.is_some() || cut_turn_continuation.is_some() {
+                        TURN_TRIGGER_RESUME_INTERRUPTED_TASK
+                    } else if recovered_tool_continuation.is_some() {
+                        TURN_TRIGGER_TOOL_RESULT_RECOVERY
+                    } else {
+                        TURN_TRIGGER_INPUT
+                    },
+                )
+            },
         };
         self.require_local_process_transport("turn").await?;
         sink.admit_app_server_dispatch(&turn, None).await?;
@@ -872,7 +891,7 @@ impl CodexAppServerInterfaceDriver {
 
         let outcome = self.drain_turn(turn_context, &thread_id, &turn_id).await?;
         match outcome {
-            TurnDrainOutcome::Suspended(_) | TurnDrainOutcome::Complete => Ok(()),
+            TurnDrainOutcome::Suspended(_) | TurnDrainOutcome::AwaitingResults | TurnDrainOutcome::Complete => Ok(()),
         }
     }
 }

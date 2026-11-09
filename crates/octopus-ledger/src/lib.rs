@@ -761,6 +761,45 @@ pub struct Movement {
 }
 
 const DURABLE_INVOCATION_GRANT_CONTENT: &str = "grant_content";
+const DURABLE_INVOCATION_BINDING_REFS_CONTENT: &str = "artifact_binding_refs_content";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DurableMetadataContent {
+    Grant,
+    ArtifactBindingRefs,
+}
+
+impl DurableMetadataContent {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Grant => "invocation grant",
+            Self::ArtifactBindingRefs => "artifact binding refs",
+        }
+    }
+}
+
+fn durable_content_address(
+    content: &serde_json::Value,
+    line: usize,
+    kind: DurableMetadataContent,
+) -> LedgerResult<ContentHash> {
+    let raw = content
+        .as_str()
+        .ok_or_else(|| LedgerError::MalformedMovementMetadata {
+            line,
+            message: format!("{} content address is not a string", kind.describe()),
+        })?;
+    match ContentHash::from_hex(raw) {
+        Some(hash) if hash.to_hex() == raw => Ok(hash),
+        _ => Err(LedgerError::MalformedMovementMetadata {
+            line,
+            message: format!(
+                "{} content address is not canonical BLAKE3",
+                kind.describe()
+            ),
+        }),
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -829,7 +868,7 @@ pub fn decode_durable_movement_route(
 pub fn encode_durable_movement_row(
     movement: &Movement,
     line: usize,
-    mut pin_grant: impl FnMut(&[u8]) -> LedgerResult<ContentHash>,
+    mut pin: impl FnMut(DurableMetadataContent, &[u8]) -> LedgerResult<ContentHash>,
 ) -> LedgerResult<String> {
     let invocation_metadata = movement
         .invocation_metadata
@@ -874,8 +913,29 @@ pub fn encode_durable_movement_row(
                 })?;
                 object.insert(
                     DURABLE_INVOCATION_GRANT_CONTENT.to_string(),
-                    serde_json::Value::String(pin_grant(&bytes)?.to_hex()),
+                    serde_json::Value::String(pin(DurableMetadataContent::Grant, &bytes)?.to_hex()),
                 );
+                if !invocation.artifact_binding_refs.is_empty() {
+                    object.remove("artifact_binding_refs").ok_or_else(|| {
+                        LedgerError::MalformedMovementMetadata {
+                            line,
+                            message: "invocation metadata encoded without its artifact binding refs"
+                                .to_string(),
+                        }
+                    })?;
+                    let bytes = serde_json::to_vec(&invocation.artifact_binding_refs).map_err(
+                        |error| LedgerError::MalformedMovementMetadata {
+                            line,
+                            message: error.to_string(),
+                        },
+                    )?;
+                    object.insert(
+                        DURABLE_INVOCATION_BINDING_REFS_CONTENT.to_string(),
+                        serde_json::Value::String(
+                            pin(DurableMetadataContent::ArtifactBindingRefs, &bytes)?.to_hex(),
+                        ),
+                    );
+                }
             }
             Ok(value)
         })
@@ -897,7 +957,7 @@ pub fn encode_durable_movement_row(
 pub fn decode_durable_movement_row(
     row: &[u8],
     line: usize,
-    mut resolve_grant: impl FnMut(ContentHash) -> LedgerResult<serde_json::Value>,
+    mut resolve: impl FnMut(DurableMetadataContent, ContentHash) -> LedgerResult<serde_json::Value>,
 ) -> LedgerResult<Movement> {
     let row = serde_json::from_slice::<DurableMovementRow>(row)
         .map_err(|source| LedgerError::MalformedRow { line, source })?;
@@ -925,28 +985,34 @@ pub fn decode_durable_movement_row(
                 });
             }
             if let Some(content) = pinned_grant {
-                let raw =
-                    content
-                        .as_str()
-                        .ok_or_else(|| LedgerError::MalformedMovementMetadata {
-                            line,
-                            message: "invocation grant content address is not a string".to_string(),
-                        })?;
-                let hash = ContentHash::from_hex(raw).ok_or_else(|| {
-                    LedgerError::MalformedMovementMetadata {
-                        line,
-                        message: "invocation grant content address is not canonical BLAKE3"
-                            .to_string(),
-                    }
-                })?;
-                if hash.to_hex() != raw {
+                let hash = durable_content_address(&content, line, DurableMetadataContent::Grant)?;
+                object.insert(
+                    "grant".to_string(),
+                    resolve(DurableMetadataContent::Grant, hash)?,
+                );
+            }
+            if let Some(content) = object.remove(DURABLE_INVOCATION_BINDING_REFS_CONTENT) {
+                if object.contains_key("artifact_binding_refs") {
                     return Err(LedgerError::MalformedMovementMetadata {
                         line,
-                        message: "invocation grant content address is not canonical BLAKE3"
+                        message: "invocation metadata carries both inline and content-addressed artifact binding refs"
                             .to_string(),
                     });
                 }
-                object.insert("grant".to_string(), resolve_grant(hash)?);
+                let hash = durable_content_address(
+                    &content,
+                    line,
+                    DurableMetadataContent::ArtifactBindingRefs,
+                )?;
+                let refs = resolve(DurableMetadataContent::ArtifactBindingRefs, hash)?;
+                if !refs.as_array().is_some_and(|refs| !refs.is_empty()) {
+                    return Err(LedgerError::MalformedMovementMetadata {
+                        line,
+                        message: "content-addressed artifact binding refs are not a non-empty list"
+                            .to_string(),
+                    });
+                }
+                object.insert("artifact_binding_refs".to_string(), refs);
             }
             let metadata = serde_json::from_value::<MovementMetadata>(value).map_err(|error| {
                 LedgerError::MalformedMovementMetadata {
@@ -1003,6 +1069,9 @@ pub fn interface_arrival_mark_proof_key(
         .invocation_metadata
         .as_ref()
         .and_then(MovementMetadata::invocation)?;
+    if invocation.verification_failure.is_some() {
+        return None;
+    }
     let runtime = invocation.runtime.as_ref()?;
     let admission = invocation.checkpoint_admission.as_ref()?;
     let required = invocation

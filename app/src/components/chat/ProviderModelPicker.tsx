@@ -328,9 +328,9 @@ export function ProviderModelPicker({
     </button>
     {tooltip && !open ? createPortal(<div ref={tooltipRef} id={id + "-tooltip"} role="tooltip" className="provider-model-tooltip">Select model</div>, document.body) : null}
     {menuMounted ? createPortal(<motion.div ref={menuRef} id={id + "-menu"} role="menu" tabIndex={-1} aria-label="Model and Power"
-      aria-hidden={!open} inert={!open} initial={reducedMotion ? false : { opacity: 0, scale: 0.98 }}
-      animate={{ opacity: open ? 1 : 0, scale: open ? 1 : 0.98 }}
-      transition={{ duration: reducedMotion ? 0 : open ? 0.32 : 0.12, delay: open && !reducedMotion ? 0.03 : 0, ease: [0.23, 1, 0.32, 1] }}
+      aria-hidden={!open} inert={!open} initial={reducedMotion ? false : { opacity: 0, scale: 0.8, filter: "blur(8px)" }}
+      animate={{ opacity: open ? 1 : 0, scale: reducedMotion || open ? 1 : 0.8, filter: reducedMotion || open ? "blur(0px)" : "blur(8px)" }}
+      transition={reducedMotion ? { duration: 0 } : { type: "spring", duration: 0.3, bounce: 0.1 }}
       onAnimationComplete={() => { if (!openRef.current) setMenuMounted(false); }}
       className="provider-model-menu" data-provider-picker-menu data-view={view} data-reduced-motion={reducedMotion || undefined}
       onKeyDown={menuKey} onFocusCapture={(event) => {

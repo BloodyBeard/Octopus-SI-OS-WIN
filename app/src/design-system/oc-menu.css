@@ -67,7 +67,7 @@
 
 .oc-menu-item-icon {
   display: inline-flex;
-  min-width: var(--icon-leading-size);
+  width: var(--icon-leading-size);
   height: var(--icon-leading-size);
   flex: none;
   align-items: center;

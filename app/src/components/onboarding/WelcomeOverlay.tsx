@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { OctopusDotCloud } from "./OctopusDotCloud";
 import { MorphVideoDotCloud } from "./MorphVideoDotCloud";
 import { Glyph, type GlyphName } from "../IconGlyphs";
+import { readWelcomeProgress, saveWelcomeProgress } from "../../onboarding/onboardingStorage";
 
 type Props = {
   visitCount: number;
@@ -89,8 +90,9 @@ const IDEA_THEMES: IdeaTheme[] = [
 const IDEA_SRCS = IDEA_THEMES.map((theme) => theme.src);
 
 export function WelcomeOverlay({ visitCount, onComplete }: Props) {
-  const [stepIndex, setStepIndex] = useState(0);
-  const [heroAssembled, setHeroAssembled] = useState(false);
+  const [savedProgress] = useState(readWelcomeProgress);
+  const [stepIndex, setStepIndex] = useState(savedProgress.step);
+  const [heroAssembled, setHeroAssembled] = useState(savedProgress.heroSeen);
   const replayKey = useRef(0);
   const steps = useMemo(() => welcomeSteps, []);
   const step = steps[stepIndex];
@@ -98,6 +100,10 @@ export function WelcomeOverlay({ visitCount, onComplete }: Props) {
   const isFirst = stepIndex === 0;
   const isLast = stepIndex === steps.length - 1;
   const footerHidden = isHero && !heroAssembled;
+
+  useEffect(() => {
+    saveWelcomeProgress({ step: stepIndex, heroSeen: true });
+  }, [stepIndex]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -157,6 +163,7 @@ export function WelcomeOverlay({ visitCount, onComplete }: Props) {
           assembled={heroAssembled}
           onAssembled={() => setHeroAssembled(true)}
           replayKey={replayKey.current}
+          skipReveal={savedProgress.heroSeen}
         />
       ) : (
         <div className="welcome-stage" key={stepIndex} data-kind={step.kind}>
@@ -193,15 +200,17 @@ function HeroStage({
   assembled,
   onAssembled,
   replayKey,
+  skipReveal,
 }: {
   assembled: boolean;
   onAssembled: () => void;
   replayKey: number;
+  skipReveal: boolean;
 }) {
   return (
     <div className="welcome-hero-stage">
       <div className="welcome-hero-bg">
-        <OctopusDotCloud src={HERO_SRC} framing="bottom" onAssembled={onAssembled} replayKey={replayKey} />
+        <OctopusDotCloud src={HERO_SRC} framing="bottom" onAssembled={onAssembled} replayKey={replayKey} skipReveal={skipReveal} />
         <div className="welcome-hero-veil" aria-hidden="true" />
       </div>
       <div className={`welcome-hero-copy${assembled ? " is-in" : ""}`}>

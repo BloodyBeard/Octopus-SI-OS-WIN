@@ -172,6 +172,7 @@ function createClientAttachmentStagingStore({ root }) {
   if (typeof root !== "function") throw new Error("attachment staging requires a root resolver");
   const entries = new Map();
   const ready = new Map();
+  const consumed = new WeakMap();
 
   async function begin(owner, request) {
     sweepExpired();
@@ -424,7 +425,7 @@ function createClientAttachmentStagingStore({ root }) {
     const entry = ready.get(id);
     if (!entry || entry.ownerId !== requiredString(owner, "attachment stage owner")) throw new Error("Attachment stage is unavailable.");
     ready.delete(id);
-    return {
+    const attachment = {
       contentHash: entry.contentHash,
       label: entry.label,
       lastModified: entry.lastModified,
@@ -433,11 +434,24 @@ function createClientAttachmentStagingStore({ root }) {
       size: entry.size,
       type: entry.type,
     };
+    consumed.set(attachment, { id, entry });
+    return attachment;
+  }
+
+  function restore(owner, attachment) {
+    const claim = consumed.get(attachment);
+    if (!claim || claim.entry.ownerId !== requiredString(owner, "attachment stage owner") || ready.has(claim.id)) {
+      throw new Error("Consumed attachment cannot be restored to this draft.");
+    }
+    claim.entry.expiresAt = Date.now() + ATTACHMENT_STAGE_TTL_MS;
+    ready.set(claim.id, claim.entry);
+    consumed.delete(attachment);
   }
 
   async function discard(input) {
     const staged = input && typeof input === "object" ? input : {};
     const payloadPath = requiredString(staged.payloadPath, "staged attachment payloadPath");
+    consumed.delete(staged);
     await fs.promises.unlink(payloadPath).catch((error) => {
       if (error?.code !== "ENOENT") throw error;
     });
@@ -457,7 +471,7 @@ function createClientAttachmentStagingStore({ root }) {
     }
   }
 
-  return { abort, abortAll, abortOwner, append, begin, consume, discard, finalize, readPreview, stageBytes, stageFile, sweepExpired };
+  return { abort, abortAll, abortOwner, append, begin, consume, discard, finalize, readPreview, restore, stageBytes, stageFile, sweepExpired };
 }
 
 function ipcBytes(value) {

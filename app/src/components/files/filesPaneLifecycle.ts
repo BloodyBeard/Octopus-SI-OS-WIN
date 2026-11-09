@@ -20,7 +20,7 @@ const listeners = new Set<() => void>();
 let generation = 0;
 let windowCloseLock: { requestId: string; profile?: string } | null = null;
 
-export function filesPaneKey(profile: string, tabId: string): string { return JSON.stringify([profile, tabId]); }
+export function filesPaneKey(profile: string, tabId: string, scope?: string): string { return JSON.stringify(scope ? [profile, tabId, scope] : [profile, tabId]); }
 export function ensureFilesPane(key: string, target?: FilesOpenTarget, initial?: FilesPaneSnapshot): FilesPaneState {
   const existing = panes.get(key);
   if (existing) {

@@ -106,7 +106,6 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
     "octopus-operator-chat-artifact",
     "octopus-operator-chat-topology",
     "octopus-secret-store",
-    "octopus-world-cron-task-plan",
   ]);
 
   function collectBundledBinaries(source) {
@@ -174,6 +173,12 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
     const upstream = JSON.parse(fs.readFileSync(path.join(bridgeRoot, "upstream.json"), "utf8"));
     const bridgeBytes = fs.readFileSync(bridge);
     const bridgeDigest = crypto.createHash("sha256").update(bridgeBytes).digest("hex");
+    const inputs = Object.entries(receipt?.inputs ?? {});
+    const attestedInput = ([name, expected]) => {
+      const file = path.resolve(bridgeRoot, name);
+      return file.startsWith(path.resolve(bridgeRoot) + path.sep) && fs.existsSync(file)
+        && crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") === expected;
+    };
     if (
       receipt?.schema_version !== 1
       || receipt.executable !== "bin/octopus-opencodex-bridge"
@@ -181,8 +186,10 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
       || receipt.executable_sha256 !== bridgeDigest
       || typeof upstream?.npm_package !== "string"
       || typeof upstream?.commit !== "string"
-      || receipt?.upstream?.npm_package !== upstream.npm_package
-      || receipt?.upstream?.commit !== upstream.commit
+      || !Array.isArray(upstream?.used_surfaces)
+      || JSON.stringify(receipt.upstream) !== JSON.stringify(upstream)
+      || !inputs.some(([name]) => name === "upstream.json")
+      || !inputs.every(attestedInput)
     ) {
       throw new Error(`OpenCodex owner build receipt does not attest the packaged bridge: ${receiptFile}`);
     }

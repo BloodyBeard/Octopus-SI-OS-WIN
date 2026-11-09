@@ -336,6 +336,11 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
         &selected_context,
         &staged_publication_artifacts,
     )?;
+    let operations = OperationRoutes::load(registry_root, &request.external_inputs,
+        request.existing_run_record.as_ref().map(|_| previous_authoring_profile.external_inputs.iter()).into_iter().flatten())?;
+    for binding in operations.catalog_bindings() {
+        if !selected_context.contains(&binding) { selected_context.push(binding); }
+    }
     let catalogue = collection_context::plan(collection_context::PlanContext {
         registry_root, ee_instances_root: ee_policy_root, ee_id: &selection.ee_id, identity: &identity,
         bindings: config.run.context_artifact_bindings.iter()
@@ -353,6 +358,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
         &private_worker_role_artifacts,
         &catalogue.inline_ids(),
         request.interface_private_state_root.as_deref(),
+        &request.door_host_slots,
         &mut writes,
     )?;
     home_voice::plan_descriptors(registry_root, &config, &topology, &identity, &mut writes)?;
@@ -436,12 +442,15 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
             .existing_run_record
             .as_ref()
             .map(|_| &previous_authoring_profile),
+        &operations,
     )?;
     let run_record_content = catalogue.wire(&identity.model_interface_id, run_record_content)?;
     let run_record_content = home_outputs::wire(&identity, &topology, &role_artifacts, &selected_context, run_record_content)?;
-    let (run_record_content, intake) = input_intake::wire(registry_root, &identity, &mut writes, run_record_content)?;
+    let (run_record_content, intake) = input_intake::wire(registry_root, &identity, &mut writes, run_record_content)
+        .map_err(|error| format!("input intake composition: {error}"))?;
     let (run_record_content, mut voice_run_writes) = home_voice::wire(request, &config, &identity, &role_artifacts, &selected_context, run_record_content)?;
-    let run_record_content = context_bindings::configure_tool_context(registry_root, &identity, run_record_content, request.existing_run_record.as_ref())?;
+    let run_record_content = context_bindings::configure_tool_context(registry_root, &identity, run_record_content, request.existing_run_record.as_ref())
+        .map_err(|error| format!("tool context composition: {error}"))?;
     let run_record_content = if request.retain_current_capabilities {
         context_bindings::retain_context_access(run_record_content,
             request.existing_run_record.as_ref().ok_or("retained context access requires its existing record")?, &identity.model_interface_id)?
@@ -455,6 +464,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
             config: &config,
             identity: &identity,
             source_input_labels: vec![config.artifact_labels.message.clone()],
+            source_payload_input_labels: operations.standing_input_labels(&request.external_inputs)?,
             existing: request.existing_run_record.as_ref(),
             write_hash_algorithm: request.write_hash_algorithm,
         },
@@ -482,7 +492,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
     }
     let (run_record_content, mut run_writes) = if preserve_existing_writers {
         writer_runs::wire_preserving_existing(request, &identity, run_record_content)?
-    } else { writer_runs::wire(request, &identity, run_record_content)? };
+    } else { writer_runs::wire(request, &identity, run_record_content).map_err(|e| format!("writer composition: {e}"))? };
     run_writes.append(&mut voice_run_writes);
     run_writes.append(&mut maintenance_runs);
     let retained_paths = planned_retained_registry_paths(registry_root, &identity, &writes);

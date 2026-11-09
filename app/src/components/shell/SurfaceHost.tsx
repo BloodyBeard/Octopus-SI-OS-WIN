@@ -203,7 +203,7 @@ function renderSurface(
     case "builtin.voice":
       return <HomeSurface accessProfile={accessProfile} commandsActive={commandsActive} homeRunId={homeRunId} voiceSession={voiceSession} homeViewMode={homeViewMode} onHomeViewModeChange={onHomeViewModeChange} searchFocusTick={searchFocusTick} chatWorkspace={chatWorkspace} onOpenFiles={onOpenFiles} voiceSurfaces={voiceSurfaces} installedVoiceWidgetIds={installedVoiceWidgetIds} installedVoiceWidgetsReady={installedVoiceWidgetsReady} builtinVoiceWidgetSources={builtinVoiceWidgetSources} workerEnvironmentSurfaces={workerEnvironmentSurfaces} topology={topology} />;
     case "builtin.scheduled":
-      return <ScheduledView searchFocusTick={searchFocusTick} navigationInPane={paneRole === "secondary"} />;
+      return <ScheduledView searchFocusTick={searchFocusTick} navigationInPane={paneRole === "secondary"} onSelectChat={onOpenRun ? (runId) => onOpenRun(runId, "task") : undefined} />;
     case "builtin.worker_environments":
       return <WorkerEnvironmentsView accessProfile={accessProfile} chatRuns={chatWorkspace.runs} onOpenRun={onOpenRun} onSelect={onSelect} searchFocusTick={searchFocusTick} snapshot={topology} surfaces={workerEnvironmentSurfaces} />;
     case "custom.projection":

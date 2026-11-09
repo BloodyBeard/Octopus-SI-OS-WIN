@@ -1,6 +1,6 @@
 use super::*;
 use octopus_ledger::ArtifactDelivery;
-use octopus_ledger_index::{ArrivalDedupIndex, RetainedArrivalState};
+use octopus_ledger_index::{InterfaceArrivalProjection, RetainedArrivalState};
 
 pub(super) struct Ledger {
     interface: InterfaceId,
@@ -9,7 +9,8 @@ pub(super) struct Ledger {
     max_row_bytes: u64,
     offset: u64,
     observed_length: u64,
-    index: ArrivalDedupIndex,
+    next_sequence: u64,
+    index: InterfaceArrivalProjection,
     submitted: HashSet<(String, RuntimeCoordinateKey)>,
     scoped: HashSet<(String, RuntimeCoordinateKey)>,
     unattributed: BTreeSet<String>,
@@ -19,13 +20,14 @@ pub(super) struct Ledger {
 impl Ledger {
     pub(super) fn new(interface: InterfaceId, path: PathBuf, max_row_bytes: u64) -> Self {
         Self {
+            index: InterfaceArrivalProjection::new(interface.clone()),
             interface,
             ledger: if path.as_os_str().is_empty() { ledger_rows::LedgerRows::detached(&path) } else { ledger_rows::LedgerRows::shared(&path) },
             path,
             max_row_bytes,
             offset: 0,
             observed_length: 0,
-            index: ArrivalDedupIndex::new(),
+            next_sequence: 0,
             submitted: HashSet::new(),
             scoped: HashSet::new(),
             unattributed: BTreeSet::new(),
@@ -35,7 +37,7 @@ impl Ledger {
 
     pub(super) fn watermark(&mut self) -> Result<u64, String> {
         self.refresh()?;
-        Ok(self.index.watermark())
+        Ok(self.next_sequence)
     }
 
     fn refresh(&mut self) -> Result<(), String> {
@@ -56,12 +58,29 @@ impl Ledger {
                 }
                 BoundedLedgerRow::Eof => return Ok(()),
             };
-            let movement = self
-                .ledger
-                .decode(&row, self.index.watermark())?;
-            if movement.seq.0 != self.index.watermark() {
+            // Reading this interface's delivery evidence does not hydrate every
+            // other interface's grants. The global cursor still checks every
+            // row's JSON and sequence, without manufacturing skipped movements.
+            #[derive(serde::Deserialize)]
+            struct Route { seq: u64, from: Endpoint }
+            let route: Route = serde_json::from_slice(&row).map_err(|error| error.to_string())?;
+            if route.seq != self.next_sequence {
                 return Err("retained output ledger is not contiguous".into());
             }
+            let next_offset = self.offset.checked_add(row.len() as u64)
+                .ok_or("retained output ledger offset overflow")?;
+            if route.from != Endpoint::Interface(self.interface.clone()) {
+                self.next_sequence += 1;
+                self.offset = next_offset;
+                continue;
+            }
+            let movement = self
+                .ledger
+                .decode_with_grant_if(&row, self.next_sequence, |movement| {
+                    movement.kind == MovementKind::InterfaceArrival
+                        && movement.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+                            .is_some_and(|metadata| !metadata.required_verified_artifacts.is_empty())
+                })?;
             if let Some(artifact) = movement.artifact.as_ref().filter(|_| {
                 movement.from == Endpoint::Interface(self.interface.clone())
                     && matches!(
@@ -110,12 +129,10 @@ impl Ledger {
                 }
             }
             self.index
-                .catch_up_movements(std::iter::once(movement))
+                .observe(&movement)
                 .map_err(|error| error.to_string())?;
-            self.offset = self
-                .offset
-                .checked_add(row.len() as u64)
-                .ok_or("retained output ledger offset overflow")?;
+            self.next_sequence += 1;
+            self.offset = next_offset;
         }
     }
 
@@ -123,7 +140,7 @@ impl Ledger {
         self.refresh()?;
         let Some(scope) = self
             .index
-            .retained_arrival_scope(&identity.provider, &identity.id()?)
+            .retained_arrival_scope(&identity.id()?)
             .map_err(|error| error.to_string())?
         else {
             return Ok(None);
@@ -289,7 +306,7 @@ impl ProviderOutputHandoff {
         if !identity.exists(&self.ctx)? { return Ok(None); }
         let mut index = self.session.index()?;
         index.retained_delivery.refresh()?;
-        Ok(Some((identity.id()?, index.retained_delivery.index.watermark())))
+        Ok(Some((identity.id()?, index.retained_delivery.next_sequence)))
     }
 
     fn pending_delivery_identity(
@@ -333,6 +350,19 @@ impl ProviderOutputHandoff {
             return Err("retained provider output scope omits its original checkpoint".into());
         }
         Ok(scope.complete)
+    }
+
+    pub(super) fn pending_output_has_submission(
+        &self, pending: &PendingHandoff, item: &PendingHandoffItem,
+    ) -> Result<bool, String> {
+        let identity = self.pending_delivery_identity(pending, item);
+        if identity.exists(&self.ctx)? { return Ok(true); }
+        let (_, reference) = load_pending_artifact(&self.var_dir, item)?;
+        let key = artifact_ref_key(&reference);
+        let mut index = self.session.index()?;
+        index.retained_delivery.refresh()?;
+        Ok(index.retained_delivery.unattributed.contains(&key)
+            || index.retained_delivery.submitted.iter().any(|(artifact, _)| artifact == &key))
     }
 
     fn prepare_pending_delivery(

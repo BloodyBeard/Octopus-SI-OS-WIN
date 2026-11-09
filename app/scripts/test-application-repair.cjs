@@ -64,7 +64,7 @@ test("repairing a stale or receipt-less application asks the host to repair exac
   }, { get: (target, name) => target[name] ?? (typeof name === "string" && name.startsWith("on") ? () => () => {} : () => new Promise(() => {})) });
   root.render(React.createElement(ApplicationsView, { accessProfile: "live", searchFocusTick: 0 }));
   const repairButton = (name) => [...container.querySelectorAll("button")].find((candidate) => {
-    if (candidate.textContent !== "Repair") return false;
+    if (candidate.textContent !== "Repair" || candidate.disabled) return false;
     let card = candidate.parentElement;
     while (card && !card.textContent.includes("Application ")) card = card.parentElement;
     return card?.textContent.includes(name);
@@ -79,4 +79,51 @@ test("repairing a stale or receipt-less application asks the host to repair exac
     { action: "repair_package", packageIds: ["package.missing"], expectedRepairs: { "package.missing": { sourceDigest: digest("a"), installedDigest: digest("b"), receiptState: "missing", receiptDigest: null } } },
   ]);
   assert.ok(mutations.every(({ operationId }) => /^[0-9a-f-]{36}$/.test(operationId)) && mutations[0].operationId !== mutations[1].operationId);
+});
+
+test("install review uses dialog sections and a catalogue refresh preserves the mounted page within its access profile", async () => {
+  const ApplicationsView = await compiled;
+  const reads = [];
+  let initial = true;
+  const fresh = application("fresh", {
+    materialized: false, managed: false, receipt_state: "not_installed",
+    install_packages: [{ id: "system", name: "System Room", installed: true, source_digest: digest("a") },
+      { id: "package.fresh", name: "Application fresh", installed: false, source_digest: digest("a") }],
+  });
+  w.octopusTransport = new Proxy({
+    projectionRead: async (request) => {
+      if (request.method !== "projection.operator.os.applications") return { packs: [], errors: [] };
+      if (initial) { initial = false; return { applications: [fresh], projects: [], errors: [] }; }
+      return new Promise((resolve) => reads.push(resolve));
+    },
+    mutateOctopusOsWorkspace: async () => ({ status: "complete" }),
+  }, { get: (target, name) => target[name] ?? (typeof name === "string" && name.startsWith("on") ? () => () => {} : () => new Promise(() => {})) });
+  root.render(React.createElement(ApplicationsView, { key: "refresh", accessProfile: "live", searchFocusTick: 0 }));
+  const install = () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Install");
+  const loading = () => [...container.querySelectorAll('[role="progressbar"]')].some((node) => node.getAttribute("aria-label")?.startsWith("Loading"));
+  await until(install, () => "application offers Install");
+  const heading = container.querySelector("h1");
+  install().click();
+  await until(() => document.querySelector('[role="dialog"] h2'), () => "install review is open");
+  const dialog = document.querySelector('[role="dialog"]');
+  assert.match(dialog.querySelector("h2").textContent, /^Install /);
+  assert.match(dialog.textContent, /System Room/);
+  assert.match(dialog.textContent, /Application fresh/);
+  [...dialog.querySelectorAll("button")].find((button) => button.textContent === dialog.querySelector("h2").textContent).click();
+  await until(() => reads.length === 1, () => "installation reload started");
+  assert.equal(container.querySelector("h1"), heading);
+  assert.equal(container.querySelector(".surface-content-loading-state"), null);
+  assert.equal([...container.querySelectorAll("button")].some((button) => button.textContent === "Install" && !button.disabled), false, "no Install is offered before the post-install read lands");
+  assert.ok(loading(), "the card reads Loading until the post-install read lands");
+  reads[0]({ applications: [{ ...fresh, installed: true }], projects: [], errors: [] });
+  await settle();
+  assert.equal(container.querySelector("h1"), heading);
+  assert.equal(loading(), false, "Loading clears once the read reports the application installed");
+  root.render(React.createElement(ApplicationsView, { key: "refresh", accessProfile: "lab", searchFocusTick: 0 }));
+  await until(() => reads.length === 2, () => "new profile read started");
+  assert.ok(container.querySelector(".surface-content-loading-state"));
+  assert.doesNotMatch(container.textContent, /Application fresh/);
+  reads[1]({ applications: [], projects: [], errors: [] });
+  await settle();
+  assert.equal(container.querySelector(".surface-content-loading-state"), null);
 });

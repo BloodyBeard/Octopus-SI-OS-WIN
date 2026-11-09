@@ -194,6 +194,7 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           applicationSelectionLocked={chat.applicationSelectionLocked}
           applicationSelectionLockReason={chat.applicationSelectionLockReason}
           canSubmit={chat.canSubmit}
+          blockingReason={chat.runtimeBlockReason}
           contextUsage={chat.contextUsage}
           hasQueuedMessages={chat.queuedTurns.length > 0}
           canQueue={chat.canQueue}

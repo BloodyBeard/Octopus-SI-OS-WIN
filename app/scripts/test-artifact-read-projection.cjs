@@ -6,6 +6,7 @@ const path = require("node:path");
 const { blake3 } = require("@noble/hashes/blake3");
 const { BoundedJsonProjection, parseArtifactReadProjection, artifactReadProjectionForLabel } = require("../electron/boundedJsonProjection.cjs");
 const { readContentAddressedArtifactProjection, readContentAddressedArtifactPayload } = require("../electron/contentAddressedArtifact.cjs");
+const { readStableContentAddressedArtifactBytes } = require("../electron/projection/movementRows.cjs");
 
 const contract = { schema_version: 1, json_object_labels: ["reply", "interface.artifact.output"], excluded_root_fields: ["private"], max_source_bytes: 2 * 1024 * 1024, max_projected_bytes: 64 * 1024 };
 function project(input, size = 7, policy = contract) {
@@ -14,6 +15,16 @@ function project(input, size = 7, policy = contract) {
   for (let start = 0; start < bytes.length; start += size) parser.write(bytes.subarray(start, start + size));
   return parser.finish();
 }
+
+test("large artifact verification preserves exact bytes and refuses a changed digest", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "oct-verified-artifact-")), file = path.join(root, "payload");
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const bytes = Buffer.alloc(1024 * 1024 + 7, 0x5a), digest = Buffer.from(blake3(bytes)).toString("hex");
+  await fs.writeFile(file, bytes);
+  assert.deepEqual(await readStableContentAddressedArtifactBytes(file, digest, bytes.length, "artifact"), bytes);
+  await fs.writeFile(file, Buffer.alloc(bytes.length, 0x6b));
+  await assert.rejects(readStableContentAddressedArtifactBytes(file, digest, bytes.length, "artifact"), /content-addressed digest/);
+});
 
 test("projection validates JSON across every byte boundary and preserves all public values", () => {
   const cases = [

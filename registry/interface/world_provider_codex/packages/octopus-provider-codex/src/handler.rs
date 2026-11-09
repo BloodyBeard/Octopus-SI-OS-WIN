@@ -23,7 +23,7 @@ use octopus_appserver_proto::{
     ThreadStartParams, ThreadStartResponse, ThreadTokenUsage, TokenUsageBreakdown,
     TurnEnvironmentParams, TurnInterruptParams, TurnInterruptResponse, TurnItemsView, TurnPlanStep,
     TurnPlanUpdatedNotification, TurnStartParams, TurnStatus, TurnSteerParams, TurnSteerResponse,
-    UserInput, WebSearchAction,
+    TurnToolOutput, UserInput, WebSearchAction,
 };
 use octopus_descriptors::{InterfaceId, MarkId, VerifierId};
 use octopus_interfaces::{
@@ -34,11 +34,11 @@ use octopus_interfaces::{
 use octopus_ledger::{ArtifactRef, InvocationMetadata, RequiredVerifiedArtifact};
 use octopus_login::AuthManager;
 use octopus_model_context_render::{
-    model_hidden_tool_names, model_tool_exclusions, model_visible_affordances, render_model_context_block,
+    model_hidden_tool_names, model_tool_exclusions, model_visible_affordances, render_checkpoint_bindings_block, render_model_context_block,
     resolve_instruction_context,
 };
 use octopus_protocol::config_types::{ReasoningSummary, WebSearchMode};
-use octopus_protocol::models::MessagePhase;
+use octopus_protocol::models::{FunctionCallOutputBody, FunctionCallOutputContentItem, MessagePhase};
 use octopus_protocol::openai_models::ReasoningEffort;
 use octopus_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderInvocationSessionSnapshot,
@@ -68,18 +68,25 @@ use crate::run_affordances::{NativePending, NativeStep, PeerAction, PeerMessage,
 mod tool_operator_request;
 use tool_operator_request::{ToolOperatorContinuity, ToolOperatorPhase, ToolOperatorRequest};
 
+#[path = "operation_operator_request.rs"]
+mod operation_operator_request;
+use operation_operator_request::{operation_decision_call, OperationOperatorRequest};
+
 #[path = "context_refresh.rs"]
 mod context_refresh;
 use context_refresh::{ContextRefresh, CurrentNativeContext, NativeHistoryProof, NativeHistoryRetirement};
 
 #[path = "native_history.rs"]
 mod native_history;
-use native_history::{read_native_turn, read_native_turn_items};
+use native_history::read_native_turn;
 
 #[path = "composer_prediction.rs"]
 pub(crate) mod composer_prediction;
 #[path = "client_generation.rs"]
 pub(crate) mod client_generation;
+#[path = "account_sessions.rs"]
+mod account_sessions;
+pub(crate) use account_sessions::*;
 
 pub const CODEX_APP_SERVER_INTERFACE_DRIVER_REF: &str = "codex_app_server";
 
@@ -285,7 +292,11 @@ mod turn_sink;
 pub(crate) use turn_sink::*;
 mod driver_compaction;
 mod driver_turn;
+pub(crate) use driver_turn::*;
+mod late_calls;
+pub(crate) use late_calls::*;
 mod thread_params;
+mod tool_schema;
 pub(crate) use thread_params::*;
 mod operation_catalog;
 pub(crate) use operation_catalog::*;

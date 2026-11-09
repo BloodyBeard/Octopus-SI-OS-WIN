@@ -115,13 +115,13 @@ function fakeElectron(world) {
     },
   });
   const safeStorage = {
-    isEncryptionAvailable: () => { world.events.push(["safe-storage"]); return true; },
-    encryptString: (value) => { world.events.push(["safe-storage"]); return Buffer.from(`sealed:${value}`); },
-    decryptString: (value) => {
+    isAsyncEncryptionAvailable: async () => { world.events.push(["safe-storage"]); return true; },
+    encryptStringAsync: async (value) => { world.events.push(["safe-storage"]); return Buffer.from(`sealed:${world.sealKey ?? 1}:${value}`); },
+    decryptStringAsync: async (value) => {
       world.events.push(["safe-storage"]);
-      const text = value.toString();
-      if (!text.startsWith("sealed:")) throw new Error("not sealed here");
-      return text.slice("sealed:".length);
+      const sealed = /^sealed:(\d+):(.*)$/s.exec(value.toString());
+      if (!sealed) throw new Error("not sealed here");
+      return { result: sealed[2], shouldReEncrypt: Number(sealed[1]) !== (world.sealKey ?? 1) };
     },
   };
   return {
@@ -176,6 +176,8 @@ function fakeRuntimeHost(world) {
       options,
       probe: async () => { world.events.push(["probe"]); return { ...world.runtimeState }; },
       snapshot: () => ({ ...world.runtimeState }),
+      assertStorageWritable: async () => { if (world.storageError) throw world.storageError; },
+      recordStorageFailure: (error) => world.events.push(["storage-failure", error]),
       observe: () => world.events.push(["observe"]),
       start: () => world.events.push(["runtime-start"]),
       waitUntilStopped: async () => { world.events.push(["wait-stopped"]); return true; },
@@ -217,6 +219,12 @@ function fakeProjectionStore(world) {
 
 function overrides(world) {
   return {
+    "./clientDictationStream.cjs": () => ({ createClientDictationStream: (_request, options) => ({
+      ready: Promise.resolve(),
+      append: (bytes) => world.events.push(["dictation-audio", bytes.length]),
+      finish: async () => { options.onEvent({ type: "transcript", text: "Final words" }); return { text: "Final words" }; },
+      close: () => world.events.push(["dictation-close"]),
+    }) }),
     "./runtimeHost.cjs": (real) => ({ ...real, createRuntimeHost: fakeRuntimeHost(world) }),
     "./terminalHost.cjs": () => ({ createTerminalHost: fakeTerminalHost(world) }),
     "./clientDataSource.cjs": (real) => ({ ...real, createClientProjectionStore: fakeProjectionStore(world) }),
@@ -363,6 +371,58 @@ async function launchMain(options = {}) {
 }
 
 const surface = { kind: "surface", runId: "run-1", surfaceId: "chat", workspaceKey: "octopus-os" };
+
+test("streaming dictation binds audio, events and finalization to the unlocked owner window and closes on lock", async () => {
+  const main = await launchMain();
+  const [primary] = main.windows();
+  const request = { attemptId: require("node:crypto").randomUUID(), sampleRateHz: 24_000 };
+  assert.equal((await main.invoke("octopus:dictation-stream-start", primary, null, request)).ok, false);
+  const token = await main.unlock(primary);
+  assert.equal((await main.invoke("octopus:dictation-stream-start", primary, token, request)).ok, true);
+  const other = new main.electron.module.BrowserWindow({});
+  main.sendSync("octopus:dictation-stream-audio", other, token, request.attemptId, Buffer.from([0, 1]));
+  assert.equal(main.eventsOf("dictation-audio").length, 0);
+  assert.equal((await main.invoke("octopus:dictation-stream-finish", other, token, request.attemptId)).ok, false);
+  main.sendSync("octopus:dictation-stream-audio", primary, token, request.attemptId, Buffer.from([0, 1]));
+  assert.equal(main.eventsOf("dictation-audio").length, 1);
+  const final = await main.invoke("octopus:dictation-stream-finish", primary, token, request.attemptId);
+  assert.equal(final.value.text, "Final words");
+  assert.equal(primary.webContents.sentOn("octopus:dictation-stream-event")[0][0].text, "Final words");
+  assert.deepEqual(other.webContents.sentOn("octopus:dictation-stream-event"), []);
+  assert.equal((await main.invoke("octopus:dictation-stream-start", primary, token, request)).ok, true);
+  main.world.expiredTokens.add(token);
+  main.sendSync("octopus:dictation-stream-audio", primary, token, request.attemptId, Buffer.from([0, 1]));
+  assert.equal(main.eventsOf("dictation-audio").length, 1);
+  assert.equal(main.eventsOf("dictation-close").length, 2);
+});
+
+test("dictation recording IPC requires access and returns saved audio or a safe failure", async () => {
+  const main = await launchMain();
+  const [primary] = main.windows();
+  const denied = await main.invoke("octopus:dictation-recordings-read", primary, null);
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error.code, "recording-storage");
+  const token = await main.unlock(primary);
+  const initial = await main.invoke("octopus:dictation-recordings-read", primary, token);
+  assert.equal(initial.ok, true);
+  assert.equal(initial.value.enabled, true);
+  assert.deepEqual(initial.value.recordings, []);
+  const bytes = Buffer.alloc(44 + 24_000 * 0.3 * 2);
+  bytes.write("RIFF"); bytes.write("WAVE", 8);
+  const saved = await main.invoke("octopus:dictation-recording-save", primary, token, {
+    bytes, durationMs: 300, mediaType: "audio/wav", provider: "codex", sampleRateHz: 24_000,
+  });
+  assert.equal(saved.ok, true);
+  const recording = await main.invoke("octopus:dictation-recording-read", primary, token, saved.value.id);
+  assert.equal(recording.ok, true);
+  assert.deepEqual(recording.value.bytes, bytes);
+  const refused = await main.invoke("octopus:dictation-recording-read", primary, token, "../../outside");
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, "recording-storage");
+  const deleted = await main.invoke("octopus:dictation-recording-delete", primary, token, saved.value.id);
+  assert.deepEqual(deleted, { ok: true, value: null });
+  assert.deepEqual((await main.invoke("octopus:dictation-recordings-read", primary, token)).value.recordings, []);
+});
 
 test("Help reports work independently of the main renderer and export the reviewed snapshot", async () => {
   const main = await launchMain();
@@ -674,6 +734,7 @@ test("the launch terminal belongs to the primary window, reuses its shell and op
     OCTOPUS_HOME: main.world.home,
     OCTOPUS_SOURCE_REGISTRY: path.join(main.world.root, "repo", "registry"),
     OCTOPUS_MACHINE_CODEX_AUTH_FILE: path.join(main.world.codexHome, "auth.json"),
+    OCTOPUS_MACHINE_CODEX_AUTH_LOCK_FILE: path.join(main.world.codexHome, "auth.lock"),
   });
 });
 
@@ -751,6 +812,12 @@ test("Touch ID status reads only the private preference and enrollment, and enab
   writeFixture(enrollmentFile, { ...enrollment, sealedVerifier: Buffer.from("tampered").toString("base64") });
   await assert.rejects(main.invoke("octopus:touch-id-unlock", primary), /could not be verified/);
   writeFixture(enrollmentFile, enrollment);
+  main.world.sealKey = 2;
+  const rotated = await main.invoke("octopus:touch-id-unlock", primary);
+  const resealed = JSON.parse(fs.readFileSync(enrollmentFile, "utf8"));
+  assert.equal(resealed.credentialFingerprint, enrollment.credentialFingerprint);
+  assert.match(Buffer.from(resealed.sealedVerifier, "base64").toString(), /^sealed:2:[a-f0-9]{64}$/, "a verifier the OS asks to re-encrypt is sealed again under the current key");
+  await main.invoke("octopus:access-lock", primary, rotated.token);
   main.world.touchIdRefused = true;
   await assert.rejects(main.invoke("octopus:touch-id-unlock", primary), /cancelled/);
   const again = await main.unlock(primary);
@@ -819,12 +886,25 @@ test("chat turns, steering, turn control and artifact reads use the verified cha
   assert.equal(main.eventsOf("read-payload")[0][1].blobsRoot, blobs);
 
   main.world.events.length = 0;
-  assert.deepEqual(await main.invoke("octopus:submit-chat-steer", primary, token, { runId: "run-1", messageId: "m-2", text: "steer" }), {
+  const steered = await main.invoke("octopus:submit-chat-steer", primary, token, { runId: "run-1", messageId: "m-2", text: "steer" });
+  assert.equal(steered.ok, true);
+  assert.deepEqual(steered.value, {
     interfaceId: "world_operator_chat_home", runId: "run-1", label: "operator.message", messageId: "m-2", attachmentCount: 0,
     contentHash: "hash-1", messageRecovered: false, verdict: { admitted: { seq: 4 } },
   });
   assert.deepEqual(names(main, ["submit-operator-turn", "message-artifact"]), ["submit-operator-turn"]);
   assert.equal(main.eventsOf("read-payload")[0][1].blobsRoot, blobs);
+
+  main.world.storageError = Object.assign(new Error("Disk full. Your draft is retained."), { code: "home_storage_blocked", deliveryState: "not_sent" });
+  main.world.events.length = 0;
+  for (const channel of ["octopus:submit-chat-turn", "octopus:submit-chat-steer"]) {
+    const refused = await main.invoke(channel, primary, token, { runId: "run-1", text: "Keep this draft" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, "home_storage_blocked");
+    assert.equal(refused.error.deliveryState, "not_sent");
+  }
+  assert.equal(main.eventsOf("submit-operator-turn").length, 0);
+  main.world.storageError = null;
 
   main.world.events.length = 0;
   const control = await main.invoke("octopus:submit-operator-turn-control", primary, token, { interfaceId: "world_operator_chat_home", runId: "run-1", action: "pause", controlId: "control-1" });

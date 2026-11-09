@@ -4,7 +4,6 @@ use super::*;
 pub struct RunAuthoringResultIdentity {
     pub(crate) provider_interface: InterfaceId,
     pub(crate) profile: RunAuthoringProfile,
-    pub(crate) writer_history: Arc<Mutex<BTreeMap<RunId,writer_run::WriterHistory>>>,
     pub(crate) context_output_labels: BTreeSet<String>,
     pub(crate) session_snapshot_labels: BTreeSet<String>,
 }
@@ -18,7 +17,6 @@ impl RunAuthoringResultIdentity {
         Ok(Self {
             provider_interface: descriptor.id.clone(),
             profile,
-            writer_history: Arc::new(Mutex::new(BTreeMap::new())),
             context_output_labels,
             session_snapshot_labels,
         })
@@ -31,6 +29,7 @@ impl RunAuthoringResultIdentity {
     pub async fn consume_if_matches(
         &self,
         ctx: &InterfaceLiftContext,
+        session: &ProviderHandoffSession,
         movement: &Movement,
         envelope: &InterfaceInvocationEnvelope,
         artifact_label: &str,
@@ -43,6 +42,7 @@ impl RunAuthoringResultIdentity {
             ));
         }
         if artifact_label == self.artifact_label() {
+            session.validate_context(ctx)?;
             let payload = envelope.read_artifact_payload().map_err(|error| {
                 format!(
                     "provider movement {} authoring-result payload cannot be read: {error}",
@@ -54,7 +54,7 @@ impl RunAuthoringResultIdentity {
                 let record = RunRecord::from_bytes(&pinned_run_record).map_err(|error| {
                     format!("provider authoring result pinned run record is malformed: {error}")
                 })?;
-                if writer_run::consume_result(ctx, &self.writer_history, &self.profile, movement, &record)? { return Ok(()); }
+                if writer_run::consume_result(ctx, &session.writer_history, &self.profile, movement, &record)? { return Ok(()); }
                 let config = self.config_for_record(&record)?;
                 let result: FileWriteResultEnvelope =
                     serde_json::from_slice(&payload).map_err(|error| {
@@ -473,7 +473,7 @@ pub(crate) fn active_checkpoint_for_role<'a>(
     record: &'a RunRecord,
     config: &RunAuthoringConfig,
     role: RunAuthoringCheckpointRole,
-) -> Result<&'a octopus_runtime::run_record::CheckpointRecord, String> {
+) -> Result<&'a octopus_run_record::CheckpointRecord, String> {
     let template = config.checkpoint_for_role(role)?;
     active_checkpoint_for_template(record, config, template)
 }
@@ -482,7 +482,7 @@ pub(crate) fn active_checkpoint_for_template<'a>(
     record: &'a RunRecord,
     config: &RunAuthoringConfig,
     template: &RunAuthoringCheckpoint,
-) -> Result<&'a octopus_runtime::run_record::CheckpointRecord, String> {
+) -> Result<&'a octopus_run_record::CheckpointRecord, String> {
     let provider_state = record
         .interface_state
         .get(&config.provider_interface)
@@ -562,6 +562,11 @@ pub(crate) fn validate_authoring_failure_source(
     Ok(ValidatedAuthoringFailureSource {
         provider_source_movement_seq: attempt.provider_source_movement_seq,
         correlation_id: attempt.authored.correlation_id,
+        rebase: if attempt.authored.pending_handoff.source_movement_seq == attempt.provider_source_movement_seq {
+            attempt.authored.pending_handoff.rebase
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -608,6 +613,7 @@ pub(crate) async fn hand_validated_authoring_failure(
         record,
         config,
         validated.provider_source_movement_seq,
+        &validated.rebase,
         context_output_labels,
         session_snapshot_labels,
     )?;
@@ -678,6 +684,7 @@ pub(crate) fn validate_authoring_attempt_source(
     })?;
     if !result_inputs::saved_definition_transition(record, &candidate, config)? {
         source_settlement::validate_transition(record, &candidate, config)?;
+        source_continuation::validate_transition(record, &candidate, config)?;
         source_withdrawal::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
         rejected_final::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
     }
@@ -720,8 +727,7 @@ pub(crate) fn validate_authoring_attempt_source(
     let after_hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
     Ok(ValidatedAuthoringAttempt {
         manifest_path,
-        provider_source_movement_seq: result_inputs::definition_source(record, &candidate, config)?
-            .unwrap_or(pending.source_movement_seq),
+        provider_source_movement_seq: pending.source_movement_seq,
         authored: AuthoredRun {
             json_format: call.arguments.json_format,
             content,

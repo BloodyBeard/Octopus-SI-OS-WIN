@@ -118,17 +118,35 @@ test("page loaders show only the centered logo until the catalog settles", async
     assert.ok(container.querySelector("header, input, h1") === null);
   };
   try { expectLogo(fallback.container, "surface-loading-state"); } finally { await fallback.close(); }
+  const topology = loader({
+    "./ArtifactTransferAnimation": { useArtifactTransferFeed: () => ({ feed: {}, error: "" }) },
+    "../toasts": { useAppErrorToast: noop },
+  });
+  const { TopologyStage } = topology("src/components/TopologyStage.tsx");
+  const snapshot = topology("src/data/topology.ts").emptySnapshot({ mode: "connecting", label: "Loading topology", detail: "" });
+  const props = { snapshot, query: "", scope: "World", viewMode: "zones", filters: { statuses: {} }, selected: null, onSelect: noop };
+  const stage = await mount(TopologyStage, props);
+  try {
+    expectLogo(stage.container);
+    await stage.render({ ...props, scope: "System" });
+    expectLogo(stage.container);
+    await stage.render({ ...props, snapshot: { ...snapshot, projection: { mode: "error", label: "Read failed", detail: "Unavailable" } } });
+    assert.equal(stage.container.querySelector(".octopus-loading-logo"), null);
+    assert.match(stage.container.textContent, /Read failed/);
+  } finally { await stage.close(); }
   const incidents = [];
   for (const name of ["ApplicationsView", "DriversView"]) {
     const pending = new Map();
     const Component = loader({
-      "../projectionClient": { hasProjectionBridge: () => true, onApplicationLifecycleProgress: () => noop, formatProjectionError: String, readProjection: key => new Promise((resolve, reject) => pending.set(key, { resolve, reject })) },
+      "../projectionClient": { canConnectApplications: () => false, hasProjectionBridge: () => true, onApplicationLifecycleProgress: () => noop, formatProjectionError: String, readProjection: key => new Promise((resolve, reject) => pending.set(key, { resolve, reject })) },
       "../projectionLive": { useProjectionStructureGeneration: () => 0 },
       "../extensions/useClientExtensions": { useClientExtensions: () => ({ extensions: [], actionStatuses: [] }) },
       "../extensions/incidents": { subscribeClientExtensionIncidents: () => noop, clientExtensionIncidentSnapshot: () => incidents },
       "../toasts": { useAppErrorToast: noop },
-      "./catalog": { CatalogRouteTransition: ({ children }) => children, CatalogSection: () => null },
+      "./catalog": { CatalogInstalledRail: () => null, CatalogRouteTransition: ({ children }) => children, CatalogSection: () => null, CatalogSectionFilter: () => null, CatalogToolbarBreadcrumb: () => null },
       "./SetupDialogShell": { SetupDialogShell: () => null },
+      "./applications/ApplicationConnectDialog": { ApplicationConnectDialog: () => null },
+      "./applications/PackageInstallReviewDialog": { PackageInstallReviewDialog: () => null },
     })(`src/components/${name}.tsx`)[name];
     const view = await mount(Component, { accessProfile: "live", searchFocusTick: 0 });
     try {
@@ -386,7 +404,6 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     "../CadencedShimmerText": { CadencedShimmerText: ({ children, active }) => React.createElement("span", { "data-active": active }, children), ShimmerActivityScope: ({ children }) => children },
     "../chat/ChatComposer": { ChatComposer: composer },
     "../chat/QueuedMessageList": { QueuedMessageList: () => null },
-    "./AirHandVoiceController": { AirHandVoiceController: () => null },
     "./VoiceOrbScene": { VoiceOrbScene: props => { orbProps = props; return null; } },
     "./voiceWidgetDocuments": { buildVoiceWidgetDocuments: () => [] },
     "../chat/chatProductError": { chatProductError: () => "" },

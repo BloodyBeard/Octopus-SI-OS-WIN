@@ -332,7 +332,7 @@ test("provider validation waits for a successful registry read and leaves repair
     "../../clientPreferences": { useClientPreferences: () => ({ startupSurfaceId: "voice" }), useSetClientPreferences: () => () => {} },
     "../../design-system/components": {
       OcGroup: ({ children }) => children, OcCard: ({ children }) => children,
-      OcSettingsRow: ({ control }) => control, OcStatus: () => null, OcSwitch: () => null, OcSlider: () => null,
+      OcSettingsRow: ({ control }) => control, OcStatus: () => null, OcSwitch: () => null, OcSlider: () => null, OcButton: () => null,
       OcSelect: ({ label, value, options, error, disabled, onChange }) => React.createElement("select", { "aria-label": label, "data-error": error, disabled, value, onChange: (event) => onChange(event.target.value) }, options.map((option) => React.createElement("option", { key: option.value, value: option.value, disabled: option.disabled }, option.label))),
     },
     "../../toasts": { useAppErrorToast: (error) => { if (error) toasts.push(error); } },
@@ -342,6 +342,9 @@ test("provider validation waits for a successful registry read and leaves repair
     "./SettingsHeading": { SettingsHeading: () => null },
     "./NotificationSettingsSection": { MarkActivitySettingsRow: () => null, NotificationSoundSettingsRow: () => null },
     "./SettingsProviderState": { ProviderSummary: () => null, useDeclaredProviders: () => providerState },
+    "../../projectionClient": { readProjection: async () => null, saveSetupFile: async () => ({ saved: false }) },
+    "../../onboarding/setupFile": { serializeSetupFile: () => "", setupFileFromHome: () => null, setupFileName: () => "" },
+    "../../extensions/useClientExtensions": { useClientExtensions: () => ({ loading: false, extensions: [] }) },
   });
   const props = { accessProfile: "lab", surfaces: [] };
   const { host, root } = await mount(React.createElement(GeneralSection, props));
@@ -372,6 +375,7 @@ test("opening Settings from Account preserves the destination's initial focus", 
     "../../account/useChatgptAccount": { useChatgptAccount: (enabled) => { assert.equal(enabled, live); return { account: null, action: "idle", loading: false }; } },
     "../../account/useChatgptUsage": { useChatgptUsage: (_account, enabled) => { assert.equal(enabled, false); return { value: null, loading: false, error: "" }; } },
     "../../account/chatgptUsageModel": load("src/account/chatgptUsageModel.ts"),
+    "../../account/chatgptWorkspaces": load("src/account/chatgptWorkspaces.ts"),
     "../account/AccountLogoutDialog": { AccountLogoutDialog: ({ open }) => { assert.equal(open, false); return null; } },
     "../account/AccountUsage": { AccountUsageCompact: () => { throw new Error("Lab focus navigation must not render native usage"); } },
     "../../design-system/OcDropdown": { OcDropdown },

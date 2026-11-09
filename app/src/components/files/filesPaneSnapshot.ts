@@ -1,3 +1,4 @@
+import { normalizeArtifactFilesTarget } from "./artifactFilesTarget";
 import type { OctopusOsFile } from "../../electron";
 import type { FilesOpenTarget } from "./types";
 
@@ -52,7 +53,7 @@ export function filesRootMatches(snapshot: FilesPaneSnapshot, roots: readonly { 
 }
 
 function normalizeTarget(value: unknown): FilesOpenTarget | null {
-  if (!record(value, ["kind", "absolutePath", "path", "rootId", "artifactId", "createdAtMs", "interfaceId", "label", "runId"])) return null;
+  if (!record(value, ["kind", "absolutePath", "path", "rootId", "artifactId", "createdAtMs", "interfaceId", "label", "runId", "previewText"])) return null;
   if (value.kind === "file") {
     if (!record(value, ["kind", "absolutePath", "path", "rootId"])) return null;
     if (value.absolutePath !== undefined && !token(value.absolutePath, 4096)) return null;
@@ -61,9 +62,7 @@ function normalizeTarget(value: unknown): FilesOpenTarget | null {
     if (value.absolutePath === undefined && value.path === undefined) return null;
     return { kind: "file", ...(typeof value.absolutePath === "string" ? { absolutePath: value.absolutePath } : {}), ...(typeof value.path === "string" && typeof value.rootId === "string" ? { path: value.path, rootId: value.rootId } : {}) };
   }
-  if (value.kind !== "artifact" || !record(value, ["kind", "artifactId", "createdAtMs", "interfaceId", "label", "runId"])) return null;
-  if (!token(value.artifactId, 1024) || !token(value.interfaceId, 512) || !token(value.label, 1024) || !token(value.runId, 512) || value.createdAtMs !== undefined && !integer(value.createdAtMs)) return null;
-  return { kind: "artifact", artifactId: value.artifactId, interfaceId: value.interfaceId, label: value.label, runId: value.runId, ...(typeof value.createdAtMs === "number" ? { createdAtMs: value.createdAtMs } : {}) };
+  return normalizeArtifactFilesTarget(value);
 }
 
 function record(value: unknown, keys: readonly string[]): value is Record<string, unknown> {

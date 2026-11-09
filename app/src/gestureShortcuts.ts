@@ -1,8 +1,10 @@
 import { useCallback, useSyncExternalStore } from "react";
+import type { GestureInteraction } from "./airHandEngine";
 import { clientCommands, type ClientCommandId } from "./clientActions";
 import type { OctopusClientAccessProfile } from "./electron";
 
-export type AirHandGestureId = "open_palm" | "left_click" | "fist" | "swipe_left" | "swipe_right";
+export type AirHandGestureId = "swipe_left" | "swipe_right" | "fist";
+export type GestureEventSource = "camera" | "test";
 export type GestureCommandId = ClientCommandId | "none";
 export type GestureSensitivity = "responsive" | "balanced" | "deliberate";
 
@@ -12,16 +14,15 @@ export type GestureShortcutPreferences = Readonly<{
   mirrorX: boolean;
   sensitivity: GestureSensitivity;
   spatialControl: boolean;
+  tourCompleted: boolean;
   mappings: Readonly<Record<AirHandGestureId, GestureCommandId>>;
   removedBuiltins: readonly AirHandGestureId[];
 }>;
 
 export const airHandGestures: readonly { id: AirHandGestureId; label: string; detail: string }[] = [
-  { id: "open_palm", label: "Open palm", detail: "A stable open-palm pose" },
-  { id: "left_click", label: "Finger fold", detail: "Index folded while the supporting fingers stay closed" },
-  { id: "fist", label: "Fist", detail: "A stable closed-fist pose" },
-  { id: "swipe_left", label: "Swipe left", detail: "A quick sideways flick to the left, open hand or two fingers" },
-  { id: "swipe_right", label: "Swipe right", detail: "A quick sideways flick to the right, open hand or two fingers" },
+  { id: "swipe_left", label: "Swipe left", detail: "Flick an open hand quickly to the left. Handy for going back without looking for a button." },
+  { id: "swipe_right", label: "Swipe right", detail: "Flick an open hand quickly to the right. Handy for going forward again." },
+  { id: "fist", label: "Fist hold", detail: "Close your hand and hold it still for a moment to run the command you pick here." },
 ];
 
 const DEFAULT_PREFERENCES: GestureShortcutPreferences = Object.freeze({
@@ -30,18 +31,19 @@ const DEFAULT_PREFERENCES: GestureShortcutPreferences = Object.freeze({
   mirrorX: true,
   sensitivity: "balanced",
   spatialControl: true,
+  tourCompleted: false,
   mappings: Object.freeze({
-    open_palm: "none",
-    left_click: "none",
-    fist: "none",
     swipe_left: "navigate_back",
     swipe_right: "navigate_forward",
+    fist: "none",
   }),
   removedBuiltins: Object.freeze([]),
 });
 
 const STORAGE_KEY = "octopus.gesture-shortcuts.v1";
 const GESTURE_EVENT = "octopus:airhand-gesture";
+const INTERACTION_EVENT = "octopus:airhand-interaction";
+const INTERACTION_TYPES: Readonly<Record<GestureInteraction["type"], true>> = { point: true, navigate: true, press: true, grab: true, release: true, cancel: true, transform: true };
 const stores = new Map<OctopusClientAccessProfile, GestureStore>();
 
 type GestureStore = {
@@ -70,11 +72,28 @@ export function defaultAirHandGestureCommand(gesture: AirHandGestureId): Gesture
   return DEFAULT_PREFERENCES.mappings[gesture];
 }
 
-export function emitAirHandGesture(gesture: AirHandGestureId, source: "camera" | "test"): void {
+export function emitAirHandGesture(gesture: AirHandGestureId, source: GestureEventSource): void {
   window.dispatchEvent(new CustomEvent(GESTURE_EVENT, { detail: { gesture, source } }));
 }
 
-export function subscribeAirHandGestures(listener: (gesture: AirHandGestureId, source: "camera" | "test") => void): () => void {
+export function emitGestureInteraction(interaction: GestureInteraction, source: GestureEventSource): void {
+  window.dispatchEvent(new CustomEvent(INTERACTION_EVENT, { detail: { interaction, source } }));
+}
+
+export function subscribeGestureInteractions(listener: (interaction: GestureInteraction, source: GestureEventSource) => void): () => void {
+  const handle = (event: Event) => {
+    if (!(event instanceof CustomEvent)) return;
+    const interaction = event.detail?.interaction as GestureInteraction | undefined;
+    const source = event.detail?.source;
+    if (!interaction || !Object.prototype.hasOwnProperty.call(INTERACTION_TYPES, interaction.type)) return;
+    if (source !== "camera" && source !== "test") return;
+    listener(interaction, source);
+  };
+  window.addEventListener(INTERACTION_EVENT, handle);
+  return () => window.removeEventListener(INTERACTION_EVENT, handle);
+}
+
+export function subscribeAirHandGestures(listener: (gesture: AirHandGestureId, source: GestureEventSource) => void): () => void {
   const handle = (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
     const gesture = event.detail?.gesture;
@@ -110,6 +129,7 @@ function updateStore(store: GestureStore, partial: Partial<GestureShortcutPrefer
     mirrorX: typeof partial.mirrorX === "boolean" ? partial.mirrorX : store.current.mirrorX,
     sensitivity: normalizeSensitivity(partial.sensitivity ?? store.current.sensitivity),
     spatialControl: typeof partial.spatialControl === "boolean" ? partial.spatialControl : store.current.spatialControl,
+    tourCompleted: typeof partial.tourCompleted === "boolean" ? partial.tourCompleted : store.current.tourCompleted,
     mappings,
     removedBuiltins: Object.freeze(normalizeRemoved(partial.removedBuiltins ?? store.current.removedBuiltins)),
   });
@@ -133,6 +153,7 @@ function readPreferences(profile: OctopusClientAccessProfile): GestureShortcutPr
       mirrorX: value.mirrorX !== false,
       sensitivity: normalizeSensitivity(value.sensitivity),
       spatialControl: value.spatialControl !== false,
+      tourCompleted: value.tourCompleted === true,
       mappings: normalizeMappings(value.mappings),
       removedBuiltins: Object.freeze(normalizeRemoved(value.removedBuiltins)),
     });

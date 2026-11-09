@@ -171,7 +171,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
     let mut planner: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&planner_path).unwrap()).unwrap();
     planner["checkpoints"][0]["outbound_interface_bindings"] =
-        serde_json::json!([support::all_binding("world_terminal")]);
+        serde_json::json!([support::all_binding("world_operator_chat")]);
     let mut sibling = planner["checkpoints"][0].clone();
     sibling["id"] = serde_json::json!("cA2");
     sibling["trace"] = serde_json::json!("trace:run_planner_a:cA2");
@@ -365,13 +365,14 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
                 .filter(|movement| matches!(movement.kind, MovementKind::MarkOutcomeAdmitted(_)))
                 .count(),
             2,
-            "cut {cut}"
+            "cut {cut}; verifier refusals: {:?}",
+            recovered_rows.iter().filter_map(|row| row.invocation_metadata.as_ref()?.invocation()?.verification_failure.as_ref()).collect::<Vec<_>>()
         );
         assert_eq!(
             recovered_rows
                 .iter()
                 .filter(|movement| movement.kind == MovementKind::InterfaceOutbound
-                    && movement.to == Endpoint::Interface(InterfaceId::new("world_terminal")))
+                    && movement.to == Endpoint::Interface(InterfaceId::new("world_operator_chat")))
                 .count(),
             2,
             "cut {cut}"
@@ -403,7 +404,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
                 source.artifact.as_ref().unwrap(),
                 &RunId::new("run_executor_b"),
                 &CheckpointId::new("cB"),
-                octopus_runtime::GrantEpoch(0),
+                octopus_run_record::GrantEpoch(0),
                 source.lamport,
                 &InterfaceId::new(WORKER_INTERFACE),
             )
@@ -455,7 +456,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
         source.artifact.as_ref().unwrap(),
         &RunId::new("run_executor_b"),
         &CheckpointId::new("cB"),
-        octopus_runtime::GrantEpoch(1),
+        octopus_run_record::GrantEpoch(1),
         source.lamport,
         &InterfaceId::new(WORKER_INTERFACE),
     )
@@ -588,7 +589,7 @@ async fn interface_addressed_reference_emission_preserves_artifact_identity() {
         trace: TraceId("mismatched-reference-emission".into()),
         kind: MovementKind::InterfaceOutbound,
         from: Endpoint::Interface(InterfaceId::new(WORKER_INTERFACE)),
-        to: Endpoint::Interface(InterfaceId::new("world_terminal")),
+        to: Endpoint::Interface(InterfaceId::new("world_operator_chat")),
         artifact: Some(original.clone()),
         invocation_metadata: Some(source_metadata.into()),
         causal_floor: None,
@@ -605,7 +606,7 @@ async fn interface_addressed_reference_emission_preserves_artifact_identity() {
     .await
     .expect_err("another interface's movement cannot borrow exact interface authority");
     assert!(mismatched_refusal.to_string().contains(
-        "targets interface 'world_terminal', not host-attested interface 'system_context'"
+        "targets interface 'world_operator_chat', not host-attested interface 'system_context'"
     ));
 
     let refused = admit_system_interface_reference_emission(
@@ -904,7 +905,7 @@ async fn a_driver_backed_door_outbound_is_not_relayed_into_its_result_checkpoint
                     "run": "run_door_turn",
                     "trace": "trace:run_door_turn:cp_tool",
                     "epoch": 0,
-                    "interface_binding": support::all_binding("world_terminal"),
+                    "interface_binding": support::all_binding("world_operator_chat"),
                     "outbound_interface_bindings": [support::all_binding("system_coder_env")],
                     "artifact_bindings": support::worker_role_artifact_bindings(&[
                         "system_worker_coder_max",
@@ -916,7 +917,7 @@ async fn a_driver_backed_door_outbound_is_not_relayed_into_its_result_checkpoint
                     "trace": "trace:run_door_turn:cp_result",
                     "epoch": 0,
                     "interface_binding": support::all_binding("system_coder_env"),
-                    "outbound_interface_bindings": [support::all_binding("world_terminal")],
+                    "outbound_interface_bindings": [support::all_binding("world_operator_chat")],
                     "artifact_bindings": support::worker_role_artifact_bindings(&[
                         "system_worker_coder_max",
                     ]),
@@ -941,7 +942,7 @@ async fn a_driver_backed_door_outbound_is_not_relayed_into_its_result_checkpoint
         &mut log,
         &mut blob_handle,
         &submit,
-        &InterfaceId::new("world_terminal"),
+        &InterfaceId::new("world_operator_chat"),
     )
     .await
     .expect("the terminal tool-call admits its own checkpoint");
@@ -1018,7 +1019,7 @@ async fn the_same_boundary_artifact_admits_each_freshly_armed_checkpoint() {
                 "run": "run_repeat_turn",
                 "trace": format!("trace:run_repeat_turn:{checkpoint}"),
                 "epoch": 0,
-                "interface_binding": support::all_binding("world_terminal"),
+                "interface_binding": support::all_binding("world_operator_chat"),
                 "outbound_interface_bindings": [],
                 "artifact_bindings": support::worker_role_artifact_bindings(&[
                     "system_worker_coder_max",
@@ -1048,7 +1049,7 @@ async fn the_same_boundary_artifact_admits_each_freshly_armed_checkpoint() {
         &mut log,
         &mut blob_handle,
         &submit,
-        &InterfaceId::new("world_terminal"),
+        &InterfaceId::new("world_operator_chat"),
     )
     .await
     .expect("the first arrival admits the first armed checkpoint");
@@ -1071,7 +1072,7 @@ async fn the_same_boundary_artifact_admits_each_freshly_armed_checkpoint() {
         &mut log,
         &mut blob_handle,
         &submit,
-        &InterfaceId::new("world_terminal"),
+        &InterfaceId::new("world_operator_chat"),
     )
     .await
     .expect(
@@ -1106,7 +1107,7 @@ async fn the_same_boundary_artifact_admits_each_freshly_armed_checkpoint() {
         &mut log,
         &mut blob_handle,
         &submit,
-        &InterfaceId::new("world_terminal"),
+        &InterfaceId::new("world_operator_chat"),
     )
     .await
     .expect_err("editing a neighboring checkpoint must not re-arm the spent edge");
@@ -1138,7 +1139,7 @@ async fn retained_fanout_recovers_only_original_unfinished_edges_after_restart()
         "id":id, "ee":"ee_existence", "worker":"system_worker_coder_max", "trace":format!("trace:{id}"),
         "status":"running", "interface_state":{}, "active_checkpoints":[checkpoint], "checkpoints":[{
             "id":checkpoint, "run":id, "trace":format!("trace:{id}:{checkpoint}"), "epoch":0,
-            "interface_binding":support::all_binding("world_terminal"), "outbound_interface_bindings":[],
+            "interface_binding":support::all_binding("world_operator_chat"), "outbound_interface_bindings":[],
             "artifact_bindings":support::worker_role_artifact_bindings(&["system_worker_coder_max"]),
             "required_verified_artifacts":if verified { serde_json::json!([{
                 "mark":"coder.build.ok", "artifact_label":"coder.build.result", "verifier":"build_success", "params":{}
@@ -1150,7 +1151,7 @@ async fn retained_fanout_recovers_only_original_unfinished_edges_after_restart()
     write_run_record(root.path(), &embedded.runtime, &record("first", "first_0", false));
     write_run_record(root.path(), &embedded.runtime, &record("second", "second_0", true));
     let artifact = captured_boundary_artifact(root.path().join("output"), "coder.build.result", &serde_json::to_vec(&build_success_payload()).unwrap());
-    let interface = InterfaceId::new("world_terminal");
+    let interface = InterfaceId::new("world_operator_chat");
     let mut log = LiveMovementLog::new(InMemoryLog::new());
     let mut blob_handle = SharedBlobHandle::new(blobs.clone());
     let busy = WriteGuard::acquire(&root.path().join("runs/second.json"), false).unwrap();
@@ -1178,7 +1179,7 @@ async fn retained_fanout_recovers_only_original_unfinished_edges_after_restart()
     write_run_record(root.path(), &embedded.runtime, &record("first", "first_1", false));
     write_run_record(root.path(), &embedded.runtime, &record("later", "later_0", false));
     let mut second = record("second", "second_0", true);
-    second["interface_state"] = serde_json::json!({"world_terminal":{"draft":"later independent context"}});
+    second["interface_state"] = serde_json::json!({"world_operator_chat":{"draft":"later independent context"}});
     write_run_record(root.path(), &embedded.runtime, &second);
     drop(embedded);
     let cold = support::build_test_spine(config()).await.unwrap();

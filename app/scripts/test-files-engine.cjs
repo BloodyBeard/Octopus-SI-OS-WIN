@@ -310,7 +310,10 @@ function fileSaveHarness(options = {}) {
   const flush = effects.find((node) => node.getText(source).includes("registerFilesPaneFlush"));
   assert.ok(mounted && rootChanged && flush, "read cleanup, root generation and flush must come from the actual FilesView effects");
   const snapshotFile = path.join(app, "src/components/files/filesPaneSnapshot.ts");
-  const snapshot = evaluate(fs.readFileSync(snapshotFile, "utf8"), snapshotFile);
+  const artifactTargetFile = path.join(app, "src/components/files/artifactFilesTarget.ts");
+  const snapshot = evaluate(fs.readFileSync(snapshotFile, "utf8"), snapshotFile, {
+    "./artifactFilesTarget": evaluate(fs.readFileSync(artifactTargetFile, "utf8"), artifactTargetFile),
+  });
   const lifecycleFile = path.join(app, "src/components/files/filesPaneLifecycle.ts");
   const lifecycle = evaluate(fs.readFileSync(lifecycleFile, "utf8"), lifecycleFile, { "./filesPaneSnapshot": snapshot });
   const paneKey = lifecycle.filesPaneKey("live", crypto.randomUUID());

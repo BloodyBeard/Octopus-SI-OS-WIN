@@ -34,6 +34,7 @@ const compiled = build({
       ? "export function useProjectionGeneration() { return 0; } export function currentProjectionStructureGeneration() { return 0; }"
       : `export function canMutateScheduledInterfaces() { return globalThis.scheduleFixture.writable; }
          export function hasProjectionBridge() { return false; }
+         export function formatProjectionError(error) { return error instanceof Error ? error.message : String(error); }
          export function projectionTargetLabel() { return ""; }
          export async function readProjection(name) { const f = globalThis.scheduleFixture; f.reads.push(name); if (f.error) throw Error(f.error); return { scheduled_interfaces: f.rows }; }
          export async function mutateScheduledInterface(request) { return globalThis.scheduleFixture.mutate(request); }`, loader: "js" }));
@@ -41,11 +42,11 @@ const compiled = build({
 }).then(({ outputFiles }) => { const module = { exports: {} }; Function("module", "exports", "require", outputFiles[0].text)(module, module.exports, require); return module.exports; });
 
 function sidebarChrome(ui) {
-  const projectWorkspace = { projects: [], rootEeId: "", homeRunId: "", homeInterfaceId: "", rootContext: null, rootAllowedChildTemplateIds: [], templates: [], status: "", loading: false, pending: false, error: "",
+  const projectWorkspace = { projects: [], rootEeId: "", homeRunId: "", homeInterfaceId: "", rootContext: null, rootAllowedChildTemplateIds: [], templates: [], status: "", phase: "ready", pending: false, error: "",
     updatePresentation() {}, async createProject() {}, async createAgentTemplate() { return { agentId: "", workerInterfaceId: "" }; } };
   return function Navigation() {
     const [surface, setSurface] = React.useState("scheduled");
-    return React.createElement(ui.Sidebar, { accessProfile: "live", navigationSection: "tasks", activeSurfaceId: surface, activeChatRunId: "", chatRuns: [], chatRunsLoading: false, homeRunId: "", runtimeHost: { home: "fixture" }, surfaceErrors: [], surfaces: [],
+    return React.createElement(ui.Sidebar, { accessProfile: "live", navigationSection: "tasks", activeSurfaceId: surface, activeChatRunId: "", chatRuns: [], chatRunsPhase: "ready", chatRunListError: "", async onRetryChatRuns() {}, homeRunId: "", runtimeHost: { home: "fixture" }, surfaceErrors: [], surfaces: [],
       agentPinnedChatIds: [], agentChatOrderIds: [], agentProjectFilterEeId: "", agentProjectWorkspace: projectWorkspace, agentExecutionContexts: [], agentDefinitions: [], agentProviderInterfaces: [], agentModelsLoading: false, agentModelError: "",
       async onRefreshAgentModels() {}, onSurfaceChange: setSurface, onSelectChat() {}, onNewChat() {}, onAgentPinnedChatIdsChange() {}, onAgentChatOrderIdsChange() {}, onAgentProjectFilterEeIdChange() {}, onSearch() {} });
   };
@@ -54,8 +55,8 @@ function sidebarChrome(ui) {
 function schedule(index, status = "enabled") {
   return {
     interface_id: `world_task_${index}`, display_name: `Task ${index}`, status, valid: status !== "invalid", activation_digest: String(index % 10).repeat(64),
-    schedule: { type: "cron", cron: "0 13 * * *" }, timezone: "UTC", fire_on_start: false, instructions: `Review task ${index}.`, clone_eligible: status !== "invalid",
-    run_template: { run_id: `run_task_${index}`, ee_id: "ee_project", worker_interface_id: "system_worker_flash", checkpoint_count: 2, outbound_interface_ids: ["world_delivery"], artifact_binding_count: 1 },
+    schedule: { type: "cron", cron: "0 13 * * *" }, timezone: "UTC", fire_on_start: false, instructions: `Review task ${index}.`,
+    targets: [{ run_id: `run_task_${index}`, chat_interface_id: `world_operator_chat_task_${index}`, title: `Task ${index}` }],
     next_run_at_ms: Date.now() + (index + 1) * 60_000, next_run_source: "driver_state", error: status === "invalid" ? "Invalid fixture configuration" : "",
   };
 }
@@ -68,13 +69,13 @@ function fixture(rows) {
   global.scheduleFixture = f;
   return f;
 }
-async function mount({ active = true, scope = "Experiment", secondary = false, drafts = [] } = {}) {
+async function mount({ active = true, scope = "Experiment", secondary = false, drafts = [], opened = [] } = {}) {
   const ui = await compiled;
   const Navigation = sidebarChrome(ui);
   const host = document.createElement("div"); document.body.append(host);
   const root = createRoot(host); roots.push(root);
   const render = async (next = scope) => act(async () => root.render(React.createElement(ui.ScheduledWorkspaceProvider, { active, key: next, onCreateTask: (text) => drafts.push(text) },
-    !secondary && React.createElement(Navigation), React.createElement(ui.LiveScheduledView, { navigationInPane: secondary, searchFocusTick: 0 }))));
+    !secondary && React.createElement(Navigation), React.createElement(ui.LiveScheduledView, { navigationInPane: secondary, searchFocusTick: 0, onSelectChat: (id) => opened.push(id) }))));
   await render();
   return { host, render, drafts };
 }
@@ -84,7 +85,12 @@ function rows(host) { return [...host.querySelectorAll('[data-scheduled-sidebar]
 function secondary(row) { return row.querySelector("[data-thread-secondary-title]").textContent; }
 function detail(host) { return host.querySelector("[data-scheduled-detail]"); }
 function dialog() { return document.querySelector('[role="dialog"] form[data-density="form"]'); }
-async function click(element) { assert.ok(element, "button exists"); await act(async () => element.click()); }
+async function click(element) {
+  assert.ok(element, "button exists");
+  await act(async () => element.click());
+  // Let a newly opened dialog take initial focus before the next user action.
+  await act(async () => new Promise((resolve) => window.requestAnimationFrame(resolve)));
+}
 async function input(element, value) {
   const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(prototype, "value").set;
@@ -101,6 +107,25 @@ async function commit(element, value) {
   await act(async () => element.blur());
 }
 async function choose(menuLabel, option) { await click(button(dialog(), menuLabel)); await click(menuItem(option)); }
+
+test("event triggers show their receiving task without offering cron mutations", async () => {
+  const f = fixture([{
+    interface_id: "world_issue_events", display_name: "Issue events", status: "enabled", valid: true,
+    event_source: { sources: ["issue.opened"], targets: [{ run_id: "review", chat_interface_id: "chat", title: "Review issues" }] },
+  }]);
+  const opened = [];
+  const { host } = await mount({ opened });
+  assert.equal(rows(host).length, 1);
+  assert.equal(secondary(rows(host)[0]), "On event");
+  await click(rows(host)[0]);
+  assert.match(detail(host).textContent, /issue.opened/);
+  assert.match(detail(host).textContent, /No events received yet/);
+  assert.equal(button(detail(host), "Trigger actions"), undefined);
+  assert.equal(button(detail(host), "Edit"), undefined);
+  await click(button(detail(host), "Open task"));
+  assert.deepEqual(opened, ["review"]);
+  assert.deepEqual(f.writes, []);
+});
 
 test("Triggers keeps navigation, selection, search and authoring in one workspace", async () => {
   const f = fixture([...Array.from({ length: 8 }, (_, index) => schedule(index)), schedule(8, "disabled"), schedule(9, "invalid")]);
@@ -204,7 +229,11 @@ test("inactive Scheduled reads nothing and calendar labels respect timezone boun
 });
 
 test("a secondary Triggers pane retains its own list without replacing the primary sidebar", async () => {
-  fixture([schedule(0)]);
+  const title = "Repaired Home voice memory capture and updated the installed configuration. ".repeat(8).trim();
+  fixture([{ ...schedule(0), deliveries: [{ seq: 1, at_ms: Date.now(), run_id: "review", chat_interface_id: "chat", title }] }]);
+  const stylesheet = document.createElement("style");
+  stylesheet.textContent = fs.readFileSync(path.join(appRoot, "src/design-system/oc-dropdown.css"), "utf8");
+  document.body.append(stylesheet);
   const { host } = await mount({ secondary: true });
   assert.equal(host.querySelector("aside"), null);
   await click(button(host, "Triggers"));
@@ -212,6 +241,13 @@ test("a secondary Triggers pane retains its own list without replacing the prima
   await click(document.querySelector('[role="dialog"] [data-scheduled-sidebar] [role=listitem] > [role=button]'));
   assert.equal(detail(host).querySelector("[data-automation-card] .truncate").textContent, "Task 0");
   assert.ok(document.querySelector('[role="dialog"]') === null);
+  await click(button(host, "Triggers"));
+  const navigation = document.querySelector('[role="dialog"][aria-label="Triggers"]');
+  assert.equal(navigation.querySelector('[data-selected-scheduled-task] [data-thread-title]').textContent, "Task 0");
+  assert.ok(navigation.textContent.includes(title), "history keeps the complete title for display and accessibility");
+  assert.equal(getComputedStyle(navigation).width, "340px", "history cannot expand the dropdown through its intrinsic content width");
+  await click(navigation.querySelector('[data-selected-scheduled-task] > [role="button"]'));
+  assert.equal(getComputedStyle(navigation).width, "340px", "collapsing history preserves the same navigation width");
 });
 
 test("one-shot deadlines retain their kind and exact timestamp through editing", async () => {
@@ -252,10 +288,11 @@ test("one-shot timestamps validate calendar dates and preserve nanosecond deadli
 
 test("an installed inactivity template opens a chat draft, reports honest state and undoes a journaled run", async () => {
   const inactivity = { seconds: 3600, interface_match: { interface_type: "world", role: "user", interface_driver_ref: "app_server" } };
-  const template = { ...schedule(0), interface_id: "world_system_review", display_name: "System review", status: "template", template: true, clone_eligible: true, schedule: { type: "inactivity", ...inactivity }, next_run_at_ms: null, next_run_source: "" };
-  const journal = { digest: "a".repeat(64), outcome: "changed", summary: "Saved the export procedure as a skill.", undoable: true, undone: false, checks: [{ check: "doctor", result: "passed", evidence: "seq 9" }],
+  const template = { ...schedule(0), interface_id: "world_system_review", display_name: "System review", status: "template", template: true, targets: [], schedule: { type: "inactivity", ...inactivity }, next_run_at_ms: null, next_run_source: "" };
+  const journal = { digest: "a".repeat(64), firing: "1790000000000", outcome: "changed", summary: "Saved the export procedure as a skill.", undoable: true, undone: false, checks: [{ check: "doctor", result: "passed", evidence: "seq 9" }],
     changes: [{ kind: "file", path: "/home/registry/artifact/a/artifact.json", action: "created", reason: "repeated", status: "applied", restorable: true, unrestorable_reason: "" }] };
   const trigger = { ...template, interface_id: "world_quiet_review", display_name: "Quiet review", status: "enabled", template: false, schedule: { type: "inactivity", ...inactivity, within_ee: "ee_project" },
+    targets: [{ run_id: "run_review_1", chat_interface_id: "world_operator_chat_review", title: "Quiet review" }],
     inactivity_state: { status: "waiting", current: true, last_activity_at_ms: Date.now() }, next_run_at_ms: Date.now() + 3_600_000, next_run_source: "driver_state",
     deliveries: [{ seq: 12, at_ms: Date.now() - 60_000, run_id: "run_review_1", chat_interface_id: "world_operator_chat_review", journal }] };
   const f = fixture([template]);
@@ -277,7 +314,7 @@ test("an installed inactivity template opens a chat draft, reports honest state 
   await click(button(run, "Run actions")); await click(menuItem("Undo changes…"));
   assert.match(document.querySelector("[data-scheduled-journal]").textContent, /created · \/home\/registry\/artifact\/a\/artifact\.json/);
   await click(button(document, "Undo changes"));
-  assert.deepEqual(f.writes[0], { action: "undo_changes", runId: "run_review_1", expectedJournalDigest: "a".repeat(64) });
+  assert.deepEqual(f.writes[0], { action: "undo_changes", runId: "run_review_1", firing: "1790000000000", expectedJournalDigest: "a".repeat(64) });
 });
 
 test("a change journal undoes only files still holding the recorded result", async () => {
@@ -289,7 +326,7 @@ test("a change journal undoes only files still holding the recorded result", asy
   const registry = path.join(home, "registry");
   const modified = path.join(registry, "interface", "world_a", "interface.json");
   const created = path.join(registry, "artifact", "artifact-new", "artifact.json");
-  const journalRoot = path.join(home, "state", "change-journals", "run_review");
+  const journalRoot = path.join(home, "state", "change-journals", "run_review", "1790000000000");
   for (const file of [modified, created, path.join(journalRoot, "before", "0")]) fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(modified, "after\n"); fs.writeFileSync(created, "new\n"); fs.writeFileSync(path.join(journalRoot, "before", "0"), "before\n");
   const journal = { schema_version: 1, run: "run_review", outcome: "changed", summary: "s", changes: [
@@ -300,14 +337,14 @@ test("a change journal undoes only files still holding the recorded result", asy
   const plans = [];
   const hooks = { commitClientAuthoring: async (plan) => { plans.push(plan); } };
   fs.writeFileSync(created, "edited later\n");
-  await assert.rejects(mutateScheduledInterface(registry, home, { action: "undo_changes", runId: "run_review", expectedJournalDigest: digest }, hooks), /artifact.json is changed/);
+  await assert.rejects(mutateScheduledInterface(registry, home, { action: "undo_changes", runId: "run_review", firing: "1790000000000", expectedJournalDigest: digest }, hooks), /artifact.json is changed/);
   fs.writeFileSync(created, "new\n");
-  await mutateScheduledInterface(registry, home, { action: "undo_changes", runId: "run_review", expectedJournalDigest: digest }, hooks);
+  await mutateScheduledInterface(registry, home, { action: "undo_changes", runId: "run_review", firing: "1790000000000", expectedJournalDigest: digest }, hooks);
   assert.deepEqual(plans[0].writes.map((write) => [write.file, write.beforeDigest, write.content ?? write.next]), [[modified, sha("after\n"), "before\n"], [created, sha("new\n"), null]]);
   fs.rmSync(home, { recursive: true, force: true });
 });
 
-test("setup arms each selected pack trigger once through the template clone", async () => {
+test("setup arms each selected pack trigger once as a template copy bound into its own task", async () => {
   const { setupTriggerEntries, setupTriggerProof, armSetupTriggers } = require("../electron/projection.cjs");
   const os = require("node:os");
   const repoRegistry = path.join(appRoot, "..", "registry");
@@ -328,19 +365,32 @@ test("setup arms each selected pack trigger once through the template clone", as
   const entries = setupTriggerEntries(pack, ["world_system_review"]);
   assert.deepEqual(entries.map((entry) => [entry.interface_id, entry.quiet_period_seconds]), [["world_self_improvement", 3600]]);
   const labels = [];
-  const hooks = { commitClientAuthoring: async (plan) => {
-    labels.push(plan.label);
-    for (const write of plan.writes) {
-      fs.mkdirSync(path.dirname(write.file), { recursive: true });
-      fs.writeFileSync(write.file, `${JSON.stringify(write.next, null, 2)}\n`);
-    }
-  } };
+  const planned = [];
+  const runPath = path.join(home, "state", "runs", "run_trigger_task.json");
+  const hooks = {
+    commitClientAuthoring: async (plan) => {
+      labels.push(plan.label);
+      for (const write of plan.writes) {
+        fs.mkdirSync(path.dirname(write.file), { recursive: true });
+        fs.writeFileSync(write.file, write.content ?? `${JSON.stringify(write.next, null, 2)}\n`);
+      }
+    },
+    planTriggerTask: async (entry, input) => {
+      planned.push([entry.task.worker_interface_id, input]);
+      assert.ok(fs.existsSync(path.join(registry, "interface", input.interfaceId, "interface.json")), "the trigger folder exists before its task is planned");
+      const run = { id: "run_trigger_task", checkpoints: [{ id: input.checkpointId, interface_binding: { interface: input.interfaceId } }] };
+      return { runId: run.id, writes: [{ file: runPath, beforeDigest: null, content: `${JSON.stringify(run)}\n` }] };
+    },
+  };
   assert.equal(await setupTriggerProof(registry, home, entries), null);
   await armSetupTriggers(registry, home, entries, hooks);
   await armSetupTriggers(registry, home, entries, hooks);
-  assert.deepEqual(labels, ["create scheduled interface world_self_improvement"]);
+  assert.deepEqual(labels, ["create trigger world_self_improvement", "create the task of trigger world_self_improvement"]);
+  assert.deepEqual(planned, [["system_worker_system_review", { checkpointId: "cp_world_self_improvement", interfaceId: "world_self_improvement", artifactNames: ["cron.current_time"] }]]);
   const [proof] = await setupTriggerProof(registry, home, entries);
-  assert.equal(proof.run_id, "run_world_self_improvement");
+  assert.deepEqual(proof.run_ids, ["run_trigger_task"]);
+  const descriptor = JSON.parse(fs.readFileSync(path.join(registry, "interface", "world_self_improvement", "interface.json"), "utf8"));
+  assert.equal(descriptor.copy_of, "world_cron");
   const read = (id) => JSON.parse(fs.readFileSync(path.join(registry, "interface", id, "activation.json"), "utf8")).activations[0];
   const armed = read("world_self_improvement");
   const template = read("world_system_review");
@@ -349,7 +399,7 @@ test("setup arms each selected pack trigger once through the template clone", as
   assert.equal(armed.config.schedule.inactivity.seconds, 3600);
   assert.deepEqual(armed.config.schedule.inactivity.exclude_interface_match, template.config.schedule.inactivity.exclude_interface_match);
   assert.equal(armed.config.schedule.reminder_default, template.config.schedule.reminder_default);
-  assert.ok(fs.existsSync(path.join(home, "state", "runs", "run_world_self_improvement.json")));
+  assert.deepEqual(Object.keys(armed.config), ["schedule"]);
   fs.rmSync(home, { recursive: true, force: true });
 });
 

@@ -30,12 +30,28 @@ Screenshots show a development installation, including its incomplete setups.
 | **Applications** | Install and configure providers, connectors, plugins, and context packages; choose where they are available. |
 | **Drivers** | Install and configure the environments in which tools act: files, worktrees, browsers, desktops, containers, and remote execution. |
 
-The avatar menu offers **Settings** and **Log out**. Log out locks local client
-access and returns to the [password screen](getting-started.md#first-setup);
-it does not sign out of the model provider. Unlock with your password, or
+The avatar menu offers **Settings** and **Lock Octopus**. For a connected ChatGPT
+account, **Usage** shows remaining limits and reset times when available.
+When the account belongs to more than one workspace, the avatar menu lists them
+with the current one checked; choosing another switches the workspace Octopus
+uses for new requests, and the model list reloads. **Settings → Account** shows
+the account, plan and workspace, lists the workspaces with **Switch**, and offers
+**Add account** and **Log out**. Adding an account signs in another ChatGPT
+account in the browser and replaces the current sign-in; a workspace that
+requires SSO opens browser sign-in, and cancelling it keeps the current one.
+Switching requires an unlocked session; if the workspace list cannot be loaded,
+the menu says so and tries again the next time it opens. The
+sign-in is shared with Codex on this computer (see
+[Codex CLI](getting-started.md#codex-cli)).
+**Lock Octopus** locks local access and returns to the
+[password screen](getting-started.md#first-setup). The model provider stays signed
+in. Unlock with your password, or
 Touch ID if you enabled it. **Surfaces** controls additional views;
 the primary navigation destinations stay available. Workspace views support
 split panes, so a conversation and its evidence can remain visible together.
+Each conversation retains its right-pane tabs, selected tab, open state and
+pane layout when you leave it and return. This presentation state is local to
+the selected Home, access profile and client window.
 
 ### Home: conversation, Activity, and voice
 
@@ -59,15 +75,28 @@ requires the appropriate bindings and granted tools.
 
 There are two distinct audio features:
 
-- **Dictation** transcribes speech into the active composer. It prepares text
-  locally in the client flow; transcription may call the configured provider.
-  It does not submit an Octopus message until you send the text.
+- **Dictation** streams recognized speech into the active message field. A
+  compact waveform appears inside the Stop button while the normal composer
+  controls remain in place. Intermediate words are a preview; they are committed
+  to the draft only when finalized. **Stop dictation** keeps the final text in
+  the message field; **Send** finalizes it and sends the current draft. Escape
+  removes the speech preview and preserves text you typed yourself. Each
+  recording supports up to ten minutes. The last 20 recordings, including cancelled captures and failed
+  transcriptions, are saved on this device by default. **Settings → Voice →
+  Dictation → Recent recordings** shows transcript and time, with Copy and a
+  menu for Download recording and Delete recording. Audio without text offers
+  Retry. **View recording** after a failure opens that exact recording in these
+  settings, with Download audio and Show all recordings. Retry in the composer
+  can reuse retained audio while that composer remains open. Escape cancels
+  capture or a pending transcription without submitting a message. A failed
+  stream offers explicit retry of the saved audio; it never silently switches
+  to another recognition path.
 - **A voice call** connects the Home run through its declared voice interface.
   The controls include microphone mute, speaker output, device selection,
   transcript, and ending the call. Calls require a configured voice provider
   and microphone permission; text-provider sign-in alone is not enough.
 
-**Settings → Voice & Audio** contains device choices, dictation settings and
+**Settings → Voice** contains device choices, dictation settings and
 dictionary, and the floating call controls used outside Home. A selectable
 synthesized voice is offered only when the speech interface declares one.
 
@@ -88,8 +117,8 @@ nearest edge and dissolve, while the waves gather into the call orb exactly as
 they do without octopuses. When the call ends and the orb returns to the waves,
 the octopuses swim back in from open edges one after another.
 
-Audio remains part of the artifact contract: microphone or speech interfaces
-produce audio or transcript artifacts; receiving interfaces decide how to
+Audio exchanged through runtime interfaces remains part of the artifact contract:
+microphone or speech interfaces produce audio or transcript artifacts; receiving interfaces decide how to
 play or interpret them. An audio artifact can reference binary media without
 turning its contents into JSON. The kernel does not decode audio.
 
@@ -105,6 +134,11 @@ Filesystem tools require a working folder from the selected project, Agent or
 host configuration. When none is configured, the composer explains the missing
 folder before submission; changing access settings remains available.
 
+The bundled providers default to a 400,000-token context window. Claude Code
+and Anthropic default to 700,000 tokens. Grok CLI defaults to 500,000 tokens. Models with a smaller declared capacity
+keep that limit. The context indicator uses the provider's reported usable
+capacity, which can reserve space within that window.
+
 If a manual message cannot be sent, its text returns to the composer and the
 usual error notification explains the failure. Delivery with a lost confirmation
 is checked against task history; retrying explicitly uses the same message
@@ -115,6 +149,13 @@ A **Project** supplies the goal and permission boundary. An **Agent** is a
 reusable worker template in that project: its pin, capability ceiling, and
 defaults for authoring a task. Creating an Agent does not start work. A **task**
 is a run created from that template; subsequent messages continue that run.
+Creating a Project creates its EE and writes the chosen name into the EE record.
+Renaming the Project updates that same record. Topology reads the EE's name
+directly and keeps its goal and policy template available in the details.
+
+The task list normally follows the last recorded update. Opening or reading a
+task does not promote it. **Sort by → Manual** keeps your chosen order; pinned
+tasks and project groups retain their own placement.
 
 For example, to work on a repository:
 
@@ -127,11 +168,21 @@ A workspace Driver operates in the chosen folder. A worktree Driver supplies a
 separate Git worktree. Choose according to where the work should happen;
 creating a task does not itself promise branch isolation.
 
+Web links in messages open in a browser tab inside the client. The toolbar retains an explicit **Open in default browser** action. These manually opened pages belong to the client window; opening one does not start a task or grant a model access to it.
+
+Artifacts opened from the tool trace, Sources, and Outputs use the right **Files**
+pane. A recorded read shows the content read at that point, including its recorded
+excerpt when the read was partial. It remains read-only; opening it beside an
+edited file retains the normal Save, Discard, or Cancel choice for that draft.
+
 Task environment panels can expose files, a terminal, changes, a browser,
 desktop, or connection details. The available panels come from the task's
 actual environment. **Triggers** and **Archived** are views within Tasks.
 Triggers are presented by the client over declared runtime interfaces: a time,
-an interval, or a quiet period in your work, each starting an ordinary run.
+an interval, or a quiet period in your work, each waking the tasks bound to it. A
+connected application that receives events, such as Email, Telegram or Slack,
+appears there too: each incoming message it admits starts a turn in the tasks
+connected to it.
 
 ![Tasks with Projects, Agents, task history, and the new-task composer](images/client/tasks.png)
 
@@ -176,17 +227,42 @@ and [Drivers](contracts/ENVIRONMENTS.md#in-the-app).
 Installation and access are separate:
 
 1. **Install** materializes the package and its required dependencies.
-2. **Configure** supplies the required account, endpoint, device, or folder.
+2. **Connect** supplies the required account, key, or device. Where the
+   application declares a connection check, the client verifies what you enter
+   against the real service, walks you through browser sign-in or pairing, and
+   shows the connected account. Gmail, GitHub and Google Drive work through the
+   apps linked to your ChatGPT account, and Octopus keeps no GitHub or Google
+   token: the card shows the account each one uses (the Gmail mailbox, the
+   GitHub login, the Google Drive account), with the ChatGPT account beneath
+   it. If an app is already linked there, Octopus still asks you to **Connect**
+   once before tasks can use it. **Manage in ChatGPT** opens the page where you
+   switch, add or unlink its accounts, and for GitHub the repositories its app
+   reaches; Disconnect in Octopus does not unlink it from ChatGPT. Image
+   Generation needs no key: it uses the ChatGPT account signed in on this Mac
+   and shows that account with its plan, which must be a paid one. Unity MCP
+   connects to the local server MCP for Unity starts from the Unity Editor and
+   shows the Editor project it serves.
 3. **Make available** admits it within Home or the chosen Project's ceiling.
+   Installing an application lets the Home and task workers and the Computer
+   Use Agent preset use it; there is no separate list to edit. An application outside an Agent's ceiling appears
+   disabled in the Agent dialog with the reason, and saving an Agent brings it
+   up to its template's current ceiling.
 4. **Select/connect** gives a task the relevant bindings. A default for new
    tasks is not evidence that an existing task already uses it.
 
-An installed package grants no authority by itself. Each card shows one
-status: **Not installed**, **Needs setup** (details such as an API key are
-missing), **Not enabled** (installed but not yet available in Home or a
-project), **Enabled**, **Needs repair** or **Check settings**, followed by how
-many tasks are connected. Removal can be blocked while live records depend on
-it.
+In a task with **Full access**, connected MCP applications never ask before a
+tool runs. In **Project access**, a tool asks for your approval in the chat
+first unless its server declares it read-only, or neither destructive nor
+open-world — the rule Codex uses for app tools.
+
+An installed package grants no authority by itself. Each card offers the next
+step — **Install**, **Repair** or **Connect** — or shows **Connected** with a
+menu to reconnect or disconnect; **Reconnect required** and **Connection
+issue** appear only when the check fails. After Install, Repair or Remove the
+card shows **Finishing** until the catalog reflects the result, so a second
+press cannot start the same change again. The detail page shows the connected
+account, where the application is available, and how many tasks use it.
+Removal can be blocked while live records depend on it.
 
 ### Client Extensions
 
@@ -202,9 +278,12 @@ Open **Settings → Extensions** to browse and manage additions to the client:
 - **Repairs** provide explicit maintenance actions, such as **Codex sign-in
   check** after an authentication failure.
 
-Review an extension's declared sources and actions before installing it, then
-complete any required setup. Adding a client view does not grant a run new
-tools or access to data.
+Opening an extension shows its page: what it adds, its setup and who made it.
+**Install** opens one dialog with the same facts, or a setup dialog first when
+the extension needs a folder, a key or a device. When it finishes, the dialog
+offers to open what you installed: the new tab, Home for a widget, or its
+settings for an input. Adding a client view does not grant a run new tools or
+access to data.
 
 Some extensions need a key. A key is a credential source: the manifest names
 the one origin it may be sent to, setup stores it with owner-only file
@@ -284,29 +363,98 @@ To add a capability, start with [Extending Octopus](contracts/EXTENSION_SURFACES
 To understand updates and local JSON changes, read
 [Source and Home](development.md#source-and-home).
 
+## Experiments
+
+**Settings → Experiments** lists small product ideas running in this client,
+each with its own switch and a count kept on this device:
+
+- **Gesture feedback** briefly shows which command a swipe or fist ran.
+- **Shortcut coach** shows a command's keyboard shortcut after you have opened
+  it from the command menu three times.
+
+Experiments change presentation only. Both start on, in each profile
+separately, and nothing they count leaves the client.
+
 ## Experimental interaction and Test
 
-**Settings → Gestures** maps camera-recognized hand gestures to client
-commands. It includes camera selection, built-in mappings, custom gesture
-recording, and a preview. Camera access is required. Treat these controls as
-experimental, particularly across different cameras and lighting.
+**Settings → Gestures** turns the camera into a second way to drive the
+client. It includes camera selection, command mappings, custom pose recording,
+and a live preview. The first time you turn it on, a short tour asks for the
+camera and shows pointing, pinching and swipes; **Take the tour** repeats it.
+While gesture control is on, a hand button sits in the navigation rail. Its dot
+shows whether the camera is live, and its menu shows the preview and turns
+gesture control off. **Turn gesture control on or off** is also in the command
+menu and can be given a keyboard shortcut. Camera access is required. Hand tracking runs on the GPU in
+a background worker, off the thread that draws the client; if the GPU cannot
+start it, Settings shows that error instead of tracking on the CPU. Treat these
+controls as experimental, particularly across different cameras and lighting.
 
-A swipe is a quick sideways flick with an open hand or two fingers; by default
-left goes Back and right goes Forward. It is judged by the hand's speed and
-straightness, so a frame lost to motion blur or a hand leaving the camera at
-speed still counts, slow sideways movement steps gesture focus instead, and the
-hand returning after a swipe is not read as a swipe the other way. Held poses
-fire only while the hand stays still. While Settings is open, the preview names
-each recognized gesture and its command, and commands run once Settings is
-closed. The preview also measures how many frames per second the camera really
-delivers and warns when that is too few for swipes; a dim room or a phone used
-as a camera can drop to a handful.
+Every gesture in Settings has a small looping illustration of the hand, a plain
+description, and its current command or effect.
+
+A hand counts a quarter second after it comes into view, and a pinch has to be
+held for a moment, so a passing hand or a twitch does nothing.
+
+There is no hand cursor. Gestures move one visible focus ring between concrete
+targets — buttons, fields, tabs, list rows, and Home widgets:
+
+| Gesture | Effect |
+|---------|--------|
+| **Point** (index finger out) | Where the hand is picks the target. An inner region of the camera view spans the whole window — about 62% of its width and 64% of its height at Balanced response, smaller at Responsive and larger at Deliberate — so each window edge is reached with the hand still well inside the frame. Each hand's region is shifted a little toward its own side, so a right hand reaches the left sidebar without crossing the body. Focus goes to the target nearest that point. Holding the hand past an edge scrolls the list under focus. |
+| **Pinch** (thumb to index, then release) | The ring fills while pinched; releasing selects the focused target. On a Home widget it opens the widget's own controls, and on a field it places the text cursor there. |
+| **Pinch and move** | Carries the focused Home widget; releasing drops it. |
+| **Throw** | Releasing a carried widget mid-motion hides it. |
+| **Two-hand pinch** | Spreading or closing both pinched hands resizes the focused widget; moving them together carries it. |
+| **Swipe left / right** (quick flick, open hand or two fingers) | Runs a mapped client command, Back and Forward by default. |
+| **Fist hold** | Runs a mapped client command, none by default. |
+
+Both hands are tracked at once, and each keeps its side as it moves or briefly
+leaves the frame. The pointing position is smoothed by an adaptive filter that
+stays still at rest and keeps up with a moving hand, and focus moves only to a
+target that is clearly closer and stays closer for a moment, so tremor near a
+border does not flip it. A pose is read by a vote over the last few frames, so
+a frame or two misread mid-gesture does not interrupt pointing. Pointing starts
+a moment after the pose settles, and a hand that blurs or leaves keeps the last
+target instead of teleporting focus. Focus stays inside an open dialog or menu.
+A pinch is judged by the 3D distance between the thumb and index fingertips
+relative to the size of the hand, with separate thresholds for closing and
+opening, so a finger pointed toward the camera, whose tip only appears to touch
+the thumb, is not a pinch. It does not depend on what the other fingers do.
+Releasing selects the target that had focus just before the fingers started to
+close, so the motion of pinching does not move the selection, and a new pinch is
+ignored for a quarter of a second after a release, so one wobbly pinch never
+selects several times. A small wobble while pinching still selects, and a pinch
+on a control that cannot move always selects when released. A pinch survives a
+few blurred or dropped frames, and a hand that leaves the camera mid-pinch
+cancels instead of selecting. A swipe needs an open hand or two fingers and is
+judged by speed and straightness, so a frame lost to motion blur still counts,
+the hand returning is not read as a swipe the other way, and a hand turning
+through an unclear pose never swipes. **Spatial widget
+control** turns carrying, resizing, and throwing on or off; focus and selection
+work without it.
+
+**Record gesture trace** saves a few seconds of raw hand landmarks for both
+hands, with every recognizer decision and no video, to `client/gesture-traces/`
+in the Home, and **Reveal in Finder** shows the file. Recording starts after a
+short countdown and continues if you leave Settings, so the moment that
+misbehaves can be captured where it happens. `node
+app/scripts/test-air-hand-control.cjs --trace <file>` replays a trace against
+the current recognizer and prints the recorded and replayed decisions side by
+side.
+
+Focus and selection also work inside Settings, so the preview can be tried in
+place. Mapped commands wait until Settings closes. The preview shows each
+tracked hand with its side and pose, the last recognized gesture and what it
+did, and the focused target. It also measures how many frames per second the
+camera really delivers and warns when that is too few; a dim room or a phone
+used as a camera can drop to a handful.
 
 These gestures are client input, like keyboard shortcuts. The camera recognizer
-emits a local event, which selects a client command or moves a Home widget.
-Switching a tab or dragging a widget does not send an artifact through the
-runtime. If a command submits a message or starts a call, that action enters
-the ordinary chat or voice interface path.
+emits local events that move client focus, run a client command, or arrange a
+Home widget. Moving focus, selecting a control, or carrying a widget does not
+send an artifact through the runtime. If a selected control or a command
+submits a message or starts a call, that action enters the ordinary chat or
+voice interface path.
 
 The repository also carries [AirHand](../registry/interface/world_hand_gesture_control/README.md),
 a macOS prototype for moving the pointer, clicking, and scrolling from a
@@ -357,6 +505,11 @@ runs, ledger, and interface data. The client keeps its preferences and
 Extensions in that Home's `client/` directory. The launch selection and
 provider authentication live elsewhere, such as Codex credentials under
 `~/.codex`, so changing `OCTOPUS_HOME` alone does not isolate provider accounts.
+
+Task history reads use bounded concurrency. Indexed movements, file verification
+and sealed response streams are processed in batches that yield to the client's
+event loop. Cold history reconstruction retains the same ordering, identity and
+integrity checks while allowing the client to handle input between batches.
 
 Use **Help → Report a Problem…** to describe a failure, preview diagnostics,
 save or copy a report, and open a GitHub issue draft. The report has its own

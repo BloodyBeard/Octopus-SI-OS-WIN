@@ -55,7 +55,7 @@ const { useChatCapabilityCatalog } = load("components/chat/useChatCapabilityCata
 });
 function Host() {
   current = useChatCapabilityCatalog("live", true, true, home);
-  gateInput = { ...capabilities, ...current, chatDraftKey, enabled: true, runtimeReady: true, queueReady: true, queueError: "", loadingMessages: false,
+  gateInput = { ...capabilities, ...current, chatDraftKey, enabled: true, runtimeReady: true, runtimeBlockReason: "", queueReady: true, queueError: "", loadingMessages: false,
     artifactWriterAvailable: true, activeRun: { writable: true }, activeRunId: "run", activeRunKey: "run", replyOpen, replyRunKey: replyOpen ? "run" : "",
     activeRunSteeringPending: false, queuedTurns: [], applicationMutationPending: "", clientAgentSelectionReady: true,
     providerSelectionReady: current.providerInterfacesLoaded, activeProvider: current.providerInterfaces.find((item) => item.id === provider.id),

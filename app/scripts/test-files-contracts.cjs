@@ -106,7 +106,8 @@ export const openArtifactFile = async () => {}; export const safeArtifactFilenam
   "src/design-system/components": `import { createElement } from "react";
 export function OcButton({ children, disabled, onClick }) { return createElement("button", { disabled, onClick, type: "button" }, children); }
 export function OcIconButton({ label, disabled, onClick }) { return createElement("button", { "aria-label": label, disabled, onClick, type: "button" }); }
-export function OcMenuItem({ label, disabled, onClick }) { return createElement("button", { role: "menuitem", disabled, onClick, type: "button" }, label); }`,
+export function OcMenuItem({ label, disabled, onClick }) { return createElement("button", { role: "menuitem", disabled, onClick, type: "button" }, label); }
+export function OcStatus({ label }) { return createElement("span", null, label); }`,
   "src/design-system/OcDropdown": `export function OcDropdown({ open, children }) { return open ? children : null; }`,
   "src/runtimeFormat": `export const copyText = async (value) => { globalThis.__files.copies.push(value); return true; };`,
   "src/toasts": `export const appToast = { danger() {}, success() {} };`,
@@ -239,6 +240,22 @@ test("an artifact opens as text up to the 2 MB preview limit and lists its sanit
     }
     assert.deepEqual(harness.trees.at(-1).paths, ["safe:notes/report.md"]);
   }
+});
+
+test("an admitted read opens its exact content in Files instead of the tool envelope", async () => {
+  const { FilesView } = await filesViewModule;
+  filesBridge();
+  const previewText = '{"content":{"text":"Retained instructions · Ω"}}';
+  const target = { kind: "artifact", artifactId: "read:context", runId: "run-1", interfaceId: "provider", label: "self-improvement", previewText };
+  harness.resolveArtifact = async (reference) => {
+    assert.equal(reference.inlinePayload, previewText);
+    return { file: { filename: "self-improvement.json", mediaType: "application/json", bytes: new TextEncoder().encode(reference.inlinePayload) }, model: { kind: "json" } };
+  };
+  await show(React.createElement(FilesView, { accessProfile: "live", active: true, paneKey: "pane-read-context", target }));
+  await settle();
+  assert.equal(harness.editorProps.at(-1).value, previewText);
+  assert.equal(harness.editorProps.at(-1).onChange, undefined);
+  assert.equal(document.querySelector('[role="dialog"]'), null);
 });
 
 test("the renderer root gives the diff worker pool the appearance themes and a Pierre worker", async () => {

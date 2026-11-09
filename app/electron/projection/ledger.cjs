@@ -16,7 +16,8 @@ function ledgerProjection(store) {
   }
 
   const ledgerCursors = new Map();
-  const resolvedMovementGrants = new Map();
+  const resolvedMovementMetadata = new Map();
+  let resolvedMovementMetadataBytes = 0;
   const resolvedArtifactPayloads = new Map();
   let resolvedArtifactPayloadBytes = 0;
   let ledgerProjectionReadTail = Promise.resolve();
@@ -167,50 +168,66 @@ function ledgerProjection(store) {
   function decodeDurableMovementGrant(row, file, lineNumber) {
     const metadata = row?.invocation_metadata;
     if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return "";
-    const hasGrant = Object.prototype.hasOwnProperty.call(metadata, "grant");
-    const hasGrantContent = Object.prototype.hasOwnProperty.call(metadata, "grant_content");
-    if (!hasGrantContent) return "";
-    if (hasGrant) {
+    const grantContent = decodeMovementMetadataContent(metadata, "grant", file, lineNumber);
+    if (decodeMovementMetadataContent(metadata, "artifact_binding_refs", file, lineNumber)
+      && (!Array.isArray(metadata.artifact_binding_refs) || !metadata.artifact_binding_refs.length)) {
+      throw new ProjectionEvidenceError(`ledger movement binding refs content is not a non-empty list: ${file}:${lineNumber}`);
+    }
+    return grantContent;
+  }
+
+  function decodeMovementMetadataContent(metadata, field, file, lineNumber) {
+    const addressField = `${field}_content`;
+    if (!Object.hasOwn(metadata, addressField)) return "";
+    if (Object.hasOwn(metadata, field)) {
       throw new ProjectionEvidenceError(
-        `ledger movement metadata carries both inline and content-addressed grant: ${file}:${lineNumber}`,
+        `ledger movement metadata carries both inline and content-addressed ${field}: ${file}:${lineNumber}`,
       );
     }
-    const content = metadata.grant_content;
+    const content = metadata[addressField];
     if (typeof content !== "string" || !/^[0-9a-f]{64}$/.test(content)) {
-      throw new ProjectionEvidenceError(
-        `ledger movement grant content address is not canonical BLAKE3: ${file}:${lineNumber}`,
-      );
+      throw new ProjectionEvidenceError(`ledger movement ${field} content address is not canonical BLAKE3: ${file}:${lineNumber}`);
     }
-    const metadataRoot = path.join(path.dirname(file), "metadata");
-    const cacheKey = `${metadataRoot}:${content}`;
-    let grant = resolvedMovementGrants.get(cacheKey);
-    if (grant === undefined) {
-      const grantPath = path.join(metadataRoot, content);
-      let bytes;
-      try {
-        bytes = fsSync.readFileSync(grantPath);
-      } catch (error) {
-        throw new ProjectionEvidenceError(
-          `ledger movement grant content is unreadable: ${grantPath}: ${error.message}`,
-        );
+    const contentPath = path.join(path.dirname(file), "metadata", content);
+    const fingerprint = () => {
+      const stat = fsSync.lstatSync(contentPath, { bigint: true });
+      if (!stat.isFile()) throw new Error("metadata content is not a regular file");
+      return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+    };
+    let value;
+    try {
+      const before = fingerprint();
+      const cached = resolvedMovementMetadata.get(contentPath);
+      if (cached && cached.fingerprint === before) {
+        resolvedMovementMetadata.delete(contentPath);
+        resolvedMovementMetadata.set(contentPath, cached);
+        value = cached.value;
+      } else {
+        if (cached) {
+          resolvedMovementMetadata.delete(contentPath);
+          resolvedMovementMetadataBytes -= cached.byteLength;
+        }
+        const bytes = fsSync.readFileSync(contentPath);
+        const actual = Buffer.from(blake3(bytes)).toString("hex");
+        if (actual !== content) throw new Error(`content integrity mismatch: expected ${content}, got ${actual}`);
+        if (fingerprint() !== before) throw new Error("metadata content changed while being read");
+        value = JSON.parse(bytes.toString("utf8"));
+        const maxBytes = 8 * 1024 * 1024;
+        if (bytes.length <= maxBytes) {
+          while (resolvedMovementMetadata.size >= 64 || resolvedMovementMetadataBytes + bytes.length > maxBytes) {
+            const oldest = resolvedMovementMetadata.keys().next().value;
+            resolvedMovementMetadataBytes -= resolvedMovementMetadata.get(oldest).byteLength;
+            resolvedMovementMetadata.delete(oldest);
+          }
+          resolvedMovementMetadata.set(contentPath, { fingerprint: before, value, byteLength: bytes.length });
+          resolvedMovementMetadataBytes += bytes.length;
+        }
       }
-      const actual = Buffer.from(blake3(bytes)).toString("hex");
-      if (actual !== content) {
-        throw new ProjectionEvidenceError(
-          `ledger movement grant content integrity mismatch: ${grantPath}: expected ${content}, got ${actual}`,
-        );
-      }
-      try {
-        grant = JSON.parse(bytes.toString("utf8"));
-      } catch (error) {
-        throw new ProjectionEvidenceError(
-          `ledger movement grant content JSON is invalid: ${grantPath}: ${error.message}`,
-        );
-      }
-      resolvedMovementGrants.set(cacheKey, grant);
+    } catch (error) {
+      throw new ProjectionEvidenceError(`ledger movement ${field} content is invalid: ${contentPath}: ${error.message}`);
     }
-    delete metadata.grant_content;
-    metadata.grant = grant;
+    delete metadata[addressField];
+    metadata[field] = value;
     return content;
   }
 
@@ -338,6 +355,8 @@ function ledgerProjection(store) {
   function closeLedgerProjection() {
     ledgerProjectionSnapshot = null;
     ledgerCursors.clear();
+    resolvedMovementMetadata.clear();
+    resolvedMovementMetadataBytes = 0;
     resolvedArtifactPayloads.clear();
     resolvedArtifactPayloadBytes = 0;
   }

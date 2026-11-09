@@ -27,6 +27,7 @@ pub fn ensure_bootstrap_ee_instances(
 
     let root_id = bootstrap_ee_instance_id(root_template);
     let root = EeInstance {
+        name: None,
         ee_id: root_id.clone(),
         template: root_template.id.clone(),
         parent_ee: None,

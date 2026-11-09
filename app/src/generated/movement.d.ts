@@ -43,7 +43,7 @@ export type DescriptorHash = [
 export type Endpoint = {
   Interface: string;
 };
-export type MovementMetadata = DeliveryMetadata | Mark | InvocationMetadata;
+export type MovementMetadata = ArrivalFanoutMetadata | DeliveryMetadata | Mark | InvocationMetadata;
 export type DeliveryVerdict =
   | {
       admitted: {
@@ -100,10 +100,12 @@ export interface ArtifactRef {
   content: DescriptorHash;
   id: string;
 }
-export interface DeliveryMetadata {
-  delivery_verdict: DeliveryVerdict;
-  runtime?: RuntimeInvocationMetadata | null;
-  source_movement_seq?: number | null;
+export interface ArrivalFanoutMetadata {
+  arrival_fanout: ArrivalFanoutScope;
+}
+export interface ArrivalFanoutScope {
+  identity: string;
+  targets: RuntimeInvocationMetadata[];
 }
 export interface RuntimeInvocationMetadata {
   checkpoint: string;
@@ -114,7 +116,14 @@ export interface RuntimeInvocationMetadata {
   run_record_hash?: string | null;
   worker: string;
 }
+export interface DeliveryMetadata {
+  delivery_scope_seq?: number | null;
+  delivery_verdict: DeliveryVerdict;
+  runtime?: RuntimeInvocationMetadata | null;
+  source_movement_seq?: number | null;
+}
 export interface Mark {
+  arrival_seq?: number | null;
   class: MarkClass;
   details?: {
     [k: string]: unknown;
@@ -135,8 +144,10 @@ export interface InvocationMetadata {
   artifact_binding_refs?: ArtifactRef[];
   checkpoint_admission?: CheckpointAdmissionMetadata | null;
   checkpoint_binding_policy?: CheckpointBindingPolicySnapshot | null;
+  delivery_scope_seq?: number | null;
   grant?: GrantProjection;
   outbound_interface_bindings?: string[];
+  replaces_arrival_seq?: number | null;
   required_verified_artifacts?: RequiredVerifiedArtifact[];
   runtime?: RuntimeInvocationMetadata | null;
   source_movement_seq?: number | null;

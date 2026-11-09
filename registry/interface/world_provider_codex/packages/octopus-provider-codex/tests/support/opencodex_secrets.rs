@@ -17,6 +17,8 @@ fn opencodex_configuration_selects_the_bridge_at_the_toml_root() {
     let encoded = std::fs::read_to_string(home.join("config.toml")).unwrap();
     let config: toml::Value = toml::from_str(&encoded).unwrap();
     assert_eq!(config["model_provider"].as_str(), Some("octopus_opencodex"));
+    assert!(config.get("model_context_window").is_none());
+    assert!(config.get("model_auto_compact_token_limit").is_none());
     assert!(
         !config["agents"]
             .as_table()
@@ -29,6 +31,8 @@ fn opencodex_configuration_selects_the_bridge_at_the_toml_root() {
         Some("http://127.0.0.1:12345/v1")
     );
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+    assert_eq!(provider["request_max_retries"].as_integer(), Some(4));
+    assert_eq!(provider["stream_max_retries"].as_integer(), Some(5));
     assert_eq!(config["features"]["shell_tool"].as_bool(), Some(false));
     let catalog: ModelsResponse = serde_json::from_slice(
         &std::fs::read(config["model_catalog_json"].as_str().unwrap()).unwrap(),
@@ -40,7 +44,8 @@ fn opencodex_configuration_selects_the_bridge_at_the_toml_root() {
         .iter()
         .find(|model| model.slug == "anthropic/claude-sonnet-5")
         .unwrap();
-    assert_eq!(sonnet.context_window, Some(1000000));
+    assert_eq!(sonnet.context_window, Some(400000));
+    assert_eq!(sonnet.max_context_window, Some(1000000));
     assert!(!sonnet.used_fallback_model_metadata);
 }
 
@@ -87,7 +92,7 @@ fn opencodex_reads_the_interface_local_store_for_owner_and_task_interfaces() {
         Default::default(),
     );
     assert_eq!(
-        resolve_api_key(&ctx, &descriptor, &transport, &config)
+        resolve_api_key(&ctx, &descriptor, &transport, &config, &PrivateValues { owner: None })
             .unwrap()
             .as_deref(),
         Some("test-interface-private-key")
@@ -97,7 +102,7 @@ fn opencodex_reads_the_interface_local_store_for_owner_and_task_interfaces() {
     ctx.root_slots
         .insert(PROVIDER_SECRET_OWNER_ROOT_SLOT.into(), owner.clone());
     assert_eq!(
-        resolve_api_key(&ctx, &descriptor, &transport, &config)
+        resolve_api_key(&ctx, &descriptor, &transport, &config, &PrivateValues { owner: None })
             .unwrap()
             .as_deref(),
         Some("test-interface-private-key")
@@ -105,16 +110,81 @@ fn opencodex_reads_the_interface_local_store_for_owner_and_task_interfaces() {
     let mut wrong_scope = transport.clone();
     wrong_scope.auth_secret_ref = Some("secret://world_provider_other/OPENROUTER_API_KEY".into());
     assert!(
-        resolve_api_key(&ctx, &descriptor, &wrong_scope, &config)
+        resolve_api_key(&ctx, &descriptor, &wrong_scope, &config, &PrivateValues { owner: None })
             .unwrap_err()
             .contains("scope must equal")
     );
     store.delete(&scope, &name).unwrap();
     assert!(
-        resolve_api_key(&ctx, &descriptor, &transport, &config)
+        resolve_api_key(&ctx, &descriptor, &transport, &config, &PrivateValues { owner: None })
             .unwrap_err()
             .contains("credential is missing")
     );
+}
+
+#[test]
+fn opencodex_task_copy_reads_setup_values_from_its_credential_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let owner = root.path().join("world_provider_custom");
+    std::fs::create_dir(&owner).unwrap();
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let document = serde_json::json!({
+        "schema_version": 1,
+        "interface": "world_provider_custom",
+        "values": {
+            "OCTOPUS_PROVIDER_CUSTOM_API_KEY": "test-custom-key",
+            "OCTOPUS_PROVIDER_CUSTOM_BASE_URL": "https://example.test/v1",
+            "OCTOPUS_PROVIDER_CUSTOM_MODEL": "vendor/model-x"
+        }
+    });
+    let environment = owner.join("environment.json");
+    std::fs::write(&environment, serde_json::to_vec(&document).unwrap()).unwrap();
+    std::fs::set_permissions(&environment, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut descriptor: InterfaceDescriptor = serde_json::from_str(include_str!(
+        "../../../../../world_provider_custom/interface.json"
+    ))
+    .unwrap();
+    descriptor.id = octopus_descriptors::InterfaceId::new("world_provider_custom_task");
+    let config = descriptor_config(&descriptor).unwrap().unwrap();
+    let transport = descriptor
+        .interface_driver_config
+        .as_ref()
+        .unwrap()
+        .transport
+        .clone()
+        .unwrap();
+    let (arrivals, _) = tokio::sync::mpsc::channel(1);
+    let task_dir = root.path().join("world_provider_custom_task");
+    let ctx = InterfaceLiftContext::unprivileged(
+        descriptor.id.clone(),
+        task_dir.clone(),
+        None,
+        task_dir,
+        root.path().join("movements.jsonl"),
+        root.path().join("blobs"),
+        root.path().join("ledger-index.sqlite"),
+        BTreeMap::from([(PROVIDER_SECRET_OWNER_ROOT_SLOT.into(), owner.clone())]),
+        arrivals,
+        Default::default(),
+    );
+    let values = PrivateValues::resolve(&ctx, &descriptor, &transport, &config).unwrap();
+    assert_eq!(
+        resolve_model_aliases(&config, &["custom-model".to_string()], &values).unwrap(),
+        BTreeMap::from([("custom-model".to_string(), "vendor/model-x".to_string())])
+    );
+    assert_eq!(
+        resolve_base_url(&transport, config.allow_private_network, &values).unwrap(),
+        "https://example.test/v1"
+    );
+    assert_eq!(
+        resolve_api_key(&ctx, &descriptor, &transport, &config, &values)
+            .unwrap()
+            .as_deref(),
+        Some("test-custom-key")
+    );
+    std::fs::set_permissions(&environment, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(PrivateValues::resolve(&ctx, &descriptor, &transport, &config).is_err());
 }
 
 #[test]

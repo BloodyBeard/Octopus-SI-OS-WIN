@@ -1,18 +1,17 @@
-import { useState } from "react";
-import { ArtifactWorkbench } from "../artifacts/ArtifactWorkbench";
+import { openArtifactInFiles } from "../files/FilesPaneNavigation";
+import type { FilesOpenTarget } from "../files/types";
 import type { ArtifactReference } from "../artifacts/types";
 import { Glyph } from "../IconGlyphs";
 import type { TaskSourceRow } from "./taskSourcesPane";
 
-export function TaskSourcesPaneTab({ sources }: { sources: TaskSourceRow[] }) {
-  const [artifactTarget, setArtifactTarget] = useState<ArtifactReference | null>(null);
+export function TaskSourcesPaneTab({ sources, onOpenFiles }: { sources: TaskSourceRow[]; onOpenFiles: (target: FilesOpenTarget) => void }) {
   return (
     <div className="task-sources-panel">
       <ul aria-label="Sources">
         {sources.map((source) => (
           <li key={source.id}>
             {source.reference ? (
-              <button aria-label={source.label} onClick={() => setArtifactTarget(source.reference as ArtifactReference)} type="button">
+              <button aria-label={source.label} onClick={() => openArtifactInFiles(source.reference as ArtifactReference, onOpenFiles)} type="button">
                 <SourceIdentity source={source} />
               </button>
             ) : <div><SourceIdentity source={source} /></div>}
@@ -27,7 +26,6 @@ export function TaskSourcesPaneTab({ sources }: { sources: TaskSourceRow[] }) {
           </li>
         ))}
       </ul>
-      {artifactTarget ? <ArtifactWorkbench onClose={() => setArtifactTarget(null)} presentation="overlay" reference={artifactTarget} /> : null}
     </div>
   );
 }

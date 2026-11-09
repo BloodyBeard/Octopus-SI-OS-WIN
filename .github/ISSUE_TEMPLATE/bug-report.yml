@@ -44,6 +44,19 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact on your work
+      description: How does this affect what you are trying to do?
+      options:
+        - Blocks work completely
+        - Major degradation or frequent failure
+        - Minor bug or occasional failure
+        - Cosmetic issue
+    validations:
+      required: true
+
   - type: input
     id: provider
     attributes:
@@ -84,6 +97,13 @@ body:
       label: Evidence
       description: The `last_error` from `client/setup-state/operations/`, the refusal row from `ledger/movements.jsonl`, or the end of the interface's stderr log. Redact paths, prompts, and artifact contents.
       render: text
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if any)
+      description: Describe anything that lets you continue working and what limitations remain.
+      placeholder: Restarting the app lets me send messages again until the problem returns.
 
   - type: checkboxes
     id: privacy

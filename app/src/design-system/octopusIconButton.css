@@ -20,6 +20,13 @@
 .oc-octopus-icon-control[data-appearance=compact][data-selected=true]:enabled[data-state=open] { background: color-mix(in oklab, var(--color-text-info) 15%, transparent); }
 .oc-octopus-icon-control[data-appearance=compact]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring); }
 
+.oc-octopus-icon-control[data-appearance=dialog-close] {
+  display: flex; width: 24px; height: 24px; flex: none; align-items: center; justify-content: center;
+  padding: 4px; border: 0; border-radius: 4px; background: transparent; color: var(--color-text-secondary); cursor: var(--cursor-interaction);
+}
+.oc-octopus-icon-control[data-appearance=dialog-close]:enabled:hover { background: var(--color-background-primary-ghost-hover); color: var(--color-text); }
+.oc-octopus-icon-control[data-appearance=dialog-close]:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
+
 .oc-octopus-icon-control:disabled { cursor: default; opacity: .4; }
 
 .oc-octopus-icon-control[data-appearance=rail] {

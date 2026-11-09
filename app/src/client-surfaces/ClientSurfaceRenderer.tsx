@@ -128,6 +128,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         animate={{ opacity: voiceLeaving ? 0 : 1 }}
         className={`voice-projection-card client-surface-frame ${OCTOPUS_WIDGET_SURFACE_CLASS} is-${document.render.kind}${densityClass}${widgetResize.layoutReady ? " is-layout-ready" : ""}${widgetResize.interacting ? " is-interacting" : ""}`}
         data-content-fit={document.target.layout.content_fit}
+        data-gesture-label={document.title}
         data-surface-document={document.id}
         data-surface-artifact={admitted.sourceArtifactId}
         data-surface-run={admitted.sourceRunId}
@@ -144,6 +145,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         <button
           aria-label={`Move ${document.title}`}
           className="voice-widget-drag-handle"
+          data-gesture-ignore=""
           onLostPointerCapture={widgetResize.onPointerEnd}
           onPointerCancel={widgetResize.onPointerEnd}
           onPointerDown={widgetResize.onDragPointerDown}
@@ -158,7 +160,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
               <strong>{document.title}</strong>
             </span>
             {onDismiss ? (
-              <button aria-label={`Hide ${document.title}`} className="client-surface-dismiss" onClick={onDismiss} type="button">
+              <button aria-label={`Hide ${document.title}`} className="client-surface-dismiss" data-surface-dismiss="" onClick={onDismiss} type="button">
                 <Glyph name="close" size={14} />
               </button>
             ) : null}
@@ -186,6 +188,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
       <motion.section
         animate={voiceLeaving ? { opacity: 0, scale: 0.985, y: 5 } : { opacity: 1, scale: 1, y: 0 }}
         className={`voice-surface-window client-surface-frame ${OCTOPUS_FLOATING_SURFACE_CLASS} is-${document.render.kind}${densityClass}${widgetResize.layoutReady ? " is-layout-ready" : ""}${widgetResize.interacting ? " is-interacting" : ""}`}
+        data-gesture-label={document.title}
         data-surface-document={document.id}
         data-surface-artifact={admitted.sourceArtifactId}
         data-surface-run={admitted.sourceRunId}
@@ -203,6 +206,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         <button
           aria-label={`Move ${document.title}`}
           className="voice-widget-drag-handle"
+          data-gesture-ignore=""
           onLostPointerCapture={widgetResize.onPointerEnd}
           onPointerCancel={widgetResize.onPointerEnd}
           onPointerDown={widgetResize.onDragPointerDown}
@@ -213,7 +217,7 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         <header>
           <span><strong>{document.title}</strong></span>
           {onDismiss ? (
-            <button aria-label={`Hide ${document.title}`} onClick={onDismiss} type="button">
+            <button aria-label={`Hide ${document.title}`} data-surface-dismiss="" onClick={onDismiss} type="button">
               <Glyph className="icon-xs" name="close" size={16} />
             </button>
           ) : null}
@@ -257,7 +261,7 @@ type WidgetInteractionStart = {
   bounds: DOMRect;
   corner?: VoiceSpatialCorner;
   inputId: string;
-  kind: "drag" | "resize";
+  kind: "drag" | "resize" | "transform";
   pointerX: number;
   pointerY: number;
   stageBounds: DOMRect;
@@ -549,7 +553,7 @@ export function useVoiceWidgetResize(
     beginPointerInteraction("resize", corner, event);
   }
 
-  function moveInteractionAt(clientX: number, clientY: number, inputId: string) {
+  function moveInteractionAt(clientX: number, clientY: number, inputId: string, scale = 1) {
     const start = active.current;
     const element = ref.current;
     if (!start || start.inputId !== inputId || !element) return;
@@ -557,6 +561,22 @@ export function useVoiceWidgetResize(
     const deltaY = clientY - start.pointerY;
     const stageWidth = start.stageBounds.width;
     const stageHeight = start.stageBounds.height;
+    if (start.kind === "transform") {
+      const bounds = widgetSizeBounds(sizePolicy, stageWidth, stageHeight, element);
+      const width = clamp(start.bounds.width * scale, bounds.minWidth, bounds.maxWidth);
+      const height = clamp(start.bounds.height * scale, bounds.minHeight, bounds.maxHeight);
+      setGeometry((current) => ({
+        ...current,
+        height,
+        stageHeight,
+        stageWidth,
+        width,
+        x: clamp(start.x + (start.bounds.width - width) / 2 + deltaX, WIDGET_EDGE_GAP, Math.max(WIDGET_EDGE_GAP, stageWidth - width - WIDGET_EDGE_GAP)),
+        y: clamp(start.y + (start.bounds.height - height) / 2 + deltaY, WIDGET_EDGE_GAP, Math.max(WIDGET_EDGE_GAP, stageHeight - height - WIDGET_EDGE_GAP)),
+        z: start.z,
+      }));
+      return;
+    }
     if (start.kind === "drag") {
       setGeometry((current) => ({
         ...current,
@@ -635,7 +655,7 @@ export function useVoiceWidgetResize(
       return;
     }
     if (interaction.phase === "move") {
-      moveInteractionAt(interaction.clientX, interaction.clientY, inputId);
+      moveInteractionAt(interaction.clientX, interaction.clientY, inputId, interaction.scale);
       return;
     }
     endInteraction(inputId);

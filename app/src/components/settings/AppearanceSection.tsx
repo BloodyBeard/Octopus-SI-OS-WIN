@@ -31,6 +31,8 @@ import {
 } from "../../design-system/components";
 import { OcDropdown } from "../../design-system/OcDropdown";
 import { Glyph } from "../IconGlyphs";
+import { MessageTooltip } from "../chat/MessageTooltip";
+import { ThemePreviewGraphic } from "./AppearanceThemePreview";
 import { octopusDiffThemeName, registerOctopusDiffThemes } from "./octopusDiffThemes";
 import { octopusDiffRawUnsafeCss } from "./octopusDiffUnsafeCss";
 import { SettingsHeading } from "./SettingsHeading";
@@ -43,7 +45,7 @@ const themeOptions: Array<{ value: ThemeMode; label: string }> = [
   { value: "dark", label: "Dark" },
 ];
 
-const themeCardClass = "flex flex-col [&>*:not(:last-child)]:relative [&>*:not(:last-child)]:after:pointer-events-none [&>*:not(:last-child)]:after:absolute [&>*:not(:last-child)]:after:inset-x-4 [&>*:not(:last-child)]:after:bottom-0 [&>*:not(:last-child)]:after:h-[0.5px] [&>*:not(:last-child)]:after:bg-border [&>*:not(:last-child)]:after:content-[''] overflow-hidden rounded-2xl border border-default";
+const themeCardClass = "flex flex-col [&>*:not(:last-child)]:relative [&>*:not(:last-child)]:after:pointer-events-none [&>*:not(:last-child)]:after:absolute [&>*:not(:last-child)]:after:inset-x-4 [&>*:not(:last-child)]:after:bottom-0 [&>*:not(:last-child)]:after:h-px [&>*:not(:last-child)]:after:bg-border [&>*:not(:last-child)]:after:content-[''] overflow-hidden rounded-2xl border border-default";
 const rangeClass = "h-0.5 flex-1 appearance-none rounded-full [&::-moz-range-thumb]:h-5 [&::-moz-range-thumb]:w-5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border [&::-moz-range-thumb]:border-transparent [&::-moz-range-thumb]:bg-current [&::-moz-range-thumb]:shadow-sm [&::-moz-range-track]:h-0.5 [&::-moz-range-track]:rounded-full [&::-webkit-slider-runnable-track]:h-0.5 [&::-webkit-slider-runnable-track]:rounded-full [&::-webkit-slider-thumb]:mt-[-9px] [&::-webkit-slider-thumb]:h-5 [&::-webkit-slider-thumb]:w-5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border [&::-webkit-slider-thumb]:border-transparent [&::-webkit-slider-thumb]:bg-current [&::-webkit-slider-thumb]:shadow-sm";
 
 const themePreviewBefore = `const themePreview: ThemeConfig = {
@@ -148,7 +150,7 @@ export function AppearanceSection() {
 
       <OcGroup title="Theme">
         <div className="flex flex-col gap-4">
-          <div aria-label="Theme" className="grid max-w-lg grid-cols-3 gap-3" role="radiogroup">
+          <div aria-label="Theme" className="grid w-68 max-w-full grid-cols-3 gap-4" role="radiogroup">
             {themeOptions.map((option) => (
               <ThemeOption
                 checked={appearance.themeMode === option.value}
@@ -346,68 +348,30 @@ function ThemeOption({
   mode: ThemeMode;
   onChange: () => void;
 }) {
-  const background = mode === "system"
-    ? "linear-gradient(90deg, rgb(159, 159, 159) 0px, rgb(159, 159, 159) 50%, rgb(93, 93, 93) 50%, rgb(93, 93, 93) 100%)"
-    : mode === "light" ? "rgb(243, 243, 243)" : "rgb(93, 93, 93)";
   return (
-    <label className="group flex min-w-0 cursor-interaction flex-col items-center gap-1.5 text-center">
-      <input
-        aria-label={label}
-        checked={checked}
-        className="peer sr-only"
-        name="appearance-theme"
-        onChange={onChange}
-        type="radio"
-      />
-      <span
-        aria-hidden="true"
-        className={cx(
-          "relative isolate block aspect-[17/12] w-full overflow-hidden rounded-lg border peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-token-focus-border",
-          checked ? "border-token-text-primary" : "border-token-border group-hover:border-token-border-heavy",
-        )}
-        style={{ background }}
-      >
-        <ThemePreviewGraphic mode={mode} />
-      </span>
-      <span className={cx(
-        "truncate text-sm group-hover:text-token-text-primary",
-        checked ? "text-token-text-primary" : "text-token-text-secondary",
-      )}>
-        {label}
-      </span>
-    </label>
+    <MessageTooltip asChild label={label}>
+      <label className="group flex min-w-0 cursor-interaction flex-col items-center gap-1.5 text-center">
+        <input
+          aria-label={label}
+          checked={checked}
+          className="peer sr-only"
+          name="appearance-theme"
+          onChange={onChange}
+          type="radio"
+        />
+        <span
+          aria-hidden="true"
+          className="relative isolate block aspect-4/3 w-full overflow-hidden rounded-lg text-info peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring"
+        >
+          <ThemePreviewGraphic mode={mode} />
+          <span className={cx(
+            "absolute inset-0 rounded-lg border-2",
+            checked ? "border-ring" : "border-default group-hover:border-strong",
+          )} />
+        </span>
+      </label>
+    </MessageTooltip>
   );
-}
-
-function ThemePreviewGraphic({ mode }: { mode: ThemeMode }) {
-  const capsule = (x: number, y: number, width: number, height: number, fill: string) => <rect x={x} y={y} width={width} height={height} rx={height / 2} fill={fill} />;
-  if (mode === "system") {
-    return <svg aria-hidden="true" className="block size-full mix-blend-luminosity" viewBox="0 0 170 120" xmlns="http://www.w3.org/2000/svg">
-      {[false, true].map((dark) => <svg key={String(dark)} x={dark ? 85 : 0} width={85} height={120} viewBox={`${dark ? 85 : 0} 0 85 120`} overflow="hidden">
-        <rect x={7} y={34} width={156} height={108} rx={8} fill={dark ? "#393939" : "#f3f3f3"} />
-        {capsule(70, 59, 27, 6, dark ? "#767676" : "#cdcdcd")}
-        <rect x={53} y={68} width={64} height={3} fill={dark ? "#8f8f8f" : "#dfdfdf"} />
-        <rect x={26} y={77} width={118} height={64} rx={7} fill={dark ? "#4f4f4f" : "#fff"} />
-        {[85, 111].map((y) => <g key={y}>
-          {capsule(32, y, 35, 6, dark ? "#767676" : "#dfdfdf")}
-          {capsule(103, y, 35, 6, dark ? "#767676" : "#dfdfdf")}
-        </g>)}
-        <rect x={32} y={96} width={106} height={2} fill={dark ? "#767676" : "#f3f3f3"} />
-        <rect x={26} y={105} width={118} height={1} fill={dark ? "#767676" : "#f3f3f3"} />
-      </svg>)}
-    </svg>;
-  }
-  const dark = mode === "dark";
-  return <svg aria-hidden="true" className="block size-full mix-blend-luminosity" viewBox="0 0 170 120" xmlns="http://www.w3.org/2000/svg">
-    {capsule(46, 26, 78, 6, dark ? "#9f9f9f" : "#cdcdcd")}
-    {capsule(26, 35, 118, 4, dark ? "#8f8f8f" : "#dfdfdf")}
-    <rect x={15} y={44} width={140} height={96} rx={8} fill="#fff" />
-    {[56, 80, 104].map((y) => <g key={y}>
-      {capsule(22, y, 45, 6, "#dfdfdf")}
-      <rect x={22} y={y + 11} width={65} height={2} fill="#f3f3f3" />
-    </g>)}
-    <path d="M15 76h140M15 100h140" stroke="#f3f3f3" strokeWidth={1} transform="translate(0 .5)" />
-  </svg>;
 }
 
 function ThemeDiffPreview({ appearance }: { appearance: AppearanceSettings }) {
@@ -527,7 +491,7 @@ function ThemeEditor({
               />
             </div>
           )}
-          label={<h2 id={titleId}>{title}</h2>}
+          label={<h2 className="font-medium" id={titleId}>{title}</h2>}
         />
         <ThemeRow control={<ColorField label={`${capitalize(mode)} accent color`} onChange={onAccent} value={accent} />} label="Accent" />
         <ThemeRow control={<ColorField label={`${capitalize(mode)} background color`} onChange={onBackground} value={background} />} label="Background" />
@@ -566,10 +530,10 @@ function ThemeImportDialog({
       initialFocusRef={inputRef}
       onClose={onClose}
       open={Boolean(mode)}
-      panelClassName="max-w-[520px]"
+      panelClassName="settings-theme-import-dialog"
     >
-      <OcDialogHeader onClose={onClose} title="Import theme" titleId="appearance-theme-import-title" />
-      <div className="min-h-0 px-6 pb-6">
+      <OcDialogHeader className="settings-theme-import-header" onClose={onClose} title="Import theme" titleId="appearance-theme-import-title" />
+      <div className="min-h-0 px-5 pt-3">
         <OcTextField
           inputClassName="font-mono text-sm"
           inputRef={inputRef}
@@ -588,7 +552,7 @@ function ThemeImportDialog({
           value={value}
         />
       </div>
-      <OcDialogFooter>
+      <OcDialogFooter className="settings-theme-import-footer">
         <OcButton onClick={onClose} variant="ghost">Cancel</OcButton>
         <OcButton disabled={!valid} onClick={onSubmit} variant="primary">Import theme</OcButton>
       </OcDialogFooter>
@@ -687,10 +651,10 @@ function CodeThemeSwatch({
 
 function ThemeRow({ label, control, className }: { label: ReactNode; control: ReactNode; className?: string }) {
   return (
-    <div className={cx("flex items-center justify-between gap-4 px-4 py-2", className)}>
+    <div className={cx("settings-theme-row flex items-center justify-between gap-4 px-4 py-2", className)}>
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <div className="flex min-w-0 flex-col gap-0.5">
-          <div className="min-w-0 text-sm font-medium text-token-text-primary">{label}</div>
+          <div className="min-w-0 break-words text-sm text-default">{label}</div>
         </div>
       </div>
       <div className="flex max-w-full shrink-0 items-center gap-2">{control}</div>
@@ -710,12 +674,12 @@ function PreferenceRow({
   className?: string;
 }) {
   return (
-    <div className={cx("flex items-center justify-between px-4 gap-6 py-3", className)}>
+    <div className={cx("settings-preference-row flex items-center justify-between px-4 gap-6 py-3", className)}>
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <div className="flex min-w-0 flex-col gap-0.5">
-          <div className="min-w-0 text-token-text-primary text-sm font-medium">{label}</div>
+          <div className="min-w-0 break-words text-token-text-primary text-sm font-medium">{label}</div>
           {description ? (
-            <div className="min-w-0 text-xs leading-4 text-balance text-token-text-secondary">{description}</div>
+            <div className="min-w-0 text-xs leading-4 text-wrap break-words text-token-text-secondary">{description}</div>
           ) : null}
         </div>
       </div>

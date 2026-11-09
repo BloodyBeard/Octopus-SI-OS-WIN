@@ -64,7 +64,9 @@ export function useRuntimeTopology(
   focusedRunIds: readonly string[] = [],
   includeLedger = true,
 ): RuntimeTopologyState {
-  const [snapshot, setSnapshot] = useState<TopologySnapshot>(() => emptySnapshot());
+  const [snapshot, setSnapshot] = useState<TopologySnapshot>(() => emptySnapshot({
+    ...emptyProjection, mode: "connecting", label: "Loading topology", detail: "",
+  }));
   // Every projection change on disk re-projects the world in place: no flash back to a
   // loading state, no stale "live" claim. The first read is the only "connecting" moment.
   const generation = useProjectionGeneration(includeLedger, enabled);
@@ -143,8 +145,8 @@ export function useRuntimeTopology(
         projection: {
           mode: "connecting",
           endpoint: projectionTargetLabel(),
-          label: "Reading projection",
-          detail: "Reading registry descriptors, binding manifests, artifacts, marks, and ledger rows",
+          label: "Loading topology",
+          detail: "",
         },
       }));
     }
@@ -624,7 +626,7 @@ function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
 
   return {
     id: eeId,
-    name: `${templateName}.ee`,
+    name: stringValue(ee?.name) || eeId,
     status,
     statusLabel: statusLabel(status),
     accent,
@@ -640,6 +642,7 @@ function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
     description: `EE scope ${templateName} contains runs, interface bindings, artifact movement, worker environments, and policy data for this goal boundary.`,
     stats: [
       { label: "Status", value: statusLabel(status), tone: statusTone(status) },
+      { label: "Policy template", value: templateName },
       { label: "Child EEs", value: String(projectionIndex.childCounts.get(eeId)?.length ?? 0) },
       { label: "Active Runs", value: `${activeRuns} / ${eeRuns.length}` },
       { label: "Worker Refs", value: compactList(workers) || "none" },

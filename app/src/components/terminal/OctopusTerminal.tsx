@@ -222,6 +222,7 @@ function readTerminalTheme(element: HTMLElement): ITheme {
   const elementStyle = getComputedStyle(element);
   const rootStyle = getComputedStyle(document.documentElement);
   const probe = document.createElement("div");
+  probe.style.setProperty("transition-property", "none", "important");
   element.appendChild(probe);
   const resolve = (name: string): string | undefined => {
     const value = elementStyle.getPropertyValue(name).trim() || rootStyle.getPropertyValue(name).trim();

@@ -29,13 +29,18 @@ function load(relative, mocks = {}) {
 }
 const workspaces = load("src/shell/clientWorkspaces.ts");
 const navigation = load("src/shell/navigation.ts", { "./clientWorkspaces": workspaces });
-const windows = load("src/shell/clientWindowModel.ts", { "../components/files/filesPaneSnapshot": {} });
+const artifactFilesTarget = load("src/components/files/artifactFilesTarget.ts");
+const windows = load("src/shell/clientWindowModel.ts", {
+  "../components/files/filesPaneSnapshot": {},
+  "../components/files/artifactFilesTarget": artifactFilesTarget,
+});
 const state = load("src/components/shell/operatorShellState.ts", {
   "../../clientActions": { clientCommands: [] },
   "../../shell/clientWorkspaces": workspaces,
   "../../shell/navigation": navigation,
   "../../shell/clientWindowModel": windows,
   "../files/filesPaneSnapshot": {},
+  "../files/artifactFilesTarget": artifactFilesTarget,
   "./paneTabs": load("src/components/shell/paneTabs.ts"),
 });
 const surfaces = navigation.clientNavigationDestinations.map(({ surfaceId }) => ({
@@ -202,7 +207,7 @@ test("Tasks restores its own task or Scheduled in the primary surface", () => {
     const fixture = railFixture(options);
     fixture.open("tasks");
     assert.deepEqual(fixture.calls.at(-1), expected);
-    assert.ok(fixture.calls.some(([name, value]) => name === "side-pane" && value === false));
+    assert.equal(fixture.calls.some(([name]) => name === "side-pane"), false, "navigation preserves the destination-owned pane state");
     assert.ok(!fixture.calls.some(([name]) => name === "home"));
   }
 });
@@ -238,9 +243,9 @@ test("opening an existing task or pressing plus uses Tasks without opening Home"
     selectSurface: (id, runId) => calls.push(["surface", id, runId]),
   });
   open("task-a");
-  assert.deepEqual(calls.splice(0), [["task", "task-a"], ["side-pane", false], ["focused", false], ["surface", "chat", "task-a"]]);
+  assert.deepEqual(calls.splice(0), [["task", "task-a"], ["surface", "chat", "task-a"]]);
   open("");
-  assert.deepEqual(calls.splice(0), [["new"], ["side-pane", false], ["focused", false], ["surface", "chat", ""]]);
+  assert.deepEqual(calls.splice(0), [["new"], ["surface", "chat", ""]]);
   open("", "project-a");
   assert.deepEqual(calls[0], ["new", "project-a"]);
 });
@@ -259,10 +264,10 @@ test("opening a task outside the selected project reveals it in All tasks", () =
 
 test("Home opens its surface, Dashboard restores its view, and Inbox, Applications and Drivers open directly", () => {
   const home = railFixture(); home.open("home");
-  assert.deepEqual(home.calls, [["focused", false], ["home"], ["home-mode", "voice"]]);
+  assert.deepEqual(home.calls, [["home"], ["home-mode", "voice"]]);
   for (const [section, surfaceId] of [["dashboard", "registry"], ["inbox", "inbox"], ["applications", "applications"], ["drivers", "drivers"]]) {
     const fixture = railFixture(); fixture.open(section);
-    assert.deepEqual(fixture.calls, [["focused", false], ["side-pane", false], ["surface", surfaceId]]);
+    assert.deepEqual(fixture.calls, [["surface", surfaceId]]);
   }
   assert.equal(navigation.navigationSectionForSurface(surfaces.find(({ id }) => id === "custom-home")), "tasks");
   assert.equal(navigation.navigationSectionForSurface(surfaces.find(({ id }) => id === "custom-dashboard")), "dashboard");
@@ -282,10 +287,10 @@ test("global surface selection follows the rail and exposes additional Dashboard
   open(surfaces.find(({ id }) => id === "voice"));
   assert.deepEqual(calls.splice(0), [["rail", "home"]]);
   open(surfaces.find(({ id }) => id === "registry"));
-  assert.deepEqual(calls, [["focused", false], ["side-pane", false], ["surface", "registry"]]);
+  assert.deepEqual(calls, [["surface", "registry"]]);
 });
 
-test("Back and Forward reveal their primary destination and restore its exact task", () => {
+test("Back and Forward restore the exact task and retain destination-owned pane state", () => {
   let current = { entries: [{ surfaceId: "voice" }, { surfaceId: "chat", runId: "task-a" }, { surfaceId: "inbox" }], index: 2 };
   const calls = [];
   const move = (delta) => callback("navigateSurfaceHistory", {
@@ -300,10 +305,10 @@ test("Back and Forward reveal their primary destination and restore its exact ta
   })(delta);
   move(-1);
   assert.equal(current.index, 1);
-  assert.deepEqual(calls.splice(0), [["side-pane", false], ["focused", false], ["pane", "primary"], ["task", "task-a"]]);
+  assert.deepEqual(calls.splice(0), [["task", "task-a"]]);
   move(1);
   assert.equal(current.index, 2);
-  assert.deepEqual(calls.splice(0), [["side-pane", false], ["focused", false], ["pane", "primary"]]);
+  assert.deepEqual(calls.splice(0), []);
   move(1);
   assert.deepEqual(calls, []);
 });
@@ -312,6 +317,7 @@ test("Settings is one history entry: sections replace it and closing returns to 
   let current = { entries: [{ surfaceId: "chat", runId: "task-a" }], index: 0 };
   const calls = [], preferences = { settingsSection: "general" };
   const environment = {
+    setSettingsRecordingId: () => {},
     clientPreferences: preferences, normalizeSettingsSection: (section) => section,
     sameClientDestination: state.sameClientDestination, clientDestination: state.clientDestination,
     setClientPreferences: (update) => Object.assign(preferences, update),

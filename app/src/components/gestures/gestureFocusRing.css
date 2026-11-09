@@ -1,0 +1,127 @@
+.gesture-focus-ring {
+  --gesture-ring-color: var(--color-token-focus-border);
+  position: fixed;
+  z-index: 2147480000;
+  top: 0;
+  left: 0;
+  width: var(--gesture-ring-width, 0);
+  height: var(--gesture-ring-height, 0);
+  border: 2px solid var(--gesture-ring-color);
+  border-radius: var(--gesture-ring-radius, 8px);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--gesture-ring-color) 18%, transparent);
+  pointer-events: none;
+  transform: translate3d(var(--gesture-ring-x, 0), var(--gesture-ring-y, 0), 0);
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    width 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    translate 110ms ease-out,
+    background-color 120ms ease,
+    box-shadow 160ms ease;
+  will-change: transform, width, height;
+}
+
+.gesture-focus-ring[data-settled="false"],
+.gesture-focus-ring[data-state="grab"],
+.gesture-focus-ring[data-state="resize"] {
+  transition: background-color 120ms ease, box-shadow 160ms ease;
+}
+
+.gesture-focus-ring[data-visible="false"] {
+  opacity: 0;
+}
+
+.gesture-focus-ring[data-state="armed"] {
+  border-width: 3px;
+  background: color-mix(in srgb, var(--gesture-ring-color) 12%, transparent);
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--gesture-ring-color) 26%, transparent);
+}
+
+.gesture-focus-ring[data-state="confirm"] {
+  background: color-mix(in srgb, var(--gesture-ring-color) 18%, transparent);
+  animation: gesture-ring-confirm 280ms ease-out;
+}
+
+.gesture-focus-ring[data-state="reject"] {
+  --gesture-ring-color: var(--color-token-text-tertiary);
+  animation: gesture-ring-reject 320ms ease-in-out;
+}
+
+.gesture-focus-ring[data-state="grab"],
+.gesture-focus-ring[data-state="resize"] {
+  border-width: 2px;
+  background: color-mix(in srgb, var(--gesture-ring-color) 6%, transparent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--gesture-ring-color) 32%, transparent),
+    0 22px 48px -22px rgb(0 0 0 / 55%);
+}
+
+.gesture-focus-ring[data-bump="left"] {
+  translate: -6px 0;
+}
+
+.gesture-focus-ring[data-bump="right"] {
+  translate: 6px 0;
+}
+
+.gesture-focus-ring[data-bump="up"] {
+  translate: 0 -6px;
+}
+
+.gesture-focus-ring[data-bump="down"] {
+  translate: 0 6px;
+}
+
+.gesture-focus-ring__hint {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  padding: 3px 8px;
+  border: 1px solid var(--color-token-border);
+  border-radius: 999px;
+  color: var(--color-token-text-secondary);
+  background: color-mix(in srgb, var(--color-token-main-surface-primary) 94%, transparent);
+  box-shadow: var(--elevation-prominent, 0 4px 16px rgb(0 0 0 / 14%));
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  translate: -50% 0;
+}
+
+.gesture-focus-ring[data-hint-above="true"] .gesture-focus-ring__hint {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+@keyframes gesture-ring-confirm {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--gesture-ring-color) 45%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--gesture-ring-color) 0%, transparent);
+  }
+}
+
+@keyframes gesture-ring-reject {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  25% {
+    translate: -4px 0;
+  }
+  75% {
+    translate: 4px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gesture-focus-ring {
+    transition: none;
+    animation: none;
+  }
+
+  .gesture-focus-ring[data-state] {
+    animation: none;
+  }
+}

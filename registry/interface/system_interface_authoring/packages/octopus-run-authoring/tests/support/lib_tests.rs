@@ -30,6 +30,7 @@
             consumed_context_free_independent_input: None,
             consumed_verified_input: false,
             deferred_context_generations: 0,
+            result_rebase: None,
         };
         reattach_unpublished_context_inputs(&mut state, 10, vec![ArtifactId::new("operator.message:3")]).unwrap();
         assert_eq!(state.session_context.artifacts.iter().map(|entry| entry.source_movement_seq.unwrap()).collect::<Vec<_>>(), vec![3, 10, 12, 14]);
@@ -51,7 +52,7 @@
     fn names_binding(interface: impl Into<String>, names: &[&str]) -> AuthoredInterfaceBinding {
         AuthoredInterfaceBinding {
             interface: InterfaceId::new(interface),
-            config: octopus_runtime::InterfaceBindingConfig {
+            config: octopus_policy::InterfaceBindingConfig {
                 artifact_policy: BindingArtifactPolicy::Allow {
                     names: names.iter().map(|name| (*name).to_string()).collect(),
                     namespaces: Vec::new(),
@@ -274,6 +275,115 @@
             artifact: None,
             invocation_metadata: None,
         }
+    }
+
+    #[test]
+    fn writer_edge_candidates_keep_unattributed_rows_and_validate_ledger_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movements.jsonl");
+        let index_path = dir.path().join("ledger-index.sqlite");
+        let source = InterfaceId::new("source");
+        let door = InterfaceId::new("door");
+        let mut rows: Vec<_> = (0..4).map(ledger_row).collect();
+        rows[1].kind = MovementKind::InterfaceOutbound;
+        rows[1].from = Endpoint::Interface(source.clone());
+        rows[1].to = Endpoint::Interface(door.clone());
+        rows[2].kind = MovementKind::InterfaceOutbound;
+        rows[2].to = Endpoint::Interface(door.clone());
+        let mut ledger = String::new();
+        let mut row_ranges = Vec::new();
+        for row in &rows {
+            let start = ledger.len() as u64;
+            ledger.push_str(&format!("{}\n", serde_json::to_string(row).unwrap()));
+            row_ranges.push((start, ledger.len() as u64));
+        }
+        std::fs::write(&path, &ledger).unwrap();
+        let mut index = LedgerSqliteIndex::open(&index_path).unwrap();
+        index.ingest_from(&SnapshotMovementLog { rows, durable_end_offset: ledger.len() as u64, row_ranges }).unwrap();
+        drop(index);
+        let blobs = dir.path().join("blobs");
+        let evidence = CheckedRunEvidence { movements_path: &path, ledger_index_path: &index_path, blobs_dir: &blobs,
+            max_control_frame_bytes: 4096, max_manifest_bytes: 4096, max_payload_bytes: 4096 };
+        let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+        let selected = reader.indexed_outbound_edges(&[(&source, &door)]).unwrap().unwrap();
+        assert_eq!(selected.iter().map(|row| row.seq).collect::<Vec<_>>(), [1, 3]);
+        reader.reader.seek(std::io::SeekFrom::Start(selected[0].start_offset)).unwrap();
+        reader.next_seq = selected[0].seq;
+        assert!(reader.movement(1).unwrap().unwrap().invocation_metadata.is_none());
+        let mut bytes = ledger.into_bytes();
+        bytes[selected[0].start_offset as usize] = b'!';
+        std::fs::write(&path, bytes).unwrap();
+        let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+        assert!(reader.indexed_outbound_edges(&[(&source, &door)]).unwrap().is_none());
+        reader.movement(0).unwrap();
+        assert!(reader.movement(1).is_err());
+        std::fs::remove_file(&index_path).unwrap();
+        let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+        assert!(reader.indexed_outbound_edges(&[(&source, &door)]).unwrap().is_none());
+    }
+
+    #[test]
+    fn selected_ledger_grants_preserve_authority_and_validate_unselected_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = dir.path().join("metadata");
+        std::fs::create_dir(&metadata).unwrap();
+        let mut movement = ledger_row(0);
+        movement.invocation_metadata = Some(InvocationMetadata::new(GrantProjection {
+            tools: vec!["file.write".into()], interfaces: vec!["system_room".into()], ..Default::default()
+        }).into());
+        let row = octopus_ledger::encode_durable_movement_row(&movement, 0, |_, bytes| {
+            let hash = ContentHash::of_bytes(bytes);
+            std::fs::write(metadata.join(hash.to_hex()), bytes).unwrap(); Ok(hash)
+        }).unwrap();
+        let rows = ledger_rows::LedgerRows::detached(&dir.path().join("movements.jsonl"));
+        assert_eq!(rows.decode_with_grant_if(row.as_bytes(), 0, |_| true).unwrap(), movement);
+        let projected = rows.decode_with_grant_if(row.as_bytes(), 0, |_| false).unwrap();
+        let grant = &projected.invocation_metadata.as_ref().unwrap().invocation().unwrap().grant;
+        assert!(grant.tools.is_empty());
+        assert_eq!(grant.interfaces, ["system_room"]);
+        let blob = std::fs::read_dir(&metadata).unwrap().next().unwrap().unwrap().path();
+        std::fs::remove_file(blob).unwrap();
+        assert!(rows.decode_with_grant_if(row.as_bytes(), 0, |_| false).is_err());
+    }
+
+    #[test]
+    fn retained_delivery_reads_own_grants_and_checks_the_global_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movements.jsonl");
+        let metadata = dir.path().join("metadata");
+        std::fs::create_dir(&metadata).unwrap();
+        let source = InterfaceId::new("own");
+        let mut foreign = ledger_row(0);
+        foreign.from = Endpoint::Interface("other".into());
+        foreign.invocation_metadata = Some(InvocationMetadata::new(Default::default()).into());
+        let foreign_row = octopus_ledger::encode_durable_movement_row(&foreign, 0,
+            |_, bytes| Ok(ContentHash::of_bytes(bytes))).unwrap();
+        let mut own = ledger_row(1);
+        own.from = Endpoint::Interface(source.clone());
+        own.invocation_metadata = Some(InvocationMetadata::new(GrantProjection {
+            tools: vec!["file.write".into()], ..Default::default()
+        }).into());
+        let own_row = octopus_ledger::encode_durable_movement_row(&own, 1, |_, bytes| {
+            let hash = ContentHash::of_bytes(bytes);
+            std::fs::write(metadata.join(hash.to_hex()), bytes).unwrap(); Ok(hash)
+        }).unwrap();
+        std::fs::write(&path, format!("{foreign_row}\n{own_row}\n")).unwrap();
+        let mut projection = pending_delivery::Ledger::new(source.clone(), path.clone(), 1_048_576);
+        assert_eq!(projection.watermark().unwrap(), 2);
+        assert_eq!(projection.watermark().unwrap(), 2);
+        let mut sparse = octopus_ledger_index::InterfaceArrivalProjection::new(source.clone());
+        assert!(sparse.observe(&foreign).is_err());
+        sparse.observe(&own).unwrap();
+        assert!(sparse.observe(&own).is_err());
+        let mut gap = serde_json::from_str::<serde_json::Value>(&foreign_row).unwrap();
+        gap["seq"] = serde_json::json!(3);
+        use std::io::Write as _;
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{gap}").unwrap();
+        assert!(projection.watermark().unwrap_err().contains("not contiguous"));
+        std::fs::write(&path, format!("{foreign_row}\n{own_row}\n")).unwrap();
+        let blob = std::fs::read_dir(metadata).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(blob, b"corrupt").unwrap();
+        assert!(pending_delivery::Ledger::new(source, path, 1_048_576).watermark().is_err());
     }
 
     #[test]
@@ -810,6 +920,7 @@
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
                 deferred_context_generations: 0,
+                result_rebase: None,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -1097,6 +1208,7 @@
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
                 deferred_context_generations: 0,
+                result_rebase: None,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -1304,41 +1416,41 @@
         full.push(result.clone());
         let mut bound = prior.clone();
         bound.extend([entry("continuity", 80), entry("later.input", 98)]);
-        let restored = merge_failed_source_context(&bound, &full, 68, Some(98)).unwrap();
+        let restored = merge_failed_source_context(&bound, &full, 68, Some(98), &[]).unwrap();
         assert_eq!(session_artifacts_fingerprint(&restored[..full.len()]).unwrap(), session_artifacts_fingerprint(&full).unwrap());
         assert_eq!(session_artifacts_fingerprint(&restored[full.len()..]).unwrap(), session_artifacts_fingerprint(&bound[prior.len()..]).unwrap());
         assert_eq!(restored.iter().filter(|item| item.source_artifact == result.source_artifact).count(), 1);
         let mut published = restored.clone();
         let result_position = published.iter().position(|item| item.source_artifact == result.source_artifact).unwrap();
         published.insert(result_position, entry("provider.tool.call", 67));
-        let retained_publication = merge_failed_source_context(&published, &full, 68, Some(98)).unwrap();
+        let retained_publication = merge_failed_source_context(&published, &full, 68, Some(98), &[]).unwrap();
         assert_eq!(session_artifacts_fingerprint(&retained_publication).unwrap(), session_artifacts_fingerprint(&published).unwrap());
-        assert_eq!(session_artifacts_fingerprint(&merge_failed_source_context(&restored, &full, 68, Some(98)).unwrap()).unwrap(), session_artifacts_fingerprint(&restored).unwrap());
+        assert_eq!(session_artifacts_fingerprint(&merge_failed_source_context(&restored, &full, 68, Some(98), &[]).unwrap()).unwrap(), session_artifacts_fingerprint(&restored).unwrap());
         let mut conflicting = bound.clone();
         conflicting[1].payload = serde_json::json!({"wrong":true});
-        assert!(merge_failed_source_context(&conflicting, &full, 68, Some(98)).is_err());
+        assert!(merge_failed_source_context(&conflicting, &full, 68, Some(98), &[]).is_err());
         let mut reversed = full.clone();
         reversed.swap(0, 1);
-        assert!(merge_failed_source_context(&bound, &reversed, 68, Some(98)).is_err());
+        assert!(merge_failed_source_context(&bound, &reversed, 68, Some(98), &[]).is_err());
         let mut unproven = full.clone();
         unproven[3].source_movement_seq = None;
-        assert!(merge_failed_source_context(&bound, &unproven, 68, Some(98)).is_err());
+        assert!(merge_failed_source_context(&bound, &unproven, 68, Some(98), &[]).is_err());
         let mut early_input = bound.clone();
         early_input.last_mut().unwrap().source_movement_seq = Some(60);
-        let late_result = merge_failed_source_context(&early_input, &full, 68, Some(60)).unwrap();
+        let late_result = merge_failed_source_context(&early_input, &full, 68, Some(60), &[]).unwrap();
         assert_eq!(session_artifacts_fingerprint(&late_result[..full.len()]).unwrap(), session_artifacts_fingerprint(&full).unwrap());
         assert_eq!(late_result.last().unwrap().source_movement_seq, Some(60));
         for (mut completed, input) in [(restored.clone(), 98), (late_result, 60)] {
             completed.push(entry("current.reply", 100));
-            let replayed = merge_failed_source_context(&completed, &full, 68, Some(input)).unwrap();
+            let replayed = merge_failed_source_context(&completed, &full, 68, Some(input), &[]).unwrap();
             assert_eq!(session_artifacts_fingerprint(&replayed).unwrap(), session_artifacts_fingerprint(&completed).unwrap());
         }
         let mut queued = bound.clone();
         queued.insert(queued.len() - 1, entry("previous.queued.input", 60));
-        let merged = merge_failed_source_context(&queued, &full, 68, Some(98)).unwrap();
+        let merged = merge_failed_source_context(&queued, &full, 68, Some(98), &[]).unwrap();
         assert_eq!(session_artifacts_fingerprint(&merged[full.len()..]).unwrap(), session_artifacts_fingerprint(&queued[prior.len()..]).unwrap());
         queued.insert(prior.len(), entry("previous.result", 66));
-        let merged = merge_failed_source_context(&queued, &full, 68, Some(98)).unwrap();
+        let merged = merge_failed_source_context(&queued, &full, 68, Some(98), &[]).unwrap();
         let position = |label| merged.iter().position(|item| item.label == label).unwrap();
         assert!(position("previous.result") < position("completed.result"));
         assert!(position("completed.result") < position("continuity"));
@@ -1538,7 +1650,7 @@
         );
 
         let mut changed_prefix = restored.clone();
-        changed_prefix.artifacts[0].source_movement_seq = Some(99);
+        changed_prefix.artifacts[0].payload = serde_json::json!({"text": "changed payload"});
         let rejected_output = InterfaceArtifactFile::write(
             dir.path().join("rejected"),
             "interface.artifact.output",
@@ -1559,7 +1671,7 @@
             artifact.source_movement_seq = Some(index as u64 + 1);
         }
         reconcile_resolved_session_snapshot_head(&normalized, &mut normalized_head).unwrap();
-        assert!(normalized_head.is_none());
+        assert!(normalized_head.is_some());
         let rebased_output = InterfaceArtifactFile::write(
             dir.path().join("rebased"),
             "interface.artifact.output",
@@ -1571,13 +1683,16 @@
                 .unwrap();
         let rebased_payload = rebased_snapshot.read_payload_bytes().unwrap();
         let rebased_value: serde_json::Value = serde_json::from_slice(&rebased_payload).unwrap();
-        assert!(rebased_value[SESSION_CONTEXT_FIELD]["parent"].is_null());
+        assert_eq!(
+            serde_json::from_value::<ArtifactRef>(rebased_value[SESSION_CONTEXT_FIELD]["parent"].clone()).unwrap(),
+            snapshot_ref
+        );
         assert_eq!(
             rebased_value[SESSION_CONTEXT_FIELD]["artifacts"]
                 .as_array()
                 .unwrap()
                 .len(),
-            normalized.artifacts.len()
+            normalized.artifacts.len() - normalized_head.as_ref().unwrap().covered_artifact_count
         );
 
         restored.artifacts.push(session_entry(
@@ -1659,9 +1774,11 @@
             deferred_publication: false,
             source_without_context: false,
             settlement_of: None,
+            continuation_of: None,
             dispatch_fenced: true,
             withdrawal: None, replacement: None,
             standing: Vec::new(),
+            rebase: Vec::new(),
             items: vec![PendingHandoffItem {
                 artifact_id: source.id.clone(),
                 artifact_content_hash: source.content.to_hex(),
@@ -2424,7 +2541,7 @@
         let bound = pending_output_checkpoint(output, "bound_output", "tool.call", &full, &mandatory_role);
         assert_eq!(bound.artifact_bindings, [full.clone(), vec![ArtifactId::new("explicit-object")]].concat());
         let roles = vec![ArtifactBinding { id: mandatory_role[0].clone(), access: Default::default() }];
-        let mut projected: octopus_runtime::run_record::CheckpointRecord = serde_json::from_value(
+        let mut projected: octopus_run_record::CheckpointRecord = serde_json::from_value(
             materialize_pending_checkpoint(&bound, &config.run),
         ).unwrap();
         assert!(checkpoint_role_bindings_match(&projected, &roles, output));
@@ -2438,7 +2555,7 @@
         overlap.static_artifact_bindings.push(mandatory_role[0].clone());
         let mut roles = roles;
         roles[0].access.change = true;
-        let mut projected: octopus_runtime::run_record::CheckpointRecord = serde_json::from_value(
+        let mut projected: octopus_run_record::CheckpointRecord = serde_json::from_value(
             materialize_pending_checkpoint(&bound, &config.run),
         ).unwrap();
         projected.artifact_bindings[0] = roles[0].clone();
@@ -2533,6 +2650,7 @@
             inputs: vec![
                 ProviderVerifiedInput {
                     also_deliver_to_tool: None,
+                    also_deliver_to_interface: None,
                     artifact_label: "operator.approval.response".to_string(),
                     required_verified_artifact: requirement(
                         "operator.approval",
@@ -2541,6 +2659,7 @@
                 },
                 ProviderVerifiedInput {
                     also_deliver_to_tool: None,
+                    also_deliver_to_interface: None,
                     artifact_label: "operator.approval.response".to_string(),
                     required_verified_artifact: requirement(
                         "operator.input.provided",
@@ -2611,6 +2730,30 @@
             )
             .unwrap_err();
         assert!(error.contains("outside the formed invocation grant"));
+
+        let ProviderHandoffRoute::ClientProjectionWithVerifiedInputs { mut inputs } = route else {
+            unreachable!()
+        };
+        let recipient = InterfaceId::new("world_input_test");
+        for input in &mut inputs {
+            input.also_deliver_to_interface = Some(recipient.clone());
+        }
+        let route = ProviderHandoffRoute::ClientProjectionWithVerifiedInputs { inputs };
+        let unadmitted = config
+            .verified_input_checkpoints(&route, output, &static_context, &marks, &BTreeSet::new(), &BTreeSet::new())
+            .unwrap_err();
+        assert!(unadmitted.contains("not a distinct granted interface"));
+        let delivered = config
+            .verified_input_checkpoints(&route, output, &static_context, &marks, &BTreeSet::new(), &BTreeSet::from([recipient.clone()]))
+            .unwrap();
+        assert!(delivered.iter().all(|checkpoint| {
+            checkpoint
+                .outbound_interfaces()
+                .eq([&config.provider_interface, &recipient])
+        }));
+        let mut next = config.clone();
+        next.checkpoints.extend(delivered);
+        next.validate(&next.provider_interface, &next.run).unwrap();
     }
 
     #[test]
@@ -3263,9 +3406,13 @@
         let rejected: ToolResultArtifact = serde_json::from_slice(&rejected_envelope.read_artifact_payload().unwrap()).unwrap();
         authoring_retry::validate_rejected_result(&rejection_ctx, &handoff.config, &rejected_movement, &rejected_envelope, &original, &rejected).unwrap();
         let consumed = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
-            result_identity.consume_if_matches(&rejection_ctx, &rejected_movement, &rejected_envelope, "file.write.result")
+            result_identity.consume_if_matches(&rejection_ctx, &ProviderHandoffSession::new(&rejection_ctx).unwrap(), &rejected_movement, &rejected_envelope, "file.write.result")
         ).unwrap();
         assert!(consumed);
+        let wrong_ledger = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
+            result_identity.consume_if_matches(&rejection_ctx, &ProviderHandoffSession::new(&ctx).unwrap(), &rejected_movement, &rejected_envelope, "file.write.result")
+        ).unwrap_err();
+        assert!(wrong_ledger.contains("handoff session belongs to interface"));
         assert_eq!(std::fs::read_to_string(&rejection_ctx.movements_path).unwrap(), journal);
         {
             let mut concurrent: serde_json::Value = serde_json::from_slice(&run_bytes).unwrap();
@@ -3598,6 +3745,7 @@
             .into_iter()
             .map(|(mark, verifier)| ProviderVerifiedInput {
                 also_deliver_to_tool: Some("coder.exec".into()),
+                also_deliver_to_interface: None,
                 artifact_label: "operator.approval.response".into(),
                 required_verified_artifact: RequiredVerifiedArtifact {
                     mark: octopus_descriptors::MarkId::new(mark),
@@ -4806,6 +4954,7 @@
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
                 deferred_context_generations: 0,
+                result_rebase: None,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -4998,6 +5147,7 @@
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
                 deferred_context_generations: 0,
+                result_rebase: None,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -5018,6 +5168,16 @@
         );
         assert!(record.checkpoints.iter().any(|checkpoint| checkpoint.id.as_str().ends_with("_standing_transport_dispatch_standing")));
         validate_pending_items_are_active(&record, &provider, &pending).unwrap();
+        let repeated = pending.items[0].clone();
+        assert_eq!(
+            standing_routes::distinct_standing([repeated.clone(), repeated.clone()], &[]).unwrap(),
+            vec![repeated.clone()],
+            "an output emitted twice with the same bytes is one standing delivery"
+        );
+        assert!(standing_routes::distinct_standing([repeated.clone()], &[repeated.clone()]).unwrap().is_empty());
+        let mut conflicting = repeated.clone();
+        conflicting.artifact_content_hash = ContentHash::of_bytes(b"other").to_hex();
+        assert!(standing_routes::distinct_standing([repeated, conflicting], &[]).is_err());
         std::fs::write(&run_path, authored.content.as_bytes()).unwrap();
         std::fs::write(
             &movements_path,
@@ -5105,9 +5265,11 @@
             deferred_publication: false,
             source_without_context: false,
             settlement_of: None,
+            continuation_of: None,
             dispatch_fenced: true,
             withdrawal: None, replacement: None,
             standing: Vec::new(),
+            rebase: Vec::new(),
             items: vec![PendingHandoffItem {
                 artifact_id: identity.artifact.id.clone(),
                 artifact_content_hash: identity.artifact.content.to_hex(),
@@ -5282,6 +5444,7 @@
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
                 deferred_context_generations: 0,
+                result_rebase: None,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -5377,7 +5540,7 @@
             let mut visible = record.clone();
             visible.checkpoints.iter_mut().find(|cp| cp.id.as_str() == "terminal_input").unwrap()
                 .artifact_bindings.push(ArtifactBinding {
-                    id:context_free.items[0].artifact_id.clone(), access:octopus_runtime::ArtifactAccess::read_only(),
+                    id:context_free.items[0].artifact_id.clone(), access:octopus_policy::ArtifactAccess::read_only(),
                 });
             assert!(later.restore_pending_context(&mut state, &visible, &context_free).is_err());
         }
@@ -5456,6 +5619,7 @@
             consumed_context_free_independent_input: None,
             consumed_verified_input: false,
             deferred_context_generations: 0,
+            result_rebase: None,
         }));
         assert_eq!(
             rearmed_handoff.recover_source().await.unwrap(),
@@ -5473,6 +5637,7 @@
             value["interface_state"]["world_provider_test"]["pending_handoff"]["terminal"] =
                 serde_json::Value::Bool(false);
             state.run_record_bytes = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&handoff.run_path, &state.run_record_bytes).unwrap();
             state.session_context.artifacts = vec![SessionContextArtifact {
                 label: identity.label.clone(),
                 payload: serde_json::json!({"text": "already handed"}),
@@ -5894,3 +6059,35 @@
             }
         }
     }
+
+#[test]
+#[ignore = "requires explicitly selected read-only ledger performance evidence"]
+fn selected_retained_delivery_cost() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_BENCH_HOME").unwrap());
+    let interface = InterfaceId::new(std::env::var("OCTOPUS_BENCH_INTERFACE").unwrap());
+    let path = home.join("ledger/movements.jsonl");
+    let started = std::time::Instant::now();
+    let count = if std::env::var_os("OCTOPUS_BENCH_FULL_LEDGER").is_some() {
+        let ledger = ledger_rows::LedgerRows::detached(&path);
+        let mut index = octopus_ledger_index::ArrivalDedupIndex::new();
+        let mut reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+        loop {
+            match read_bounded_ledger_row(&mut reader, 16_777_216).unwrap() {
+                BoundedLedgerRow::Complete(row) => {
+                    let movement = ledger.decode_with_grant_if(&row, index.watermark(), |movement| {
+                        movement.kind == MovementKind::InterfaceArrival && movement.invocation_metadata
+                            .as_ref().and_then(|metadata| metadata.invocation())
+                            .is_some_and(|metadata| !metadata.required_verified_artifacts.is_empty())
+                    }).unwrap();
+                    index.catch_up_movements([movement]).unwrap();
+                }
+                BoundedLedgerRow::Eof => break,
+                BoundedLedgerRow::Partial => panic!("incomplete ledger"),
+            }
+        }
+        index.watermark()
+    } else {
+        pending_delivery::Ledger::new(interface, path, 16_777_216).watermark().unwrap()
+    };
+    println!("retained delivery: {count} rows in {} ms", started.elapsed().as_millis());
+}

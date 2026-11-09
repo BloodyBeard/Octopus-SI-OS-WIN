@@ -7,7 +7,7 @@ use octopus_interface_transport::InterfaceLiftContext;
 use octopus_interfaces::{InterfaceArtifactFile, InterfaceArtifactManifest};
 use octopus_ledger::{ArtifactRef, CheckpointBindingPolicySnapshot, ContentHash, InvocationMetadata, Movement, MovementKind, Endpoint};
 use octopus_ledger_index::LedgerSqliteReader;
-use octopus_runtime::run_record::{CheckpointRecord, RunRecord};
+use octopus_run_record::{CheckpointRecord, RunRecord};
 use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -129,7 +129,7 @@ impl ConsentAuthorityConfig {
         Ok([&self.checkpoints.command, &self.checkpoints.call, &self.checkpoints.result, &self.checkpoints.management, &self.checkpoints.publication].into_iter().map(|template| {
             let mut checkpoint = template.clone();
             checkpoint.id = CheckpointId::new(format!("{}:{generation}", template.id));
-            checkpoint.epoch = octopus_runtime::GrantEpoch(generation);
+            checkpoint.epoch = octopus_run_record::GrantEpoch(generation);
             checkpoint
         }).collect())
     }
@@ -141,7 +141,7 @@ impl ConsentAuthorityConfig {
         for list in state.management.values().filter(|list| list.removal.is_none() && !list.displayed_receipts.is_empty()) {
             let mut checkpoint = self.checkpoints.management.clone();
             checkpoint.id = CheckpointId::new(format!("{}:{}:{}", checkpoint.id, state.generation, list.request_id));
-            checkpoint.epoch = octopus_runtime::GrantEpoch(state.generation);
+            checkpoint.epoch = octopus_run_record::GrantEpoch(state.generation);
             let binding = |interface: InterfaceId| octopus_policy::AuthoredInterfaceBinding {
                 interface, config: octopus_policy::InterfaceBindingConfig {
                     artifact_policy: octopus_policy::BindingArtifactPolicy::Allow {
@@ -391,12 +391,12 @@ impl ConsentEvidenceReader {
         self.charge(len as u64)?;
         require(row.last() == Some(&b'\n'), "consent evidence names an incomplete ledger row")?;
         let line = usize::try_from(seq).map_err(string_error)?;
-        let movement = octopus_ledger::decode_durable_movement_row(&row, line, |hash| {
+        let movement = octopus_ledger::decode_durable_movement_row(&row, line, |kind, hash| {
             let mut resolve = || -> Result<Value, String> {
                 let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&self.metadata_dir.join(hash.to_hex()),
                     self.max_payload_bytes.min(self.remaining)).map_err(string_error)?;
                 self.charge(bytes.len() as u64)?;
-                require(ContentHash::of_bytes(&bytes) == hash, "consent invocation grant changed its immutable content address")?;
+                require(ContentHash::of_bytes(&bytes) == hash, &format!("consent {} changed its immutable content address", kind.describe()))?;
                 serde_json::from_slice(&bytes).map_err(string_error)
             };
             resolve().map_err(|message| octopus_ledger::LedgerError::MalformedMovementMetadata { line, message })

@@ -3,6 +3,27 @@
 Memory, skills, and persona are artifacts bound to runs. Updating one is an
 ordinary run under policy.
 
+The shared worker-role artifact identifies the installed system with the agent:
+its goals, runs, interfaces, triggers, worker environments and their connections
+are Octopus, and a run is one part of its work. Maintaining and improving that
+system is part of the role. Home and Task role artifacts specialize it; provider
+choice does not change the identity. This guidance is bound context, not
+additional authority or evidence of work elsewhere. The realtime provider's
+session instructions present the same identity through voice.
+
+The system library's `self-improvement` skill carries the detailed guidance.
+Its catalogue applicability covers substantial or long-running work, continuing
+intentions, dependencies, recurring work and observed friction. The model reads
+the entry through the ordinary context collection tools when relevant. It builds
+and maintains a bounded picture of current goals, runs, connections, capabilities
+and results; questions the organization of the work; and maintains, repairs or
+extends the system within its grant. Improvements include adding missing
+capabilities and connecting them to their consumers. The shared role keeps a
+short responsibility statement and pointer instead of repeating this procedure.
+Skill selection remains a model decision; no task classifier or execution loop
+is added. Working state summaries remain observations over owning records and
+recorded effects, carried through declared artifact routes when needed.
+
 ## Memory is an artifact
 
 Memory **state** is an artifact made visible through bindings. A memory
@@ -28,8 +49,8 @@ Memory is written in two ways:
    when every save it names is scoped to the environment the evidence shows for
    the observed turn and landed in the collection. After a quiet period, the **Memory consolidation**
    trigger (recommended in the Codex pack, armed by setup with a three-hour
-   quiet period) starts an ordinary task in
-   Home's environment: it lists the notes with their usage, merges duplicates,
+   quiet period) wakes its consolidation task, which setup created and bound to
+   the trigger in Home's environment: it lists the notes with their usage, merges duplicates,
    settles contradictions using their sources and the user's latest applicable
    decisions, and folds stale, unused notes into what is still true. A newer
    note is not automatically stronger evidence. Both are ordinary runs started by
@@ -38,12 +59,11 @@ Memory is written in two ways:
 The resulting entries become visible only to runs whose bindings and formed
 policy admit them.
 
-Knowledge entries describe what was observed and the conditions under which it
-applies. A prepared plan, an installed configuration and a successful execution
-support different claims. Material uncertainty belongs in the description as
-well as the content, so discovery does not present an untested procedure as
-proven. Capturing or consolidating experience preserves these limits. A useful
-failure may be saved without recasting it as a solution.
+Knowledge entries retain their sources and distinguish observations, proposals
+and inference. Descriptions include conditions or unresolved dependencies that
+affect whether the knowledge is usable. Useful failures and partial results can
+also be retained. Capture and consolidation preserve these distinctions and the
+entry's audience.
 
 The projection's byte limit covers the complete artifact, including its model
 text and any original input attached after source verification. When it is too
@@ -62,12 +82,47 @@ Other context entries remain exact references in the omission record. The
 projection verifies their source evidence before selection and never trims
 publication proof to meet its output bound.
 
+A projection window starts at its selected input and follows the session's
+consumption order. An input admitted while the source turn was working is
+consumed after outputs that entered the ledger later, so evidence after the
+selected input may carry an earlier movement than its neighbour. The window
+refuses only evidence older than the selected input and duplicate references.
+
+Any input that can start a turn of the observed run can be the selected input.
+An operator message gives its declared fields. An artifact admitted from one of
+the run's external inputs, such as mail or a sensor event, is selected whole:
+each top-level member except `session_context` becomes a field, because its
+shape belongs to the interface that produced it and the provider showed the
+model the same payload. The observer's projection declares the source's input
+routes and rules; a current-run amendment that adds an input to the source
+re-forms them in the same transaction, so a trigger bound later is captured
+like one bound at creation. It re-forms them from the observer selection the accepted declaration
+records, so the routes follow even after the Home stops selecting an observer
+for new tasks. Removing an input keeps the rules and routes the projection
+already declared: a turn that arrived through the removed input before the
+edit is still selected as itself, while the source no longer pins the route,
+so nothing new can cross it.
+
 An observer's final text is one JSON object. Malformed JSON produces an explicit
 `memory.capture.error` diagnostic with the original terminal artifact reference.
 That diagnostic has no capture-success mark. It settles its source so the
 projection can process the next observation; it never extracts fenced JSON or
 rewrites the model's decision. Well-formed outcomes still cross the declared
-capture verifier before any success mark is admitted.
+capture verifier before any success mark is admitted. An outcome that verifier
+refuses is settled the same way: its replacement is a `memory.capture.error`
+diagnostic that keeps the model's decision and names the refusal movements, so a
+refused outcome is never resubmitted unchanged. A projected experience input
+that the input verifier refuses settles the same way, as a `memory.capture.error`
+diagnostic naming the refusal movements. The diagnostic is an ordinary
+projection output, not part of the projection run's session snapshot. A refused
+final changes its label only this way: from a verified output to a declared
+output that requires no mark, with the refusal evidence as its proof.
+
+A terminal the projection cannot project — an input outside its declared
+routes, a missing required field, an exceeded bound — is settled the same way:
+the projection hands a `memory.capture.error` diagnostic naming the error and
+the terminal, the observer model is not woken, and the next observation is
+processed. One unprojectable source never stops the projection.
 
 ## Remembering is one call
 
@@ -137,6 +192,12 @@ consumers and related state, adapting its investigation and verification to the
 task. Schemas and detailed operation examples remain available on demand;
 general instructions do not repeat them or prescribe a universal checklist.
 
+The system library's `framework-authoring` entry carries portable Octopus
+development guidance: architecture principles, the four development axes and
+engineering discipline. The system-review trigger binds that library, and its
+role directs the run to read the entry before changing Octopus. The guide does
+not depend on a maintainer's private skill files or grant additional authority.
+
 The registry ships `skill.capture`, `skill.upsert`, `skill.search`,
 `skill.list`, and `skill.get` as **ordinary tools** behind the system room's
 door. A concept-named tool is fine. A concept-named runtime primitive is not.
@@ -171,8 +232,9 @@ policy, that edits the artifact like any other.
 
 ## The two-layer rule
 
-**The registries the system may change. The runtime it may not - but the
-runtime must support any registry change.**
+Memory and skill behavior belongs in registries and owner packages. Authorized
+runs may repair runtime source under the workspace grant and development rules,
+preserving the kernel's generic contracts.
 
 - Skill-named or memory-named **registry objects are fine**: tool descriptors,
   artifact descriptors, EE templates that allow those tools.

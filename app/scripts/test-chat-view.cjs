@@ -6,7 +6,7 @@ const { JSDOM } = require("jsdom");
 
 const dom = new JSDOM('<div id="host"></div><div id="root"></div>', { url: "http://fixture.invalid", pretendToBeVisual: true });
 const w = dom.window;
-for (const key of ["window", "document", "HTMLElement", "Element", "SVGElement", "Node", "Event", "CustomEvent", "MouseEvent", "KeyboardEvent", "WheelEvent", "navigator", "getComputedStyle", "localStorage"]) {
+for (const key of ["window", "document", "HTMLElement", "Element", "SVGElement", "Node", "Event", "CustomEvent", "MouseEvent", "KeyboardEvent", "WheelEvent", "MutationObserver", "navigator", "getComputedStyle", "localStorage"]) {
   Object.defineProperty(globalThis, key, { configurable: true, value: key === "getComputedStyle" ? w[key].bind(w) : key === "window" ? w : w[key] });
 }
 globalThis.requestAnimationFrame = w.requestAnimationFrame.bind(w);
@@ -218,15 +218,21 @@ test("a long message body clamps to its lines and expands to its full height wit
   const tall = Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, "scrollHeight");
   Object.defineProperty(w.HTMLElement.prototype, "scrollHeight", { configurable: true, get() { return 2000; } });
   try {
-    root.render(React.createElement(CollapsibleMessageBody, { maxLines: 20 }, React.createElement("p", null, "Long body")));
+    root.render(React.createElement(CollapsibleMessageBody, { maxLines: 20, text: "Long body" }, React.createElement("p", null, "Long body")));
     await settle();
     const content = query(".collapsible-message-content");
     const toggle = query(".collapsible-message-toggle");
-    assert.equal(content.style.maxHeight, "450px");
+    assert.equal(content.style.maxHeight, "19lh");
+    assert.equal(query(".collapsible-message-ellipsis").textContent, "…");
     assert.deepEqual([toggle.textContent, toggle.getAttribute("aria-expanded")], ["Show more", "false"]);
     await press(toggle, "click");
     assert.deepEqual([content.style.maxHeight, toggle.textContent, toggle.getAttribute("aria-expanded")], ["", "Show less", "true"]);
     assert.ok(!query(".collapsible-message-fade"));
+    await show(workspace({ renderedMessages: [user("long-user", "Long user message")], activeMessageCount: 1 }));
+    const bubble = query('[data-user-message-bubble="true"]');
+    assert.ok(bubble.querySelector(".collapsible-message-fade"));
+    assert.equal(bubble.querySelector(".collapsible-message-content").style.maxHeight, "20lh");
+    assert.equal(bubble.querySelector(".collapsible-message-ellipsis"), null);
   } finally {
     Object.defineProperty(w.HTMLElement.prototype, "scrollHeight", tall);
   }

@@ -26,18 +26,20 @@ import { commandActivityModel, commandOutcomeLabel, commandResultBody } from "./
 import { readProjection } from "../../projectionClient";
 import { appToast } from "../../toasts";
 import type { ArtifactReference } from "../artifacts/types";
+import { useOpenArtifactFiles } from "../files/FilesPaneNavigation";
 import { AssistantDirectiveSurfaces } from "./AssistantDirectiveSurfaces";
 import { projectAssistantDirectives, type AssistantVisualizationTarget } from "./assistantDirectives";
 import {
   buildThreadVirtualizerLayout,
   distanceFromBottomAnchoredToTurn,
+  distanceFromBottomForTurn,
   rangeAnchoredToTurn,
   threadVirtualizerRange,
   type ThreadVirtualizerRange,
 } from "./threadVirtualizer";
+import { DevThreadSearch, type DevThreadSearchHost } from "./DevThreadSearch";
 
 const WorkingPatchDiff = lazy(() => import("./WorkingPatchDiff"));
-const TraceArtifactWorkbench = lazy(() => import("../artifacts/ArtifactWorkbench").then((module) => ({ default: module.ArtifactWorkbench })));
 
 type Props = {
   activityPresentation?: "conversation" | "ledger";
@@ -76,6 +78,7 @@ type Props = {
   steerableMessageId: string;
   revealPinnedContext: ChatPinnedContextItem | null;
   responseStreaming: boolean;
+  blockingReason?: string;
   onPinnedContextRevealed: () => void;
 };
 
@@ -187,6 +190,7 @@ export function ChatMessageList({
   steerableMessageId,
   revealPinnedContext,
   responseStreaming,
+  blockingReason = "",
   onPinnedContextRevealed,
 }: Props) {
   const stableContinueInNewTask = useStableCallback(onContinueInNewTask);
@@ -255,6 +259,27 @@ export function ChatMessageList({
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [unseenMessageCount, setUnseenMessageCount] = useState(0);
   const reducedMotion = useShouldReduceMotion();
+  const devSearchRevealRef = useRef<(() => void) | null>(null);
+  const devSearchHost = useMemo<DevThreadSearchHost>(() => ({
+    detachFromLatest() {
+      pinnedRef.current = false;
+      readingAnchorRef.current = null;
+    },
+    revealTurn(key) {
+      pinnedRef.current = false;
+      readingAnchorRef.current = null;
+      return new Promise<void>((resolve) => {
+        devSearchRevealRef.current?.();
+        devSearchRevealRef.current = resolve;
+        setVirtualRevealRequest({ id: `__devsearch:${key}`, instant: true, turnKey: key });
+        window.setTimeout(() => {
+          if (devSearchRevealRef.current !== resolve) return;
+          devSearchRevealRef.current = null;
+          resolve();
+        }, 1_500);
+      });
+    },
+  }), []);
   const findState = useMemo(() => {
     const query = findQuery.trim();
     let offset = 0;
@@ -705,6 +730,9 @@ export function ChatMessageList({
 
   return (
     <div className="relative h-full flex-1 [content-visibility:auto]">
+      {import.meta.env?.DEV && listenToGlobalCommands ? (
+        <DevThreadSearch host={devSearchHost} listRef={listRef} turnKeyOf={turnKey} turns={turns} />
+      ) : null}
       <UserMessageNavigationRail
         activeId={activeUserMessageId}
         items={navigationItems}
@@ -798,6 +826,15 @@ export function ChatMessageList({
                     return;
                   }
                   if (request.id.startsWith("__pinned:")) return;
+                  if (request.id.startsWith("__devsearch:")) {
+                    const resolve = devSearchRevealRef.current;
+                    devSearchRevealRef.current = null;
+                    pinnedRef.current = false;
+                    listRef.current?.querySelector<HTMLElement>(`[data-thread-turn-key="${CSS.escape(request.turnKey)}"]`)
+                      ?.scrollIntoView({ block: "start", behavior: "instant" });
+                    resolve?.();
+                    return;
+                  }
                   revealUserMessage(request.id, request.instant, true);
                 }}
                 onRestoreStateChange={onVirtualizerRestoreStateChange}
@@ -832,6 +869,7 @@ export function ChatMessageList({
                       pinnedArtifactIds={pinnedArtifactIds}
                       pinningArtifactIds={pinningArtifactIds}
                       responseStreaming={responseStreaming && turnIndex === turns.length - 1}
+                      blockingReason={turnIndex === turns.length - 1 && responseStreaming ? blockingReason : ""}
                       resolveAssistantVisualization={stableResolveAssistantVisualization}
                       taskActionsEnabled={taskActionsEnabled}
                       toolPresentations={toolPresentations}
@@ -1116,6 +1154,12 @@ function VirtualizedTurns({
     const index = layout.turnIndexByKey.get(revealRequest.turnKey);
     if (index === undefined) return;
     if (index < range.startIndex || index >= range.endIndex) {
+      const distance = distanceFromBottomForTurn({
+        layout,
+        turnKey: revealRequest.turnKey,
+        viewportHeightPx: scrollElementRef.current?.clientHeight ?? 800,
+      });
+      if (distance !== null) scrollToDistanceFromBottomPx(distance);
       setRange({
         startIndex: Math.max(0, index - THREAD_VIRTUALIZATION_OVERSCAN_TURNS),
         endIndex: Math.min(turns.length, index + THREAD_VIRTUALIZATION_OVERSCAN_TURNS + 1),
@@ -1124,7 +1168,7 @@ function VirtualizedTurns({
     }
     const frame = window.requestAnimationFrame(() => onRevealReady(revealRequest));
     return () => window.cancelAnimationFrame(frame);
-  }, [layout.turnIndexByKey, onRevealReady, range.endIndex, range.startIndex, revealRequest, turns.length, virtualized]);
+  }, [layout, onRevealReady, range.endIndex, range.startIndex, revealRequest, scrollElementRef, scrollToDistanceFromBottomPx, turns.length, virtualized]);
 
   const commitMeasuredHeights = useCallback((measurements: ReadonlyMap<string, number>) => {
     const current = measuredHeightsByKeyRef.current;
@@ -1473,6 +1517,7 @@ function ChatTurn({
   pinnedArtifactIds,
   pinningArtifactIds,
   responseStreaming,
+  blockingReason,
   resolveAssistantVisualization,
   taskActionsEnabled,
   toolPresentations,
@@ -1495,6 +1540,7 @@ function ChatTurn({
   pinnedArtifactIds: string[];
   pinningArtifactIds: string[];
   responseStreaming: boolean;
+  blockingReason: string;
   resolveAssistantVisualization: Props["resolveAssistantVisualization"];
   taskActionsEnabled: boolean;
   toolPresentations: ChatToolPresentationIndex;
@@ -1569,14 +1615,14 @@ function ChatTurn({
       onTogglePinnedMessage={onTogglePinnedMessage}
       pinned={Boolean(message.artifactId && pinnedArtifactIds.includes(message.artifactId))}
       pinning={Boolean(message.artifactId && pinningArtifactIds.includes(message.artifactId))}
-      streaming={responseStreaming && isLatestTurn && message === response}
+      streaming={!blockingReason && responseStreaming && isLatestTurn && message === response}
       resolveAssistantVisualization={resolveAssistantVisualization}
       taskActionsEnabled={taskActionsEnabled}
       toolPresentations={toolPresentations}
     />
   ) : (
     <SelectableMessageText message={message} onPinMessageExcerpt={onPinMessageExcerpt} taskActionsEnabled={taskActionsEnabled}>
-      <AssistantEventContent find={findOf(message)} message={message} onOpenAssistantReview={onOpenAssistantReview} onOpenAssistantVisualization={onOpenAssistantVisualization} onOpenFile={onOpenFile} onOperatorRequestResponse={onOperatorRequestResponse} resolveAssistantVisualization={resolveAssistantVisualization} streaming={responseStreaming && isLatestTurn && (message === response || message.eventKind === "message_delta")} toolPresentations={toolPresentations} />
+      <AssistantEventContent find={findOf(message)} message={message} onOpenAssistantReview={onOpenAssistantReview} onOpenAssistantVisualization={onOpenAssistantVisualization} onOpenFile={onOpenFile} onOperatorRequestResponse={onOperatorRequestResponse} resolveAssistantVisualization={resolveAssistantVisualization} streaming={!blockingReason && responseStreaming && isLatestTurn && (message === response || message.eventKind === "message_delta")} toolPresentations={toolPresentations} />
     </SelectableMessageText>
   );
 
@@ -1604,6 +1650,7 @@ function ChatTurn({
       {visibleUser && turn.length > 1 ? <div aria-hidden="true" className="w-full" style={{ height: "var(--conversation-item-gap, 16px)" }} /> : null}
       <TurnActivity
         activities={activities}
+        blockingReason={blockingReason}
         turnInProgress={responseStreaming && isLatestTurn}
         finalStartedAtMs={finalStartedAtMs}
         presentation={activityPresentation}
@@ -1706,6 +1753,7 @@ function chatTurnPropsEqual(
     && stringListsEqual(previous.pinnedArtifactIds, next.pinnedArtifactIds)
     && stringListsEqual(previous.pinningArtifactIds, next.pinningArtifactIds)
     && previous.responseStreaming === next.responseStreaming
+    && previous.blockingReason === next.blockingReason
     && previous.resolveAssistantVisualization === next.resolveAssistantVisualization
     && previous.taskActionsEnabled === next.taskActionsEnabled
     && previous.toolPresentations === next.toolPresentations
@@ -1836,7 +1884,7 @@ function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, ste
           <div className="flex flex-col items-end gap-1">
             <div className="chat-user-message-content text-size-chat relative w-full min-w-0">
               <SelectableMessageText message={message} onPinMessageExcerpt={onPinMessageExcerpt} taskActionsEnabled={taskActionsEnabled}>
-                <CollapsibleMessageBody>
+                <CollapsibleMessageBody collapseIndicator="fade" text={message.text}>
                   <div className="text-size-chat whitespace-pre-wrap">
                     {message.text ? <MessageContent find={find} text={message.text} variant="user" /> : null}
                   </div>
@@ -2324,11 +2372,10 @@ function TraceReadTarget({ message, presentation, onOpenFile }: {
   presentation: DynamicToolPresentation;
   onOpenFile: Props["onOpenFile"];
 }) {
-  const [reference, setReference] = useState<ArtifactReference | null>(null);
+  const openArtifactFiles = useOpenArtifactFiles();
   const [pending, setPending] = useState(false);
   const attempt = useRef(0);
   useEffect(() => {
-    setReference(null);
     setPending(false);
     return () => { attempt.current += 1; };
   }, [message.eventData?.call_id, message.runId, presentation.target]);
@@ -2345,7 +2392,7 @@ function TraceReadTarget({ message, presentation, onOpenFile }: {
         run_id: message.runId,
       });
       if (request !== attempt.current) return;
-      setReference(traceReadArtifactReference(message, presentation, response));
+      openArtifactFiles(traceReadArtifactReference(message, presentation, response));
     } catch (error) {
       if (request === attempt.current) appToast.warning(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2359,7 +2406,6 @@ function TraceReadTarget({ message, presentation, onOpenFile }: {
       : presentation.path ? () => onOpenFile(presentation.path, presentation.exactToolId) : undefined} variant="activity-target">
       <span aria-busy={pending || undefined} className="octopus-activity-detail octopus-activity-file-target">{presentation.pathLabel}</span>
     </MessageTooltip>
-    {reference ? <Suspense fallback={null}><TraceArtifactWorkbench reference={reference} presentation="overlay" onClose={() => setReference(null)} /></Suspense> : null}
   </>;
 }
 
@@ -2379,8 +2425,11 @@ function traceReadArtifactReference(message: ChatRenderMessage, presentation: Dy
     const args = eventRecord(message.eventData?.arguments);
     const pin = eventRecord(body.pin);
     const source = eventRecord(pin.source);
+    const requested = eventRecord(args.source);
     const entry = eventRecord(body.entry);
-    if (!eventString(args.source) || source.id !== args.source || pin.entry_id !== presentation.target
+    if (!eventString(requested.id) || source.id !== requested.id
+      || !Array.isArray(source.content) || JSON.stringify(source.content) !== JSON.stringify(requested.content)
+      || pin.entry_id !== presentation.target
       || entry.id !== presentation.target || !/^[a-f0-9]{64}$/.test(eventString(pin.revision))
       || pin.revision !== args.revision) {
       throw new Error("The admitted context entry does not match the selected source and revision.");

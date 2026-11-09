@@ -39,7 +39,6 @@ const stubbed = {
   MessageContent: 'export function MessageContent({ text }) { return createElement("span", { "data-content": "" }, text); }',
   QueuedMessageList: "export function QueuedMessageList() { return null; }",
   OperatorRequestSurface: "export function OperatorRequestSurface() { return null; }",
-  AirHandVoiceController: "export function AirHandVoiceController() { return null; }",
   HomeCallControls: "export function HomeCallControls() { return null; }",
   VoiceOrbScene: "export function VoiceOrbScene() { return null; }",
   OctopusOceanScene: "export function OctopusOceanScene() { return null; }",
@@ -160,7 +159,7 @@ test("stopping Home keeps the activity layout and scroll position while showing 
   }
 });
 
-const widgetInput = { context: [], environmentAvailable: false, goals: [], memory: [], scheduled: [], tools: [],
+const widgetInput = { context: [], goals: [], memory: [], scheduled: [], tools: [],
   insights: { change: "+1%", changeDetail: "vs last week", label: "Leads", series: [1, 2], value: "12" },
   taskProgress: { completion: 50, failed: 0, running: 1, scheduled: 0, unseenDone: 0, waiting: 0 } };
 
@@ -196,6 +195,16 @@ test("built-in Home widgets keep their declared slot classification", async () =
   assert.equal(slots["builtin.voice.live-context"], "right");
   assert.equal(slots["builtin.voice.insights"], "right");
   assert.ok(Object.values(slots).every((slot) => slot === "right"), JSON.stringify(slots));
+});
+
+test("built-in Home widgets stay admitted however many rows a run projects", async () => {
+  const { buildVoiceWidgetDocuments } = await widgetBundle;
+  const rows = Array.from({ length: 80 }, (_, index) => ({ label: `row ${index}` }));
+  const documents = Object.fromEntries(buildVoiceWidgetDocuments({ ...widgetInput, context: rows, memory: rows, tools: rows })
+    .map(({ document }) => [document.id, document]));
+  const children = documents["builtin.voice.live-context"].render.root.children;
+  assert.equal(children.length, 24);
+  assert.deepEqual(children.at(-1), { type: "key_value", label: "More", tone: "muted", value: "57" });
 });
 
 test("saved widget positions survive slot changes and older layouts without a slot", async () => {

@@ -313,41 +313,52 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut roots = BTreeMap::new();
+        let mut unresolved = Vec::new();
         for slot in requested_slots {
-            let path = available_root_slots.get(&slot).ok_or_else(|| {
-                ProcessInvocationAuthorityError::Unavailable(format!(
-                    "process invocation authority requests unbound root slot '{slot}'"
-                ))
-            })?;
+            let Some(path) = available_root_slots.get(&slot) else {
+                unresolved.push(format!("'{slot}' is unbound"));
+                continue;
+            };
             let path = if writable_slots.contains(&slot) {
                 normalize_declared_exact_path(path.clone())
             } else {
                 normalize_existing_path(path.clone())
+            };
+            match path {
+                Ok(path) => {
+                    roots.insert(slot, path);
+                }
+                Err(error) => unresolved.push(format!("'{slot}': {error}")),
             }
-            .map_err(ProcessInvocationAuthorityError::Unavailable)?;
-            roots.insert(slot, path);
         }
+        let refused = |error: String| {
+            ProcessInvocationAuthorityError::Refused(if unresolved.is_empty() {
+                error
+            } else {
+                format!("{error}; unresolved candidate root slots: {}", unresolved.join("; "))
+            })
+        };
         let readable = resolve_argument_paths(
             "read_argument_paths",
             &self.read_argument_paths,
             arguments,
             &roots,
         )
-        .map_err(ProcessInvocationAuthorityError::Refused)?;
+        .map_err(refused)?;
         let writable = resolve_argument_paths(
             "write_argument_paths",
             &self.write_argument_paths,
             arguments,
             &roots,
         )
-        .map_err(ProcessInvocationAuthorityError::Refused)?;
+        .map_err(refused)?;
         let executable = resolve_argument_paths(
             "executable_argument_paths",
             &self.executable_argument_paths,
             arguments,
             &roots,
         )
-        .map_err(ProcessInvocationAuthorityError::Refused)?;
+        .map_err(refused)?;
         Ok(ResolvedInvocationPaths {
             readable,
             writable,
@@ -419,25 +430,19 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
             .chain(&self.write_root_slots)
             .chain(&self.executable_root_slots)
             .chain(
-                self.read_argument_paths
-                    .iter()
-                    .flat_map(|binding| binding.within_root_slots.iter()),
-            )
-            .chain(
-                self.write_argument_paths
-                    .iter()
-                    .flat_map(|binding| binding.within_root_slots.iter()),
-            )
-            .chain(
-                self.executable_argument_paths
-                    .iter()
-                    .flat_map(|binding| binding.within_root_slots.iter()),
-            )
-            .chain(
                 self.executable_root_subpaths
                     .iter()
                     .map(|binding| &binding.root_slot),
             )
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let candidate_slots = self
+            .read_argument_paths
+            .iter()
+            .chain(&self.write_argument_paths)
+            .chain(&self.executable_argument_paths)
+            .flat_map(|binding| binding.within_root_slots.iter())
+            .filter(|slot| !requested_slots.contains(*slot))
             .cloned()
             .collect::<BTreeSet<_>>();
         let optional_requested_slots = self
@@ -469,6 +474,19 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
                 normalize_existing_path(path.clone())?
             };
             root_slots.insert(slot, path);
+        }
+        for slot in candidate_slots {
+            let Some(path) = available_root_slots.get(&slot) else {
+                continue;
+            };
+            let path = if writable_slots.contains(&slot) {
+                normalize_declared_exact_path(path.clone())
+            } else {
+                normalize_existing_path(path.clone())
+            };
+            if let Ok(path) = path {
+                root_slots.insert(slot, path);
+            }
         }
         for slot in optional_requested_slots {
             let Some(path) = available_root_slots.get(&slot) else {
@@ -564,6 +582,11 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
             }
             executable.insert(resolve_executable(command, &repository_root, search_path)?);
             executable_links.extend(search_path_links(command, search_path)?);
+        }
+        for binding in &self.read_executable_relative_paths {
+            let command = resolve_executable(&binding.executable, &repository_root, search_path)?;
+            let parent = command.parent().ok_or("resolved executable has no parent directory")?;
+            readable.insert(normalize_existing_path(parent.join(&binding.relative_path))?);
         }
         let has_argument_paths = !self.read_argument_paths.is_empty()
             || !self.write_argument_paths.is_empty()
@@ -1311,6 +1334,12 @@ fn prepare_macos(
     readable_exact.extend(process_closure.selector_paths.iter().cloned());
     readable_exact.extend(process_closure.runtime_library_paths.iter().cloned());
     let mut environment = BTreeMap::new();
+    if process_closure
+        .selector_paths
+        .contains(Path::new("/private/var/select/developer_dir"))
+    {
+        environment.insert(OsString::from("xcrun_nocache"), OsString::from("1"));
+    }
     if authority.allow_network {
         let trust_store = PathBuf::from("/private/etc/ssl/cert.pem");
         if !trust_store.is_file() {
@@ -1947,7 +1976,8 @@ fn macos_selected_executable(
                 selector.display()
             ));
         }
-        let selectors = BTreeSet::from([selector, developer_dir.clone()]);
+        let mut selectors = BTreeSet::from([selector, developer_dir.clone()]);
+        selectors.extend(macos_developer_sdk_metadata_paths(&developer_dir));
         let library = developer_dir.join("usr/lib/libxcrun.dylib");
         let canonical_library = normalize_existing_path(library.clone())?;
         if !canonical_library.starts_with(&developer_dir) || !canonical_library.is_file() {
@@ -2015,6 +2045,48 @@ fn macos_selected_executable(
         selected,
         BTreeSet::new(),
     )))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_developer_sdk_metadata_paths(developer_dir: &Path) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for sdks_root in [
+        developer_dir.join("SDKs"),
+        developer_dir.join("Platforms/MacOSX.platform/Developer/SDKs"),
+    ] {
+        macos_sdk_root_metadata_paths(developer_dir, sdks_root, &mut paths);
+    }
+    paths
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sdk_root_metadata_paths(developer_dir: &Path, sdks_root: PathBuf, paths: &mut BTreeSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(&sdks_root) else {
+        return;
+    };
+    paths.insert(sdks_root);
+    for entry in entries.flatten() {
+        let sdk_path = entry.path();
+        paths.insert(sdk_path.clone());
+        let Ok(canonical_sdk) = std::fs::canonicalize(&sdk_path) else {
+            continue;
+        };
+        if !canonical_sdk.starts_with(developer_dir) || !canonical_sdk.is_dir() {
+            continue;
+        }
+        paths.insert(canonical_sdk.clone());
+        for relative in [
+            "SDKSettings.plist",
+            "SDKSettings.json",
+            "Entitlements.plist",
+            "System/Library/CoreServices/SystemVersion.plist",
+        ] {
+            let metadata_file = canonical_sdk.join(relative);
+            if metadata_file.is_file() {
+                paths.insert(metadata_file);
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2852,6 +2924,44 @@ mod native_path_tests {
         let profile = std::fs::read_to_string(&prepared.args[1]).expect("prepared profile");
         assert!(profile.contains("process-exec (with no-sandbox)\n(literal \"/usr/bin/sandbox-exec\")"));
         assert!(profile.contains("lsopen"));
+    }
+
+    #[test]
+    fn macos_developer_shim_disables_xcrun_cache_and_grants_sdk_metadata() {
+        let authority = ProcessAuthority::resolve(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            false,
+            false,
+            false,
+            false,
+            false,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        )
+        .expect("process authority");
+        let profiles = tempfile::tempdir().expect("profile root");
+        let prepared = authority
+            .prepare(
+                "/usr/bin/git",
+                &[],
+                Path::new("/tmp"),
+                None,
+                profiles.path(),
+            )
+            .expect("prepared developer shim process");
+        assert_eq!(
+            prepared.environment.get(OsStr::new("xcrun_nocache")),
+            Some(&OsString::from("1"))
+        );
+        let profile = std::fs::read_to_string(&prepared.args[1]).expect("prepared profile");
+        let developer_dir = std::fs::canonicalize("/private/var/select/developer_dir").expect("developer directory");
+        for metadata in macos_developer_sdk_metadata_paths(&developer_dir) {
+            assert!(profile.contains(&*metadata.to_string_lossy()), "{}", metadata.display());
+        }
     }
 }
 

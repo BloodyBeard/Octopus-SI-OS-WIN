@@ -110,7 +110,7 @@ pub(crate) fn accept_event(
             if call.status == "failed" {
                 output.extend(seal_transcripts(call, "transport_failed"));
             }
-            output.push(("realtime.session.state".into(), call.event_body(json!({"state":call.status,"reason":event.get("reason"),"attempt":event.get("attempt"),"provider_close_sent":event.get("provider_close_sent"),"remote_closed":event.get("remote_closed")})),false));
+            output.push(("realtime.session.state".into(), call.event_body(json!({"state":call.status,"sideband_connected":event_type == "octopus.transport.connected","reason":event.get("reason"),"attempt":event.get("attempt"),"provider_close_sent":event.get("provider_close_sent"),"remote_closed":event.get("remote_closed")})),false));
         }
         "session.closed" => {
             call.status = "closed".into();

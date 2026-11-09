@@ -755,7 +755,7 @@ test("Inbox selection stays on its detail surface and explicit open follows exac
     calls.length = 0; handler(items.at(-1)); assert.deepEqual(calls.map(([kind]) => kind), ["warning"]);
     calls.length = 0; readResult = true;
     window.dispatchEvent(new CustomEvent("activate", { detail: { kind: "mark", movementId: items[0].id } }));
-    assert.deepEqual(calls[0], ["pane", false]); assert.deepEqual(calls[1], ["surface", "inbox"]); assert.deepEqual(calls.at(-1), ["read", [items[0].id]]);
+    assert.deepEqual(calls[0], ["surface", "inbox"]); assert.ok(!calls.some(([kind]) => kind === "pane")); assert.deepEqual(calls.at(-1), ["read", [items[0].id]]);
     calls.length = 0; window.dispatchEvent(new CustomEvent("activate", { detail: { kind: "run", runId: "not-a-mark" } }));
     assert.deepEqual(calls, []);
     for (const role of ["home", "task"]) {
@@ -769,12 +769,12 @@ test("Inbox selection stays on its detail surface and explicit open follows exac
       assert.deepEqual(calls.at(-1), ["read", [item.id]]);
       assert.ok(!calls.some(([kind]) => kind === "surface"));
       calls.length = 0; window.dispatchEvent(new CustomEvent("activate", { detail: { kind: "mark", movementId: item.id } }));
-      assert.deepEqual(calls[0], ["pane", false]); assert.deepEqual(calls[1], ["surface", "inbox"]); assert.deepEqual(calls.at(-1), ["read", [item.id]]);
+      assert.deepEqual(calls[0], ["surface", "inbox"]); assert.ok(!calls.some(([kind]) => kind === "pane")); assert.deepEqual(calls.at(-1), ["read", [item.id]]);
     }
   } finally { cleanup(); }
 });
 
-test("sidebar selection clears secondary focus and opens the primary pane", () => {
+test("sidebar selection restores its destination without overwriting its retained panes", () => {
   const relative = "src/components/shell/OperatorShell.tsx";
   const parsed = ts.createSourceFile(relative, fs.readFileSync(path.join(appRoot, relative), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const owner = parsed.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "OperatorShell");
@@ -796,7 +796,7 @@ test("sidebar selection clears secondary focus and opens the primary pane", () =
     }`).create;
     const handlers = create(dependencies);
     handlers.openSidebarSurface("event-log");
-    assert.deepEqual(calls, [["focused", false], ["pane", false], ["main-surface", "event-log"]]);
+    assert.deepEqual(calls, [["main-surface", "event-log"]]);
     calls.length = 0;
     handlers.openSidebarChat("run"); handlers.openSidebarChat("");
     assert.deepEqual(calls, [["task", "run"], ["task", ""]]);

@@ -196,3 +196,44 @@ test("dismissal survives remount, is revision scoped, fails visibly on corrupt s
     for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(global, key, descriptor); else delete global[key]; }
   }
 });
+
+test("document refresh makes progress during activity, coalesces reads and isolates access changes", async () => {
+  const { JSDOM } = require("jsdom"), React = require("react"), { createRoot } = require("react-dom/client");
+  const dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost" });
+  const saved = new Map(["window", "document", "IS_REACT_ACT_ENVIRONMENT"].map(key => [key, Object.getOwnPropertyDescriptor(global, key)]));
+  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })) Object.defineProperty(global, key, { configurable: true, writable: true, value });
+  const filename = path.join(appRoot, "src/client-surfaces/useClientSurfaceDocuments.ts"), module = { exports: {} };
+  const code = ts.transpileModule(fs.readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  let generation = 0, state;
+  const pending = [], read = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  Function("module", "exports", "require", code)(module, module.exports, id => {
+    if (id === "react") return React;
+    if (id === "./documentRegistry") return { materializeRegistry };
+    if (id === "../projectionLive") return { useProjectionGeneration: () => generation };
+    if (id === "../projectionClient") return { readProjection: read };
+    if (id === "./transport") return { readClientSurfaceDocuments: read, subscribeClientSurfaceDocuments: () => () => {} };
+    throw Error(id);
+  });
+  const snapshot = revision => ({ generation: revision, root: "artifact://ledger", errors: [], documents: [source(widget(revision))] });
+  function Harness({ profile }) { state = module.exports.useClientSurfaceDocuments(profile); return null; }
+  const root = createRoot(document.body.appendChild(document.createElement("div")));
+  const render = profile => React.act(async () => root.render(React.createElement(Harness, { profile })));
+  try {
+    await render("live");
+    for (let i = 0; i < 3; i++) { generation++; await render("live"); }
+    await React.act(async () => pending[0].resolve(snapshot(1)));
+    assert.equal(state.documents[0]?.document.revision, 1, "activity must not discard a completed read");
+    assert.equal(pending.length, 2, "activity queues one trailing read, not concurrent reads");
+    await React.act(async () => pending[1].resolve(snapshot(2)));
+    assert.equal(state.documents[0].document.revision, 2);
+    generation++; await render("live");
+    await render("lab");
+    await React.act(async () => pending[2].resolve(snapshot(3)));
+    assert.equal(state.hydrated, false, "old access scope must not supply the new snapshot");
+    await React.act(async () => pending[3].reject(Error("reader unavailable")));
+    assert.equal(state.documents.length, 0); assert.match(state.errors.join(" "), /reader unavailable/);
+  } finally {
+    await React.act(async () => root.unmount()); dom.window.close();
+    for (const [key, descriptor] of saved) { if (descriptor) Object.defineProperty(global, key, descriptor); else delete global[key]; }
+  }
+});

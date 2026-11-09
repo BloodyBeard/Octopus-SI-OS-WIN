@@ -28,7 +28,8 @@ fn resolve(
         blobs,
         registry_root: registry_root.to_path_buf(),
         ee_instances_root: ee_instances_root.to_path_buf(),
-        fingerprint: Arc::new(Mutex::new(Some(registry_descriptor_fingerprint(registry_root, ee_instances_root).unwrap()))),
+        files: Arc::new(Mutex::new(RegistryFileCache::default())),
+        fingerprint: Arc::new(Mutex::new(Some(registry_descriptor_fingerprint(registry_root, ee_instances_root, &mut RegistryFileCache::default()).unwrap()))),
     }
     .resolve_run_grant(RunGrantQuery {
         run: &RunId::new("run"),
@@ -151,6 +152,27 @@ fn normalized_formation_inputs_rebuild_the_historical_grant_after_source_changes
 }
 
 #[test]
+fn registry_fingerprint_tracks_same_size_rewrites_with_preserved_mtime() {
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("registry");
+    let instances = root.path().join("instances");
+    let descriptor = registry.join("interface/world_probe/interface.json");
+    write(&descriptor, json!({"id":"world_probe", "source_names":["alpha"]}));
+    let modified = std::fs::metadata(&descriptor).unwrap().modified().unwrap();
+    let mut files = RegistryFileCache::default();
+    let mut previous = registry_descriptor_fingerprint(&registry, &instances, &mut files).unwrap();
+    for text in ["omega", "alpha"].into_iter().cycle().take(32) {
+        write(&descriptor, json!({"id":"world_probe", "source_names":[text]}));
+        std::fs::File::open(&descriptor).unwrap().set_modified(modified).unwrap();
+        let next = registry_descriptor_fingerprint(&registry, &instances, &mut files).unwrap();
+        assert_ne!(previous, next);
+        previous = next;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert_eq!(previous, registry_descriptor_fingerprint(&registry, &instances, &mut files).unwrap());
+}
+
+#[test]
 fn registry_observation_requires_stability_and_propagates_read_failures() {
     for (reads, expected, loads) in [
         (vec![1, 2, 2, 2], "ok", 2),
@@ -222,10 +244,11 @@ fn admission_guards_only_the_selected_ee_dependency_closure() {
     let owner = RegistryRunGrantResolver {
         live_registry: Arc::new(RwLock::new(LoadedRegistrySnapshot::load(&registry, &instances).unwrap())),
         blobs: Arc::new(Mutex::new(InMemoryBlobs::new())),
-        fingerprint: Arc::new(Mutex::new(Some(registry_descriptor_fingerprint(&registry, &instances).unwrap()))),
+        files: Arc::new(Mutex::new(RegistryFileCache::default())),
+        fingerprint: Arc::new(Mutex::new(Some(registry_descriptor_fingerprint(&registry, &instances, &mut RegistryFileCache::default()).unwrap()))),
         registry_root: registry, ee_instances_root: instances.clone(),
     };
-    let record = octopus_runtime::run_record::RunRecord::from_bytes(&serde_json::to_vec(&json!({
+    let record = octopus_run_record::RunRecord::from_bytes(&serde_json::to_vec(&json!({
         "id":"run", "ee":"ee_0", "worker":"worker", "trace":"guard", "status":"running", "interface_state":{},
         "active_checkpoints":["input"], "checkpoints":[{"id":"input", "run":"run", "trace":"guard", "epoch":0,
         "interface_binding":octopus_policy::AuthoredInterfaceBinding::all(InterfaceId::new("worker")), "artifact_bindings":[], "outbound_interface_bindings":[]}]

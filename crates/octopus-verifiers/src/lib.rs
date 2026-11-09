@@ -1037,6 +1037,11 @@ mod tests {
         ctx.scratch_root = package.path().join("scratch");
         ctx.descriptor.authority.executable_commands =
             std::collections::BTreeSet::from(["/usr/bin/env".to_string(), "python3".to_string()]);
+        ctx.descriptor.authority.read_executable_relative_paths = vec![
+            octopus_descriptors::ProcessExecutableRelativePathSpec {
+                executable: "python3".into(), relative_path: "../lib".into(),
+            },
+        ];
         let (_, artifact) = blob(b"verified payload");
         let input = test_input(
             artifact,
@@ -1102,6 +1107,7 @@ mod tests {
         std::fs::write(&script, format!("#!/usr/bin/python3\n{body}")).unwrap();
         ctx.descriptor.authority.executable_commands =
             std::collections::BTreeSet::from(["/usr/bin/python3".to_string()]);
+        ctx.descriptor.authority.read_executable_relative_paths[0].executable = "/usr/bin/python3".into();
         let absolute = run_verifier_process(&ctx, &input, b"verified payload".to_vec());
         assert!(
             absolute.passed,

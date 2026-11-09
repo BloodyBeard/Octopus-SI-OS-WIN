@@ -3,14 +3,14 @@ module.exports = { operatorChatListProjection };
 const path = require("node:path");
 const { projectHomeVoiceContext } = require("../homeVoiceProjection.cjs");
 const { operatorActivityRows } = require("../operatorActivity.cjs");
-const { readChangeJournalDocument } = require("./changeJournal.cjs");
 const { activationDriverRef, scheduledInterfaceDisplayName } = require("./cronActivation.cjs");
 const { cachedOperatorChatArtifactText } = require("./operatorChatCache.cjs");
+const { ARTIFACT_PAYLOAD_READ_CONCURRENCY } = require("./constants.cjs");
 const { readConnectedApplicationIdsByRun } = require("./applicationPackages.cjs");
 const { compareMovementOrder, movementBoundaryInterface, openValidatedLedgerIndex, optionalUnsignedInteger, readIndexedTaskSearchCandidates, taskSearchSnippet } = require("./movementRows.cjs");
 const { operatorActivityAgent, operatorActivityMessage, operatorChatExpandedStreamRows, operatorChatResponseKey, operatorChatRunProvider, operatorChatSearchMessage, operatorChatTurnText } = require("./operatorChatEvents.cjs");
 const { eeInstanceRows, octopusOsInterfaceSidecars } = require("./registryRows.cjs");
-const { arrayValue, contentHashHex, ledgerArtifactId, ledgerArtifactLabel, numberValue, objectOrEmpty, requiredString, rowTimeMs, stringValue } = require("./values.cjs");
+const { arrayValue, contentHashHex, ledgerArtifactId, ledgerArtifactLabel, mapConcurrentOrdered, numberValue, objectOrEmpty, requiredString, rowTimeMs, stringValue } = require("./values.cjs");
 
 function operatorChatListProjection(store) {
   async function operatorChatsList(projection) {
@@ -41,19 +41,13 @@ function operatorChatListProjection(store) {
       if (text) return text;
     }
     if (entry.surfaceRole === "task") {
-      try {
-        const journal = await readChangeJournalDocument(projection.octopusHome, entry.runId);
-        if (stringValue(journal?.document.summary)) return journal.document.summary;
-      } catch {
-        return "Run journal is unreadable";
-      }
       for (const movement of entry.activity) {
         if (movement.kind !== "InterfaceArrival" || !store.artifactLabelMatches(ledgerArtifactLabel(movement), "cron.current_time", true)) continue;
         const interfaceId = movementBoundaryInterface(movement, "from");
         const descriptor = projection.descriptorIndexes?.interface?.get(interfaceId);
         const activation = arrayValue(arrayValue(descriptor?.activation_sidecars)[0]?.activations)
           .find((row) => activationDriverRef(row) === "cron_life");
-        if (activation) return scheduledInterfaceDisplayName(interfaceId, stringValue(activation.config?.run_template?.id));
+        if (activation) return scheduledInterfaceDisplayName(interfaceId);
       }
     }
     return entry.runId;
@@ -85,7 +79,7 @@ function operatorChatListProjection(store) {
       .map((presentation) => [stringValue(presentation.ee_id), stringValue(presentation.color)]));
     const connectedApplicationsByRun = await readConnectedApplicationIdsByRun(projection, store.operatorOsScope(projection));
     const eeById = new Map(eeInstanceRows(projection, false).map((row) => [stringValue(row.ee_id), row]));
-    const chats = await Promise.all((await store.operatorChatRunIndex(projection)).map(async (entry) => {
+    const chats = await mapConcurrentOrdered(await store.operatorChatRunIndex(projection), ARTIFACT_PAYLOAD_READ_CONCURRENCY, async (entry) => {
       const movements = entry.activity.length ? entry.activity : [...entry.inbound, ...entry.outbound];
       const times = movements.map(rowTimeMs).filter(Boolean);
       const lastMovementSeq = movements.reduce(
@@ -162,7 +156,7 @@ function operatorChatListProjection(store) {
         agent_icon: activityAgent?.icon ?? null,
         agent_color: activityAgent ? projectColors.get(eeId) || null : null,
       };
-    }));
+    });
     projection.operatorChatStatusInitialized = true;
     return chats.sort((a, b) => b.updated_at_ms - a.updated_at_ms);
   }
@@ -237,7 +231,7 @@ function operatorChatListProjection(store) {
         const streams = outbound.filter((row) => ledgerArtifactLabel(row) === "turn.stream" && row.seq > after);
         if (streams.length > 1000) throw new Error(`Activity exceeds the 1000-stream resolution read boundary: ${chat.run_id}`);
         const streamPayloads = await store.resolveLedgerArtifactPayloads(streams, true);
-        for (const row of operatorChatExpandedStreamRows(streams, streamPayloads, entry.runId)) {
+        for (const row of await operatorChatExpandedStreamRows(streams, streamPayloads, entry.runId)) {
           if (ledgerArtifactLabel(row) === "turn.operator_request.resolved") messages.push(operatorActivityMessage(row, streamPayloads.get(row), protocol));
         }
         rows = operatorActivityRows(input);

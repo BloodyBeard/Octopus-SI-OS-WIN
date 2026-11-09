@@ -22,16 +22,6 @@ path = "src/bin/input_intake_life.rs"
 name = "octopus-provider-opencodex-life"
 path = "src/bin/opencodex_life.rs"
 
-[features]
-default = []
-embed-support = [
-    "dep:octopus-config",
-    "dep:octopus-core",
-    "dep:octopus-exec",
-    "dep:octopus-app-server-transport",
-    "dep:toml",
-]
-
 [dependencies]
 octopus-private-fs = { path = "../../../../../crates/octopus-private-fs" }
 octopus-local-socket = { path = "../../../../../crates/octopus-local-socket" }
@@ -54,6 +44,7 @@ octopus-util-abspath = { path = "../../../../worker_environment_kind/process_ses
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+octopus-run-record = { path = "../../../../../crates/octopus-run-record" }
 octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
 octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }
 octopus-interface-activation-app-server-transport = { path = "../../../world_operator_chat/packages/octopus-interface-activation-app-server-transport" }
@@ -77,11 +68,6 @@ tracing = "0.1.44"
 url = "2"
 zeroize = "1.8.2"
 
-octopus-config = { path = "../octopus-codex-config", optional = true }
-octopus-core = { path = "../octopus-codex-core", optional = true }
-octopus-exec = { package = "octopus-exec-substrate", path = "../../../../../registry/worker_environment_kind/process_session/packages/octopus-exec-substrate", optional = true }
-octopus-app-server-transport = { path = "../octopus-app-server-transport", optional = true }
-toml = { version = "0.9.5", optional = true }
 octopus-app-server-interface = { path = "../../../world_operator_chat/packages/octopus-app-server-interface" }
 
 [dev-dependencies]
@@ -89,5 +75,4 @@ json-patch.workspace = true
 octopus-app-server = { path = "../../../../../crates/octopus-app-server" }
 octopus-system-room-env = { path = "../../../../../registry/worker_environment_kind/system_room/packages/octopus-system-room-env" }
 toml = "0.9.5"
-octopus-world-terminal-client = { path = "../../../world_terminal/packages/octopus-world-terminal-client" }
 tempfile = "3.23.0"

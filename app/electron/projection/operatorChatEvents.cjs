@@ -1,6 +1,7 @@
 module.exports = { activityDirection, activityPayloadText, appendOperatorChatAssistantMessage, clientEventDataProjection, clientEventHasProcessOutput, clientEventHasUnifiedDiff, clientReasoningSummaryProjection, compactClientEventValue, nativeTurnRecordedInputs, operatorActivityAgent, operatorActivityMessage, operatorChatActivityPayload, operatorChatAssistantItemCompleted, operatorChatAttachments, operatorChatEventData, operatorChatEventIdentity, operatorChatEventKind, operatorChatEventText, operatorChatExecutionScope, operatorChatExpandedStreamRows, operatorChatMovementContext, operatorChatProjectedRowId, operatorChatProviderFailureActivity, operatorChatRequestKey, operatorChatResponseKey, operatorChatRunProvider, operatorChatRuntimeProviderId, operatorChatSearchMessage, operatorChatStreamPositionCovered, operatorChatTurnText, operatorTurnControlEndsTurn, operatorTurnControlOutcome, operatorTurnStreamIdentity, validateOperatorRecordedInput };
 
 const crypto = require("node:crypto");
+const { setImmediate: yieldToClient } = require("node:timers/promises");
 const { CLIENT_EVENT_DATA_MAX_ARRAY_ITEMS, CLIENT_EVENT_DATA_MAX_BYTES, CLIENT_EVENT_DATA_MAX_DEPTH, CLIENT_EVENT_DATA_MAX_OBJECT_KEYS, CLIENT_EVENT_DATA_MAX_STRING_LENGTH, CLIENT_REASONING_SUMMARY_MAX_BYTES } = require("./constants.cjs");
 const { indexedUnsignedInteger, movementBaseKind, movementBoundaryInterface, movementKindText, movementRunId } = require("./movementRows.cjs");
 const { isOperatorChatProviderFailureRow } = require("./registryRows.cjs");
@@ -164,7 +165,7 @@ function operatorChatProjectedRowId(row, fallback) {
   return ledgerArtifactId(row) || fallback;
 }
 
-function operatorChatExpandedStreamRows(rows, payloads, runId, onHeader) {
+async function operatorChatExpandedStreamRows(rows, payloads, runId, onHeader) {
   const expanded = [];
   for (const row of rows) {
     if (ledgerArtifactLabel(row) !== "turn.stream") {
@@ -179,8 +180,7 @@ function operatorChatExpandedStreamRows(rows, payloads, runId, onHeader) {
     if (bytes.byteLength > 256 * 1024 * 1024) throw new Error("sealed turn.stream payload exceeds 256 MiB");
     const records = [];
     let startOffset = 0;
-    for (let index = 0; index < bytes.byteLength; index += 1) {
-      if (bytes[index] !== 0x0a) continue;
+    for (let index = bytes.indexOf(0x0a); index >= 0; index = bytes.indexOf(0x0a, startOffset)) {
       const rawRow = bytes.subarray(startOffset, index > startOffset && bytes[index - 1] === 0x0d ? index - 1 : index);
       if (rawRow.byteLength === 0) throw new Error("sealed turn.stream contains an empty row");
       let value;
@@ -192,6 +192,7 @@ function operatorChatExpandedStreamRows(rows, payloads, runId, onHeader) {
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("sealed turn.stream row must be an object");
       records.push({ value, startOffset, endOffset: index + 1 });
       startOffset = index + 1;
+      if (records.length % 128 === 0) await yieldToClient();
     }
     const headerRecord = records.shift();
     const header = headerRecord?.value;
@@ -271,6 +272,7 @@ function operatorChatExpandedStreamRows(rows, payloads, runId, onHeader) {
       expectedSeq += 1;
       previousTime = value.recorded_at_unix_ms;
       previousSourceMovementSeq = value.source_movement_seq;
+      if (expectedSeq % 128 === 0) await yieldToClient();
     }
     if (!sealed) throw new Error("sealed turn.stream has no seal row");
     onHeader?.(header);
@@ -299,8 +301,8 @@ function validateOperatorRecordedInput(value, header) {
     || !["item/started", "item/completed", "thread/resume"].includes(value.source_event)) {
     throw new Error("turn.stream input_recorded has invalid observation stage/source");
   }
-  if (value.source_event === "thread/resume" ? Object.hasOwn(value, "native_event_at_ms")
-    : !Number.isSafeInteger(value.native_event_at_ms) || value.native_event_at_ms < 0) {
+  if ((value.source_event !== "thread/resume" || Object.hasOwn(value, "native_event_at_ms"))
+    && (!Number.isSafeInteger(value.native_event_at_ms) || value.native_event_at_ms < 0)) {
     throw new Error("turn.stream input_recorded has invalid native event time");
   }
 }

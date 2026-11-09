@@ -389,7 +389,6 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
             )
             .await
             .unwrap();
-            socket.send(Message::Text(json!({"type":"session.started"}).to_string().into())).await.unwrap();
             let update: Value =
                 serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
                     .unwrap();
@@ -493,8 +492,10 @@ async fn http_and_sideband_contracts_preserve_call_and_operation_identity() {
         .await
         .is_err());
         let activated = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await.unwrap().unwrap();
+        assert_eq!(activated.event["type"], "octopus.transport.connected");
         apply_sideband_events(&config, &mut store, [activated]).unwrap();
         assert_eq!(store.state.calls["offer"].status, "attached");
+        assert_eq!(store.state.pending.last().unwrap().body["sideband_connected"], true);
         let observation = SessionUpdate {
             call_id: "rtc_fixture".into(), correlation_id: "offer".into(),
             update_id: "client-observation".into(), delegation_id: None,

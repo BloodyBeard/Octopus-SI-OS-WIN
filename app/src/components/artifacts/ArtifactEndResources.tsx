@@ -5,7 +5,7 @@ import type { ChatRenderMessage } from "../chat/types";
 import { Glyph, type GlyphName } from "../IconGlyphs";
 import { OcMenuItem, OcMenuMessage, OcMenuSurface } from "../../design-system/components";
 import { appToast } from "../../toasts";
-import { ArtifactWorkbench } from "./ArtifactWorkbench";
+import { useOpenArtifactFiles } from "../files/FilesPaneNavigation";
 import {
   downloadArtifactFileCopy,
   listArtifactFileOpenTargets,
@@ -84,7 +84,7 @@ export function artifactEndResourceFromMessage(message: ChatRenderMessage): Arti
 }
 
 function ArtifactEndResourceCard({ resource }: { resource: ArtifactEndResource }) {
-  const [previewOpen, setPreviewOpen] = useState(false);
+  const openArtifactFiles = useOpenArtifactFiles();
   const [menuOpen, setMenuOpen] = useState(false);
   const [file, setFile] = useState<ArtifactFile | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
@@ -170,7 +170,7 @@ function ArtifactEndResourceCard({ resource }: { resource: ArtifactEndResource }
         aria-label={`Open ${resource.filename}`}
         className="peer/end-resource absolute inset-0 cursor-interaction border-0 bg-transparent group-hover/end-resource:bg-token-list-hover-background/30 focus-visible:ring-1 focus-visible:ring-token-focus-border focus-visible:outline-none focus-visible:ring-inset"
         draggable={Boolean(window.octopusTransport?.startClientFileDrag)}
-        onClick={() => setPreviewOpen(true)}
+        onClick={() => openArtifactFiles(resource.reference)}
         onDragStart={(event) => {
           event.preventDefault();
           void ensureFile().then((resolved) => startArtifactFileDrag(resolved)).catch((failure) => {
@@ -219,7 +219,6 @@ function ArtifactEndResourceCard({ resource }: { resource: ArtifactEndResource }
           trigger={triggerRef.current}
         />
       ) : null}
-      {previewOpen ? <ArtifactWorkbench onClose={() => setPreviewOpen(false)} presentation="overlay" reference={resource.reference} /> : null}
     </div>
   );
 }

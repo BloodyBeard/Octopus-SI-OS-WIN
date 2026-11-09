@@ -2,8 +2,10 @@ import type { WidgetAction } from "../../electron/clientActionSemantics.mjs";
 import type { ClientExtensionRegistryState } from "../extensions/types";
 import { materializeClientExtensions } from "../extensions/useClientExtensions";
 import { readClientExtensions } from "../extensions/transport";
+import { readProjection } from "../projectionClient";
+import { materializeRegistry } from "./documentRegistry";
 import { homeSurfaceIdentity, selectHomeSurfaceDocuments } from "./homePresentation";
-import type { AdmittedClientSurfaceDocument } from "./types";
+import type { AdmittedClientSurfaceDocument, ClientSurfaceDocumentSnapshot } from "./types";
 
 export const homeWidgetHiddenKey = (profile: string) => `octopus.voice.hidden-surfaces.v1.${profile}`;
 export const homeWidgetDismissalsKey = (profile: string, runId: string, interfaceId: string) =>
@@ -77,6 +79,10 @@ export async function applyHomeWidgetAction(options: HomeWidgetControls, action:
   if (options.accessProfile !== "live" || !options.runId || !options.interfaceId || !options.extensions.hydrated) {
     throw new Error("The selected Home widget registry is not ready.");
   }
+  const snapshot = await readProjection<ClientSurfaceDocumentSnapshot>("projection.client_surfaces.list");
+  const published = materializeRegistry(snapshot, "", false, options.accessProfile);
+  if (published.errors.length) throw new Error(published.errors.join("; "));
+  options = { ...options, surfaces: published.voiceSurfaces };
   let current = options;
   const changes = action.action === "set_widget" ? action.changes : [];
   const before = inventory(options);

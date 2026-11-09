@@ -23,7 +23,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   if (id === undefined) return;
   const result = method === 'account/read' ? {account:signedIn ? {type:'chatgpt'} : null}
     : method === 'account/login/start' ? {type:'chatgpt',loginId:'login',authUrl:'https://example.test/login'}
-    : method === 'model/list' ? {data:[row(params.cursor ? 'second' : 'first')], nextCursor:params.cursor ? null : 'next'} : {};
+    : method === 'model/list' ? {data:params.cursor ? [row('second')] : [row('first'), {...row('no-reasoning'), defaultReasoningEffort:'none', supportedReasoningEfforts:[]}], nextCursor:params.cursor ? null : 'next'} : {};
   process.stdout.write(JSON.stringify({id,result})+'\\n');
   if (method === 'account/login/start') {
     signedIn = true;
@@ -38,7 +38,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     await fs.mkdir(folder, { recursive: true });
     await installNativeMetadata(path.join(root, "registry"));
     await fs.writeFile(path.join(folder, "interface.json"), JSON.stringify({ id: "provider", interface_type: "world",
-      role: "provider", interface_driver_ref: "codex_app_server", interface_driver_config: nativeConfig(), interface_policy: { variables: { models: { default: ["second"] } } } }));
+      role: "provider", interface_driver_ref: "codex_app_server", interface_driver_config: nativeConfig(), interface_policy: { variables: { models: { default: ["second", "no-reasoning"] } } } }));
     const service = createClientProviderMetadata({ registryRoot: () => path.join(root, "registry"), sourceRegistryRoot: () => path.join(root, "registry"), accountClient: () => client,
       reference: (kind, id, evidence) => ({ kind, id, evidence }) });
     const source = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8");
@@ -51,8 +51,13 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     await owner.apply(plan);
     assert.equal(opened, 1, "an existing sign-in must not reopen the browser");
     const catalog = await service.models({ providerInterfaceId: "provider" });
-    assert.deepEqual(catalog.models.map((row) => row.model), ["second"]);
-    assert.deepEqual(catalog.models[0].supportedReasoningEfforts, ["high"]);
+    assert.deepEqual(catalog.models.map((row) => row.model), ["no-reasoning", "second"]);
+    assert.deepEqual(catalog.models[0].supportedReasoningEfforts, []);
+    assert.equal(catalog.models[0].defaultReasoningEffort, "");
+    assert.deepEqual(catalog.models[1].supportedReasoningEfforts, ["high"]);
+    validateProviderModelSelection([{ id: "provider", models: catalog.models }], {
+      providerInterfaceId: "provider", providerModel: "no-reasoning", reasoningEffort: "",
+    });
     assert.deepEqual(catalog.models[0].serviceTiers.map((tier) => tier.id), ["priority", "ultrafast"]);
     await assert.rejects(service.models({ providerInterfaceId: "../provider" }), /Invalid provider/);
     const calls = (await fs.readFile(methods, "utf8")).trim().split("\n").map(JSON.parse);

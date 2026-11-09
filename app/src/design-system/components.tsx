@@ -28,7 +28,7 @@ export type OcTone = "neutral" | "accent" | "success" | "warning" | "danger" | "
 export type OcControlVariant = "primary" | "secondary" | "ghost" | "outline";
 export type OcControlSize = "xs" | "sm" | "md";
 
-const OCTOPUS_BUTTON_BASE = "border-default no-drag cursor-interaction flex items-center gap-1 rounded-lg border whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40";
+const OCTOPUS_BUTTON_BASE = "border-default no-drag cursor-interaction flex items-center gap-1 rounded-lg border whitespace-nowrap select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-0 disabled:cursor-default";
 const OCTOPUS_BUTTON_SIZE: Record<OcControlSize, string> = {
   xs: "h-token-button-composer-sm px-1.5 py-0 text-sm leading-[18px]",
   sm: "h-token-button-composer px-2 py-0 text-base leading-[18px]",
@@ -259,6 +259,7 @@ export function OcCompactAction({
 }
 
 type OcButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  busy?: boolean;
   buttonRef?: Ref<HTMLButtonElement>;
   leadingIcon?: GlyphName;
   trailingIcon?: GlyphName;
@@ -270,6 +271,7 @@ type OcButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 export function OcButton({
+  busy = false,
   buttonRef,
   leadingIcon,
   trailingIcon,
@@ -291,6 +293,7 @@ export function OcButton({
         "oc-button-root",
         `oc-tone-${tone}`,
         OCTOPUS_BUTTON_BASE,
+        !busy && "disabled:opacity-40",
         OCTOPUS_BUTTON_SIZE[size],
         OCTOPUS_BUTTON_VARIANT[variant],
         selected && "is-selected bg-token-foreground/10",
@@ -299,6 +302,8 @@ export function OcButton({
       data-oc-control="button"
       data-state={selected ? "selected" : undefined}
       {...props}
+      aria-busy={busy || props["aria-busy"]}
+      disabled={busy || props.disabled}
       type={type}
     >
       {leadingIcon ? <Glyph name={leadingIcon} size={size === "xs" ? 12 : 14} /> : null}
@@ -307,7 +312,7 @@ export function OcButton({
       {trailingIcon ? <Glyph name={trailingIcon} size={size === "xs" ? 12 : 14} /> : null}
     </button>
   );
-  return <ShellTooltip asChild disabled={props.disabled || !title} label={title ?? ""}>{button}</ShellTooltip>;
+  return <ShellTooltip asChild disabled={busy || props.disabled || !title} label={title ?? ""}>{button}</ShellTooltip>;
 }
 
 export type OcAnimatedActionSlotProps = {
@@ -346,7 +351,7 @@ export function OcAnimatedActionSlot({ children, className }: OcAnimatedActionSl
 }
 
 type OcIconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
-  appearance?: "default" | "sidebar" | "compact" | "rail";
+  appearance?: "default" | "sidebar" | "compact" | "rail" | "dialog-close";
   buttonRef?: Ref<HTMLButtonElement>;
   glyph: GlyphName;
   label: string;
@@ -510,9 +515,8 @@ export function OcInlineProgress({
   const determinate = typeof value === "number" && Number.isFinite(value);
   const progress = determinate ? Math.max(0, Math.min(100, value)) : null;
   const roundedProgress = progress == null ? null : Math.round(progress);
-  const radius = 7;
-  const circumference = Math.PI * 2 * radius;
   const accessibleLabel = progressLabel ?? (typeof label === "string" ? label : "Progress");
+  const ringTransition = reducedMotion ? "none" : "stroke-dashoffset 500ms ease-out, opacity 500ms ease-out";
   return (
     <span
       {...props}
@@ -527,24 +531,26 @@ export function OcInlineProgress({
     >
       {determinate ? <svg
         aria-hidden="true"
-        className="size-4 shrink-0 -rotate-90"
-        viewBox="0 0 18 18"
+        className="shrink-0"
+        height="16"
+        viewBox="0 0 16 16"
+        width="16"
       >
-        <circle className="fill-none stroke-current opacity-20" cx="9" cy="9" r={radius} strokeWidth="2" />
+        <circle cx="8" cy="8" fill="none" opacity={0.16} r="7" stroke="currentColor" strokeWidth="2" />
         <circle
-          className="fill-none stroke-current"
-          cx="9"
-          cy="9"
-          r={radius}
-          strokeDasharray={circumference}
-          strokeDashoffset={progress == null ? 0 : circumference * (1 - progress / 100)}
+          cx="8"
+          cy="8"
+          fill="none"
+          opacity={progress === 0 ? 0 : 1}
+          pathLength={100}
+          r="7"
+          stroke="currentColor"
+          strokeDasharray={100}
+          strokeDashoffset={100 - (progress ?? 0)}
           strokeLinecap="round"
           strokeWidth="2"
-          style={determinate ? {
-            transitionDuration: reducedMotion ? "0ms" : "500ms",
-            transitionProperty: "stroke-dashoffset",
-            transitionTimingFunction: "ease-out",
-          } : undefined}
+          style={{ transition: ringTransition }}
+          transform="rotate(-90 8 8)"
         />
       </svg> : <OctopusSpinner className="icon-xs shrink-0" />}
       <span className="min-w-0 truncate">{label}{showValue && roundedProgress != null ? ` ${roundedProgress}%` : ""}</span>
@@ -562,7 +568,6 @@ type OcStatusProps = {
 export function OcStatus({ label, detail, tone = "neutral", className }: OcStatusProps) {
   return (
     <ShellTooltip asChild disabled={!detail} label={detail ?? ""}><span className={cx("oc-status", `oc-tone-${tone}`, className)} aria-description={detail} data-oc-status>
-      <span aria-hidden="true" className="oc-status__dot" />
       <span className="oc-status__label">{label}</span>
     </span></ShellTooltip>
   );
@@ -1143,6 +1148,7 @@ export type OcExpandableListProps<T> = {
   getItemLabel: (item: T) => string;
   items: readonly T[];
   renderItemPreview?: (item: T) => ReactNode;
+  renderPreviews?: (hiddenItems: readonly T[]) => ReactNode;
   resetKey: string | number;
   visibleItemLimit: number;
 };
@@ -1155,6 +1161,7 @@ export function OcExpandableList<T>({
   getItemLabel,
   items,
   renderItemPreview,
+  renderPreviews,
   resetKey,
   visibleItemLimit,
 }: OcExpandableListProps<T>) {
@@ -1197,7 +1204,7 @@ export function OcExpandableList<T>({
           onClick={() => setExpansion({ key: resetKey, page: isExpanded ? 0 : page + 1 })}
           type="button"
         >
-          {previewItems.length ? (
+          {renderPreviews ? (isExpanded ? null : renderPreviews(hiddenItems)) : previewItems.length ? (
             <span aria-hidden="true" className="flex h-10 w-8 shrink-0 items-center">
               {previewItems.map(({ key, content }) => (
                 <span className="-ml-2 flex size-4 items-center justify-center overflow-hidden rounded-sm border border-token-border-default bg-token-main-surface-primary first:ml-0" key={key}>
@@ -1429,7 +1436,7 @@ export function OcSlider({
   );
 }
 
-export type OcDialogSize = "narrow" | "feature" | "compact" | "default" | "wide" | "xwide" | "xxwide" | "editor";
+export type OcDialogSize = "narrow" | "feature" | "compact" | "setup" | "default" | "wide" | "xwide" | "xxwide" | "editor";
 
 export type OcDialogProps = {
   open: boolean;
@@ -1579,10 +1586,10 @@ export function OcDialogHeader({
     <header {...props} className={cx("flex shrink-0 items-start gap-4 px-6 pt-6 pb-4", className)}>
       {leading ? <div className="shrink-0">{leading}</div> : null}
       <div className="min-w-0 flex-1">
-        <h2 className="heading-lg m-0 text-token-foreground" id={titleId}>{title}</h2>
+        <h2 className="heading-dialog m-0 font-semibold text-token-foreground" id={titleId}>{title}</h2>
         {description ? <p className="mt-1 text-sm leading-5 text-token-text-secondary">{description}</p> : null}
       </div>
-      {onClose ? <OcIconButton disabled={closeDisabled} glyph="close" label={closeLabel} onClick={onClose} variant="ghost" /> : null}
+      {onClose ? <OcIconButton appearance="dialog-close" disabled={closeDisabled} glyph="close" label={closeLabel} onClick={onClose} variant="ghost" /> : null}
     </header>
   );
 }

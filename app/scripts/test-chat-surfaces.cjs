@@ -61,7 +61,7 @@ const surfaces = bundle([
 ].join("\n"), {
   "./chat": ["ChatComposer", "ChatMessageList", "QueuedMessageList", "ChatThreadHeader", "ChatThreadHeaderActions", "ChatRenderBoundary", "TaskSummaryPanel", "useChatWorkspace"],
   ChatComposer: ["ChatComposer"], useChatWorkspace: ["useChatWorkspace"], MessageContent: ["MessageContent"], QueuedMessageList: ["QueuedMessageList"],
-  OperatorRequestSurface: ["OperatorRequestSurface"], VoiceOrbScene: ["VoiceOrbScene"], OctopusOceanScene: ["OctopusOceanScene"], AirHandVoiceController: ["AirHandVoiceController"],
+  OperatorRequestSurface: ["OperatorRequestSurface"], VoiceOrbScene: ["VoiceOrbScene"], OctopusOceanScene: ["OctopusOceanScene"],
   OctopusSwarm: ["OctopusSwarm"], ClientSurfaceRenderer: ["ClientSurfaceRenderer", "resetVoiceWidgetLayout", "restoreVoiceWidgetLayout", "useVoiceWidgetResize"],
   toasts: "export const appToast = { warning: (message) => globalThis.__surfaceStubs.toasts.warnings.push(message), info() {}, success() {}, danger() {} }; export function useAppErrorToast() {} export function AppToastViewport() { return null; }",
 });

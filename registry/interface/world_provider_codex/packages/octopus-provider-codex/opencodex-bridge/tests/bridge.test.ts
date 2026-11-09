@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -10,6 +10,7 @@ type SpawnedBridge = {
 
 const children: Array<ReturnType<typeof Bun.spawn>> = [];
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+const directories: string[] = [];
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
@@ -17,6 +18,7 @@ afterEach(async () => {
     await child.exited;
   }
   for (const server of servers.splice(0)) server.stop(true);
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 function config(baseUrl: string, provider: Record<string, unknown> = {}) {
@@ -63,7 +65,7 @@ async function readLine(stream: ReadableStream<Uint8Array>): Promise<string> {
   }
 }
 
-const bridgeBinary = resolve(import.meta.dir, "../bin/octopus-opencodex-bridge");
+const bridgeBinary = process.env.OCTOPUS_TEST_BRIDGE_BINARY ?? resolve(import.meta.dir, "../bin/octopus-opencodex-bridge");
 
 async function spawnBridge(value: unknown, env?: Record<string, string>): Promise<SpawnedBridge> {
   const child = Bun.spawn([bridgeBinary], { stdin: "pipe", stdout: "pipe", stderr: "pipe", ...(env ? { env } : {}) });
@@ -163,7 +165,9 @@ function sse(events: Array<[string | null, unknown]>): Response {
   return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
 }
 
-async function exchange(provider: Record<string, unknown>, upstreamReply: Response, model = "test-model", tools: unknown[] = []) {
+const userInput = [{ role: "user", content: [{ type: "input_text", text: "hi" }] }];
+
+async function exchange(provider: Record<string, unknown>, upstreamReply: Response, model = "test-model", tools: unknown[] = [], input: unknown[] = userInput) {
   let observed: { path: string; search: string; headers: Headers; body: Record<string, unknown> } | undefined;
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -180,7 +184,7 @@ async function exchange(provider: Record<string, unknown>, upstreamReply: Respon
   const response = await fetch(`${bridge.origin}/v1/responses`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, stream: true, input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }], tools }),
+    body: JSON.stringify({ model, stream: true, input, tools }),
   });
   return { status: response.status, text: await response.text(), observed: observed! };
 }
@@ -197,6 +201,32 @@ test("chat tool calls come back as Responses function calls", async () => {
   expect(result.text).toContain("function_call");
   expect(result.text).toContain("exact_tool");
   expect(result.text).toContain("response.completed");
+});
+
+test("root schema alternatives become described fields and the upstream's own refusal reaches Codex", async () => {
+  const alternativeTool = {
+    type: "function",
+    name: "alternative_tool",
+    description: "Send",
+    parameters: {
+      type: "object",
+      properties: { interface: { type: "string" } },
+      required: ["interface"],
+      oneOf: [{ required: ["payload", "label"], properties: { label: { type: "string" } } }, { required: ["ref"], properties: { ref: { type: "string" } } }],
+      allOf: [{}],
+    },
+  };
+  const refusal = "tools.0.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level";
+  const result = await exchange({}, Response.json({
+    error: { message: "Provider returned error", code: 400, metadata: { raw: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: refusal } }) } },
+  }, { status: 400 }), "test-model", [alternativeTool]);
+  const sent = (result.observed.body.tools as Array<{ function: { description: string; parameters: Record<string, unknown> } }>)[0].function;
+  expect(Object.keys(sent.parameters).filter(key => ["oneOf", "anyOf", "allOf"].includes(key))).toEqual([]);
+  expect(sent.parameters.required).toEqual(["interface"]);
+  expect(Object.keys(sent.parameters.properties as object).sort()).toEqual(["interface", "label", "ref"]);
+  expect(sent.description).toContain("exactly one of these field sets: (payload + label) | (ref)");
+  expect(result.status).toBe(400);
+  expect(result.text).toContain(refusal);
 });
 
 test("registry entry and model alias reach the upstream as the configured model", async () => {
@@ -247,19 +277,23 @@ test("gemini generateContent streams through the bridge", async () => {
   expect(result.text).toContain("response.completed");
 });
 
+function responsesStream(text: string): Response {
+  const item = { id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] };
+  return sse([
+    ["response.created", { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model: "test-model", output: [] } }],
+    ["response.output_item.added", { type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } }],
+    ["response.content_part.added", { type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } }],
+    ["response.output_text.delta", { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: text }],
+    ["response.output_text.done", { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text }],
+    ["response.content_part.done", { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: item.content[0] }],
+    ["response.output_item.done", { type: "response.output_item.done", output_index: 0, item }],
+    ["response.completed", { type: "response.completed", response: { id: "resp_1", object: "response", status: "completed", model: "test-model", output: [item], usage: { input_tokens: 3, output_tokens: 3, total_tokens: 6 } } }],
+  ]);
+}
+
 for (const adapter of ["openai-responses", "azure"]) {
   test(`${adapter} Responses stream through the bridge`, async () => {
-    const item = { id: "msg_1", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "responses says hi", annotations: [] }] };
-    const result = await exchange({ adapter, ...(adapter === "azure" ? { base_url: "/openai", auth_header: "api-key", auth_value_prefix: "" } : {}) }, sse([
-      ["response.created", { type: "response.created", response: { id: "resp_1", object: "response", status: "in_progress", model: "test-model", output: [] } }],
-      ["response.output_item.added", { type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } }],
-      ["response.content_part.added", { type: "response.content_part.added", item_id: "msg_1", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } }],
-      ["response.output_text.delta", { type: "response.output_text.delta", item_id: "msg_1", output_index: 0, content_index: 0, delta: "responses says hi" }],
-      ["response.output_text.done", { type: "response.output_text.done", item_id: "msg_1", output_index: 0, content_index: 0, text: "responses says hi" }],
-      ["response.content_part.done", { type: "response.content_part.done", item_id: "msg_1", output_index: 0, content_index: 0, part: item.content[0] }],
-      ["response.output_item.done", { type: "response.output_item.done", output_index: 0, item }],
-      ["response.completed", { type: "response.completed", response: { id: "resp_1", object: "response", status: "completed", model: "test-model", output: [item], usage: { input_tokens: 3, output_tokens: 3, total_tokens: 6 } } }],
-    ]));
+    const result = await exchange({ adapter, ...(adapter === "azure" ? { base_url: "/openai", auth_header: "api-key", auth_value_prefix: "" } : {}) }, responsesStream("responses says hi"));
     expect(result.status).toBe(200);
     expect(result.observed.path).toBe(adapter === "azure" ? "/openai/v1/responses" : "/v1/responses");
     expect(result.observed.headers.get(adapter === "azure" ? "api-key" : "authorization")).toBe(adapter === "azure" ? "test-secret" : "Bearer test-secret");
@@ -268,10 +302,38 @@ for (const adapter of ["openai-responses", "azure"]) {
   });
 }
 
+test("Codex configuration_update items reach neither a translated nor a passthrough upstream", async () => {
+  const input = [...userInput, { type: "configuration_update", reasoning: { effort: "high" } }];
+  const chat = await exchange({}, sse([
+    [null, { id: "c", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: "chat ok" }, finish_reason: null }] }],
+    [null, { id: "c", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }],
+    [null, "[DONE]"],
+  ]), "test-model", [], input);
+  const passthrough = await exchange({ adapter: "openai-responses" }, responsesStream("passthrough ok"), "test-model", [], input);
+  for (const result of [chat, passthrough]) {
+    expect(result.status).toBe(200);
+    expect(result.text).toContain("response.completed");
+    expect(JSON.stringify(result.observed.body)).toContain("hi");
+    expect(JSON.stringify(result.observed.body)).not.toContain("configuration_update");
+  }
+});
+
 test("claude-cli turns run through the signed-in CLI with a scoped env and the bridge's own capture MCP", async () => {
   const home = mkdtempSync(join(tmpdir(), "octopus-claude-cli-"));
+  directories.push(home);
   const bin = join(home, "bin");
   mkdirSync(bin);
+  const toolArguments = [JSON.stringify({ value: `${"x".repeat(70000)}🙂\n\"` }), JSON.stringify({ value: "second call" })];
+  const frames: unknown[] = [];
+  toolArguments.forEach((args, index) => {
+    frames.push({ type: "stream_event", event: { type: "content_block_start", index, content_block: { type: "tool_use", id: `call_${index}`, name: "exact_tool", input: {} } } });
+    for (let offset = 0; offset < args.length; offset += 16) {
+      frames.push({ type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: args.slice(offset, offset + 16) } } });
+    }
+    frames.push({ type: "stream_event", event: { type: "content_block_stop", index } });
+  });
+  frames.push({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" } } }, { type: "stream_event", event: { type: "message_stop" } });
+  writeFileSync(join(home, "tool-frames"), frames.map(frame => JSON.stringify(frame)).join("\n") + "\n");
   writeFileSync(join(bin, "claude"), [
     "#!/bin/sh",
     'printf "%s\\n" "$@" > "$HOME/args"',
@@ -283,6 +345,7 @@ test("claude-cli turns run through the signed-in CLI with a scoped env and the b
     'cp "$catalog" "$HOME/catalog.json"',
     `printf '%s\\n' '{"type":"system","subtype":"init","mcp_servers":[{"name":"opencodex","status":"connected"}]}'`,
     `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"claude cli says hi"}]}}'`,
+    'cat "$HOME/tool-frames"',
     `printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"claude cli says hi","usage":{"input_tokens":3,"output_tokens":4}}'`,
   ].join("\n"), { mode: 0o755 });
   const bridge = await spawnBridge(config("https://api.anthropic.com", {
@@ -309,14 +372,21 @@ test("claude-cli turns run through the signed-in CLI with a scoped env and the b
     body: JSON.stringify({
       model: "claude-sonnet-5",
       stream: true,
-      input: [{ role: "user", content: [{ type: "input_text", text: "hello claude" }] }],
+      input: [{ role: "user", content: [
+        { type: "input_text", text: "hello claude" },
+        { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
+      ] }],
       tools: [exactTool],
     }),
   });
   expect(response.status).toBe(200);
   const text = await response.text();
   expect(text).toContain("claude cli says hi");
-  expect(text).toContain("response.completed");
+  const events = text.split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6)));
+  expect(events.filter(event => event.type === "response.failed").map(event => event.response.error)).toEqual([]);
+  expect(events.some(event => event.type === "response.completed")).toBe(true);
+  const calls = events.find(event => event.type === "response.completed").response.output.filter((item: { type: string }) => item.type === "function_call");
+  expect(calls.map((call: { call_id: string; name: string; arguments: string }) => [call.call_id, call.name, call.arguments])).toEqual(toolArguments.map((args, index) => [`call_${index}`, "exact_tool", args]));
   const args = readFileSync(join(home, "args"), "utf8").split("\n");
   expect(args).toEqual(expect.arrayContaining(["-p", "--tools", "", "--strict-mcp-config", "--setting-sources", "--no-session-persistence", "--model", "claude-sonnet-5", "--mcp-config"]));
   const env = readFileSync(join(home, "env"), "utf8");
@@ -325,6 +395,8 @@ test("claude-cli turns run through the signed-in CLI with a scoped env and the b
   expect(env).toContain("USER=octopus-test");
   expect(env).not.toContain("ANTHROPIC_");
   expect(readFileSync(join(home, "stdin"), "utf8")).toContain("hello claude");
+  const nativeInput = JSON.parse(readFileSync(join(home, "stdin"), "utf8"));
+  expect(nativeInput.message.content).toContainEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } });
   const mcp = JSON.parse(readFileSync(join(home, "mcp.json"), "utf8"));
   const server = Object.values(mcp.mcpServers)[0] as { command: string; args: string[] };
   expect(server.command).toBe(bridgeBinary);
@@ -349,6 +421,174 @@ test("claude-cli turns run through the signed-in CLI with a scoped env and the b
     buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
   }
   expect(listed.result.tools.map((tool) => tool.name).join(",")).toContain("exact_tool");
+});
+
+test("an incomplete claude-cli tool call fails closed and names the frame sequence that left it open", async () => {
+  const home = mkdtempSync(join(tmpdir(), "octopus-claude-cli-open-"));
+  directories.push(home);
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  const frames = [
+    { type: "system", subtype: "init", mcp_servers: [{ name: "opencodex", status: "connected" }] },
+    { type: "stream_event", event: { type: "message_start" } },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_0", name: "exact_tool", input: {} } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"value\":" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "\"secret text\"" } } },
+    { type: "result", subtype: "success", is_error: false, result: "", usage: { input_tokens: 3, output_tokens: 4 } },
+  ];
+  writeFileSync(join(home, "frames"), frames.map(frame => JSON.stringify(frame)).join("\n") + "\n");
+  writeFileSync(join(bin, "claude"), ["#!/bin/sh", 'cat > /dev/null', 'cat "$HOME/frames"'].join("\n"), { mode: 0o755 });
+  const bridge = await spawnBridge(config("https://api.anthropic.com", {
+    id: "world_provider_claude_cli", adapter: "claude-cli", registry_entry: "claude-cli",
+    models: ["claude-sonnet-5"], default_model: "claude-sonnet-5", api_key: undefined, auth_header: undefined,
+    auth_value_prefix: undefined, headers: {}, allow_private_network: false,
+  }), { HOME: home, USER: "octopus-test", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: home });
+  const response = await fetch(`${bridge.origin}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", stream: true, input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }], tools: [exactTool] }),
+  });
+  const text = await response.text();
+  expect(text).toContain("Coding-agent CLI ended with an incomplete tool call.");
+  expect(text).toContain("CLI frames: system:init message_start block_start[0]:tool_use(");
+  expect(text).toContain("delta[0]:input_json_deltax2 result:success");
+  expect(text).not.toContain("secret text");
+});
+
+test("a claude-cli continuation after a cut assistant message is discarded with a named reason", async () => {
+  const home = mkdtempSync(join(tmpdir(), "octopus-claude-cli-cut-"));
+  directories.push(home);
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  const frames = [
+    { type: "system", subtype: "init", mcp_servers: [{ name: "opencodex", status: "connected" }] },
+    { type: "stream_event", event: { type: "message_start" } },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_0", name: "exact_tool", input: {} } } },
+    { type: "stream_event", event: { type: "message_start" } },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "The previous step was stopped" } } },
+    { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+    { type: "stream_event", event: { type: "message_stop" } },
+    { type: "result", subtype: "success", is_error: false, result: "The previous step was stopped", usage: { input_tokens: 3, output_tokens: 4 } },
+  ];
+  writeFileSync(join(home, "frames"), frames.map(frame => JSON.stringify(frame)).join("\n") + "\n");
+  writeFileSync(join(bin, "claude"), ["#!/bin/sh", 'cat > /dev/null', 'cat "$HOME/frames"'].join("\n"), { mode: 0o755 });
+  const bridge = await spawnBridge(config("https://api.anthropic.com", {
+    id: "world_provider_claude_cli", adapter: "claude-cli", registry_entry: "claude-cli",
+    models: ["claude-sonnet-5"], default_model: "claude-sonnet-5", api_key: undefined, auth_header: undefined,
+    auth_value_prefix: undefined, headers: {}, allow_private_network: false,
+  }), { HOME: home, USER: "octopus-test", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: home });
+  const response = await fetch(`${bridge.origin}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", stream: true, input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }], tools: [exactTool] }),
+  });
+  const text = await response.text();
+  expect(text).toContain("Claude Code started another assistant message before the previous one finished");
+  expect(text).toContain("CLI frames: system:init message_start block_start[0]:tool_use(");
+  expect(text).not.toContain("The previous step was stopped");
+});
+
+test("a claude-cli refusal ends the turn as a terminal refusal without its continuation", async () => {
+  const home = mkdtempSync(join(tmpdir(), "octopus-claude-cli-refusal-"));
+  directories.push(home);
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  const frames = [
+    { type: "system", subtype: "init", mcp_servers: [{ name: "opencodex", status: "connected" }] },
+    { type: "stream_event", event: { type: "message_start" } },
+    { type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "refusal" } } },
+    { type: "stream_event", event: { type: "message_stop" } },
+    { type: "stream_event", event: { type: "message_start" } },
+    { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+    { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "CLI continuation" } } },
+    { type: "stream_event", event: { type: "content_block_stop", index: 0 } },
+    { type: "stream_event", event: { type: "message_stop" } },
+    { type: "result", subtype: "success", is_error: false, result: "CLI continuation", usage: { input_tokens: 3, output_tokens: 4 } },
+  ];
+  writeFileSync(join(home, "frames"), frames.map(frame => JSON.stringify(frame)).join("\n") + "\n");
+  writeFileSync(join(bin, "claude"), ["#!/bin/sh", 'cat > /dev/null', 'cat "$HOME/frames"'].join("\n"), { mode: 0o755 });
+  const bridge = await spawnBridge(config("https://api.anthropic.com", {
+    id: "world_provider_claude_cli", adapter: "claude-cli", registry_entry: "claude-cli",
+    models: ["claude-sonnet-5"], default_model: "claude-sonnet-5", api_key: undefined, auth_header: undefined,
+    auth_value_prefix: undefined, headers: {}, allow_private_network: false,
+  }), { HOME: home, USER: "octopus-test", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: home });
+  const response = await fetch(`${bridge.origin}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", stream: true, input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }] }),
+  });
+  const text = await response.text();
+  expect(text).toContain("response.failed");
+  expect(text).toContain("invalid_prompt");
+  expect(text).not.toContain("protocol_error");
+  expect(text).not.toContain("CLI continuation");
+});
+
+test("grok-cli turns run the signed-in Grok CLI in an isolated home and hand back the catalog calls it makes", async () => {
+  const home = mkdtempSync(join(tmpdir(), "octopus-grok-cli-"));
+  directories.push(home);
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  const calls = { type: "assistant", message: { stop_reason: "tool_use", usage: { input_tokens: 5, output_tokens: 6 }, content: [
+    { type: "thinking", thinking: "two calls" },
+    { type: "tool_use", id: "call_a", name: "use_tool", input: { tool_name: "opencodex__exact_tool", tool_input: { value: "a" } } },
+    { type: "tool_use", id: "call_b", name: "use_tool", input: { tool_name: "opencodex__exact_tool", tool_input: { value: "b" } } },
+  ] } };
+  writeFileSync(join(home, "frames"), JSON.stringify(calls) + "\n");
+  writeFileSync(join(bin, "grok"), [
+    "#!/bin/sh",
+    `printf "%s\\n" "$@" > "${home}/args"`,
+    `env > "${home}/env"`,
+    `cp "$HOME/.claude.json" "${home}/mcp.json"`,
+    `cp "$(dirname "$HOME")/catalog.json" "${home}/catalog.json"`,
+    'previous=""',
+    `for argument in "$@"; do if [ "$previous" = "--prompt-file" ]; then cp "$argument" "${home}/prompt"; fi; previous="$argument"; done`,
+    `cat "${home}/frames"`,
+    "sleep 30",
+  ].join("\n"), { mode: 0o755 });
+  const bridge = await spawnBridge(config("https://cli-chat-proxy.grok.com/v1", {
+    id: "world_provider_grok_cli",
+    adapter: "grok-cli",
+    models: ["grok-4.7"],
+    default_model: "grok-4.7",
+    api_key: undefined,
+    auth_header: undefined,
+    auth_value_prefix: undefined,
+    headers: {},
+    allow_private_network: false,
+  }), { HOME: home, USER: "octopus-test", PATH: `${bin}:/usr/bin:/bin`, TMPDIR: home, XAI_API_KEY: "must-not-reach-the-cli" });
+  const response = await fetch(`${bridge.origin}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "grok-4.7", stream: true, reasoning: { effort: "xhigh" }, input: [{ role: "user", content: [{ type: "input_text", text: "hello grok" }] }], tools: [exactTool] }),
+  });
+  expect(response.status).toBe(200);
+  const events = (await response.text()).split("\n").filter(line => line.startsWith("data: {")).map(line => JSON.parse(line.slice(6)));
+  expect(events.filter(event => event.type === "response.failed").map(event => event.response.error)).toEqual([]);
+  const completed = events.find(event => event.type === "response.completed").response.output.filter((item: { type: string }) => item.type === "function_call");
+  expect(completed.map((call: { call_id: string; name: string; arguments: string }) => [call.call_id, call.name, call.arguments])).toEqual([
+    ["call_a", "exact_tool", JSON.stringify({ value: "a" })],
+    ["call_b", "exact_tool", JSON.stringify({ value: "b" })],
+  ]);
+  const args = readFileSync(join(home, "args"), "utf8").split("\n");
+  expect(args).toEqual(expect.arrayContaining(["--prompt-file", "--agent", "-m", "grok-4.7", "--effort", "xhigh", "--max-turns", "1", "--tools", "use_tool", "--output-format", "streaming-messages-json"]));
+  const env = readFileSync(join(home, "env"), "utf8");
+  expect(env).toContain(`GROK_HOME=${join(home, ".grok")}`);
+  expect(env).not.toContain(`HOME=${home}\n`);
+  expect(env).not.toContain("XAI_API_KEY");
+  expect(readFileSync(join(home, "prompt"), "utf8")).toContain("hello grok");
+  const server = Object.values(JSON.parse(readFileSync(join(home, "mcp.json"), "utf8")).mcpServers)[0] as { command: string; args: string[] };
+  expect(server.command).toBe(bridgeBinary);
+  expect(server.args[0]).toBe("__grok-mcp");
+  const capture = Bun.spawn([bridgeBinary, "__grok-mcp", join(home, "catalog.json")], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  children.push(capture);
+  capture.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
+  capture.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "exact_tool", arguments: { value: "a" } } })}\n`);
+  capture.stdin.end();
+  const replies = (await new Response(capture.stdout).text()).trim().split("\n").map(line => JSON.parse(line));
+  expect(replies[0].result.tools.map((tool: { name: string }) => tool.name)).toEqual(["exact_tool"]);
+  expect(replies[1].result.content[0].type).toBe("text");
 });
 
 test("provider descriptors match providers.json and the pinned OpenCodex registry", () => {

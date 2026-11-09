@@ -184,6 +184,7 @@ function operatorOsProjection(store) {
       const template = templates.get(templateName) ?? {};
       return [{
         ee_id: eeId,
+        name: stringValue(environment.name),
         parent_ee_id: stringValue(environment.parent_ee_id),
         template_name: templateName,
         goal: stringValue(environment.goal),
@@ -517,6 +518,12 @@ function operatorOsProjection(store) {
           partially_connected_run_ids: partiallyConnectedRunIds,
           project_states: projectStates,
           configuration,
+          connection_interfaces: installed
+            ? interfaceIds.filter((interfaceId) => Object.prototype.hasOwnProperty.call(
+                objectOrEmpty(objectOrEmpty(descriptorsByInterface.get(interfaceId)?.interface_driver_config).private_config),
+                "client_connection",
+              ))
+            : [],
         }];
       }).sort((left, right) => (
         stringValue(left.category).localeCompare(stringValue(right.category))
@@ -628,6 +635,7 @@ function operatorOsProjection(store) {
           name,
           display_name: stringValue(localPackage?.display?.name),
           description: stringValue(localPackage?.display?.description),
+          icon: stringValue(localPackage?.display?.icon),
           package_id: stringValue(localPackage?.id) || `driver.${name}`,
           installed,
           materialized,

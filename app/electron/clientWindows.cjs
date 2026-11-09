@@ -629,7 +629,7 @@ function validateFilesPaneSnapshot(value) {
       };
   }
   function normalizeTarget(value) {
-      if (!record(value, ["kind", "absolutePath", "path", "rootId", "artifactId", "createdAtMs", "interfaceId", "label", "runId"]))
+      if (!record(value, ["kind", "absolutePath", "path", "rootId", "artifactId", "createdAtMs", "interfaceId", "label", "runId", "previewText"]))
           return null;
       if (value.kind === "file") {
           if (!record(value, ["kind", "absolutePath", "path", "rootId"]))
@@ -644,11 +644,11 @@ function validateFilesPaneSnapshot(value) {
               return null;
           return { kind: "file", ...(typeof value.absolutePath === "string" ? { absolutePath: value.absolutePath } : {}), ...(typeof value.path === "string" && typeof value.rootId === "string" ? { path: value.path, rootId: value.rootId } : {}) };
       }
-      if (value.kind !== "artifact" || !record(value, ["kind", "artifactId", "createdAtMs", "interfaceId", "label", "runId"]))
+      if (value.kind !== "artifact" || !record(value, ["kind", "artifactId", "createdAtMs", "interfaceId", "label", "runId", "previewText"]))
           return null;
-      if (!token(value.artifactId, 1024) || !token(value.interfaceId, 512) || !token(value.label, 1024) || !token(value.runId, 512) || value.createdAtMs !== undefined && !integer(value.createdAtMs))
+      if (!token(value.artifactId, 1024) || !pathText(value.interfaceId, 512) || !token(value.label, 1024) || !token(value.runId, 512) || value.createdAtMs !== undefined && !integer(value.createdAtMs) || value.previewText !== undefined && !text(value.previewText))
           return null;
-      return { kind: "artifact", artifactId: value.artifactId, interfaceId: value.interfaceId, label: value.label, runId: value.runId, ...(typeof value.createdAtMs === "number" ? { createdAtMs: value.createdAtMs } : {}) };
+      return { kind: "artifact", artifactId: value.artifactId, interfaceId: value.interfaceId, label: value.label, runId: value.runId, ...(typeof value.createdAtMs === "number" ? { createdAtMs: value.createdAtMs } : {}), ...(typeof value.previewText === "string" ? { previewText: value.previewText } : {}) };
   }
   function record(value, keys) {
       return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => keys.includes(key));
@@ -665,7 +665,7 @@ function validateFilesPaneSnapshot(value) {
 }
 
 function validateFilesOpenTarget(value) {
-  const target = exactObject(value, "Client window files open target", ["kind", "absolutePath", "path", "rootId", "artifactId", "createdAtMs", "interfaceId", "label", "runId"]);
+  const target = exactObject(value, "Client window files open target", ["kind", "absolutePath", "path", "rootId", "artifactId", "createdAtMs", "interfaceId", "label", "runId", "previewText"]);
   if (target.kind === "file") {
     exactKeys(target, "Client window file target", ["kind", "absolutePath", "path", "rootId"]);
     const hasAbsolutePath = Object.hasOwn(target, "absolutePath");
@@ -683,17 +683,19 @@ function validateFilesOpenTarget(value) {
     };
   }
   if (target.kind === "artifact") {
-    exactKeys(target, "Client window artifact target", ["kind", "artifactId", "createdAtMs", "interfaceId", "label", "runId"]);
+    exactKeys(target, "Client window artifact target", ["kind", "artifactId", "createdAtMs", "interfaceId", "label", "runId", "previewText"]);
     const createdAtMs = Object.hasOwn(target, "createdAtMs")
       ? nonNegativeSafeInteger(target.createdAtMs, "Client window artifact creation time")
       : undefined;
+    if (Object.hasOwn(target, "previewText") && (typeof target.previewText !== "string" || Buffer.byteLength(target.previewText, "utf8") > 2 * 1024 * 1024)) throw new Error("Client window artifact preview exceeds the 2 MiB text limit.");
     return {
       kind: "artifact",
       artifactId: requiredText(target.artifactId, "Client window artifact id", 1_024),
-      interfaceId: requiredText(target.interfaceId, "Client window artifact interface id", 512),
+      interfaceId: requiredText(target.interfaceId, "Client window artifact interface id", 512, true),
       label: requiredText(target.label, "Client window artifact label", 1_024),
       runId: requiredText(target.runId, "Client window artifact run id", 512),
       ...(createdAtMs === undefined ? {} : { createdAtMs }),
+      ...(typeof target.previewText === "string" ? { previewText: target.previewText } : {}),
     };
   }
   throw new Error("Client window files open target kind is unsupported.");

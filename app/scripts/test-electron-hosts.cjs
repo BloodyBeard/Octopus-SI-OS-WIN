@@ -444,6 +444,7 @@ async function verifyRuntimeReadinessEvidence() {
     endpoint: () => endpoint,
   });
   let server = null;
+  let controlServer = null;
   try {
     await fs.mkdir(registry, { recursive: true });
     await fs.writeFile(runtimeBinary, "fixture", { mode: 0o755 });
@@ -461,6 +462,12 @@ async function verifyRuntimeReadinessEvidence() {
     const stateRoot = path.join(home, "state", "runtime-instance");
     await fs.mkdir(stateRoot, { recursive: true });
     const now = Date.now();
+    const controlStatus = { outcome: "status", pid: process.pid, phase: "ready", started_at_unix_ms: now, stopping: null, interface_failures: [] };
+    controlServer = net.createServer((socket) => socket.once("data", (bytes) => {
+      assert.deepEqual(JSON.parse(bytes.toString("utf8")), { request: "status" });
+      socket.end(`${JSON.stringify(controlStatus)}\n`);
+    }));
+    await listen(controlServer, path.join(stateRoot, "control.sock"));
     await fs.writeFile(path.join(stateRoot, "state.json"), JSON.stringify({
       schema_version: 3,
       pid: process.pid,
@@ -483,6 +490,11 @@ async function verifyRuntimeReadinessEvidence() {
     assert.equal(ready.ready, true);
     assert.equal(ready.ownership, "external");
     assert.equal(ready.pid, process.pid);
+    controlStatus.interface_failures = [{ interface: "provider.bound", error: "life stopped" }];
+    assert.deepEqual((await host.probe()).interfaceFailures, [{ interfaceId: "provider.bound", message: "life stopped" }]);
+    delete controlStatus.interface_failures;
+    assert.equal((await host.probe()).ready, false);
+    controlStatus.interface_failures = [];
 
     await fs.writeFile(path.join(stateRoot, "state.json"), JSON.stringify({
       schema_version: 3,
@@ -518,6 +530,7 @@ async function verifyRuntimeReadinessEvidence() {
   } finally {
     host.close();
     await closeServer(server);
+    await closeServer(controlServer);
     await fs.rm(root, { recursive: true, force: true });
   }
 }

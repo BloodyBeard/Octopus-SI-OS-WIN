@@ -469,6 +469,42 @@ function createClient(environment, dependencies = {}) {
     });
   }
 
+  async function setProjectFolders(projectId, folders) {
+    const scope = await read("projection.operator.os.scope");
+    const target = scope.environments.find((row) => row.ee_id === projectId);
+    if (!target || projectId === scope.root_ee_id) throw new Error("Choose an existing Project.");
+    const presentations = scope.project_presentations ?? [];
+    if (!presentations.some((row) => row.ee_id === projectId)) throw new Error(`Project '${projectId}' has no presentation.`);
+    return mutate({
+      action: "update_project_presentation", operationId: randomUUID(), workspace: workspaceIdentity(scope),
+      projects: presentations.map((row) => ({
+        eeId: row.ee_id,
+        ...(row.ee_id === projectId ? { sourceFolders: folders, expectedProjectDigest: target.record_digest } : {}),
+        name: row.name, icon: row.icon, color: row.color,
+      })),
+    });
+  }
+
+  async function deleteProject(projectId) {
+    const scope = await read("projection.operator.os.scope");
+    const target = scope.environments.find((row) => row.ee_id === projectId);
+    if (!target || projectId === scope.root_ee_id) throw new Error("Choose an existing Project.");
+    return mutate({
+      action: "delete_project", operationId: randomUUID(), workspace: workspaceIdentity(scope),
+      eeId: projectId, expectedProjectDigest: target.record_digest,
+    });
+  }
+
+  async function deleteAgent(agentId) {
+    const agent = select((await contextData()).agents, agentId, "Agent");
+    const scope = await read("projection.operator.os.scope");
+    return mutate({
+      action: "delete_agent_template", agentId: agent.id, projectEeId: agent.projectEeId,
+      workerInterfaceId: agent.workerInterfaceId, expectedClientTemplateDigest: agent.clientTemplateDigest,
+      expectedAgentCatalogDigest: scope.agent_catalog_digest,
+    });
+  }
+
   async function projectPolicies(parentId) {
     const scope = await read("projection.operator.os.scope");
     const parent = scope.environments.find((row) => row.ee_id === (parentId || scope.root_ee_id));
@@ -530,7 +566,7 @@ function createClient(environment, dependencies = {}) {
   }
 
   return { env, status, contexts, tasks, task, models, history, rawHistory, send, follow, stop, respond, rename, archive,
-    createAgent, createProject, projectPolicies, deleteTask, search, saveAttachment, close, read, catalogue };
+    createAgent, deleteAgent, createProject, deleteProject, setProjectFolders, projectPolicies, deleteTask, search, saveAttachment, close, read, catalogue };
 }
 
 function workspaceIdentity(scope, agents = false) {

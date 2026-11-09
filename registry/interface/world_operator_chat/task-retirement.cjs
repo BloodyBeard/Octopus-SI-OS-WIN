@@ -229,15 +229,12 @@ function openHold(binary, context) {
   };
   const closed = new Promise((resolve) => {
     child.on("error", (error) => { fail(error); resolve(); });
-    const exited = (code, signal) => {
+    child.on("exit", () => { ended = true; });
+    child.on("close", (code, signal) => {
       ended = true;
       if (!releasing || code !== 0 || signal !== null) {
         fail(new Error(stderr.trim() || `Task retirement owner exited with code ${code}, signal ${signal}`));
       }
-    };
-    child.on("exit", exited);
-    child.on("close", (code, signal) => {
-      exited(code, signal);
       resolve();
     });
   });
@@ -248,7 +245,7 @@ function openHold(binary, context) {
   child.stdout.setEncoding("utf8");
   child.stdout.on("error", fail);
   child.stdout.on("end", () => {
-    if (buffer || pending || !releasing) fail(new Error("Task retirement owner closed its proof output before completing release"));
+    if (releasing && (buffer || pending)) fail(new Error("Task retirement owner closed its proof output before completing release"));
   });
   child.stdout.on("data", (chunk) => {
     buffer += chunk;

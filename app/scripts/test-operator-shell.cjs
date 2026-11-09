@@ -58,6 +58,11 @@ function memoryIndexedDb() {
 globalThis.indexedDB = memoryIndexedDb();
 const errors = [];
 w.addEventListener("error", (event) => errors.push(event.error ?? event.message));
+const consoleError = console.error;
+console.error = (...args) => {
+  if (String(args[0]).includes("Cannot update a component")) errors.push(new Error(args.map(String).join(" ")));
+  consoleError(...args);
+};
 
 const stubView = `import { createElement } from "react";
 export function view(kind, props, attributes = {}) {
@@ -95,7 +100,8 @@ const compiled = build({
       'import "./src/components/icon-glyphs/shell"; import "./src/components/icon-glyphs/chat";',
       'export { OperatorShell } from "./src/components/shell/OperatorShell"; export { ClientPreferencesProvider } from "./src/clientPreferences";',
       'export { dispatchClientCommand } from "./src/clientActions"; export { dispatchOpenTaskSourcesPane, OPEN_TASK_SOURCES_PANE_EVENT } from "./src/components/chat/taskSourcesPane";',
-      'export { dispatchOpenClientTaskActionsMenu } from "./src/shell/taskActionsMenu"; export { CLIENT_PANE_DRAG_MIME } from "./src/shell/clientWindowModel";',
+      'export { dispatchOpenClientTaskActionsMenu } from "./src/shell/taskActionsMenu"; export { CLIENT_PANE_DRAG_MIME, clientWindowStateKey, clientWindowStateStorage } from "./src/shell/clientWindowModel";',
+      'export { activeDestinationStorageKey } from "./src/shell/navigation";',
       'export { readSecondaryPaneState, writeSecondaryPaneState } from "./src/components/shell/operatorShellState"; export { SurfaceHost } from "./src/components/shell/SurfaceHost";',
       'export { OPEN_WORKER_ENVIRONMENT_PANE_EVENT } from "./src/components/worker-environment/workerEnvironmentPane";',
       'export { WorkspaceSurfacePane } from "./src/components/shell/WorkspaceSurfacePane"; export { WorkspacePaneManager } from "./src/components/shell/WorkspacePaneManager";',
@@ -177,7 +183,7 @@ function fakeHost() {
     topology: { generation: 1, snapshotRaw: { projection: { mode: "lab" } } },
     surfaceDocuments: { generation: 1, root: "", documents: [], errors: [] },
     run: (runId) => host.runs.find((run) => run.run_id === runId),
-    storedAtHandoff: [], stored: () => host.readStored("live", "home", host.windowId === "main" ? "main" : host.windowId),
+    storedAtHandoff: [],
     called: (name) => host.calls.filter(([method]) => method === name).map(([, ...args]) => args),
     changed(kind) { if (currentHost === host) emit("onProjectionChanged", { kind }); },
     append(runId, role, text, extra = {}) {
@@ -197,7 +203,7 @@ function fakeHost() {
         case "projection.operator.chat.messages": return { messages: structuredClone(host.messages[request.params.run_id] ?? []) };
         case "projection.operator.chat.contexts": return { contexts: [{ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1",
           workers: [{ id: "worker.test", label: "worker.test", provider_interface_ids: [provider.id], interface_policy: { [provider.id]: { models: ["model-a"] } }, ...writerAgent }] }] };
-        case "projection.operator.os.scope": return { status: "ready", root_ee_id: "ee.root", home_run_id: "home", home_interface_id: "chat.home", root_environment: { ee_id: "ee.root" } };
+        case "projection.operator.os.scope": await host.holdScope?.promise; return { status: "ready", root_ee_id: "ee.root", home_run_id: "home", home_interface_id: "chat.home", root_environment: { ee_id: "ee.root" } };
         case "projection.client_surfaces.list": await host.holdSurfaces?.promise; return host.surfaceDocuments;
         case "projection.runtime.topology": return structuredClone(host.topology);
         case "projection.worker_environments.list": return { worker_environments: [] };
@@ -236,7 +242,10 @@ function fakeHost() {
     beginClientPaneTransfer: () => ({ schema: "octopus.client-pane-transfer", schemaVersion: 1, sourceWindowId: host.windowId, transferId: `transfer-${host.calls.filter(([name]) => name === "beginClientPaneTransfer").length}` }),
     acceptClientPaneTransfer: async ({ transferId }) => host.accepting.get(transferId),
     showClientContextMenu: async ({ requestId }) => ({ requestId, id: host.nativeMenuChoice }),
-    finalizeClientPaneTransfer: async () => { host.storedAtHandoff.push(host.stored().tabs.map((tab) => tab.id)); },
+    finalizeClientPaneTransfer: async ({ transferId }) => {
+      host.storedAtHandoff.push(host.stored().tabs.map((tab) => tab.id));
+      host.pendingDestinations = host.pendingDestinations?.filter((transfer) => transfer.transferId !== transferId);
+    },
     acknowledgeClientPaneSourceFinalization: async () => { host.storedAtHandoff.push(host.stored().tabs.map((tab) => tab.id)); },
   };
   return host;
@@ -244,7 +253,7 @@ function fakeHost() {
 
 const container = document.getElementById("root");
 let root = null;
-after(() => { root?.unmount(); w.close(); assert.deepEqual(errors, []); });
+after(() => { root?.unmount(); w.close(); console.error = consoleError; assert.deepEqual(errors, []); });
 const settle = async (rounds = 8) => { for (let round = 0; round < rounds; round += 1) await new Promise((resolve) => setTimeout(resolve, 10)); };
 const until = async (predicate, message) => {
   for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -254,21 +263,26 @@ const until = async (predicate, message) => {
   assert.fail(typeof message === "function" ? message() : message);
 };
 
-async function mount(host, { clientWindow = {}, seed, keepStorage = false } = {}) {
+async function mount(host, { clientWindow = {}, seed, keepStorage = false, home } = {}) {
   const bundle = await compiled;
   const { OperatorShell, ClientPreferencesProvider } = bundle;
   root?.unmount();
+  host.home = home ?? (keepStorage ? currentHost?.home : undefined) ?? `/home/${Math.random().toString(16).slice(2)}`;
   if (!keepStorage) { window.localStorage.clear(); window.sessionStorage.clear(); }
-  seed?.(bundle);
   currentHost = host;
   host.windowId = clientWindow.windowId ?? "main";
-  host.readStored = bundle.readSecondaryPaneState;
+  host.windowScope = clientWindow.scope ?? "main";
+  host.stored = () => {
+    const surfaceId = bundle.clientWindowStateStorage(host.windowScope).getItem(bundle.clientWindowStateKey(host.windowScope, bundle.activeDestinationStorageKey("live"))) ?? "voice";
+    const runId = surfaceId === "chat" ? stubIn("primary", "chat")?.dataset.run ?? "" : "";
+    return bundle.readSecondaryPaneState("live", "home", host.windowScope, JSON.stringify([host.home, surfaceId, runId]));
+  };
+  seed?.(bundle, host);
   root = createRoot(container);
-  const home = `/home/${Math.random().toString(16).slice(2)}`;
   const props = {
     accessProfile: "live", onLogOut() {},
     clientWindow: { schema: "octopus.client-window", schemaVersion: 1, primary: true, scope: "main", windowId: "main", ...clientWindow },
-    runtimeHost: { phase: "ready", ready: true, available: true, ownership: "fixture", pid: null, home, sourceRegistry: "", runtimeBinary: "", repoRoot: "", launchCwd: "", launchCommand: "", launchEnv: {}, endpoint: "", error: null, updatedAtMs: 1 },
+    runtimeHost: { phase: "ready", ready: true, available: true, ownership: "fixture", pid: null, home: host.home, sourceRegistry: "", runtimeBinary: "", repoRoot: "", launchCwd: "", launchCommand: "", launchEnv: {}, endpoint: "", error: null, updatedAtMs: 1 },
   };
   root.render(React.createElement(ClientPreferencesProvider, { profile: "live" }, React.createElement(OperatorShell, props)));
   await settle(12);
@@ -293,14 +307,14 @@ async function openTask(runId) {
 }
 
 const chatTab = (runId) => ({ id: `chat:octopus-os:${runId}`, target: { kind: "surface", runId, surfaceId: "chat", workspaceKey: "octopus-os" } });
-const seedSecondary = (tabs, activeTabId = tabs[0]?.id ?? "") => ({ writeSecondaryPaneState }) => writeSecondaryPaneState("live", "home", "main", { activeTabId, open: true, tabs });
-const storedSecondary = async () => (await compiled).readSecondaryPaneState("live", "home", "main");
+const seedSecondary = (tabs, activeTabId = tabs[0]?.id ?? "", destination = { surfaceId: "voice" }, open = true) => ({ writeSecondaryPaneState }, host) => writeSecondaryPaneState("live", "home", host.windowScope, { activeTabId, open, tabs }, JSON.stringify([host.home, destination.surfaceId, destination.runId ?? ""]));
+const storedSecondary = async () => currentHost.stored();
 const commandsActive = (role) => stubIn(role, "chat")?.dataset.commandsActive ?? "";
 
 test("the primary task owns the sidebar highlight and titlebar while commands follow the active or focused pane", { timeout: 20_000 }, async () => {
-  await mount(fakeHost(), { seed: seedSecondary([chatTab("run-2")]) });
+  await mount(fakeHost(), { seed: seedSecondary([chatTab("run-2")], chatTab("run-2").id, { surfaceId: "chat", runId: "run-1" }, false) });
   await openTask("run-1");
-  assert.ok(!pane("secondary") || pane("secondary").getAttribute("aria-hidden") === "true", "opening a task from outside closes the side pane");
+  assert.ok(!pane("secondary") || pane("secondary").getAttribute("aria-hidden") === "true", "the task restores its own closed side pane");
   await command("toggle_split");
   await until(() => stubIn("secondary", "chat")?.dataset.run === "run-2", "the restored side task never opened");
   assert.ok(document.querySelector(".app-titlebar-secondary-pane .workspace-surface-pane-header"), "the side pane's tabs live in the window header");
@@ -332,6 +346,18 @@ test("the primary task owns the sidebar highlight and titlebar while commands fo
   assert.deepEqual([commandsActive("primary"), commandsActive("secondary")], ["false", "false"], "open Settings own every command");
 });
 
+test("dictation recovery opens its recording in existing Voice settings and Back restores the task", { timeout: 20_000 }, async () => {
+  await mount(fakeHost());
+  await openTask("run-1");
+  w.dispatchEvent(new w.CustomEvent("octopus:client-command", { detail: { id: "open_settings", source: "surface",
+    settingsDestination: { sectionId: "voice-audio", dictationRecordingId: "recording-123" } } }));
+  await until(() => document.querySelector('[data-stub="settings"]')?.props.recordingId === "recording-123", "recording destination did not reach Settings");
+  assert.equal(document.querySelector('[data-stub="settings"]').props.sectionId, "voice-audio");
+  await command("navigate_back");
+  await until(() => !document.querySelector('[data-stub="settings"]'), "Back did not close Settings");
+  assert.equal(stubIn("primary", "chat").dataset.run, "run-1");
+});
+
 test("a pane shows a task only while its workspace holds that exact run", { timeout: 20_000 }, async () => {
   const host = await mount(fakeHost());
   await openTask("run-1");
@@ -354,6 +380,32 @@ test("a pane shows a task only while its workspace holds that exact run", { time
   sidebarRow("Task run-2").click();
   await until(() => stubIn("primary", "chat")?.dataset.run === "run-2", "the sidebar never opened run-2");
   assert.deepEqual(host.called("beginClientPaneTransfer"), []);
+});
+
+test("right-pane navigation opens the current task without changing the left pane, including from Triggers", { timeout: 20_000 }, async () => {
+  await mount(fakeHost());
+  await openTask("run-1");
+  await command("toggle_split");
+  await until(() => button("Side task", pane("secondary")), "the launcher did not offer the current task");
+  button("Side task", pane("secondary")).click();
+  await until(() => stubIn("secondary", "chat")?.dataset.run === "run-1", "the current left task could not open on the right");
+  assert.equal(stubIn("primary", "chat").dataset.run, "run-1");
+
+  button("New tab").click(); await settle();
+  pane("secondary").querySelector('.workspace-pane-launcher-item[aria-haspopup="menu"]').click(); await settle();
+  document.querySelector('[data-action-id="surface:octopus-os:scheduled"]').click();
+  await until(() => stubIn("secondary", "scheduled"), "Triggers did not open on the right");
+  assert.equal(typeof stubIn("secondary", "scheduled").props.onSelectChat, "function");
+  stubIn("secondary", "scheduled").props.onSelectChat("run-1");
+  await until(() => stubIn("secondary", "chat")?.dataset.run === "run-1", "the trigger's existing task did not open on the right");
+  assert.equal(stubIn("primary", "chat").dataset.run, "run-1");
+  assert.deepEqual(secondaryTabs().map(tab => tab.textContent), ["Task run-1", "Triggers"]);
+
+  stubIn("primary", "chat").props.workspace.selectRun("run-2");
+  await until(() => !stubIn("primary", "chat"), "the primary task did not enter its loading state");
+  pointer(pane("primary"), "pointerdown"); await settle();
+  button("New tab").click();
+  await until(() => pane("secondary").querySelector(".workspace-pane-launcher"), "the left task's loading state blocked opening a right tab");
 });
 
 test("a new side task tab becomes the run its first message creates", { timeout: 20_000 }, async () => {
@@ -414,7 +466,9 @@ test("task sources open as one Sources tab per task, prefer the loaded history, 
   window.dispatchEvent(new w.CustomEvent(OPEN_TASK_SOURCES_PANE_EVENT, { detail: { schemaVersion: 2, runId: "run-1", sources: [] } }));
   await settle();
   assert.equal(secondaryTabs().length, 2, "a task reopens its own Sources tab and malformed requests are ignored");
-  assert.deepEqual(await storedSecondary(), { version: 3, open: false, activeTabId: "", tabs: [] }, "Sources tabs are never persisted");
+  const { layout, ...storedTabs } = await storedSecondary();
+  assert.deepEqual(storedTabs, { version: 3, open: false, activeTabId: "", tabs: [] }, "Sources tabs are never persisted");
+  assert.equal(layout.activePane, "secondary", "the layout still records the user's active pane");
   globalThis.surfaceRegistryView = (state) => ({ ...state, surfaces: [] });
   dispatchOpenTaskSourcesPane("run-1", [row("stale.md")]);
   await until(() => !document.querySelector(".app-shell"), "the shell kept rendering without a surface");
@@ -468,20 +522,24 @@ test("the source window releases a moved tab only while it still holds that targ
   await openTask("run-1");
   await command("open_side_task");
   await until(() => stubIn("secondary", "chat")?.dataset.run === "run-1", "the side task never opened");
+  const sourceLayout = (await storedSecondary()).layout;
   const completion = (transferId, runId) => ({ ...transfer(transferId, chatTab(runId).target), sourceWindowId: "main", sourceTabId: chatTab("run-1").id });
-  emit("onClientPaneTransferCompleted", completion("t-1", "run-1"));
-  emit("onClientPaneTransferCompleted", completion("t-2", "run-2"));
+  menuItem(await contextMenu(secondaryTabs()[0]), "Move to New Window").click(); await settle();
+  emit("onClientPaneTransferCompleted", completion("transfer-1", "run-2")); await settle();
+  menuItem(await contextMenu(secondaryTabs()[0]), "Move to New Window").click(); await settle();
+  assert.deepEqual(host.called("detachClientPane"), [[{ transferId: "transfer-1" }], [{ transferId: "transfer-2" }]]);
+  emit("onClientPaneTransferCompleted", completion("transfer-2", "run-1"));
   await settle();
-  assert.deepEqual(host.called("acknowledgeClientPaneTransfer"), [[{ released: true, transferId: "t-1" }], [{ released: false, transferId: "t-2" }]]);
+  assert.deepEqual(host.called("acknowledgeClientPaneTransfer"), [[{ released: false, transferId: "transfer-1" }], [{ released: true, transferId: "transfer-2" }]]);
   assert.ok(toasts(host).includes("The source changed during handoff. It was retained and the destination move was cancelled."));
   assert.deepEqual(secondaryTabs().map((tab) => tab.textContent), ["Task run-1"], "a released tab stays until the destination finalizes");
   assert.deepEqual((await storedSecondary()).tabs.map((tab) => tab.id), [chatTab("run-1").id]);
-  emit("onClientPaneTransferFinalized", completion("t-1", "run-1"));
+  emit("onClientPaneTransferFinalized", completion("transfer-2", "run-1"));
   await until(() => host.called("acknowledgeClientPaneSourceFinalization").length === 1, "the source never acknowledged finalization");
-  assert.deepEqual(host.called("acknowledgeClientPaneSourceFinalization"), [[{ transferId: "t-1" }]]);
+  assert.deepEqual(host.called("acknowledgeClientPaneSourceFinalization"), [[{ transferId: "transfer-2" }]]);
   assert.deepEqual(host.storedAtHandoff, [[]], "the source forgets the tab durably before acknowledging the handoff");
   await until(() => secondaryTabs().length === 0, "the finalized tab stayed in the source window");
-  assert.deepEqual(await storedSecondary(), { version: 3, open: false, activeTabId: "", tabs: [] });
+  assert.deepEqual(await storedSecondary(), { version: 3, open: false, activeTabId: "", tabs: [], layout: { ...sourceLayout, focused: false, activePane: "primary" } });
   assert.deepEqual(host.called("windowControl"), [], "the primary window never closes itself");
 });
 
@@ -492,10 +550,10 @@ test("an independent window hands over its whole surface from the titlebar and c
   await drag(document.querySelector(".app-titlebar-surface-context"));
   assert.deepEqual(host.called("beginClientPaneTransfer"), [[{ sourcePane: "primary", sourceTabId: "client-window:window-a", target: voice }]]);
   const whole = (transferId, target) => ({ ...transfer(transferId, target), sourceWindowId: "window-a", sourcePane: "primary", sourceTabId: "client-window:window-a" });
-  emit("onClientPaneTransferCompleted", whole("t-1", voice));
+  emit("onClientPaneTransferCompleted", whole("transfer-1", voice));
   emit("onClientPaneTransferCompleted", whole("t-2", { ...voice, surfaceId: "dashboard", workspaceKey: "dashboard" }));
   await settle();
-  assert.deepEqual(host.called("acknowledgeClientPaneTransfer"), [[{ released: true, transferId: "t-1" }], [{ released: false, transferId: "t-2" }]]);
+  assert.deepEqual(host.called("acknowledgeClientPaneTransfer"), [[{ released: true, transferId: "transfer-1" }], [{ released: false, transferId: "t-2" }]]);
   await command("toggle_split");
   await until(() => document.querySelector(".workspace-pane-launcher"), "the side pane never opened");
   pointer(stubIn("primary", "home"), "pointerdown"); await settle();
@@ -505,7 +563,7 @@ test("an independent window hands over its whole surface from the titlebar and c
   await settle();
   assert.deepEqual(host.called("acknowledgeClientPaneTransfer")[2], [{ released: false, transferId: "t-3" }]);
   await command("toggle_split");
-  emit("onClientPaneTransferFinalized", whole("t-1", voice));
+  emit("onClientPaneTransferFinalized", whole("transfer-1", voice));
   await until(() => host.called("windowControl").length === 1, "the emptied window never closed");
   assert.deepEqual(host.called("windowControl"), [["close"]]);
   const primary = await mount(fakeHost());
@@ -515,11 +573,14 @@ test("an independent window hands over its whole surface from the titlebar and c
 
 test("a destination window stages an accepted tab, commits or resumes it, and rolls back what the host refuses", { timeout: 20_000 }, async () => {
   const resumed = fakeHost();
+  resumed.holdScope = gate();
   resumed.pendingDestinations = [{ ...transfer("t-pending", chatTab("run-2").target), committed: true }];
   await mount(resumed);
-  await until(() => resumed.called("finalizeClientPaneTransfer").length === 1, "the pending committed transfer never finalized");
+  assert.deepEqual(resumed.called("resumeClientPaneTransfer"), [], "a pending destination waits for its exact Home owner");
+  resumed.holdScope.open(); resumed.holdScope = null;
+  await until(() => resumed.called("finalizeClientPaneTransfer").length === 1, () => `the pending committed transfer never finalized: ${JSON.stringify({ resume: resumed.called("resumeClientPaneTransfer"), commit: resumed.called("commitClientPaneTransfer"), reject: resumed.called("rejectClientPaneTransfer"), toasts: toasts(resumed) })}`);
   assert.deepEqual([resumed.called("resumeClientPaneTransfer"), resumed.called("commitClientPaneTransfer")], [[[{ transferId: "t-pending" }]], []]);
-  assert.deepEqual(secondaryTabs().map((tab) => tab.textContent), ["Task run-2"]);
+  await until(() => secondaryTabs().map((tab) => tab.textContent).join() === "Task run-2", "the resumed tab never resolved its task title");
 
   const host = await mount(fakeHost());
   await openTask("run-1");
@@ -585,6 +646,8 @@ test("a window opened on a target starts focused on it with the sidebar collapse
   await mount(fakeHost(), { clientWindow: peer, keepStorage: true });
   await settle();
   assert.equal(secondaryTabs().length, 0, "a reloaded window does not reopen its consumed initial target");
+  await openTask("run-1");
+  assert.equal(secondaryTabs().length, 0, "returning to the exact task does not recreate the consumed target");
   assert.ok(document.querySelector(".app-shell.is-sidebar-open"), "a stored sidebar choice outlives the window default");
 
   await mount(fakeHost());

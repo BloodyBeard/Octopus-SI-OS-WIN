@@ -15,8 +15,11 @@ const HELP = `Octopus — your agentic operating system, in the terminal
   octopus inspect <run-id>         Inspect recorded checkpoint and transfer evidence
   octopus projects                Show Projects and Agents
   octopus project create <name>   Create a Project with the parent's policy
+  octopus project folders <id> <folder>...  Set a Project's source folders (first is Primary)
   octopus project policies        Show policies available to a parent Project
+  octopus project delete <id> --yes  Delete a Project
   octopus agent create <name>     Create an Agent with an explicit model
+  octopus agent delete <id> --yes  Delete an Agent
   octopus models                  Show available permitted models
   octopus answer <task> <request>  Answer a pending question
   octopus stop <task>              Ask the task to stop
@@ -38,6 +41,7 @@ Options:
   --service-tier <id>             Service tier offered by the model
   --policy <id>                  Installed policy for a new Project
   --attach <path>                 Attach a file or folder; repeatable
+  --access <mode>                 New task access: project_access or full_access
   --json                          JSON results; NDJSON for streamed work
   --no-wait                       Return the input admission receipt
   --timeout <seconds>             Stop waiting at a deadline, leave task running
@@ -64,6 +68,8 @@ function argumentsFor(argv) {
       project: { type: "string" }, agent: { type: "string" },
       provider: { type: "string" }, model: { type: "string" }, effort: { type: "string" }, policy: { type: "string" },
       attach: { type: "string", multiple: true, default: [] },
+      application: { type: "string", multiple: true, default: [] },
+      access: { type: "string" },
       json: { type: "boolean", default: false }, "no-wait": { type: "boolean", default: false },
       timeout: { type: "string" }, "output-last-message": { type: "string" },
       archived: { type: "boolean", default: false },
@@ -101,6 +107,7 @@ async function main(argv = process.argv.slice(2), io = process) {
       projectId: flags.project, agentId: flags.agent,
       providerId: flags.provider, model: flags.model, effort: flags.effort, serviceTier: flags["service-tier"],
       files: flags.attach,
+      ...(flags.access === undefined ? {} : { access: taskAccess(flags.access) }),
     };
     const words = [...parsed.positionals];
     const known = new Set(["chat", "resume", "exec", "send", "watch", "tasks", "history", "inspect", "projects", "models", "answer", "stop", "rename", "archive", "restore", "delete", "export", "setup", "up", "status", "agent", "project", "download"]);
@@ -171,13 +178,27 @@ async function main(argv = process.argv.slice(2), io = process) {
       report(await client.deleteTask(required(words.shift(), "task"))); return 0;
     }
     if (command === "agent") {
-      if (words.shift() !== "create") throw new Error("Use 'agent create <name> --project <id> --provider <id> --model <id> --effort <level>'.");
-      report(await client.createAgent({ ...selection, name: required(words.join(" "), "Agent name") })); return 0;
+      const action = words.shift();
+      if (action === "delete") {
+        if (!flags.yes) throw new Error("Agent deletion requires --yes.");
+        report(await client.deleteAgent(required(words.shift(), "Agent"))); return 0;
+      }
+      if (action !== "create") throw new Error("Use 'agent create <name> --project <id> --provider <id> --model <id> --effort <level> [--application <id>]...' or 'agent delete <id> --yes'.");
+      report(await client.createAgent({ ...selection, name: required(words.join(" "), "Agent name"), ...(flags.application.length ? { applicationIds: flags.application } : {}) })); return 0;
     }
     if (command === "project") {
       const action = words.shift();
       if (action === "policies") { report(await client.projectPolicies(flags.project)); return 0; }
-      if (action !== "create") throw new Error("Use 'project create <name>' or 'project policies'.");
+      if (action === "delete") {
+        if (!flags.yes) throw new Error("Project deletion requires --yes.");
+        report(await client.deleteProject(required(words.shift(), "Project"))); return 0;
+      }
+      if (action === "folders") {
+        const projectId = required(words.shift(), "Project");
+        if (!words.length) throw new Error("Use 'project folders <project-id> <folder>...'; the first folder is Primary.");
+        report(await client.setProjectFolders(projectId, words.map((folder) => path.resolve(folder)))); return 0;
+      }
+      if (action !== "create") throw new Error("Use 'project create <name>', 'project folders <project-id> <folder>...' or 'project policies'.");
       report(await client.createProject({ name: required(words.join(" "), "Project name"), parentId: flags.project, policy: flags.policy })); return 0;
     }
     if (command === "answer") {
@@ -354,8 +375,8 @@ function createEventRenderer(io) {
 function safeText(text) { return require("./presentation.cjs").safeText(text); }
 
 function commandHelp(words) {
-  if (words[0] === "project") return `Octopus Projects\n\n  octopus project create "Project name" [--project <parent-id>] [--policy <id>]\n  octopus project policies [--project <parent-id>] [--json]\n\nNew Projects use their parent's policy unless an allowed policy is selected.\nUse 'octopus projects' to find existing Project IDs.\n`;
-  if (words[0] === "agent") return `Octopus Agents\n\n  octopus agent create "Agent name" --project <id> --provider <id> --model <id> --effort <level>\n\nUse 'octopus projects --json' for Project IDs and 'octopus models --project <id> --json'\nfor the exact permitted provider, model, and reasoning choices.\nThe Agent uses that Project's configured Applications and Drivers.\n`;
+  if (words[0] === "project") return `Octopus Projects\n\n  octopus project create "Project name" [--project <parent-id>] [--policy <id>]\n  octopus project policies [--project <parent-id>] [--json]\n  octopus project folders <project-id> <folder>... [--json]\n\nNew Projects use their parent's policy unless an allowed policy is selected.\nThe first folder is the Project's Primary folder; editing folders affects future tasks.\nUse 'octopus projects' to find existing Project IDs.\n`;
+  if (words[0] === "agent") return `Octopus Agents\n\n  octopus agent create "Agent name" --project <id> --provider <id> --model <id> --effort <level> [--application <id>]...\n\nUse 'octopus projects --json' for Project IDs and 'octopus models --project <id> --json'\nfor the exact permitted provider, model, and reasoning choices.\nThe Agent uses that Project's configured Drivers and its default Applications;\n--application selects the Applications explicitly instead.\n`;
   if (words[0] === "setup") return `Octopus setup\n\n  octopus setup [--home <path>]\n  octopus setup --home <path> --non-interactive --pack <id> --workspace-name <name>\n    --project-name <name> [--provider <id>] --model <id> --effort <level>\n\nInteractive setup lists the offered model providers, then guides ChatGPT sign-in or\nasks for the chosen provider's connection details (API key, server URL, model).\nNoninteractive setup requires existing sign-in, or the provider's settings in\n~/.octopus/.env. Configured Homes are preserved.\n`;
   return HELP;
 }
@@ -404,5 +425,10 @@ async function stdinText(input) {
 if (require.main === module) main().then((code) => { process.exitCode = code; }).catch((error) => {
   process.stderr.write(`Octopus cleanup failed: ${error.message}\n`); process.exitCode = 1;
 });
+
+function taskAccess(value) {
+  if (value === "project_access" || value === "full_access") return value;
+  throw new Error("--access must be project_access or full_access.");
+}
 
 module.exports = { main, argumentsFor, HELP, createEventRenderer };

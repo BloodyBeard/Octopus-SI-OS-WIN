@@ -55,8 +55,10 @@ test('chat index preserves scoped history and durable tail while seeking each ru
   t.mock.method(DatabaseSync.prototype, 'prepare', function (sql) {
     const statement = prepare.call(this, sql);
     if (/SELECT[\s\S]+runtime_run[\s\S]+FROM movements/.test(sql)) {
-      const all = statement.all.bind(statement);
-      statement.all = (...params) => { plans.push(...prepare.call(this, 'EXPLAIN QUERY PLAN ' + sql).all(...params)); return all(...params); };
+      for (const method of ['all', 'iterate']) {
+        const read = statement[method].bind(statement);
+        statement[method] = (...params) => { plans.push(...prepare.call(this, 'EXPLAIN QUERY PLAN ' + sql).all(...params)); return read(...params); };
+      }
     }
     return statement;
   });

@@ -87,24 +87,22 @@ cd Octopus-SI-OS
 npm ci --prefix app
 ```
 
-The native presentation build requires headers for Node **24.15.0**, independently
-of the Node version running npm. Fetch the pinned headers from Node.js:
+The native presentation build requires the headers of the Node inside the
+pinned Electron, independently of the Node version running npm.
+`app/native/runtime.json` pins Electron 45.2.1, its Node 24.22.1, the sha256 of
+the headers archive (from the [Node.js release manifest](https://nodejs.org/download/release/v24.22.1/SHASUMS256.txt))
+and the sha256 of the Electron archives. Fetch and verify the headers:
 
 ```sh
-mkdir -p app/build
-curl -fL https://nodejs.org/download/release/v24.15.0/node-v24.15.0-headers.tar.gz \
-  -o app/build/node-v24.15.0-headers.tar.gz
-printf '%s  %s\n' \
-  9a9250039fef572d0bcc110ac5e78055faf5604421211d2d5f578ebc5a34e703 \
-  app/build/node-v24.15.0-headers.tar.gz | shasum -a 256 -c -
-tar -xzf app/build/node-v24.15.0-headers.tar.gz -C app/build
+node app/native/runtime.cjs headers
 ```
 
-The checksum is from the [Node.js release manifest](https://nodejs.org/download/release/v24.15.0/SHASUMS256.txt).
-Then package and open the app:
+Electron no longer downloads its binary on install; packaging fetches the
+checksum-pinned Electron archive itself (`node app/native/runtime.cjs electron`
+does the same by hand). Then package and open the app:
 
 ```sh
-OCTOPUS_NATIVE_NODE_HEADERS="$PWD/app/build/node-v24.15.0/include/node" \
+OCTOPUS_NATIVE_NODE_HEADERS="$PWD/app/build/node-v24.22.1/include/node" \
   npm --prefix app run package:mac
 open -n ./app/build/Octopus.app
 ```
@@ -126,7 +124,8 @@ your machine:
 - The embedded launch terminal prepares a command ending in `octopus up`.
   Press Enter to run it and wait for the runtime's ready state.
 - Workspace setup asks for a starting structure, project names, and capabilities.
-  Review the choices and select **Set up Octopus**.
+  Review the choices and select **Set up Octopus**. To start from someone
+  else's setup instead, see [Setup files](#setup-files).
 
 ![Local client lock screen asking for the Administrator or Test password](images/client/client-lock.png)
 
@@ -148,6 +147,50 @@ Model availability and usage limits belong to the provider account. Additional
 applications and voice capabilities can require their own credentials and macOS
 permissions.
 
+### Setup files
+
+A setup file (`<name>.octopus-setup.json`) is plain JSON with what the setup
+wizard asks for: the space, the projects, the capabilities and where each one
+is available, and optionally the model. It never carries keys, accounts, tasks,
+history or memory.
+
+- **Import:** **Import setup…** on the wizard's first step fills every step
+  from the file. Check the steps and select **Set up Octopus**, then connect
+  accounts in **Applications**. A file that needs a component or model this
+  Octopus does not offer is refused, with the reason under the button.
+- **Export:** **Export setup…** on the wizard's review step, or
+  **Settings → General → Setup file** in a running Home.
+
+<details>
+<summary><b>The format</b></summary>
+
+<br>
+
+```json
+{
+  "schema": "octopus.setup",
+  "schema_version": 1,
+  "space": { "name": "Founder", "goal": "Operate life and work" },
+  "projects": [
+    { "id": "work", "parent": null, "name": "Work", "goal": "Ship the product", "icon": "briefcase", "color": "indigo" },
+    { "id": "site", "parent": "work", "name": "Site", "goal": "Keep the site live", "icon": "globe", "color": "teal" }
+  ],
+  "capabilities": [
+    { "kind": "application", "id": "world_cron", "projects": [] },
+    { "kind": "driver", "id": "driver.browser_session", "projects": ["site"] },
+    { "kind": "pack", "id": "codex", "projects": [] }
+  ],
+  "model": { "id": "gpt-5.5", "reasoning_effort": "high" }
+}
+```
+
+Octopus reads exactly these fields. `parent` is another project's `id` or
+`null`. `projects` on a capability lists where it is offered, for the ones the
+wizard lets you limit to projects, such as drivers. `model` is optional. Icons
+and colors are the ones the project editor offers.
+
+</details>
+
 ## Codex CLI
 
 The app carries its own Codex CLI: a pinned upstream release, checked against
@@ -160,7 +203,12 @@ place Codex CLI uses. So:
 
 - If Codex CLI on this Mac is already signed in with ChatGPT, Octopus starts
   signed in.
-- Signing in or out in either one changes it for both.
+- Signing in or out in either one changes it for both. Both take the same
+  write lock, `auth.lock` in that Codex home, so a token refresh in Octopus and
+  one in Codex CLI never overwrite each other.
+- Choosing another ChatGPT workspace or adding an account in
+  **Settings → Account** also changes it for Codex CLI. Codex keeps one ChatGPT
+  sign-in at a time, so adding an account replaces the current one.
 - Octopus needs a ChatGPT sign-in. If `~/.codex` holds an API-key login, setup
   asks you to sign in with ChatGPT, and doing so replaces that login for Codex
   CLI as well.

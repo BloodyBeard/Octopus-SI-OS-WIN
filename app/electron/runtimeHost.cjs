@@ -3,6 +3,7 @@ const fs = require("node:fs/promises");
 const net = require("node:net");
 const { localSocketAddress } = require("./localSocket.cjs");
 const path = require("node:path");
+const { blockedStorageHealth, nativeStorageFailure, readHomeStorageHealth } = require("./storageHealth.cjs");
 
 const RUNTIME_INSTANCE_FIELDS = [
   "launch_owner",
@@ -23,6 +24,10 @@ class RuntimeHost extends EventEmitter {
     this.options = options;
     this.timer = null;
     this.probePromise = null;
+    this.storageProbePromise = null;
+    this.storageProbeAtMs = 0;
+    this.storageHome = "";
+    this.storageRevision = 0;
     this.state = {
       phase: "probing",
       ready: false,
@@ -37,12 +42,51 @@ class RuntimeHost extends EventEmitter {
       launchEnv: stringMap(options.launchEnv?.() ?? {}, "runtime launch environment"),
       endpoint: options.endpoint(),
       error: null,
+      storageHealth: null,
+      interfaceFailures: [],
       updatedAtMs: Date.now(),
     };
   }
 
   snapshot() {
-    return { ...this.state, launchEnv: { ...this.state.launchEnv } };
+    return { ...this.state, launchEnv: { ...this.state.launchEnv }, storageHealth: this.state.storageHealth ? { ...this.state.storageHealth } : null,
+      interfaceFailures: this.state.interfaceFailures.map((failure) => ({ ...failure })) };
+  }
+
+  async refreshStorageHealth(force = false) {
+    const home = absolutePath(this.options.home(), "runtime home");
+    if (this.storageProbePromise) {
+      await this.storageProbePromise;
+      if (home !== this.options.home()) return this.refreshStorageHealth(force);
+    }
+    if (!force && this.storageHome === home && Date.now() < this.storageProbeAtMs) return this.state.storageHealth;
+    const revision = this.storageRevision;
+    this.storageProbePromise = readHomeStorageHealth(home).then((storageHealth) => {
+      if (home !== this.options.home()) return null;
+      if (revision !== this.storageRevision) return this.state.storageHealth;
+      this.storageHome = home;
+      this.storageProbeAtMs = Date.now() + 5_000;
+      this.transition(this.state.phase, { home, storageHealth });
+      return storageHealth;
+    }).finally(() => { this.storageProbePromise = null; });
+    return this.storageProbePromise;
+  }
+
+  recordStorageFailure(error) {
+    if (!nativeStorageFailure(error)) return;
+    this.storageRevision += 1;
+    this.storageHome = this.options.home();
+    this.storageProbeAtMs = Date.now() + 5_000;
+    this.transition(this.state.phase, { home: this.storageHome,
+      storageHealth: blockedStorageHealth(error.code, this.state.storageHealth?.availableBytes ?? null) });
+  }
+
+  async assertStorageWritable() {
+    const health = await this.refreshStorageHealth(true);
+    if (health?.status === "writable") return;
+    throw Object.assign(new Error(health?.message ?? "Home storage has not been checked. Your message has not been sent; your draft is retained."), {
+      code: "home_storage_blocked", deliveryState: "not_sent",
+    });
   }
 
   observe(intervalMs = 350) {
@@ -136,15 +180,22 @@ class RuntimeHost extends EventEmitter {
       endpoint,
     };
 
+    await this.refreshStorageHealth();
+
     const instance = await readRuntimeInstance(home);
     if (instance && processIsAlive(instance.pid)) {
-      const ready = instance.phase === "ready";
-      this.transition(ready ? "ready" : normalizeRuntimePhase(instance.phase), {
+      const status = await readRuntimeControlStatus(home);
+      if (status.pid !== instance.pid || status.started_at_unix_ms !== instance.started_at_unix_ms) {
+        throw new Error("runtime control status does not match the live runtime instance");
+      }
+      const ready = status.phase === "ready" && status.stopping === null;
+      this.transition(ready ? "ready" : status.stopping ? "stopping" : normalizeRuntimePhase(status.phase), {
         ...base,
         ready,
         ownership: "external",
         pid: instance.pid,
         error: null,
+        interfaceFailures: status.interface_failures.map((failure) => ({ interfaceId: failure.interface, message: failure.error })),
       });
       return this.snapshot();
     }
@@ -156,6 +207,7 @@ class RuntimeHost extends EventEmitter {
         ownership: "external",
         pid: null,
         error: "runtime endpoint accepts connections without coherent live runtime-instance proof",
+        interfaceFailures: [],
       });
       return this.snapshot();
     }
@@ -166,6 +218,7 @@ class RuntimeHost extends EventEmitter {
       ownership: "none",
       pid: null,
       error: null,
+      interfaceFailures: [],
     });
     return this.snapshot();
   }
@@ -181,6 +234,64 @@ class RuntimeHost extends EventEmitter {
     this.state = next;
     this.emit("state", this.snapshot());
   }
+}
+
+function readRuntimeControlStatus(home) {
+  const socketPath = path.join(home, "state", "runtime-instance", "control.sock");
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let bytes = Buffer.alloc(0), settled = false;
+    const finish = (error, status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error); else resolve(status);
+    };
+    const timer = setTimeout(() => finish(new Error("runtime control status timed out")), 1_500);
+    socket.once("connect", () => socket.write('{"request":"status"}\n'));
+    socket.once("error", (error) => finish(error));
+    socket.once("end", () => finish(new Error("runtime control status ended without a complete frame")));
+    socket.on("data", (chunk) => {
+      bytes = Buffer.concat([bytes, chunk]);
+      if (bytes.length > 1024 * 1024) { finish(new Error("runtime control status exceeds 1 MiB")); return; }
+      const newline = bytes.indexOf(10);
+      if (newline < 0) return;
+      try {
+        if (bytes.subarray(newline + 1).toString("utf8").trim()) throw new Error("runtime control status contains trailing data");
+        finish(null, parseRuntimeControlStatus(JSON.parse(bytes.subarray(0, newline).toString("utf8"))));
+      } catch (error) { finish(error); }
+    });
+  });
+}
+
+function parseRuntimeControlStatus(value) {
+  if (value?.outcome === "refused") {
+    if (Object.keys(value).sort().join(",") !== "error,outcome" || typeof value.error !== "string" || !value.error.trim()) {
+      throw new Error("runtime control refusal is malformed");
+    }
+    throw new Error(`runtime refused the control status request: ${value.error}`);
+  }
+  const fields = ["interface_failures", "outcome", "phase", "pid", "started_at_unix_ms", "stopping"];
+  const keys = value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort() : [];
+  if (keys.length !== fields.length || keys.some((key, index) => key !== fields[index])
+    || value.outcome !== "status" || !Number.isSafeInteger(value.pid) || value.pid <= 0 || value.pid > 0xffff_ffff
+    || typeof value.phase !== "string" || !/^[a-z_]+$/.test(value.phase)
+    || !Number.isSafeInteger(value.started_at_unix_ms) || value.started_at_unix_ms <= 0
+    || ![null, "stop", "restart"].includes(value.stopping) || !Array.isArray(value.interface_failures)) {
+    throw new Error("runtime control status is malformed; interface_failures is required");
+  }
+  const interfaces = new Set();
+  for (const failure of value.interface_failures) {
+    if (!failure || typeof failure !== "object" || Array.isArray(failure)
+      || Object.keys(failure).sort().join(",") !== "error,interface"
+      || typeof failure.interface !== "string" || !failure.interface.trim()
+      || typeof failure.error !== "string" || !failure.error.trim() || interfaces.has(failure.interface)) {
+      throw new Error("runtime control interface failure is malformed");
+    }
+    interfaces.add(failure.interface);
+  }
+  return value;
 }
 
 async function readRuntimeInstance(home) {

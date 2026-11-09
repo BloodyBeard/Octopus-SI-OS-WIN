@@ -94,8 +94,15 @@ impl LedgerRows {
     }
 
     pub(crate) fn decode(&self, row: &[u8], seq: u64) -> Result<Movement, String> {
+        self.decode_with_grant_if(row, seq, |_| true)
+    }
+
+    pub(crate) fn decode_with_grant_if(
+        &self, row: &[u8], seq: u64, needs_grant: impl FnOnce(&Movement) -> bool,
+    ) -> Result<Movement, String> {
         let line = usize::try_from(seq).map_err(|_| "ledger row sequence overflow".to_string())?;
         let (mut movement, content) = self.decoder.decode_projection(row, line).map_err(|error| error.to_string())?;
+        if !needs_grant(&movement) { return Ok(movement); }
         let Some(content) = content else { return Ok(movement); };
         let grant = self.grant(content)?;
         match (movement.invocation_metadata.as_mut(), grant) {

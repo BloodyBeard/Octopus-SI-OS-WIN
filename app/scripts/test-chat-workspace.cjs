@@ -309,6 +309,23 @@ test("editing the latest message keeps the task and provider without selecting a
   await pending;
 });
 
+test("editing the latest message of an Agent task sends through the task's Agent template", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  Object.assign(host.run("run-1"), { worker_interface_id: "worker.concrete", worker_choice_interface_id: "worker.test" });
+  host.messages["run-1"][0].content_hash = "b".repeat(64);
+  const view = await openTask(host, "live");
+  const message = view.current.renderedMessages.find(message => message.role === "user");
+  const pending = view.current.editUserMessage(message, "Corrected");
+  await until(() => host.turns.length === 1, "the edit of an Agent task was refused before submission");
+  assert.equal(host.turns[0].runId, "run-1");
+  assert.equal(host.turns[0].workerInterfaceId, "worker.test");
+  assert.deepEqual(host.turns[0].replacesMessage, { id: message.artifactId, content: "b".repeat(64) });
+  host.append("run-1", "assistant", "Revised answer");
+  Object.assign(host.run("run-1"), { turn_open: false, turn_state: "completed" });
+  host.changed("ledger");
+  await pending;
+});
+
 test("a new task adopts the one Agent matching the Home defaults, starts as submitting and moves to the run the host creates", { timeout: 15_000 }, async () => {
   const host = fakeHost();
   host.sourceFolders = ["/workspace/primary", "/workspace/secondary"];
@@ -317,6 +334,13 @@ test("a new task adopts the one Agent matching the Home defaults, starts as subm
   host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
   let admit;
   host.holdTurn = new Promise((resolve) => { admit = resolve; });
+  let releaseList;
+  const listReady = new Promise((resolve) => { releaseList = resolve; });
+  const read = host.transport.projectionRead;
+  host.transport.projectionRead = async (request) => {
+    if (request.method === "projection.operator.chats.list" && host.turns.length) await listReady;
+    return read(request);
+  };
   const view = await mount(host, "lab");
   await type(view, "Draft the plan");
   await until(() => view.current.canSubmit, () => `never ready: ${view.current.submitBlockReason}`);
@@ -326,7 +350,13 @@ test("a new task adopts the one Agent matching the Home defaults, starts as subm
   assert.equal(working(view)[0].eventData.work_status, "submitting");
   assert.equal(view.current.activeRunId, "");
   admit();
+  await until(() => host.turns.length === 1 && view.current.loadingRuns, "new task projection did not start");
+  assert.equal(view.current.activeRunId, "");
+  assert.equal(view.current.activeProvider.id, provider.id);
+  assert.equal(view.current.providerModel, "model-a");
+  releaseList();
   await until(() => host.turns.length === 1 && view.current.activeRunId === "run-new", () => `the new run was not adopted: ${view.current.activeRunId}`);
+  assert.ok(view.current.activeProvider);
   assert.deepEqual([host.turns[0].runId, host.turns[0].eeId, host.turns[0].workerInterfaceId, host.turns[0].providerModel, host.turns[0].text],
     [undefined, "ee.root", "worker.test", "model-a", "Draft the plan"]);
   assert.deepEqual(host.turns[0].clientContext.map(entry => entry.name), ["client_observation", "project_source_folders"]);
@@ -1057,6 +1087,80 @@ test("a manual message refused before delivery returns to the composer and the e
   assert.equal(view.current.error, "Choose a project folder");
   assert.equal(view.current.queuedTurns.length, 0);
   assert.equal(view.current.canSubmit, true);
+});
+
+test("Home storage blocking retains drafts, suspends sends and queue delivery, and keeps open turn evidence", async () => {
+  const host = fakeHost();
+  let state, emit;
+  host.transport.bootStatus = async () => state;
+  host.transport.onRuntimeHostState = (listener) => { emit = listener; return () => { emit = null; }; };
+  const home = "/home/storage-fixture";
+  state = { home, storageHealth: { status: "writable", message: null }, interfaceFailures: [] };
+  const view = await mount(host, "live", home);
+  view.current.selectRun("run-1");
+  await until(() => !view.current.loadingMessages && view.current.activeRunId === "run-1", "task unavailable");
+  await type(view, "Keep the disk-full draft");
+  Object.assign(host.run("run-1"), { turn_open: true, turn_state: "working" });
+  host.changed("ledger");
+  await until(() => view.current.turnOpen, "open turn was not observed");
+  await type(view, "Previously queued message");
+  await view.current.queueCurrentTurn();
+  await until(() => view.current.queuedTurns.length === 1, "follow-up was not queued");
+  await type(view, "Keep the disk-full draft");
+  state = { home, storageHealth: { status: "blocked", code: "ENOSPC", message: "Disk full. Sending is paused; your draft is retained." }, interfaceFailures: [] };
+  emit(state);
+  await until(() => Boolean(view.current.storageBlockReason), "storage warning missing");
+  assert.equal(view.current.canSubmit, false);
+  assert.equal(view.current.canQueue, false);
+  assert.equal(view.current.canSteer, false);
+  await view.current.submit();
+  await view.current.queueCurrentTurn();
+  await view.current.steerCurrentTurn();
+  assert.equal(view.current.text, "Keep the disk-full draft");
+  assert.equal(view.current.turnOpen, true);
+  assert.equal(host.turns.length + host.steers.length, 0);
+  assert.equal(view.current.queuedTurns.length, 1);
+  host.reply("run-1", "Previous reply finished");
+  await until(() => !view.current.turnOpen, "reply evidence was not observed");
+  await settle();
+  assert.equal(host.turns.length, 0);
+  emit({ home: "/another-home", storageHealth: { status: "writable", message: null } });
+  await settle();
+  assert.ok(view.current.storageBlockReason);
+  emit({ home, storageHealth: { status: "writable", message: null }, interfaceFailures: [] });
+  await until(() => !view.current.storageBlockReason && host.turns.length === 1, "writable Home did not resume its saved queue");
+  assert.equal(host.turns[0].text, "Previously queued message");
+  host.reply("run-1", "Queued reply finished");
+  await until(() => !view.current.busy, "queued reply did not finish");
+  assert.equal(view.current.text, "Keep the disk-full draft");
+});
+
+test("a stopped bound provider blocks only its task and preserves the open turn and draft", async () => {
+  const host = fakeHost();
+  host.runs[0].provider_bound_interface_id = "provider.bound";
+  host.runs.push(runRow("run-healthy", { provider_bound_interface_id: "provider.sibling" }));
+  host.messages["run-healthy"] = [];
+  let emit;
+  const home = "/home/provider-health-fixture";
+  host.transport.bootStatus = async () => ({ home, storageHealth: { status: "writable" }, interfaceFailures: [] });
+  host.transport.onRuntimeHostState = (listener) => { emit = listener; return () => { emit = null; }; };
+  const view = await mount(host, "live", home);
+  view.current.selectRun("run-1");
+  await until(() => !view.current.loadingMessages && view.current.activeRunId === "run-1", "task unavailable");
+  await type(view, "Keep my provider draft");
+  Object.assign(host.run("run-1"), { turn_open: true, turn_state: "working" }); host.changed("ledger");
+  await until(() => view.current.turnOpen, "open turn missing");
+  emit({ home, storageHealth: { status: "writable" }, interfaceFailures: [{ interfaceId: "provider.bound", message: "sandbox unavailable" }] });
+  await until(() => Boolean(view.current.providerFailureReason), "provider warning missing");
+  assert.match(view.current.runtimeBlockReason, /sandbox unavailable/);
+  await view.current.submit();
+  assert.equal(view.current.text, "Keep my provider draft"); assert.equal(view.current.turnOpen, true);
+  assert.equal(view.current.canQueue, false); assert.equal(view.current.storageBlockReason, "");
+  view.current.selectRun("run-healthy");
+  await until(() => !view.current.loadingMessages && view.current.activeRunId === "run-healthy", "sibling unavailable");
+  await type(view, "Healthy sibling message");
+  await until(() => view.current.canSubmit, "unrelated life failure blocked a healthy task");
+  assert.equal(view.current.runtimeBlockReason, ""); assert.equal(host.turns.length, 0);
 });
 
 

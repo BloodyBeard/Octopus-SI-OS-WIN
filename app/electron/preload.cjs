@@ -25,6 +25,9 @@ function unwrapOperatorChatSubmitResult(result) {
   error.retryable = result?.contract === OPERATOR_CHAT_SUBMIT_RESULT
     && result.ok === false
     && result.error?.retryable === true;
+  error.deliveryState = result?.contract === OPERATOR_CHAT_SUBMIT_RESULT
+    && result.ok === false
+    && result.error?.deliveryState === "not_sent" ? "not_sent" : "unknown";
   throw error;
 }
 
@@ -48,6 +51,18 @@ function unwrapClientExtensionActionResult(result) {
   error.retryable = result?.contract === CLIENT_EXTENSION_ACTION_RESULT
     && result.ok === false
     && result.error?.retryable === true;
+  throw error;
+}
+
+function unwrapApplicationConnectionResult(result) {
+  if (result?.contract === "octopus.application-connection.v1" && result.ok === true) return result.value;
+  const error = new Error(result?.contract === "octopus.application-connection.v1"
+    && typeof result.error?.message === "string"
+    && result.error.message.trim()
+    ? result.error.message
+    : "Octopus couldn't finish the connection.");
+  error.name = "OctopusApplicationConnectionError";
+  error.code = result?.error?.code === "cancelled" ? "cancelled" : "failed";
   throw error;
 }
 
@@ -239,6 +254,12 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   cameraAccessStatus() {
     return invokeAccess("octopus:camera-access-status");
   },
+  saveGestureTrace(text) {
+    return invokeAccess("octopus:gesture-trace-save", text);
+  },
+  revealGestureTrace(target) {
+    return invokeAccess("octopus:gesture-trace-reveal", target);
+  },
   clientWindowBootstrap() {
     return ipcRenderer.sendSync("octopus:client-window-bootstrap");
   },
@@ -390,6 +411,12 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   chatgptRateLimits() {
     return invokeAccess("octopus:chatgpt-rate-limits");
   },
+  chatgptAccountSessions() {
+    return invokeAccess("octopus:chatgpt-account-sessions");
+  },
+  chatgptSwitchWorkspace(request) {
+    return invokeAccess("octopus:chatgpt-switch-workspace", request);
+  },
   chatgptLogout() {
     return invokeAccess("octopus:chatgpt-logout");
   },
@@ -440,6 +467,12 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   workspaceSetupState() {
     return invokeAccess("octopus:workspace-setup-state");
   },
+  saveSetupFile(request) {
+    return invokeAccess("octopus:setup-file-save", request);
+  },
+  openSetupFile() {
+    return invokeAccess("octopus:setup-file-open");
+  },
   clientSetupRead(request) {
     return invokeAccess("octopus:client-setup-read", request);
   },
@@ -460,6 +493,18 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   },
   mutateApplicationPrivateConfiguration(request) {
     return invokeAccess("octopus:application-private-configuration-mutate", request);
+  },
+  async applicationConnectionProbe(request) {
+    return unwrapApplicationConnectionResult(await invokeAccess("octopus:application-connection-probe", request));
+  },
+  async applicationConnectionConnect(request) {
+    return unwrapApplicationConnectionResult(await invokeAccess("octopus:application-connection-connect", request));
+  },
+  async applicationConnectionCancel(request) {
+    return unwrapApplicationConnectionResult(await invokeAccess("octopus:application-connection-cancel", request));
+  },
+  async applicationConnectionDisconnect(request) {
+    return unwrapApplicationConnectionResult(await invokeAccess("octopus:application-connection-disconnect", request));
   },
   mutateOctopusOsWorkspace(request) {
     return invokeAccess("octopus:os-workspace-mutate", request);
@@ -487,6 +532,17 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   },
   closeNativeBrowserViewer(request) {
     return invokeAccess("octopus:native-browser-viewer-close", request);
+  },
+  clientBrowser(request) { return invokeAccess("octopus:client-browser", request); },
+  onClientBrowserState(listener) {
+    const handler = (_event, state) => listener(state);
+    ipcRenderer.on("octopus:client-browser-state", handler);
+    return () => ipcRenderer.removeListener("octopus:client-browser-state", handler);
+  },
+  onClientBrowserOpened(listener) {
+    const handler = (_event, state) => listener(state);
+    ipcRenderer.on("octopus:client-browser-opened", handler);
+    return () => ipcRenderer.removeListener("octopus:client-browser-opened", handler);
   },
   closeNativeBrowserPage(request) {
     return invokeAccess("octopus:native-browser-page-close", request);
@@ -611,14 +667,49 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   submitOperatorTurnControl(request) {
     return invokeAccess("octopus:submit-operator-turn-control", request);
   },
-  submitChatSteer(request) {
-    return invokeAccess("octopus:submit-chat-steer", request);
+  async submitChatSteer(request) {
+    return unwrapOperatorChatSubmitResult(await invokeAccess("octopus:submit-chat-steer", request));
   },
   updateChatPins(request) {
     return invokeAccess("octopus:update-chat-pins", request);
   },
   transcribeDictation(request) {
     return invokeAccess("octopus:transcribe-dictation", request);
+  },
+  startDictationStream(request) {
+    return invokeAccess("octopus:dictation-stream-start", request);
+  },
+  appendDictationAudio(attemptId, bytes) {
+    ipcRenderer.send("octopus:dictation-stream-audio", accessToken, attemptId, bytes);
+  },
+  finishDictationStream(attemptId) {
+    return invokeAccess("octopus:dictation-stream-finish", attemptId);
+  },
+  onDictationStreamEvent(listener) {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("octopus:dictation-stream-event", wrapped);
+    return () => ipcRenderer.removeListener("octopus:dictation-stream-event", wrapped);
+  },
+  cancelDictation(attemptId) {
+    return invokeAccess("octopus:cancel-dictation", attemptId);
+  },
+  readDictationRecordings() {
+    return invokeAccess("octopus:dictation-recordings-read");
+  },
+  configureDictationRecordings(enabled) {
+    return invokeAccess("octopus:dictation-recordings-configure", enabled);
+  },
+  saveDictationRecording(request) {
+    return invokeAccess("octopus:dictation-recording-save", request);
+  },
+  readDictationRecording(id) {
+    return invokeAccess("octopus:dictation-recording-read", id);
+  },
+  updateDictationRecording(request) {
+    return invokeAccess("octopus:dictation-recording-update", request);
+  },
+  deleteDictationRecording(id) {
+    return invokeAccess("octopus:dictation-recording-delete", id);
   },
   submitInterfaceArtifact(request) {
     return invokeAccess("octopus:submit-interface-artifact", request);
@@ -732,6 +823,11 @@ contextBridge.exposeInMainWorld("octopusTransport", {
     const wrapped = (_event, payload) => listener(payload);
     ipcRenderer.on("octopus:client-extensions-changed", wrapped);
     return () => ipcRenderer.removeListener("octopus:client-extensions-changed", wrapped);
+  },
+  onApplicationConnectionProgress(listener) {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("octopus:application-connection-progress", wrapped);
+    return () => ipcRenderer.removeListener("octopus:application-connection-progress", wrapped);
   },
   onApplicationLifecycleProgress(listener) {
     const wrapped = (_event, payload) => listener(payload);

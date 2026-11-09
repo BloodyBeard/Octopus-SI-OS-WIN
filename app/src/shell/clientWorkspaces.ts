@@ -19,7 +19,7 @@ export type ClientChatProject = {
   readOnlyRunIds?: string[];
 };
 
-export type ClientTaskSortMode = "manual" | "recent" | "attention";
+export type ClientTaskSortMode = "manual" | "recent";
 
 export type ClientRecentDestination = {
   key: string;
@@ -39,22 +39,6 @@ export type ClientTaskOrganization = {
   sortMode: ClientTaskSortMode;
 };
 
-export type ClientTaskAttentionState = "waiting" | "unread" | "active" | "idle";
-
-export type ClientTaskAttentionRun = {
-  runId: string;
-  turnOpen: boolean;
-  turnState: string;
-  updatedAtMs: number;
-};
-
-const CLIENT_TASK_ATTENTION_ORDER: Readonly<Record<ClientTaskAttentionState, number>> = Object.freeze({
-  waiting: 0,
-  unread: 1,
-  active: 2,
-  idle: 3,
-});
-
 export const PINNED_TASKS_STORAGE_KEY = "octopus.shell.pinnedTasks.v2";
 export const TASK_ORDER_STORAGE_KEY = "octopus.shell.taskOrder.v2";
 export const PROJECT_FILTER_STORAGE_KEY = "octopus.shell.selectedProject.v2";
@@ -71,7 +55,7 @@ const EMPTY_TASK_ORGANIZATION: ClientTaskOrganization = Object.freeze({
   readMarks: Object.freeze({}),
   recentRunIds: Object.freeze([]),
   recentDestinations: Object.freeze([]),
-  sortMode: "attention",
+  sortMode: "recent",
 });
 
 type TaskOrganizationStore = {
@@ -477,33 +461,11 @@ export function recordClientTaskRead(
 }
 
 export function clientTaskUnread(
-  run: ClientTaskAttentionRun,
+  run: { runId: string; updatedAtMs: number },
   organization: ClientTaskOrganization,
 ): boolean {
   if (!organization.readBaselineAtMs) return false;
   return run.updatedAtMs > (organization.readMarks[run.runId] ?? organization.readBaselineAtMs);
-}
-
-export function clientTaskNeedsOperator(
-  run: ClientTaskAttentionRun,
-  organization: ClientTaskOrganization,
-): boolean {
-  if (run.turnState !== "waiting" && run.turnState !== "failed") return false;
-  return clientTaskUnread(run, organization);
-}
-
-export function clientTaskAttentionState(
-  run: ClientTaskAttentionRun,
-  organization: ClientTaskOrganization,
-): ClientTaskAttentionState {
-  if (clientTaskNeedsOperator(run, organization)) return "waiting";
-  if (clientTaskUnread(run, organization)) return "unread";
-  if (run.turnState === "working" || run.turnOpen) return "active";
-  return "idle";
-}
-
-export function clientTaskAttentionRank(state: ClientTaskAttentionState): number {
-  return CLIENT_TASK_ATTENTION_ORDER[state];
 }
 
 export function recordClientDestination(
@@ -648,9 +610,7 @@ function normalizeTaskOrganization(value: unknown): ClientTaskOrganization {
     const normalizedTitle = typeof title === "string" ? title.trim().slice(0, 180) : "";
     return normalizedRunId && normalizedTitle ? [[normalizedRunId, normalizedTitle]] : [];
   }).slice(0, 500));
-  const sortMode: ClientTaskSortMode = row.sortMode === "recent" || row.sortMode === "manual"
-    ? row.sortMode
-    : "attention";
+  const sortMode: ClientTaskSortMode = row.sortMode === "manual" ? "manual" : "recent";
   const readMarks = Object.fromEntries(Object.entries(
     row.readMarks && typeof row.readMarks === "object" && !Array.isArray(row.readMarks)
       ? row.readMarks

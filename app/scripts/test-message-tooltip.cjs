@@ -68,6 +68,53 @@ test("leaving before the delay cancels the pending open", async () => {
   assert.ok(!tooltip());
 });
 
+test("a measurement queued while leaving cannot reopen a closed tooltip", async () => {
+  await show();
+  await hover();
+  await React.act(async () => {
+    trigger().dispatchEvent(new w.MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    w.dispatchEvent(new w.Event("resize"));
+  });
+  assert.ok(!tooltip(), "a late geometry update must keep the tooltip closed");
+});
+
+test("moving between triggers leaves only the latest tooltip and dragging opens none", async () => {
+  const MessageTooltip = await compiled;
+  await React.act(async () => root.render(React.createElement("div", { key: ++shows },
+    ...["First", "Second"].map(label => React.createElement(MessageTooltip, { key: label, label, delayMs: 30 }, label)))));
+  const [first, second] = document.querySelectorAll(".chat-tooltip-trigger");
+  await fire(first, "pointermove");
+  await fire(second, "pointermove");
+  await React.act(() => delay(50));
+  assert.deepEqual([...document.querySelectorAll('[role="tooltip"]')].map(node => node.textContent), ["Second"]);
+  await fire(second, "pointerout", { relatedTarget: document.body });
+  await fire(first, "pointerout", { relatedTarget: document.body });
+  await fire(first, "pointermove");
+  await React.act(() => delay(50));
+  await fire(second, "pointermove");
+  await React.act(() => delay(50));
+  assert.deepEqual([...document.querySelectorAll('[role="tooltip"]')].map(node => node.textContent), ["Second"]);
+  await fire(second, "pointerout", { relatedTarget: document.body });
+  await fire(second, "pointermove", { buttons: 1 });
+  await React.act(() => delay(50));
+  assert.equal(tooltip(), null);
+});
+
+test("an SVG binding keeps its group and exposes the shared tooltip on hover", async () => {
+  const MessageTooltip = await compiled;
+  await React.act(async () => root.render(React.createElement("svg", null,
+    React.createElement(MessageTooltip, { asChild: true, label: "Run: reader · Interface: files", delayMs: 30 },
+      React.createElement("g", { role: "img", tabIndex: 0, "aria-label": "Binding" }, React.createElement("line", { x1: 0, y1: 0, x2: 20, y2: 20 }))))));
+  const group = document.querySelector("svg g");
+  assert.equal(group.getAttribute("role"), "img");
+  assert.equal(document.querySelector("svg span"), null);
+  group.getBoundingClientRect = w.HTMLElement.prototype.getBoundingClientRect;
+  await fire(group, "pointermove");
+  await React.act(() => delay(50));
+  assert.equal(tooltip().textContent, "Run: reader · Interface: files");
+  assert.equal(group.getAttribute("aria-describedby"), tooltip().id);
+});
+
 test("pressing, clicking, blurring the window or scrolling closes an open tooltip", async () => {
   for (const close of [
     () => fire(trigger(), "pointerdown"),

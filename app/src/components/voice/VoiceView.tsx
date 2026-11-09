@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import "../icon-glyphs/chat";
 import "../icon-glyphs/voice";
 import "../icon-glyphs/worker";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { subscribeClientCommands } from "../../clientActions";
 import type { RuntimeTopologyState } from "../../runtimeTopology";
@@ -27,7 +27,6 @@ import { Glyph, type GlyphName } from "../IconGlyphs";
 import { ShellTooltip } from "../shell/ShellTooltip";
 import { ChatComposer } from "../chat/ChatComposer";
 import type { ProjectedFileSource } from "../chat/ProjectedFilePicker";
-import { AirHandVoiceController } from "./AirHandVoiceController";
 import { HomeCallControls } from "./HomeCallControls";
 import { HomeTurnActivity, homeTurnActivity, homeTurnAwaitsClientResult, homeTurnAwaitsFinalReply, homeTurnTerminalNotice } from "./HomeTurnActivity";
 import { projectHomeVoiceContext } from "./voiceCallArtifacts";
@@ -49,7 +48,6 @@ import { OctopusLoadingState } from "../OctopusLoadingLogo";
 import "../chat/chat.css";
 import "./voice.css";
 
-const RunEnvironmentView = lazy(() => import("../worker-environment/RunEnvironmentView").then((module) => ({ default: module.RunEnvironmentView })));
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
@@ -65,7 +63,6 @@ type Props = {
   session: VoiceSession;
   surfaces: AdmittedClientSurfaceDocument[];
   topology: RuntimeTopologyState;
-  workerEnvironmentSurfaces: AdmittedClientSurfaceDocument[];
   widgetsOpen: boolean;
   workspace: ChatWorkspace;
 };
@@ -77,7 +74,6 @@ type ProjectionTarget = {
   run: RunProjection | null;
 };
 
-type DetailPanelKind = "context" | "tools" | "goals" | "memory";
 type ProjectionItem = VoiceWidgetItem;
 
 const VOICE_TITLE_KEY = "octopus.voice.session-title.v1";
@@ -104,11 +100,8 @@ const LAB_INSIGHTS: InsightsWidget = {
   changeDetail: "vs last month",
   series: [2.1, 2.4, 3.6, 3.1, 4.2, 3.8, 5.1, 6.4],
 };
-export function VoiceView({ accessProfile, activity, builtinWidgetSources, commandsActive = true, homeRunId, installedWidgetIds, installedWidgetsReady, onViewModeChange, onWidgetsOpenChange, session, surfaces, topology, workerEnvironmentSurfaces, widgetsOpen, workspace, viewMode }: Props) {
+export function VoiceView({ accessProfile, activity, builtinWidgetSources, commandsActive = true, homeRunId, installedWidgetIds, installedWidgetsReady, onViewModeChange, onWidgetsOpenChange, session, surfaces, topology, widgetsOpen, workspace, viewMode }: Props) {
   const storageKeys = voiceStorageKeys(accessProfile);
-  const [detailPanel, setDetailPanel] = useState<DetailPanelKind | null>(null);
-  const [environmentOpen, setEnvironmentOpen] = useState(false);
-  const [environmentMaximized, setEnvironmentMaximized] = useState(false);
   const [hiddenSurfaceIds, setHiddenSurfaceIds] = useState(() => readStoredStringSet(storageKeys.hiddenSurfaces));
   useEffect(() => {
     const refresh = (event: StorageEvent) => {
@@ -270,13 +263,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     () => projectUpcomingScheduled(workspace.runs),
     [workspace.runs],
   );
-  const environmentAvailable = Boolean(
-    topology.projection.mode === "live"
-    &&
-    target.run?.workerEnvironments.some((environment) => (
-      environment.id && environment.live
-    )),
-  );
   const insights = useMemo(
     () => accessProfile === "lab" ? LAB_INSIGHTS : projectInsights(activity),
     [accessProfile, activity],
@@ -284,7 +270,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const installedWidgetIdSet = useMemo(() => new Set(installedWidgetIds), [installedWidgetIds]);
   const builtInSurfaces = useMemo(() => buildVoiceWidgetDocuments({
     context: contextItems,
-    environmentAvailable,
     goals: goalItems,
     memory: memoryItems,
     insights,
@@ -295,7 +280,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     ...surface,
     sourceExtensionId: surface.document.id,
     hostSources: builtinWidgetSources[surface.document.id] ?? [],
-  })), [builtinWidgetSources, contextItems, environmentAvailable, goalItems, insights, installedWidgetIdSet, memoryItems, taskProgress, toolItems, upcomingScheduled]);
+  })), [builtinWidgetSources, contextItems, goalItems, insights, installedWidgetIdSet, memoryItems, taskProgress, toolItems, upcomingScheduled]);
   const homeSurfaces = useHomeSurfaceDocuments(surfaces, { accessProfile, runId: boundRunId, interfaceId: homeInterfaceId });
   const visibleHomeSurfaceIds = useMemo(() => new Set(homeSurfaces.visibleDocuments.map(homeSurfaceIdentity)), [homeSurfaces.visibleDocuments]);
   const allSurfaces = useMemo(() => [...builtInSurfaces, ...homeSurfaces.documents].sort((left, right) => (
@@ -455,37 +440,9 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     if (callState.canMute) session.toggleMute();
   }
 
-  function toggleDetail(kind: DetailPanelKind) {
-    setDetailPanel((current) => {
-      const next = current === kind ? null : kind;
-      if (next) {
-        onWidgetsOpenChange?.(false);
-        setEnvironmentOpen(false);
-        setEnvironmentMaximized(false);
-      }
-      return next;
-    });
-  }
-
-  function openEnvironment() {
-    setDetailPanel(null);
-    onWidgetsOpenChange?.(false);
-    setEnvironmentOpen(true);
-  }
-
   function handleSurfaceAction(event: ClientSurfaceActionEvent): boolean {
-    if (event.action.event === "voice.open-environment") {
-      if (target.run) openEnvironment();
-      return true;
-    }
-    if (event.action.event === "voice.open-activity") {
-      onViewModeChange?.("activity");
-      return true;
-    }
-    if (event.action.event !== "voice.open-detail") return false;
-    const panel = event.action.payload?.panel;
-    if (panel !== "context" && panel !== "tools" && panel !== "goals" && panel !== "memory") return false;
-    toggleDetail(panel);
+    if (event.action.event !== "voice.open-activity") return false;
+    onViewModeChange?.("activity");
     return true;
   }
 
@@ -515,10 +472,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
 
   function setWidgetsMenuOpen(next: boolean) {
     onWidgetsOpenChange?.(next);
-    if (!next) return;
-    setDetailPanel(null);
-    setEnvironmentOpen(false);
-    setEnvironmentMaximized(false);
   }
 
   const status = homeEnvironmentStatus(target, homeProjectionLoading);
@@ -528,7 +481,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
         source: "live" as const,
         listeningLevel: inputMeter.level,
         speakingLevel: outputMeter.level,
-        thinkingLevel: session.providerActivity || workspace.busy || workspace.submitting ? 1 : 0,
+        thinkingLevel: !workspace.runtimeBlockReason && (session.providerActivity || workspace.busy || workspace.submitting) ? 1 : 0,
       };
 
   if (!callActive && homeProjectionLoading) {
@@ -540,7 +493,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   }
 
   return (
-    <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`} ref={viewRef}>
+    <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer`} ref={viewRef}>
       <div aria-hidden="true" className="voice-home-scene">
         <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} quietField={oceanScene} sceneSurface={stageMainRef} formationSurface={viewRef} rippleSurface={oceanScene ? undefined : viewRef} sizeProbe={orbProbeRef} />
         {oceanScene ? <OctopusOceanScene activity={orbActivity} calling={callActive} orbProbe={orbProbeRef} rippleSurface={viewRef} /> : null}
@@ -584,6 +537,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
           replyHidden={replyHidden}
           onReplyHidden={() => { if (callActiveRef.current) setCallSceneReady(true); }}
           busy={workspace.busy}
+          blockingReason={workspace.runtimeBlockReason}
           activity={latestHomeActivity}
           activityStartedAtMs={latestHomePrompt?.createdAtMs ?? 0}
           toolPresentations={workspace.toolPresentations}
@@ -608,7 +562,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
           onDrop={workspace.dropFiles}
           key="home"
           response={latestHomeResponse}
-          submitting={workspace.submitting}
+          submitting={workspace.submitting && !workspace.runtimeBlockReason}
           streamingResponse={latestHomeStreamingResponse}
           failure={latestHomeFailure}
           turnKey={latestHomePrompt?.id ?? latestHomeResponse?.id ?? "empty"}
@@ -663,31 +617,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
           />
         ))}
       </div>
-      <AirHandVoiceController accessProfile={accessProfile} stageRef={widgetCanvasRef} />
-
-      <AnimatePresence>
-        {detailPanel ? (
-          <VoiceDetailPanel
-            items={detailItems(detailPanel, contextItems, toolItems, goalItems, memoryItems)}
-            kind={detailPanel}
-            onClose={() => setDetailPanel(null)}
-          />
-        ) : null}
-        {environmentOpen && target.run ? (
-          <VoiceEnvironmentPanel
-            accessProfile={accessProfile}
-            maximized={environmentMaximized}
-            onClose={() => {
-              setEnvironmentOpen(false);
-              setEnvironmentMaximized(false);
-            }}
-            onMaximizedChange={setEnvironmentMaximized}
-            run={target.run}
-            surfaces={workerEnvironmentSurfaces}
-          />
-        ) : null}
-      </AnimatePresence>
-
     </section>
   );
 }
@@ -772,12 +701,13 @@ function VoiceSessionTitle({ editable, onChange, title }: {
   );
 }
 
-function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyHidden, onReplyHidden, busy, activity, activityStartedAtMs, toolPresentations, composer, dragOver, dropEnabled, homeInterfaceReady, loading, onDragLeave, onDragOver, onDrop, response, streamingResponse, submitting, failure, turnKey }: {
+function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyHidden, onReplyHidden, busy, blockingReason, activity, activityStartedAtMs, toolPresentations, composer, dragOver, dropEnabled, homeInterfaceReady, loading, onDragLeave, onDragOver, onDrop, response, streamingResponse, submitting, failure, turnKey }: {
   operatorRequests: ChatRenderMessage[];
   onOperatorRequestResponse: ChatWorkspace["respondToOperatorRequest"];
   replyHidden: boolean;
   onReplyHidden: () => void;
   busy: boolean;
+  blockingReason: string;
   activity: ChatRenderMessage[];
   activityStartedAtMs: number;
   toolPresentations: ChatToolPresentationIndex;
@@ -802,7 +732,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   const text = response?.text.trim() ?? "";
   const finalReplyPending = (!response && homeTurnAwaitsFinalReply(activity)) || homeTurnAwaitsClientResult(activity, toolPresentations);
   const activityNotice = finalReplyPending ? null : homeTurnTerminalNotice(activity);
-  const working = (busy || finalReplyPending) && !response && !submitting && !failure && !activityNotice;
+  const working = !blockingReason && (busy || finalReplyPending) && !response && !submitting && !failure && !activityNotice;
   const streamingText = working ? streamingResponse?.text ?? "" : "";
   const responseStreaming = Boolean(streamingText.trim());
   const attachments = response?.attachments ?? [];
@@ -856,7 +786,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   return (
     <motion.section
       animate={{ opacity: 1 }}
-      aria-busy={working || submitting}
+      aria-busy={!blockingReason && (working || submitting)}
       aria-label="Home latest response viewport"
       className={`home-response-stage${working ? " is-generating is-transient" : ""}${hasResponse ? " has-response" : " is-empty"}${compact ? " is-compact" : " is-expanded"}${scrolled ? " is-scrolled" : ""}${dragOver ? " is-drag-over" : ""}${replyHidden ? " is-call" : ""}`}
       initial={{ opacity: 0 }}
@@ -924,7 +854,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
               </article>
             ) : working || retainedActivity ? (
               <article className={`home-response-output home-response-output--activity${working ? " home-response-output--live" : ""}`} data-ocean-obstacle="" data-voice-placement-obstacle="" key="activity">
-                <HomeTurnActivity activities={activity} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} turnInProgress={working} terminalNotice={activityNotice} />
+                <HomeTurnActivity activities={activity} blockingReason={blockingReason} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} turnInProgress={working} terminalNotice={activityNotice} />
               </article>
             ) : quiet || loading ? null : (
               <div className="home-response-empty" data-ocean-obstacle="" data-voice-placement-obstacle="" key="empty">
@@ -1032,6 +962,7 @@ function HomeCommandDock({ awaitingClientResult, callActive, commandsActive, onV
           activeProvider={workspace.activeProvider}
           attachments={workspace.attachments}
           canSubmit={workspace.canSubmit}
+          blockingReason={workspace.runtimeBlockReason}
           contextUsage={workspace.contextUsage}
           hasQueuedMessages={workspace.queuedTurns.length > 0}
           fileInputRef={workspace.fileInputRef}
@@ -1168,66 +1099,6 @@ function HomeWidgetsControl({ accessProfile, errors, hasHiddenSurfaces, onOpenCh
         ) : null}
       </AnimatePresence>
     </div>
-  );
-}
-
-function VoiceDetailPanel({ items, kind, onClose }: {
-  items: ProjectionItem[];
-  kind: DetailPanelKind;
-  onClose: () => void;
-}) {
-  return (
-    <motion.aside
-      animate={{ opacity: 1, x: 0 }}
-      className="voice-detail-panel"
-      exit={{ opacity: 0, x: 12 }}
-      initial={{ opacity: 0, x: 12 }}
-      transition={{ duration: 0.16, ease: [0.2, 0, 0, 1] }}
-    >
-      <header>
-        <span><Glyph className="icon-xs" name={detailGlyph(kind)} size={16} />{detailTitle(kind)}</span>
-        <button aria-label={`Close ${detailTitle(kind)}`} onClick={onClose} type="button"><Glyph className="icon-xs" name="close" size={16} /></button>
-      </header>
-      <div>
-        {items.length ? items.map((item, index) => (
-          <article key={`${item.label}:${index}`}>
-            <span>{item.glyph ? <Glyph name={item.glyph} size={14} /> : null}{item.label}</span>
-            {item.detail ? <p>{item.detail}</p> : null}
-            {item.state ? <small>{item.state}</small> : null}
-          </article>
-        )) : <p className="voice-panel-empty">No projected data is available for this run.</p>}
-      </div>
-    </motion.aside>
-  );
-}
-
-function VoiceEnvironmentPanel({ accessProfile, maximized, onClose, onMaximizedChange, run, surfaces }: {
-  accessProfile: OctopusClientAccessProfile;
-  maximized: boolean;
-  onClose: () => void;
-  onMaximizedChange: (maximized: boolean) => void;
-  run: RunProjection;
-  surfaces: AdmittedClientSurfaceDocument[];
-}) {
-  return (
-    <motion.aside
-      animate={{ opacity: 1, scale: 1, x: 0 }}
-      className={`voice-environment-panel${maximized ? " is-maximized" : ""}`}
-      exit={{ opacity: 0, scale: 0.99, x: 12 }}
-      initial={{ opacity: 0, scale: 0.99, x: 12 }}
-      transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
-    >
-      <Suspense fallback={null}>
-        <RunEnvironmentView
-          accessProfile={accessProfile}
-          maximized={maximized}
-          onClose={onClose}
-          onMaximizedChange={onMaximizedChange}
-          run={run}
-          surfaces={surfaces}
-        />
-      </Suspense>
-    </motion.aside>
   );
 }
 
@@ -1415,33 +1286,6 @@ function formatScheduledTime(timestamp: number, now: number): string {
   const nextDay = at.toDateString() === tomorrow.toDateString();
   const day = sameDay ? "Today" : nextDay ? "Tomorrow" : at.toLocaleDateString([], { day: "numeric", month: "short" });
   return `${day}, ${at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
-}
-
-function detailItems(
-  kind: DetailPanelKind,
-  context: ProjectionItem[],
-  tools: ProjectionItem[],
-  goals: ProjectionItem[],
-  memory: ProjectionItem[],
-): ProjectionItem[] {
-  if (kind === "context") return context;
-  if (kind === "tools") return tools;
-  if (kind === "goals") return goals;
-  return memory;
-}
-
-function detailTitle(kind: DetailPanelKind): string {
-  if (kind === "context") return "Live context";
-  if (kind === "tools") return "Active tools";
-  if (kind === "goals") return "Current goals";
-  return "Memory";
-}
-
-function detailGlyph(kind: DetailPanelKind): GlyphName {
-  if (kind === "context") return "layers";
-  if (kind === "tools") return "plugins";
-  if (kind === "goals") return "target";
-  return "memory";
 }
 
 function glyphForTool(tool: string): GlyphName {

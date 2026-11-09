@@ -206,6 +206,12 @@
             "$ref": "#/definitions/ProcessEnvironmentSubpathSpec"
           }
         },
+        "read_executable_relative_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessExecutableRelativePathSpec"
+          }
+        },
         "read_paths": {
           "type": "array",
           "items": {
@@ -274,6 +280,22 @@
       ],
       "properties": {
         "env": {
+          "type": "string"
+        },
+        "relative_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessExecutableRelativePathSpec": {
+      "type": "object",
+      "required": [
+        "executable",
+        "relative_path"
+      ],
+      "properties": {
+        "executable": {
           "type": "string"
         },
         "relative_path": {

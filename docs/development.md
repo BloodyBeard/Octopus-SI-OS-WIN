@@ -27,7 +27,8 @@ Use [Getting started](getting-started.md) for the macOS build,
 | --- | --- |
 | `octopus-app` | The `octopus` binary: `up`, `down`, `doctor`. Boots a Home and runs the arrival loop. |
 | `octopus-app-server` | The composition root: registry snapshot, artifact arrival handling, and the worker-policy wiring. |
-| `octopus-runtime` | Grant formation per arrival, admission, outbound transfers, run records, and the run-records index. |
+| `octopus-runtime` | Grant formation per arrival, admission, and outbound transfers. |
+| `octopus-run-record` | Run and checkpoint records, grant epochs, and the run-records index. Rooms and interfaces read and author runs through it without linking the runtime. |
 | `octopus-policy` | Policy shapes and their reduction: worker-interface ceilings and interface policy declarations. |
 | `octopus-ee` | EE templates, instances, and the EE tree. |
 | `octopus-interfaces` | Interface descriptors and worker-pin policy loading. |
@@ -151,6 +152,22 @@ Code Mode, process session and file publication tests one at a time.
 Source/type checks and contract tests do not prove a
 fresh packaged setup, a real model reply, or physical device permissions.
 
+The `dependency-audit` job fails on any high or critical npm advisory in the
+production dependencies, or in the development dependencies that ship
+(Electron in the client, Bun in the OpenCodex bridge, listed under
+`shippedDevDependencies`), of the lockfiles declared in
+[`app/dependency-audit.json`](../app/dependency-audit.json). It also fails on any
+RustSec vulnerability, unsound or unmaintained advisory, or yanked crate in
+`Cargo.lock` under [`deny.toml`](../deny.toml), and in the container room
+helper's own `Cargo.lock` under its `deny.toml`. An advisory is accepted only by
+an entry with its reason in one of those files, and an entry that no longer
+matches also fails the job. Both audits read live advisory databases, so a
+newly published advisory can fail the job without a code change: resolve it
+with a lockfile update or a reasoned entry, never by lowering the audit level.
+Run the same checks locally with `node app/scripts/check-dependency-audit.cjs`
+and `cargo deny --locked check advisories`, at the repository root and in
+`registry/worker_environment_kind/container_session/packages/octopus-container-room/helper`.
+
 For the terminal client, `npm --prefix app run test:cli` checks transcript,
 interaction, transport, packaging, and setup contracts. `npm --prefix app run
 build:cli` builds its release distribution; `build:cli-client` rebuilds only the
@@ -260,7 +277,7 @@ npm --prefix app run dev:onboarding -- --help
 After preparing the build prerequisites, run both modes from the repository root:
 
 ```sh
-OCTOPUS_NATIVE_NODE_HEADERS="$PWD/app/build/node-v24.15.0/include/node" \
+OCTOPUS_NATIVE_NODE_HEADERS="$PWD/app/build/node-v24.22.1/include/node" \
   npm --prefix app run dev:onboarding -- --mode unauthenticated
 
 npm --prefix app run dev:onboarding -- --mode reused-auth \

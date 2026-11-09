@@ -1,0 +1,19 @@
+{
+  "id": "world_github_issues",
+  "interface_type": "world",
+  "role": "sensor",
+  "direction": "inbound",
+  "source_names": [
+    "github.issue.opened"
+  ],
+  "interface_driver_ref": "github_webhook",
+  "interface_driver_config": {
+    "private_config": {
+      "schema_version": 1,
+      "enabled": false,
+      "repository": "OWNER/REPOSITORY",
+      "port": 8787,
+      "path": "/github/replace-with-unique-private-route"
+    }
+  }
+}

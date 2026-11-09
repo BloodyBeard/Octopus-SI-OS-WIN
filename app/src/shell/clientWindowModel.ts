@@ -1,3 +1,4 @@
+import { normalizeArtifactFilesTarget } from "../components/files/artifactFilesTarget";
 import type { FilesOpenTarget } from "../components/files/types";
 import { normalizeFilesPaneSnapshot, type FilesPaneSnapshot } from "../components/files/filesPaneSnapshot";
 import type { TaskSourcesPaneTarget } from "../components/chat/taskSourcesPane";
@@ -51,7 +52,12 @@ export type TransferableWorkspacePaneTarget =
   | WorkspaceSurfacePaneTarget
   | WorkspaceWorkerEnvironmentPaneTarget;
 
+export type WorkspaceClientBrowserPaneTarget = {
+  kind: "client_browser"; pageId: string; title: string; workspaceKey: ClientWorkspaceKey;
+};
+
 export type WorkspacePaneTarget =
+  | WorkspaceClientBrowserPaneTarget
   | TransferableWorkspacePaneTarget
   | WorkspaceLauncherPaneTarget
   | WorkspaceTaskSourcesPaneTarget
@@ -293,7 +299,7 @@ export function screenPointOutsideClientWindow(
 export function transferableWorkspacePaneTarget(
   target: WorkspacePaneTarget,
 ): TransferableWorkspacePaneTarget | null {
-  return target.kind === "terminal" || target.kind === "task_sources" || target.kind === "launcher" ? null : target;
+  return target.kind === "client_browser" || target.kind === "terminal" || target.kind === "task_sources" || target.kind === "launcher" ? null : target;
 }
 
 export function clientWindowChatStorageScope(windowScope: string, pane: "home" | "main" | "secondary"): string {
@@ -375,24 +381,7 @@ function normalizeClientWindowFilesTarget(value: unknown): FilesOpenTarget | nul
       ...(path != null ? { path, rootId } : {}),
     };
   }
-  if (row.kind === "artifact") {
-    const artifactId = boundedClientWindowText(row.artifactId, 1024);
-    const interfaceId = boundedClientWindowText(row.interfaceId, 512);
-    const label = boundedClientWindowText(row.label, 1024);
-    const runId = boundedClientWindowText(row.runId, 512);
-    const createdAtMs = typeof row.createdAtMs === "number" && Number.isFinite(row.createdAtMs) && row.createdAtMs >= 0
-      ? row.createdAtMs
-      : undefined;
-    if (!artifactId || !interfaceId || !label || !runId || (row.createdAtMs !== undefined && createdAtMs === undefined)) return null;
-    return {
-      kind: "artifact",
-      artifactId,
-      interfaceId,
-      label,
-      runId,
-      ...(createdAtMs !== undefined ? { createdAtMs } : {}),
-    };
-  }
+  if (row.kind === "artifact") return normalizeArtifactFilesTarget(row);
   return null;
 }
 

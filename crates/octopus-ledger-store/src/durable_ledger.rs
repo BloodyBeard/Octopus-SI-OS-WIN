@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use octopus_ledger::{
-    BlobStore, ContentHash, GrantProjection, Lamport, LedgerError, LedgerResult, Movement,
+    BlobStore, ContentHash, DurableMetadataContent, GrantProjection, Lamport, LedgerError, LedgerResult, Movement,
     MovementDraft, MovementLog, MovementMetadata, Seq, decode_durable_movement_row,
     encode_durable_movement_row, movement_recorded_at_unix_ms_now,
 };
@@ -64,13 +64,13 @@ fn movement_metadata_root(path: &Path) -> PathBuf {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct GrantFileFingerprint {
+struct MetadataFileFingerprint {
     identity: LedgerIdentity,
     modified: std::time::SystemTime,
     changed: (i64, i64),
 }
 
-impl GrantFileFingerprint {
+impl MetadataFileFingerprint {
     #[cfg(unix)]
     fn from_metadata(path: &Path, metadata: &std::fs::Metadata) -> LedgerResult<Self> {
         use std::os::unix::fs::MetadataExt;
@@ -98,24 +98,24 @@ impl GrantFileFingerprint {
     }
 }
 
-struct CachedGrant {
+struct CachedMetadata {
     hash: ContentHash,
-    fingerprint: GrantFileFingerprint,
+    fingerprint: MetadataFileFingerprint,
     value: Arc<serde_json::Value>,
     byte_len: usize,
 }
 
 #[derive(Default)]
-struct GrantValueCache {
-    entries: VecDeque<CachedGrant>,
+struct MetadataValueCache {
+    entries: VecDeque<CachedMetadata>,
     byte_len: usize,
 }
 
-impl GrantValueCache {
+impl MetadataValueCache {
     fn get(
         &mut self,
         hash: ContentHash,
-        fingerprint: GrantFileFingerprint,
+        fingerprint: MetadataFileFingerprint,
     ) -> Option<Arc<serde_json::Value>> {
         let index = self.entries.iter().position(|entry| entry.hash == hash)?;
         let entry = self.entries.remove(index)?;
@@ -128,8 +128,8 @@ impl GrantValueCache {
         Some(value)
     }
 
-    fn insert(&mut self, entry: CachedGrant) {
-        const MAX_GRANTS: usize = 64;
+    fn insert(&mut self, entry: CachedMetadata) {
+        const MAX_ENTRIES: usize = 64;
         const MAX_BYTES: usize = 8 * 1024 * 1024;
         if entry.byte_len > MAX_BYTES {
             return;
@@ -142,14 +142,14 @@ impl GrantValueCache {
             self.byte_len -= self
                 .entries
                 .remove(index)
-                .expect("cached grant exists")
+                .expect("cached metadata exists")
                 .byte_len;
         }
-        while self.entries.len() >= MAX_GRANTS || self.byte_len + entry.byte_len > MAX_BYTES {
+        while self.entries.len() >= MAX_ENTRIES || self.byte_len + entry.byte_len > MAX_BYTES {
             self.byte_len -= self
                 .entries
                 .pop_back()
-                .expect("bounded grant cache is nonempty")
+                .expect("bounded metadata cache is nonempty")
                 .byte_len;
         }
         self.byte_len += entry.byte_len;
@@ -158,13 +158,13 @@ impl GrantValueCache {
 }
 
 #[derive(Default)]
-struct GrantCaches {
-    grants: Mutex<GrantValueCache>,
-    validated_grants: Mutex<HashMap<ContentHash, (GrantFileFingerprint, Vec<String>)>>,
+struct MetadataCaches {
+    values: Mutex<MetadataValueCache>,
+    validated_grants: Mutex<HashMap<ContentHash, (MetadataFileFingerprint, Vec<String>)>>,
 }
 
-fn ledger_grant_caches(root: &Path) -> Arc<GrantCaches> {
-    static CACHES: std::sync::OnceLock<Mutex<HashMap<PathBuf, Arc<GrantCaches>>>> =
+fn ledger_metadata_caches(root: &Path) -> Arc<MetadataCaches> {
+    static CACHES: std::sync::OnceLock<Mutex<HashMap<PathBuf, Arc<MetadataCaches>>>> =
         std::sync::OnceLock::new();
     let mut caches = CACHES
         .get_or_init(Default::default)
@@ -175,14 +175,14 @@ fn ledger_grant_caches(root: &Path) -> Arc<GrantCaches> {
 
 pub struct DurableMovementDecoder {
     blobs: DurableBlobs,
-    caches: Arc<GrantCaches>,
+    caches: Arc<MetadataCaches>,
 }
 
 impl DurableMovementDecoder {
     pub fn for_log(movements_path: impl AsRef<Path>) -> Self {
         let dir = movement_metadata_root(movements_path.as_ref());
         Self {
-            caches: ledger_grant_caches(&dir),
+            caches: ledger_metadata_caches(&dir),
             blobs: DurableBlobs { dir },
         }
     }
@@ -190,13 +190,13 @@ impl DurableMovementDecoder {
     pub fn open(movements_path: impl AsRef<Path>) -> LedgerResult<Self> {
         let root = movement_metadata_root(movements_path.as_ref());
         Ok(Self {
-            caches: ledger_grant_caches(&root),
+            caches: ledger_metadata_caches(&root),
             blobs: DurableBlobs::open(root)?,
         })
     }
 
     pub fn decode(&self, row: &[u8], line: usize) -> LedgerResult<Movement> {
-        decode_durable_movement_row(row, line, |hash| self.grant_value(hash, line))
+        decode_durable_movement_row(row, line, |_, hash| self.metadata_value(hash, line))
     }
 
     pub fn decode_projection(
@@ -205,10 +205,13 @@ impl DurableMovementDecoder {
         line: usize,
     ) -> LedgerResult<(Movement, Option<ContentHash>)> {
         let mut grant_content = None;
-        let mut movement = decode_durable_movement_row(row, line, |hash| {
-            let interfaces = self.validate_grant(hash, line)?;
-            grant_content = Some(hash);
-            Ok(serde_json::json!({"interfaces": interfaces}))
+        let mut movement = decode_durable_movement_row(row, line, |kind, hash| match kind {
+            DurableMetadataContent::Grant => {
+                let interfaces = self.validate_grant(hash, line)?;
+                grant_content = Some(hash);
+                Ok(serde_json::json!({"interfaces": interfaces}))
+            }
+            DurableMetadataContent::ArtifactBindingRefs => self.metadata_value(hash, line),
         })?;
         if let Some(MovementMetadata::Invocation(metadata)) = movement.invocation_metadata.as_mut()
         {
@@ -239,33 +242,33 @@ impl DurableMovementDecoder {
             })
     }
 
-    fn grant_fingerprint(&self, hash: ContentHash) -> LedgerResult<GrantFileFingerprint> {
+    fn metadata_fingerprint(&self, hash: ContentHash) -> LedgerResult<MetadataFileFingerprint> {
         let path = self.blobs.blob_path(&hash);
         match std::fs::metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Err(LedgerError::BlobMissing(hash))
             }
             Err(error) => Err(io_err(&path, &error)),
-            Ok(metadata) => GrantFileFingerprint::from_metadata(&path, &metadata),
+            Ok(metadata) => MetadataFileFingerprint::from_metadata(&path, &metadata),
         }
     }
 
-    fn read_grant(&self, hash: ContentHash, before: GrantFileFingerprint) -> LedgerResult<Vec<u8>> {
+    fn read_metadata(&self, hash: ContentHash, before: MetadataFileFingerprint) -> LedgerResult<Vec<u8>> {
         let bytes = self
             .blobs
             .try_get(&hash)?
             .ok_or(LedgerError::BlobMissing(hash))?;
-        if before != self.grant_fingerprint(hash)? {
+        if before != self.metadata_fingerprint(hash)? {
             return Err(LedgerError::Io {
                 path: self.blobs.blob_path(&hash).display().to_string(),
-                message: "movement metadata grant changed while being read".to_string(),
+                message: "movement metadata content changed while being read".to_string(),
             });
         }
         Ok(bytes)
     }
 
-    fn validate_grant(&self, hash: ContentHash, line: usize) -> LedgerResult<Vec<String>> {
-        let fingerprint = self.grant_fingerprint(hash)?;
+    pub fn validate_grant(&self, hash: ContentHash, line: usize) -> LedgerResult<Vec<String>> {
+        let fingerprint = self.metadata_fingerprint(hash)?;
         let validated = self
             .caches
             .validated_grants
@@ -281,7 +284,7 @@ impl DurableMovementDecoder {
                 return Ok(interfaces);
             }
         }
-        let bytes = self.read_grant(hash, fingerprint)?;
+        let bytes = self.read_metadata(hash, fingerprint)?;
         let grant = serde_json::from_slice::<GrantProjection>(&bytes).map_err(|error| {
             LedgerError::MalformedMovementMetadata {
                 line,
@@ -298,35 +301,50 @@ impl DurableMovementDecoder {
         Ok(grant.interfaces)
     }
 
-    fn grant_value(&self, hash: ContentHash, line: usize) -> LedgerResult<serde_json::Value> {
-        let fingerprint = self.grant_fingerprint(hash)?;
+    pub fn validate_metadata_content(&self, kind: DurableMetadataContent, hash: ContentHash, line: usize) -> LedgerResult<()> {
+        match kind {
+            DurableMetadataContent::Grant => self.validate_grant(hash, line).map(|_| ()),
+            DurableMetadataContent::ArtifactBindingRefs => {
+                let refs: Vec<octopus_ledger::ArtifactRef> = serde_json::from_value(self.metadata_value(hash, line)?)
+                    .map_err(|error| LedgerError::MalformedMovementMetadata { line, message: error.to_string() })?;
+                if refs.is_empty() {
+                    return Err(LedgerError::MalformedMovementMetadata { line,
+                        message: "content-addressed artifact binding refs are empty".into() });
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn metadata_value(&self, hash: ContentHash, line: usize) -> LedgerResult<serde_json::Value> {
+        let fingerprint = self.metadata_fingerprint(hash)?;
         let cached = self
             .caches
-            .grants
+            .values
             .lock()
             .map_err(|_| LedgerError::MalformedMovementMetadata {
                 line,
-                message: "movement metadata grant cache is poisoned".to_string(),
+                message: "movement metadata value cache is poisoned".to_string(),
             })?
             .get(hash, fingerprint);
         if let Some(value) = cached {
             return Ok((*value).clone());
         }
-        let bytes = self.read_grant(hash, fingerprint)?;
+        let bytes = self.read_metadata(hash, fingerprint)?;
         let grant = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
             LedgerError::MalformedMovementMetadata {
                 line,
-                message: format!("content-addressed invocation grant is malformed: {error}"),
+                message: format!("content-addressed movement metadata is malformed: {error}"),
             }
         })?;
         let value = Arc::new(grant);
-        self.caches.grants
+        self.caches.values
             .lock()
             .map_err(|_| LedgerError::MalformedMovementMetadata {
                 line,
-                message: "movement metadata grant cache is poisoned".to_string(),
+                message: "movement metadata value cache is poisoned".to_string(),
             })?
-            .insert(CachedGrant {
+            .insert(CachedMetadata {
                 hash,
                 fingerprint,
                 value: Arc::clone(&value),
@@ -573,11 +591,18 @@ impl DurableLog {
             invocation_metadata: draft.invocation_metadata,
         };
         let mut grant_content = None;
-        let mut json = encode_durable_movement_row(&placed, self.offsets.len(), |bytes| {
-            let hash = self.metadata.blobs.try_put(bytes)?;
-            grant_content = Some(hash);
+        let mut pinned_metadata = false;
+        let mut json = encode_durable_movement_row(&placed, self.offsets.len(), |kind, bytes| {
+            let hash = self.metadata.blobs.stage_blob(bytes)?;
+            pinned_metadata = true;
+            if kind == DurableMetadataContent::Grant {
+                grant_content = Some(hash);
+            }
             Ok(hash)
         })?;
+        if pinned_metadata {
+            sync_directory(&self.metadata.blobs.dir)?;
+        }
         json.push('\n');
         self.file
             .write_all(json.as_bytes())
@@ -993,7 +1018,7 @@ mod tests {
                     octopus_ledger::InvocationMetadata::new(octopus_ledger::GrantProjection {
                         tools: vec!["coder.exec".to_string()],
                         ..Default::default()
-                    })
+                    }).with_artifact_binding_refs(vec![aref.clone()])
                     .into(),
                 ),
                 causal_floor: None,
@@ -1006,12 +1031,14 @@ mod tests {
         };
         let durable_rows = std::fs::read_to_string(&log_path).unwrap();
         assert!(durable_rows.contains("\"grant_content\""));
+        assert!(durable_rows.contains("\"artifact_binding_refs_content\""));
+        assert!(!durable_rows.contains("\"artifact_binding_refs\""));
         assert!(!durable_rows.contains("\"grant\":{\""));
         assert_eq!(
             std::fs::read_dir(dir.path().join("metadata"))
                 .unwrap()
                 .count(),
-            1
+            2
         );
 
         let reopened = DurableLog::open(&log_path).unwrap();
@@ -1042,8 +1069,8 @@ mod tests {
     }
 
     #[test]
-    fn boot_fails_closed_when_a_content_addressed_grant_is_missing_or_corrupt() {
-        for corrupt in [false, true] {
+    fn boot_fails_closed_when_content_addressed_metadata_is_missing_or_corrupt() {
+        for (field, corrupt) in ["grant_content", "artifact_binding_refs_content"].into_iter().flat_map(|field| [false, true].map(|corrupt| (field, corrupt))) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("movements.jsonl");
             let mut log = DurableLog::open(&path).unwrap();
@@ -1057,19 +1084,15 @@ mod tests {
                     octopus_ledger::InvocationMetadata::new(octopus_ledger::GrantProjection {
                         tools: vec!["coder.exec".to_string()],
                         ..Default::default()
-                    })
+                    }).with_artifact_binding_refs(vec![ArtifactRef { id: ArtifactId::new("binding"), content: ContentHash::of_bytes(b"binding") }])
                     .into(),
                 ),
                 causal_floor: None,
             });
             drop(log);
 
-            let grant = std::fs::read_dir(dir.path().join("metadata"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path();
+            let row: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+            let grant = dir.path().join("metadata").join(row["invocation_metadata"][field].as_str().unwrap());
             if corrupt {
                 std::fs::write(&grant, b"corrupt grant evidence").unwrap();
             } else {
@@ -1196,6 +1219,40 @@ mod tests {
     }
 
     #[test]
+    fn repeated_binding_refs_are_pinned_once_and_keep_the_exact_grant_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("movements.jsonl");
+        let refs = (0..512).map(|index| ArtifactRef {
+            id: ArtifactId::new(format!("binding-{index}")),
+            content: ContentHash::of_bytes(index.to_string().as_bytes()),
+        }).collect::<Vec<_>>();
+        let metadata = octopus_ledger::InvocationMetadata::new(GrantProjection {
+            interfaces: vec!["declared".into()], ..Default::default()
+        }).with_artifact_binding_refs(refs.clone());
+        let mut log = DurableLog::open(&path).unwrap();
+        for _ in 0..16 {
+            log.try_append(MovementDraft { trace: TraceId("repeat".into()), kind: MovementKind::ArtifactMoved,
+                from: run("source"), to: run("target"), artifact: None, invocation_metadata: Some(metadata.clone().into()), causal_floor: None }).unwrap();
+        }
+        drop(log);
+        assert!(std::fs::metadata(&path).unwrap().len() < 16 * 1024);
+        assert_eq!(std::fs::read_dir(root.path().join("metadata")).unwrap().count(), 2);
+        let decoder = DurableMovementDecoder::for_log(&path);
+        let rows = std::fs::read_to_string(&path).unwrap();
+        let first = rows.lines().next().unwrap();
+        let raw: serde_json::Value = serde_json::from_str(first).unwrap();
+        let (projected, grant) = decoder.decode_projection(first.as_bytes(), 0).unwrap();
+        assert_eq!(grant.unwrap().to_hex(), raw["invocation_metadata"]["grant_content"].as_str().unwrap());
+        assert_eq!(projected.invocation_metadata.unwrap().invocation().unwrap().artifact_binding_refs, refs);
+        let mut ambiguous = raw.clone();
+        ambiguous["invocation_metadata"]["artifact_binding_refs"] = serde_json::json!(refs);
+        assert!(decoder.decode(ambiguous.to_string().as_bytes(), 0).is_err());
+        let mut invalid_address = raw;
+        invalid_address["invocation_metadata"]["artifact_binding_refs_content"] = serde_json::json!("NOT-A-HASH");
+        assert!(decoder.decode(invalid_address.to_string().as_bytes(), 0).is_err());
+    }
+
+    #[test]
     fn warm_grant_reads_revalidate_file_generations_and_bound_retention() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("movements.jsonl");
@@ -1213,7 +1270,7 @@ mod tests {
                 .into(),
             );
             rows.push(
-                encode_durable_movement_row(&movement, i as usize, |bytes| {
+                encode_durable_movement_row(&movement, i as usize, |_, bytes| {
                     let hash = ContentHash::of_bytes(bytes);
                     std::fs::write(metadata_root.join(hash.to_hex()), bytes).unwrap();
                     hashes.push(hash);
@@ -1236,7 +1293,7 @@ mod tests {
             );
             decoder.decode_projection(row.as_bytes(), i).unwrap();
         }
-        assert!(decoder.caches.grants.lock().unwrap().entries.len() <= 64);
+        assert!(decoder.caches.values.lock().unwrap().entries.len() <= 64);
         let grant_path = metadata_root.join(hashes[0].to_hex());
         let original = std::fs::read(&grant_path).unwrap();
         let modified = std::fs::metadata(&grant_path).unwrap().modified().unwrap();

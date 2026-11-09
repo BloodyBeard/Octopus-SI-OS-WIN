@@ -68,7 +68,8 @@
         "executable_commands": [
           "codex",
           "claude",
-          "security"
+          "security",
+          "sh"
         ],
         "read_env_paths": [],
         "write_env_paths": [],

@@ -19,16 +19,30 @@
       "operation_catalog_dir": "operations",
       "operation_catalog_label": "mcp.operation_catalog",
       "operation_request_label": "mcp.operation.request",
+      "operator_approval": true,
       "max_catalog_pages": 64,
       "max_catalog_items": 4096,
       "max_catalog_bytes": 16777216,
       "event_journal_segment_bytes": 16777216,
       "event_journal_retained_segments": 64,
-      "reconnect_backoff_ms": 2000
+      "reconnect_backoff_ms": 2000,
+      "account_profile": {
+        "resource": "mcpforunity://instances",
+        "accounts": "/instances",
+        "name": "/name",
+        "via": "MCP for Unity on this Mac",
+        "absent": "MCP for Unity is running, but no Unity Editor is connected to it. Open your project in Unity and let MCP for Unity connect it."
+      },
+      "client_connection": {
+        "schema_version": 1,
+        "module": "interface://world_mcp_example/packages/octopus-mcp-client/connection.cjs"
+      },
+      "server_tool_operations": {
+        "prefix": "unity"
+      }
     },
     "transport": {
-      "base_url": "",
-      "base_url_env": "WORLD_MCP_UNITY_URL",
+      "base_url": "http://127.0.0.1:8080/mcp",
       "wire": "mcp_streamable_http",
       "request_timeout_ms": 120000,
       "max_response_bytes": 8388608

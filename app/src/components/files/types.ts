@@ -12,4 +12,5 @@ export type FilesOpenTarget =
       interfaceId: string;
       label: string;
       runId: string;
+      previewText?: string;
     };

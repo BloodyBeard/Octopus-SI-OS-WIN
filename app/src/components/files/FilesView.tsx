@@ -73,7 +73,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
   const activeTargetKey = filesOpenTargetKey(activeTarget);
   const artifactTarget = activeTarget?.kind === "artifact" ? activeTarget : null;
   const artifactTargetKey = artifactTarget
-    ? JSON.stringify([artifactTarget.artifactId, artifactTarget.runId, artifactTarget.interfaceId])
+    ? JSON.stringify([artifactTarget.artifactId, artifactTarget.runId, artifactTarget.interfaceId, ...(artifactTarget.previewText === undefined ? [] : ["read"])])
     : "";
   const [roots, setRoots] = useState<OctopusOsFileRoot[]>([]);
   const [directories, setDirectories] = useState<DirectoryCache>({});
@@ -233,6 +233,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
       label: artifactTarget.label,
       runId: artifactTarget.runId,
       source: "ledger",
+      inlinePayload: artifactTarget.previewText,
     }).then((resolved) => {
       if (!cancelled) setArtifactResolution({ error: "", loading: false, preview: resolved, targetKey: artifactTargetKey });
     }).catch((error) => {
@@ -247,6 +248,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
     artifactTarget?.interfaceId,
     artifactTarget?.label,
     artifactTarget?.runId,
+    artifactTarget?.previewText,
     locked,
   ]);
 
@@ -752,7 +754,7 @@ export function FilesView({ accessProfile, active, paneKey, snapshot: initialSna
 function filesOpenTargetKey(target: FilesOpenTarget | undefined): string {
   if (!target) return "none";
   return target.kind === "artifact"
-    ? JSON.stringify(["artifact", target.artifactId, target.runId, target.interfaceId, target.label, target.createdAtMs ?? null])
+    ? JSON.stringify(["artifact", target.artifactId, target.runId, target.interfaceId, target.label, target.createdAtMs ?? null, target.previewText ?? null])
     : JSON.stringify(["file", target.rootId ?? null, target.path ?? null, target.absolutePath ?? null]);
 }
 

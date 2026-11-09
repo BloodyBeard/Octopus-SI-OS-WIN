@@ -181,6 +181,8 @@ impl EeRootSlotAllowance {
 #[serde(deny_unknown_fields)]
 pub struct EeInstance {
     pub ee_id: EeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(rename = "template_name")]
     pub template: EeTemplateId,
     #[serde(rename = "parent_ee_id")]
@@ -208,6 +210,8 @@ pub enum EeError {
     DuplicateEe(EeId),
     #[error("persisted EE instance {0} has an empty goal")]
     EmptyGoal(EeId),
+    #[error("persisted EE instance {0} has an empty name")]
+    EmptyName(EeId),
 }
 
 pub fn bootstrap_ee_instance_id(template: &EeTemplateDescriptor) -> EeId {
@@ -236,6 +240,9 @@ impl EeTree {
         }
         if instance.goal.trim().is_empty() {
             return Err(EeError::EmptyGoal(instance.ee_id));
+        }
+        if instance.name.as_ref().is_some_and(|name| name.trim().is_empty()) {
+            return Err(EeError::EmptyName(instance.ee_id));
         }
         if !self.templates.contains_key(&instance.template) {
             return Err(EeError::UnknownTemplate(instance.template));
@@ -308,6 +315,7 @@ impl EeTree {
             return Err(EeError::DuplicateEe(ee_id));
         }
         let inst = EeInstance {
+            name: None,
             ee_id: ee_id.clone(),
             template: child_template,
             parent_ee: Some(parent_ee.clone()),
@@ -520,11 +528,36 @@ mod tests {
     }
 
     #[test]
+    fn persisted_names_are_metadata_independent_of_identity_goal_and_policy() {
+        let record = serde_json::json!({ "ee_id": "ee_work", "name": "Research",
+            "template_name": "project", "parent_ee_id": null, "goal": "Maintain the toolchain" });
+        let mut instance: EeInstance = serde_json::from_value(record).unwrap();
+        let original = instance.clone();
+        instance.name = Some("Research Lab".into());
+        let mut tree = EeTree::new();
+        tree.insert_template(tmpl("project", &["a"]));
+        tree.insert_persisted_instance(instance.clone()).unwrap();
+        assert_eq!(instance.ee_id, original.ee_id);
+        assert_eq!(instance.goal, original.goal);
+        assert_eq!(instance.policy_narrowing, original.policy_narrowing);
+        assert_eq!(serde_json::to_value(&instance).unwrap()["name"], "Research Lab");
+        instance.ee_id = EeId::new("ee_blank");
+        instance.name = Some("  ".into());
+        assert!(matches!(tree.insert_persisted_instance(instance), Err(EeError::EmptyName(_))));
+        let mut unnamed = serde_json::to_value(original).unwrap();
+        unnamed.as_object_mut().unwrap().remove("name");
+        let instance: EeInstance = serde_json::from_value(unnamed).unwrap();
+        assert_eq!(instance.name, None);
+        assert!(serde_json::to_value(instance).unwrap().get("name").is_none());
+    }
+
+    #[test]
     fn persisted_roots_form_independent_policy_chains() {
         let mut tree = EeTree::new();
         tree.insert_template(tmpl("initial", &["a"]));
         tree.insert_template(tmpl("service", &["b", "c"]));
         let instance = |id: &str, template: &str| EeInstance {
+            name: None,
             ee_id: EeId::new(id), template: EeTemplateId::new(template), parent_ee: None,
             goal: id.into(), config: Default::default(), policy_narrowing: Default::default(),
         };
@@ -551,6 +584,7 @@ mod tests {
         tree.insert_template(root);
         tree.insert_template(tmpl("self_improve", &["b", "c"]));
         tree.insert_instance(EeInstance {
+            name: None,
             ee_id: EeId::new("ee_root"),
             template: EeTemplateId::new("root_scope"),
             parent_ee: None,
@@ -559,6 +593,7 @@ mod tests {
             policy_narrowing: EeInstancePolicyNarrowing::default(),
         });
         tree.insert_instance(EeInstance {
+            name: None,
             ee_id: EeId::new("ee_child"),
             template: EeTemplateId::new("self_improve"),
             parent_ee: Some(EeId::new("ee_root")),
@@ -742,6 +777,7 @@ mod tests {
         tree.insert_template(root);
         tree.insert_template(child);
         tree.insert_instance(EeInstance {
+            name: None,
             ee_id: EeId::new("ee_root"),
             template: EeTemplateId::new("root_scope"),
             parent_ee: None,
@@ -768,6 +804,7 @@ mod tests {
         let mut open_tree = EeTree::new();
         open_tree.insert_template(tmpl("open_scope", &["a"]));
         open_tree.insert_instance(EeInstance {
+            name: None,
             ee_id: EeId::new("ee_open"),
             template: EeTemplateId::new("open_scope"),
             parent_ee: None,
@@ -794,6 +831,7 @@ mod tests {
         tree.insert_template(conversation);
         let root = EeId::new("ee_root");
         tree.insert_instance(EeInstance {
+            name: None,
             ee_id: root.clone(),
             template: EeTemplateId::new("root_scope"),
             parent_ee: None,
@@ -874,6 +912,7 @@ mod tests {
         tree.insert_template(widening);
         let root = EeId::new("ee_root");
         tree.insert_instance(EeInstance {
+            name: None,
             ee_id: root.clone(),
             template: EeTemplateId::new("root_scope"),
             parent_ee: None,

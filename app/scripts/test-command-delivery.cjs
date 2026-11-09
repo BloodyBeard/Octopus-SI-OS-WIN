@@ -84,6 +84,8 @@ test("actual Stop and Resume retain unknown identity, release known rejection, f
   const create = Function("submitOperatorTurnControl", "options", `${actions}
     let activeTurnControlTarget = {runId:'r',interfaceId:'i'}, activeRun = {...activeTurnControlTarget,writable:true,chatInterfaceId:'i'};
     const resumeAvailable=true,queuedTurnsRef={current:options?.queued??[]},chatDraftKey=x=>x;
+    const deliveryContextRef={current:{storageBlockReason:options?.storageBlockReason??''}},interfaceFailureReason=()=>options?.providerFailureReason??'';
+    const activeRunIdRef={get current(){return activeRun.runId}};
     const replacePausedQueueRunKeys=options?.pause??(async()=>{});
     const randomId=()=> 'fixed',formatRuntimeError=e=>e.message,projectedRunsRef={current:[]},messageCacheRef={current:new Map()};
     let pendingTurnControls={},error='',current=true,reads=0;

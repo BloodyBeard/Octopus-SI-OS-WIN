@@ -115,7 +115,7 @@ impl CodexAppServerInterfaceDriver {
     }
 
     pub(crate) async fn wait_for_peer_artifact(
-        &self, record: &octopus_runtime::run_record::RunRecord, call_id: &str, timeout_ms: u64,
+        &self, record: &octopus_run_record::RunRecord, call_id: &str, timeout_ms: u64,
         interrupted: &std::sync::atomic::AtomicBool,
     ) -> Result<crate::peer_reader::PeerWait, InterfaceDriverError> {
         let ctx = self.life_context.get().ok_or_else(|| InterfaceDriverError::FailedClosed("peer wait has no declared interface life reader".into()))?;
@@ -139,18 +139,18 @@ impl CodexAppServerInterfaceDriver {
             retired_history,
             require_exact_resume,
             context_generation,
-            input_changes_context,
+            covered_context_generation,
             model,
             bound_instructions,
             native_affordances,
             static_context_fingerprint,
             session_context_available,
         } = acquisition;
-        let covered_context_generation = context_generation
-            .checked_sub(u64::from(input_changes_context))
-            .ok_or_else(|| InterfaceDriverError::FailedClosed(
+        if covered_context_generation > context_generation {
+            return Err(InterfaceDriverError::FailedClosed(
                 "Codex invocation context generation has no covered predecessor".to_string(),
-            ))?;
+            ));
+        }
         if require_exact_resume && recovered.is_none() {
             return Err(InterfaceDriverError::FailedClosed(
                 "Codex operation requires exact existing thread continuity".to_string(),
@@ -436,6 +436,10 @@ impl CodexAppServerInterfaceDriver {
             .validate()
     }
 
+    pub(crate) fn retained_tool_output(&self) -> Result<Option<RetainedToolOutput>, InterfaceDriverError> {
+        RetainedToolOutput::from_private_config(&self.interface_private_config)
+    }
+
     pub(crate) fn native_thread_sandbox(&self) -> Result<SandboxMode, InterfaceDriverError> {
         match self.interface_private_config.get("native_thread_sandbox") {
             None => Ok(SandboxMode::ReadOnly),
@@ -444,6 +448,16 @@ impl CodexAppServerInterfaceDriver {
                     "interface_driver_config.private_config.native_thread_sandbox is malformed: {error}"
                 ))
             }),
+        }
+    }
+
+    pub(crate) fn operation_approval_policy(&self) -> Result<&'static str, InterfaceDriverError> {
+        match self.interface_private_config.get("approval_policy").and_then(serde_json::Value::as_str) {
+            Some("on-request") => Ok("on-request"),
+            Some("never") => Ok("never"),
+            _ => Err(InterfaceDriverError::FailedClosed(
+                "interface_driver_config.private_config.approval_policy must be 'on-request' or 'never'".into(),
+            )),
         }
     }
 

@@ -134,7 +134,7 @@ export function WorkspacePaneManager({
     previousOpenRef.current = secondaryOpen;
   }, [managerId, primaryBlocked, secondaryOpen]);
 
-  useEffect(() => () => resolvedWidthMotion.set(0), [resolvedWidthMotion]);
+  useLayoutEffect(() => () => resolvedWidthMotion.set(0), [resolvedWidthMotion]);
 
   return (
     <PanePresentationContext.Provider value={{ compactOverlay, managerId }}><div

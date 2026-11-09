@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createLatestProjectionRead } from "./latestProjectionRead";
 import type { OctopusClientAccessProfile } from "../electron";
 import type { ClientAgentPresetInput } from "../agentPresets";
+import type { ProjectionResourcePhase } from "../components/projectionResource";
 import { DEFAULT_PROJECT_COLOR } from "../design-system/projectColors";
 import { useProjectionStructureGeneration } from "../projectionLive";
 import { mutateOctopusOsWorkspace, readProjection } from "../projectionClient";
@@ -52,7 +53,7 @@ export type OctopusOsProjectWorkspace = {
   rootAllowedChildTemplateIds: string[];
   templates: OctopusOsEeTemplateOption[];
   status: string;
-  loading: boolean;
+  phase: ProjectionResourcePhase;
   pending: boolean;
   error: string;
   updatePresentation: (projects: ClientChatProject[]) => void;
@@ -70,6 +71,7 @@ export type OctopusOsProjectWorkspace = {
 type ScopeEnvironment = {
   sourceFolders: string[];
   eeId: string;
+  name: string;
   parentEeId: string;
   templateName: string;
   goal: string;
@@ -120,16 +122,20 @@ const EMPTY_SCOPE: ScopeSnapshot = {
 export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtimeHome: string): OctopusOsProjectWorkspace {
   const [projects, setProjects] = useState<ClientChatProject[]>(() => readClientChatProjects(profile));
   const [scope, setScope] = useState<ScopeSnapshot>(EMPTY_SCOPE);
-  const [loading, setLoading] = useState(profile === "live");
+  const [loaded, setLoaded] = useState(profile !== "live");
+  const [reading, setReading] = useState(profile === "live");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [readError, setReadError] = useState("");
   const requestGeneration = useRef(0);
   const scopeReads = useMemo(() => createLatestProjectionRead<unknown>(), [profile, runtimeHome]);
   useLayoutEffect(() => () => scopeReads.invalidate(), [scopeReads]);
   useLayoutEffect(() => {
     requestGeneration.current += 1;
     setScope(EMPTY_SCOPE);
+    setLoaded(profile !== "live");
     setError("");
+    setReadError("");
     setProjects(profile === "live" ? [] : readClientChatProjects(profile));
   }, [profile, runtimeHome]);
   const projectionGeneration = useProjectionStructureGeneration();
@@ -139,7 +145,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
   const reload = useCallback(async () => {
     const generation = requestGeneration.current + 1;
     requestGeneration.current = generation;
-    setLoading(true);
+    setReading(true);
     try {
       const raw = await scopeReads.request(() => readProjection<unknown>("projection.operator.os.scope"));
       if (raw === undefined) return;
@@ -149,7 +155,10 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         projectsRef.current = local;
         setProjects(local);
         setScope({ ...EMPTY_SCOPE, ...projected });
-        setError(projected.status === "invalid" ? "Octopus OS scope is invalid" : "");
+        const issue = projected.status === "invalid" ? "Octopus OS scope is invalid" : "";
+        setLoaded(true);
+        setReadError(issue);
+        setError(issue);
         return;
       }
       const next = normalizeScope(raw);
@@ -158,12 +167,17 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
       projectsRef.current = merged;
       setProjects(merged);
       setScope(next);
-      setError(next.status === "invalid" ? "Octopus OS scope is invalid" : "");
+      const issue = next.status === "invalid" ? "Octopus OS scope is invalid" : "";
+      setLoaded(true);
+      setReadError(issue);
+      setError(issue);
     } catch (failure) {
       if (generation !== requestGeneration.current) return;
-      setError(failure instanceof Error ? failure.message : String(failure));
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setReadError(message);
+      setError(message);
     } finally {
-      if (generation === requestGeneration.current) setLoading(false);
+      if (generation === requestGeneration.current) setReading(false);
     }
   }, [profile, scopeReads]);
 
@@ -206,7 +220,6 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
             workspace: workspaceMutationIdentity(scope),
             projects: next.map((project) => ({
               eeId: project.id,
-              name: project.name,
               icon: project.icon,
               color: project.color,
             })),
@@ -275,8 +288,11 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         workspace: workspaceMutationIdentity(scope),
         projects: next.map((project) => ({
           eeId: project.id,
-          ...(project.id === edit.projectId ? { sourceFolders: edit.sourceFolders, expectedProjectDigest: current.recordDigest } : {}),
-          name: project.name,
+          ...(project.id === edit.projectId ? {
+            sourceFolders: edit.sourceFolders,
+            expectedProjectDigest: current.recordDigest,
+            ...(edit.name === current.name ? {} : { name: edit.name }),
+          } : {}),
           icon: project.icon,
           color: project.color,
         })),
@@ -435,15 +451,15 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     homeInterfaceId: scope.homeInterfaceId,
     rootContext: scope.rootEnvironment ? {
       eeId: scope.rootEnvironment.eeId,
-      displayName: scope.spaceName || "Home",
+      displayName: scope.rootEnvironment.name || scope.rootEnvironment.eeId,
       templateName: scope.rootEnvironment.templateName,
     } : null,
     rootAllowedChildTemplateIds: scope.rootEnvironment?.allowedChildTemplateIds ?? [],
     templates: scope.templates,
     status: scope.status,
-    loading,
+    phase: !loaded ? readError ? "failed" : "initial-loading" : readError ? "degraded" : reading ? "refreshing" : "ready",
     pending,
-    error,
+    error: error || readError,
     updatePresentation,
     createProject,
     createAgentTemplate,
@@ -536,6 +552,7 @@ function normalizeEnvironment(value: unknown): ScopeEnvironment | null {
   if (!eeId) return null;
   return {
     eeId,
+    name: text(value.name),
     sourceFolders: list(isRecord(value.config) && isRecord(value.config.octopus_os) ? value.config.octopus_os.source_folders : []).map(text).filter(Boolean),
     parentEeId: text(value.parent_ee_id),
     templateName: text(value.template_name),
@@ -577,7 +594,7 @@ function mergeProjectedProjects(
     return {
       id,
       sourceFolders: environment.sourceFolders,
-      name: visual?.name || environment.goal,
+      name: environment.name || environment.eeId,
       icon: visual?.icon || "briefcase",
       color: visual?.color || DEFAULT_PROJECT_COLOR,
       parentId: environment.parentEeId === scope.rootEeId ? "" : environment.parentEeId,

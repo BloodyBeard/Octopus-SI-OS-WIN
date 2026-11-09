@@ -33,6 +33,7 @@
 
     include!("context_refresh.rs");
     include!("cut_turn_continuation.rs");
+    include!("retained_instruction_turn.rs");
     include!("steering_compatibility.rs");
     include!("pending_history.rs");
     include!("recovery_call_ownership.rs");
@@ -40,6 +41,7 @@
     include!("result_continuity.rs");
     include!("native_planning_read.rs");
     include!("native_catalog.rs");
+    include!("parallel_dynamic_calls.rs");
 
     fn metadata_input(
         interface_affordance_specs: serde_json::Value,
@@ -541,6 +543,7 @@
             turn_input: None,
             pending,
             interrupted_pending: None,
+            parallel_pending: BTreeMap::new(),
             tool_operator_request: None,
             native_terminal: None,
             context_refresh: None,
@@ -1280,23 +1283,37 @@
                 "content_items":[{"type":"inputText", "text":"missing directory"}]}
         }});
         std::fs::write(&rollout, format!("{receipt}\n")).unwrap();
-        assert!(recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).unwrap().output_persisted);
+        let located = recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).unwrap();
+        assert!(located.output_persisted && located.native_receipt);
         assert!(!recovered_tool_result_rollout_evidence(&rollout, &expected, None).unwrap().output_persisted);
-        for (pointer, value) in [
-            ("/payload/thread_id", serde_json::json!("other")),
-            ("/payload/turn_id", serde_json::json!("other")),
-            ("/payload/item/namespace", serde_json::json!("other")),
-            ("/payload/item/tool", serde_json::json!("other")),
-            ("/payload/item/success", serde_json::json!(true)),
-            ("/payload/item/content_items/0/text", serde_json::json!("invented")),
-        ] {
+        for pointer in ["/payload/thread_id", "/payload/turn_id"] {
             let mut bad = receipt.clone();
-            *bad.pointer_mut(pointer).unwrap() = value;
+            *bad.pointer_mut(pointer).unwrap() = serde_json::json!("other");
             std::fs::write(&rollout, format!("{bad}\n")).unwrap();
             assert!(recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).is_err(), "{pointer}");
         }
         std::fs::write(&rollout, format!("{receipt}\n{receipt}\n")).unwrap();
         assert!(recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).is_err());
+        let mut native = activity.value.clone();
+        native["tool"] = serde_json::json!("workspace.list");
+        let entry = serde_json::json!({"turnId":"turn-a", "startedAtMs":10, "completedAtMs":11, "item":{
+            "type":"dynamicToolCall", "id":"exec-call", "namespace":"formed_interfaces", "tool":"workspace-dlist",
+            "arguments":{}, "status":"failed", "success":false, "durationMs":1,
+            "contentItems":[{"type":"inputText", "text":"missing directory"}]}});
+        verify_native_tool_receipt(&serde_json::from_value(entry.clone()).unwrap(), &expected, &native).unwrap();
+        for (pointer, value) in [
+            ("/turnId", serde_json::json!("other")),
+            ("/item/id", serde_json::json!("other")),
+            ("/item/namespace", serde_json::json!("other")),
+            ("/item/tool", serde_json::json!("other")),
+            ("/item/success", serde_json::json!(true)),
+            ("/item/status", serde_json::json!("inProgress")),
+            ("/item/contentItems/0/text", serde_json::json!("invented")),
+        ] {
+            let mut bad = entry.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(verify_native_tool_receipt(&serde_json::from_value(bad).unwrap(), &expected, &native).is_err(), "{pointer}");
+        }
     }
 
     #[test]
@@ -1361,6 +1378,7 @@
                 output_persisted: true,
                 successor_turn_id: Some("turn-successor".to_string()),
                 native_function_calls: 0,
+                native_receipt: false,
             }
         );
         assert!(reconcile_recovered_successor_dispatch(&rollout_evidence, &[]).is_err());
@@ -1639,7 +1657,7 @@
         assert_eq!(recovered_failed_result_source(&descriptor, &operator, &bound, &recovered_context, &[71]).unwrap(), Some(71));
         let restored_model_context = resumed_model_context(&recovered_context, &operator.artifact, &settled, ModelResultProjection { max_tokens: 1000 }).unwrap().unwrap();
         assert!(restored_model_context.contains("completed-result") && restored_model_context.contains("call-7"));
-        let native_context = native_turn_context(Some(restored_model_context), None);
+        let native_context = native_turn_context(Some(restored_model_context), None, None);
         assert!(matches!(native_context["octopus_bound_context"].kind, AdditionalContextKind::Untrusted));
         let settled_error: SessionContextArtifact = serde_json::from_value(session_artifact(
             "settled-error", TURN_ERROR_LABEL, serde_json::json!({"label":TURN_ERROR_LABEL,"message":"provider stopped",CODEX_CONTINUITY_FIELD:settled}), 72,
@@ -1874,6 +1892,28 @@
             std::fs::write(rollout.path(), format!("{}\n", serde_json::json!({"type":"response_item", "payload":expected}))).unwrap();
             assert!(recovered_function_call_output_is_persisted(rollout.path(), &expected).unwrap());
         }
+    }
+
+    #[test]
+    fn interface_input_media_reaches_the_model_as_images() {
+        use base64::Engine;
+        let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGNwaDgARAwQCgAoDgYBQzpj2gAAAABJRU5ErkJggg==";
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let event = serde_json::json!({"event": "message", "chat": {"id": 7}, "media": [{
+            "mime_type": "image/png", "payload_base64": encoded,
+            "artifact": {"label": "chat.file", "payload_path": "/private/life/media/photo.png",
+                "payload_content_hash": blake3::hash(&bytes).to_hex().to_string()}
+        }]});
+        let decode = |value: &serde_json::Value| decode_provider_input(&serde_json::to_vec(value).unwrap(), "chat.event",
+            None, &BTreeMap::new(), None, &serde_json::Map::new());
+        let ProviderInput::Turn(turn) = decode(&event).unwrap() else { panic!("an interface event is a turn") };
+        let [UserInput::Text { text, .. }, UserInput::Image { url, .. }] = turn.as_slice() else { panic!("event lost its image: {turn:?}") };
+        assert_eq!(url, &format!("data:image/png;base64,{encoded}"));
+        assert!(text.contains("\"chat\"") && text.contains("chat.file") && !text.contains(encoded));
+        assert!(!crate::result_media::without_embedded_payloads(&event).to_string().contains(encoded));
+        let mut forged = event.clone();
+        forged["media"][0]["mime_type"] = serde_json::json!("image/jpeg");
+        assert!(decode(&forged).is_err());
     }
 
     #[test]
@@ -2553,6 +2593,153 @@
     }
 
     #[tokio::test]
+    async fn declared_account_sessions_read_lists_chatgpt_sign_ins_through_admitted_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("account-sessions-app-server.sock");
+        let mut listener = crate::uds::UnixListener::bind(&socket_path).await.unwrap();
+        let sessions = serde_json::json!({
+            "activeSessionId": "session-1",
+            "sessions": [{
+                "sessionId": "session-1",
+                "email": "owner@example.test",
+                "userId": "user-1",
+                "displayName": null,
+                "imageUrl": null,
+                "lastUsedAt": 1,
+                "isActive": true,
+                "selectedWorkspaceAccountId": "team-1",
+                "workspaces": [
+                    {"accountId": "personal-1", "name": null, "imageUrl": null, "kind": "personal"},
+                    {"accountId": "team-1", "name": "Team", "imageUrl": null, "kind": "workspace"},
+                ],
+            }],
+        });
+        let listed = sessions.clone();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let octopus_appserver_proto::JSONRPCMessage::Request(init) = next_test_rpc(&mut socket).await else {
+                panic!("expected initialize request")
+            };
+            send_test_result(
+                &mut socket,
+                init.id,
+                serde_json::json!({"userAgent": "codex/test", "codexHome": "/tmp"}),
+            )
+            .await;
+            assert!(matches!(
+                next_test_rpc(&mut socket).await,
+                octopus_appserver_proto::JSONRPCMessage::Notification(_)
+            ));
+            let octopus_appserver_proto::JSONRPCMessage::Request(list) = next_test_rpc(&mut socket).await else {
+                panic!("expected accountSession/list request")
+            };
+            assert_eq!(list.method, "accountSession/list");
+            assert_eq!(list.params.as_ref().unwrap()["refreshWorkspaceMetadata"], true);
+            send_test_result(&mut socket, list.id, listed).await;
+        });
+        let client = crate::RemoteAppServerClient::connect(crate::RemoteAppServerConnectArgs {
+            endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
+                socket_path: octopus_util_abspath::AbsolutePathBuf::from_absolute_path(
+                    &socket_path,
+                )
+                .unwrap(),
+            },
+            client_name: "octopus-test".to_string(),
+            client_version: "0".to_string(),
+            experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 8,
+        })
+        .await
+        .unwrap();
+        let mut operations = provider_operations_value();
+        operations["account_sessions_read"] = serde_json::json!({
+            "request_label": PROVIDER_ACCOUNT_SESSIONS_READ_LABEL,
+            "output_label": PROVIDER_ACCOUNT_SESSIONS_LABEL,
+        });
+        let mut projected = codex_client_projection_labels();
+        projected.insert(PROVIDER_ACCOUNT_SESSIONS_LABEL.to_string());
+        let private_config = serde_json::json!({
+            "provider_operations": operations,
+            "instruction_artifacts": [],
+            "worker_instruction_artifacts": [],
+            "context_output_labels": codex_context_labels(),
+            "session_snapshot_labels": codex_snapshot_labels(),
+            "client_projection_output_labels": projected.iter().cloned().collect::<Vec<_>>(),
+            "live_stream": live_stream_config_value(),
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let config = InterfaceDriverConfig {
+            private_config,
+            ..InterfaceDriverConfig::default()
+        };
+        let driver = CodexAppServerInterfaceDriver::new_with_config(
+            AppServerClient::Remote(client),
+            Some(&config),
+        );
+        let operation = driver
+            .configured_provider_operation(PROVIDER_ACCOUNT_SESSIONS_READ_LABEL)
+            .unwrap()
+            .unwrap();
+        let (output, mut output_rx) = ProviderOutputStream::channel();
+        let labels = BTreeSet::new();
+        let output_root = temp.path().join("emitted");
+        let live_stream_root = temp.path().join("streams");
+        let live_stream_rules = live_stream_rules();
+        let provider_interface = InterfaceId::new("world_provider_codex");
+        let sink = TurnSink {
+            emit: &output,
+            output_root: &output_root,
+            live_stream_root: &live_stream_root,
+            provider_interface: &provider_interface,
+            run: "run-a",
+            source_movement_seq: 7,
+            attempt: 1,
+            context_output_labels: &labels,
+            client_projection_output_labels: &projected,
+            live_stream_rules: &live_stream_rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState::default())),
+        };
+        let handled = driver.handle_provider_operation(
+            operation,
+            &provider_interface,
+            br#"{"refresh_workspace_metadata":true}"#,
+            &sink,
+        );
+        let receive = async {
+            let ProviderStreamEmission::TransportDispatch { artifact, admitted } =
+                output_rx.recv().await.unwrap()
+            else {
+                panic!("expected transport dispatch emission")
+            };
+            let dispatch: serde_json::Value =
+                serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap();
+            assert_eq!(dispatch["method"], "accountSession/list");
+            admitted.send(Ok(())).unwrap();
+            let ProviderStreamEmission::Turn(emission) = output_rx.recv().await.unwrap() else {
+                panic!("expected provider turn emission")
+            };
+            emission
+        };
+        let (result, emission) = tokio::join!(handled, receive);
+        result.unwrap();
+        assert_eq!(
+            emission.artifact.read_manifest().unwrap().label,
+            PROVIDER_ACCOUNT_SESSIONS_LABEL
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&emission.artifact.read_payload_bytes().unwrap()).unwrap();
+        assert_eq!(payload["activeSessionId"], sessions["activeSessionId"]);
+        assert_eq!(payload["sessions"], sessions["sessions"]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cold_continuity_resumes_and_reads_the_exact_native_thread() {
         use octopus_appserver_proto::{
             ApprovalsReviewer, AskForApproval, SandboxPolicy, SessionSource, Thread, ThreadStatus,
@@ -2800,7 +2987,7 @@
             serde_json::json!({"read":true,"change":false,"create":false,"delete":false}),
         ).unwrap());
         let runtime = runtime_metadata.runtime.as_ref().unwrap();
-        let mut pinned_record = octopus_runtime::run_record::RunRecord {
+        let mut pinned_record = octopus_run_record::RunRecord {
             id: runtime.run.clone(),
             ee: runtime.ee.clone(),
             worker: runtime.worker.clone(),
@@ -2811,7 +2998,7 @@
             active_checkpoints: Vec::new(),
         };
         let pinned_run_record = serde_json::to_vec(&pinned_record).unwrap();
-        octopus_runtime::run_record::RunRecord::from_bytes(&pinned_run_record).unwrap();
+        octopus_run_record::RunRecord::from_bytes(&pinned_run_record).unwrap();
         pinned_record.interface_state.insert(
             runtime.interface.clone(),
             BTreeMap::from([("context_generation".to_string(), serde_json::json!(7))]),
@@ -2967,8 +3154,6 @@ printf '%s\n' '{"id":6,"result":{"turn":{"id":"turn-continued","items":[],"items
 printf '%s\n' '{"method":"item/started","params":{"threadId":"thr-exact","turnId":"turn-continued","startedAtMs":1,"item":{"type":"webSearch","id":"web-1","query":"example","action":null}}}'
 printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":2,"item":{"type":"webSearch","id":"web-1","query":"example","action":{"type":"search","query":"example"},"results":[{"url":"https://example.com","title":"Example","snippet":"search evidence"}]}}}'
 printf '%s\n' '{"id":"server-tool-1","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-2","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"pwd"}}}'
-printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":3,"item":{"type":"agentMessage","id":"commentary-after-result","text":"Continuing","phase":"commentary"}}}'
-printf '%s\n' '{"id":"server-tool-2","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-3","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"ls"}}}'
 IFS= read -r _
 printf '%s\n' '{"id":7,"result":{"data":[]}}'
 IFS= read -r probe
@@ -2979,6 +3164,8 @@ case "$turns" in *'"method":"thread/turns/list"'*) ;; *) exit 1;; esac
 printf '%s\n' "$(cat next-turns.json)"
 IFS= read -r response
 printf '%s\n' "$response" > queued-native-response.json
+printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":3,"item":{"type":"agentMessage","id":"commentary-after-result","text":"Continuing","phase":"commentary"}}}'
+printf '%s\n' '{"id":"server-tool-2","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-3","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"ls"}}}'
 while IFS= read -r _; do :; done
 "#,
         )
@@ -3057,7 +3244,7 @@ while IFS= read -r _; do :; done
         }]);
         admitted_record["active_checkpoints"] = serde_json::json!(["checkpoint-a"]);
         let admitted_context_record = serde_json::to_vec(&admitted_record).unwrap();
-        octopus_runtime::run_record::RunRecord::from_bytes(&admitted_context_record).unwrap();
+        octopus_run_record::RunRecord::from_bytes(&admitted_context_record).unwrap();
         let mut current_record = admitted_record;
         current_record["interface_state"]["world_provider_codex"]["context_generation"] = serde_json::json!(7);
         current_record["checkpoints"] = serde_json::json!([]);
@@ -3510,7 +3697,7 @@ while IFS= read -r _; do :; done
                     retired_history: None,
                     require_exact_resume: false,
                     context_generation: 8,
-                    input_changes_context: true,
+                    covered_context_generation: 7,
                     model: Some("gpt-5.5".to_string()),
                     bound_instructions: "role",
                     native_affordances: &[],
@@ -3534,7 +3721,7 @@ while IFS= read -r _; do :; done
                     retired_history: None,
                     require_exact_resume: false,
                     context_generation: 7,
-                    input_changes_context: true,
+                    covered_context_generation: 6,
                     model: Some("gpt-5.5".to_string()),
                     bound_instructions: "role",
                     native_affordances: &[],
@@ -3894,12 +4081,16 @@ while IFS= read -r _; do :; done
             Some(SandboxMode::ReadOnly),
             "the codex sandbox must be pinned read-only (no exec side effects outside the gate)"
         );
+        assert_eq!(
+            params.base_instructions.as_deref(),
+            Some(""),
+            "Codex's own base prompt never enters an Octopus thread; the bound role is the only behavior text"
+        );
 
         assert_eq!(
             params.developer_instructions.as_deref(),
             Some("You are the flash worker.")
         );
-        assert!(params.base_instructions.is_none());
     }
 
     #[test]
@@ -4025,7 +4216,7 @@ while IFS= read -r _; do :; done
             Some(ReasoningEffort::XHigh),
             None,
             ReasoningSummary::Detailed,
-            native_turn_context(Some("context".repeat(200_000)), Some("grant".into())),
+            native_turn_context(Some("context".repeat(200_000)), Some("grant".into()), None),
             TURN_TRIGGER_INPUT,
         );
 
@@ -4270,6 +4461,7 @@ while IFS= read -r _; do :; done
                 "label": "mcp.operation_catalog",
                 "interface": "world_mcp_drive_exact",
                 "request_label": "mcp.operation.request",
+                "task_input_labels": ["drive.event"],
                 "operations": [{
                     "name": "google_drive.read_resource",
                     "description": "read one resource from the exact interface",
@@ -4306,12 +4498,15 @@ while IFS= read -r _; do :; done
             operation,
             serde_json::json!({"uri": "drive://document"}),
             "call-1".to_string(),
+            Some("never"),
         );
         assert_eq!(output.label, "mcp.operation.request");
+        assert_eq!(output.value["approval_policy"], "never");
         assert_eq!(
             output.route,
-            ProviderEmissionRoute::Interface {
-                interface: InterfaceId::new("world_mcp_drive_exact")
+            ProviderEmissionRoute::Operation {
+                interface: InterfaceId::new("world_mcp_drive_exact"),
+                result_label: "mcp.resource".into(),
             }
         );
         let result = decode_interface_operation_result_artifact(
@@ -4350,6 +4545,10 @@ while IFS= read -r _; do :; done
             context.content,
             serde_json::json!({"ok": true, "resources": ["drive://document"]})
         );
+        let drive = InterfaceId::new("world_mcp_drive_exact");
+        let event = br#"{"ok":true,"text":"a document was shared with you"}"#;
+        let event = decode_provider_input(event, "drive.event", Some(&drive), &catalog.interface_operations, None, &serde_json::Map::new());
+        assert!(matches!(event.unwrap(), ProviderInput::Turn(_)), "a declared task input of an operation interface starts a turn");
     }
 
     #[test]
@@ -4586,7 +4785,7 @@ while IFS= read -r _; do :; done
 
     fn assert_selected_file_projection_uses_materialized_sources() {
         use octopus_ledger::ContentHash;
-        use octopus_runtime::run_record::RunRecord;
+        use octopus_run_record::RunRecord;
         let root = tempfile::tempdir().unwrap().keep();
         eprintln!("selected file projection fixture artifacts: {}", root.display());
         let materialize = |label: &str, bytes: &[u8]| {
@@ -6206,7 +6405,7 @@ while IFS= read -r _; do :; done
                 handle: driver.client.lock().await.request_handle(), request_ids: driver.next_request_id.clone(),
                 pending_requests: driver.pending_server_requests.clone(), scope: scope.clone(), output: Arc::downgrade(&emit),
                 continuity: Some(original.clone()), handoff_barrier: barrier.clone(), effect_gate: gate.clone(), turn_interrupted: interrupted.clone(),
-                thread_id: "thread-a".into(), turn_id: "turn-a".into(),
+                thread_id: "thread-a".into(), turn_id: "turn-a".into(), late_calls: None,
             });
             if cold && with_stop { driver.restore_pending_control(&control, original.clone()).await; }
             let mut applied = if with_stop { Some(tokio::time::timeout(std::time::Duration::from_secs(3), control.apply(
@@ -6258,7 +6457,7 @@ while IFS= read -r _; do :; done
                     lifecycle: None, lifecycle_prompt: None };
                 if cold || !terminal_case {
                     let checked = tokio::time::timeout(std::time::Duration::from_secs(3), driver.complete_native_terminal_result(
-                        context, &recovered, (!cold).then_some(&pending),
+                        context, &recovered, "tool:call-a", (!cold).then_some(&pending),
                         CodexTurnOutput::dynamic_tool_completed_after_interrupt("formed_interfaces".into(), result.tool.clone(), "call-a".into(), "thread-a".into(), "turn-a".into(), result.ok, result.body.clone(), result.error.clone()),
                         false, CodexTurnOutput::interrupted_result_closed("tool_result", "call-a".into(), "thread-a".into(), "turn-a".into(), result.ok, &source.artifact),
                         false,
@@ -6484,7 +6683,7 @@ while IFS= read -r _; do :; done
             broker.publish(CodexTurnControlTarget::Suspended { handle:AppServerRequestHandle::Remote(client.request_handle()),
                 request_ids:Arc::new(std::sync::atomic::AtomicI64::new(10)), pending_requests:requests.clone(),scope:scope.clone(),
                 output:Default::default(),continuity:Some(state.clone()),handoff_barrier:barrier.clone(),effect_gate:gate.clone(),
-                turn_interrupted:interrupted.clone(),thread_id:"thread-1".into(),turn_id:"turn-2".into() });
+                turn_interrupted:interrupted.clone(),thread_id:"thread-1".into(),turn_id:"turn-2".into(),late_calls:None });
             let mut intents=Vec::new();
             let applied=broker.apply(steer(),|intent|{intents.push(intent);Ok(())}).await.unwrap();
             assert_eq!(intents.len(),usize::from(bad.is_none()));

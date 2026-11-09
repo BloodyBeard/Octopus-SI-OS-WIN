@@ -264,6 +264,7 @@
             &active,
             "run_test",
             "world_provider_test",
+            &OperationRoutes::default(),
         )
         .expect("the route is identified by its exact edge after provider authoring");
         assert_eq!(resolved, active);
@@ -272,6 +273,7 @@
     pub(super) fn boot_operator_space_ee_instances(dir: &Path) {
         let instance = |ee: &str, template: &str, parent: Option<&str>| {
             let row = octopus_ee::EeInstance {
+                name: None,
                 ee_id: EeId::new(ee),
                 template: octopus_descriptors::EeTemplateId::new(template),
                 parent_ee: parent.map(EeId::new),
@@ -1263,7 +1265,7 @@
         let door = InterfaceId::new(&changed.capability_doors["system_room"]);
         let bridge = ProviderCapabilityBridge {tool:changed.capability_tools["file.read"].clone(),correlation_id:"nested-read".into(),arguments_hash:octopus_ledger::ContentHash::of_bytes(b"{}").to_hex(),return_interface:door.clone()};
         let retained = [(changed.capability_tools["file.read"].clone(),door)];
-        let amendment = plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest {amendment_key:"nested-retain".into(),selection:Some(first.clone()),authored:None,publications:vec![]},bridge.clone(),&retained).unwrap();
+        let amendment = plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest { change: None,amendment_key:"nested-retain".into(),selection:Some(first.clone()),authored:None,publications:vec![]},bridge.clone(),&retained).unwrap();
         assert!(amendment.validation.safe_to_apply,"{:?}",amendment.validation.regressions);
         let result_mark = current.interface_state[&provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter()
             .find_map(|cp|cp["result_receiving"][&bridge.tool]["mark"].as_str()).unwrap();
@@ -1276,7 +1278,7 @@
             expected_before:serde_json::json!(current),run_record:serde_json::json!(current),writes:vec![crate::run_composition::RegistryCandidateWrite {
                 path:policy_path.clone(),content:narrowed.to_string(),expected_before_hash:Some(octopus_ledger::ContentHash::of_bytes(&policy_bytes).to_hex()),
             }]};
-        assert!(plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest {amendment_key:"nested-mark-denied".into(),selection:None,authored:Some(authored),publications:vec![]},bridge,&retained)
+        assert!(plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest { change: None,amendment_key:"nested-mark-denied".into(),selection:None,authored:Some(authored),publications:vec![]},bridge,&retained)
             .unwrap_err().contains("removes the bridge result mark"));
         assert_eq!(std::fs::read(policy_path).unwrap(),policy_bytes);
         let after = RunRecord::from_bytes(&serde_json::to_vec(&amendment.amendment.after).unwrap()).unwrap();
@@ -1369,7 +1371,7 @@
         for (role, id) in [("home", "browser_home_pack"), ("task", "browser_project_pack"), ("task", "browser_nested_project_pack")] {
             if role == "task" {
                 let ee_id = format!("ee_{id}");
-                let ee = octopus_ee::EeInstance { ee_id:EeId::new(&ee_id), template:octopus_descriptors::EeTemplateId::new("project"), parent_ee:Some(EeId::new(&parent)), goal:"Declared Browser/CU profile inheritance".into(), config:Default::default(), policy_narrowing:Default::default() };
+                let ee = octopus_ee::EeInstance { name: None, ee_id:EeId::new(&ee_id), template:octopus_descriptors::EeTemplateId::new("project"), parent_ee:Some(EeId::new(&parent)), goal:"Declared Browser/CU profile inheritance".into(), config:Default::default(), policy_narrowing:Default::default() };
                 std::fs::write(ee_root.join(format!("{ee_id}.json")), serde_json::to_vec_pretty(&ee).unwrap()).unwrap();
                 inherited.ee_id = ee_id.clone();
                 parent = ee_id;
@@ -1453,6 +1455,8 @@
             for slot in ["workspace_root", "host_filesystem_root"] {
                 assert_eq!(workspace["interface_driver_config"]["host_slots"][slot]["path"], "/");
             }
+            let provider = exact(format!("interface:{}", plan.model_interface_id));
+            assert_eq!(provider["interface_driver_config"]["private_config"]["approval_policy"], "never");
             for tool in ["workspace.read_file", "workspace.write_file", "workspace.exec", "workspace.write_stdin", "workspace.process.terminate"] {
                 assert!(worker_policy["ceiling"]["tools"].as_array().unwrap().contains(&serde_json::json!(plan.capability_tools[tool])));
             }
@@ -1565,7 +1569,7 @@
                 let door = InterfaceId::new(&plan.capability_doors["system_room"]);
                 let bridge = ProviderCapabilityBridge { tool:plan.capability_tools["file.read"].clone(),correlation_id:"home-read".into(),
                     arguments_hash:octopus_ledger::ContentHash::of_bytes(b"{}").to_hex(),return_interface:door.clone() };
-                let amend = |record: &RunRecord| plan_current_run_amendment(&roots,record,&provider,CurrentRunRequest {
+                let amend = |record: &RunRecord| plan_current_run_amendment(&roots,record,&provider,CurrentRunRequest { change: None,
                     amendment_key:"home-context-retained".into(),selection:Some(selection.clone()),authored:None,publications:vec![],
                 },bridge.clone(),&[(plan.capability_tools["file.read"].clone(),door.clone())]);
                 let preview = amend(&current).unwrap();
@@ -1956,6 +1960,7 @@
             serde_json::json!("ultra")
         );
         assert_eq!(provider_config.private_config["service_tier"], serde_json::json!("priority"));
+        assert_eq!(provider_config.private_config["approval_policy"], serde_json::json!("on-request"));
         assert_eq!(
             serde_json::from_value::<BTreeSet<String>>(provider.interface_policy.values["models"].clone()).unwrap(),
             serde_json::from_value::<BTreeSet<String>>(load_interface_descriptor(&request.registry_root.join("interface"), &request.provider_interface_id)

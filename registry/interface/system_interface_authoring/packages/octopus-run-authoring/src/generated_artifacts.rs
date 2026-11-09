@@ -44,7 +44,7 @@ pub fn mandatory_role_bindings(grant: &octopus_ledger::GrantProjection) -> Resul
             || grant.artifact_access.get(role).is_none_or(|access| !access.read) {
             return Err("raw output checkpoint has no exact readable mandatory role closure".into());
         }
-        Ok(ArtifactBinding { id: ArtifactId::new(role), access: octopus_runtime::ArtifactAccess::read_only() })
+        Ok(ArtifactBinding { id: ArtifactId::new(role), access: octopus_policy::ArtifactAccess::read_only() })
     }).collect()
 }
 
@@ -116,6 +116,9 @@ fn validate_result_outputs(
     else {
         return Ok(Vec::new());
     };
+    if let Some(error) = result.error.as_ref().filter(|_| !result.ok) {
+        return Err(format!("generated artifact result failed: {}: {}", error.code, error.message));
+    }
     if !result.ok || result_movement.kind != MovementKind::InterfaceOutbound {
         return Err("generated artifact result is not an admitted success".into());
     }

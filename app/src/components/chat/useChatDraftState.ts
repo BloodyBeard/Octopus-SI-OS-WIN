@@ -160,6 +160,12 @@ export function useChatDraftState(input: {
   }
   const liveDraftRef = useRef({ runId: input.activeRunId, text, attachments, scopeIdentity });
   liveDraftRef.current = { runId: input.activeRunId, text, attachments, scopeIdentity };
+  function persistDrafts() {
+    try { saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope); }
+    catch (error) {
+      if (mountedRef.current) onErrorRef.current(`Your draft is kept in this window but could not be saved to disk. Keep this window open and free disk space. ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   function consumeDraft(runId: string, submittedText: string, submittedAttachments: ChatAttachment[]) {
     const current = liveDraftRef.current;
     if (current.runId !== runId || current.scopeIdentity !== scopeIdentity) return;
@@ -170,7 +176,7 @@ export function useChatDraftState(input: {
     setMessageId(""); setMessageHadAttachments(false); setRawText(""); setAttachments([]); setContinuation(null);
     const draft = { ...currentDraft(), messageId: "", messageHadAttachments: false, text: "", attachments: [], continuation: null, updatedAtMs: Date.now() };
     draftsRef.current.set(chatDraftKey(runId), draft);
-    saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope);
+    persistDrafts();
   }
 
   function currentDraft(): ChatDraft {
@@ -238,7 +244,7 @@ export function useChatDraftState(input: {
       updatedAtMs: Date.now(),
     };
     draftsRef.current.set(chatDraftKey(runId), draft);
-    saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope);
+    persistDrafts();
     setMessageId(nextMessageId);
     setMessageHadAttachments(hadAttachments);
   }
@@ -253,7 +259,7 @@ export function useChatDraftState(input: {
       messageHadAttachments: false,
       updatedAtMs: Date.now(),
     });
-    saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope);
+    persistDrafts();
     setMessageId((current) => current === expectedMessageId ? "" : current);
     setMessageHadAttachments(false);
   }
@@ -272,14 +278,14 @@ export function useChatDraftState(input: {
       continuation: null,
       updatedAtMs: Date.now(),
     });
-    saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope);
+    persistDrafts();
     setMessageId((current) => current === expectedMessageId ? "" : current);
     setMessageHadAttachments(false);
   }
 
   function writeDraft(runId: string, draft: ChatDraftValue) {
     draftsRef.current.set(chatDraftKey(runId), { ...draft, updatedAtMs: Date.now() });
-    saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope);
+    persistDrafts();
   }
 
   function readDraft(runId: string) {
@@ -465,7 +471,7 @@ export function useChatDraftState(input: {
       currentDraftForStorage(input.activeRunId),
     );
     const timeout = window.setTimeout(
-      () => saveChatDrafts(input.accessProfile, serializedDrafts(draftsRef.current), input.storageScope),
+      persistDrafts,
       350,
     );
     return () => window.clearTimeout(timeout);
@@ -492,11 +498,7 @@ export function useChatDraftState(input: {
 
   useEffect(() => {
     if (!input.storageScope) return;
-    const persist = () => saveChatDrafts(
-      input.accessProfile,
-      serializedDrafts(draftsRef.current),
-      input.storageScope,
-    );
+    const persist = persistDrafts;
     window.addEventListener("beforeunload", persist);
     return () => {
       window.removeEventListener("beforeunload", persist);

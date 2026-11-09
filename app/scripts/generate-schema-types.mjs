@@ -32,10 +32,10 @@ const projectionReadSchema = JSON.parse(await readFile(path.join(appSchemasDir, 
 const projectionReadVersion = projectionReadSchema.properties.contract_version.const;
 const projectionReadMethods = projectionReadSchema.$defs.projectionReadMethod.enum;
 const clientSurfaceProjectionReadMethods = projectionReadSchema.$defs.clientSurfaceProjectionReadMethod.enum;
-const projectionImplementation = await readFile(path.join(here, "..", "electron", "projection.cjs"), "utf8");
-const implementedProjectionReadMethods = [
-  ...projectionImplementation.matchAll(/case "(projection\.[^"]+)"/g),
-].map((match) => match[1]);
+const projectionImplementation = await readFile(path.join(here, "..", "electron", "projection", "queryRouter.cjs"), "utf8");
+const implementedProjectionReadMethods = [...new Set([
+  ...projectionImplementation.matchAll(/(?:case\s+|method\s*===\s*)"(projection\.[^"]+)"/g),
+].map((match) => match[1]))];
 const declaredProjectionReadMethodSet = new Set(projectionReadMethods);
 const implementedProjectionReadMethodSet = new Set(implementedProjectionReadMethods);
 const missingProjectionMethods = projectionReadMethods.filter((method) => !implementedProjectionReadMethodSet.has(method));

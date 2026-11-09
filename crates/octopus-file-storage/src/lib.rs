@@ -6,6 +6,7 @@ use std::path::Path;
 mod compression;
 
 pub mod publication;
+pub mod metadata;
 
 pub fn sync_ordered(file: &File) -> io::Result<()> {
     #[cfg(target_vendor = "apple")]

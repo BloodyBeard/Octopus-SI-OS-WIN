@@ -388,11 +388,7 @@ export function AccessSection({ accessProfile }: { accessProfile: OctopusClientA
       <OcGroup title="Privacy" description="Desktop permissions and locally stored client data.">
         <OcCard>
           <PermissionRows />
-          <OcSettingsRow {...settingsTargetProps("access.recordings")}
-            control={<OcStatus label="Artifact governed" tone="neutral" />}
-            description="Audio follows admitted artifact files, projected transcripts remain runtime evidence, and local dictation history is profile bounded."
-            label="Recordings and transcripts"
-          />
+
           <LocalDataRows
             clearState={clearLocalState}
             exportState={exportState}

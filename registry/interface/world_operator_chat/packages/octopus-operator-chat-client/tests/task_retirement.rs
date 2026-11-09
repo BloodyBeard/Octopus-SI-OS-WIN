@@ -291,7 +291,7 @@ fn real_retirement_holds_and_cold_proof_preserve_the_exact_ledger_boundary() {
 }
 
 #[test]
-fn held_retirement_revalidates_grants_and_new_rows_after_caching_a_prefix() {
+fn held_retirement_revalidates_metadata_and_new_rows_after_caching_a_prefix() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let RetirementFixture { plan, context, .. } = fixture(&root);
@@ -303,8 +303,10 @@ fn held_retirement_revalidates_grants_and_new_rows_after_caching_a_prefix() {
         "from":Endpoint::Interface("other_source".into()),"to":Endpoint::Interface("other_target".into()),"artifact":null})).unwrap();
     movement.invocation_metadata = Some(octopus_ledger::InvocationMetadata::new(octopus_ledger::GrantProjection {
         tools: vec!["large-declared-tool".repeat(512)], ..Default::default()
-    }).into());
-    let row = octopus_ledger::encode_durable_movement_row(&movement, 0, |bytes| {
+    }).with_artifact_binding_refs(vec![octopus_ledger::ArtifactRef {
+        id: octopus_descriptors::ArtifactId::new("binding"), content: octopus_ledger::ContentHash::of_bytes(b"binding")
+    }]).into());
+    let row = octopus_ledger::encode_durable_movement_row(&movement, 0, |_, bytes| {
         let hash = octopus_ledger::ContentHash::of_bytes(bytes);
         std::fs::write(metadata.join(hash.to_hex()), bytes).unwrap(); Ok(hash)
     }).unwrap();
@@ -315,7 +317,8 @@ fn held_retirement_revalidates_grants_and_new_rows_after_caching_a_prefix() {
     let mut next = movement.clone(); next.seq = octopus_ledger::Seq(1); next.invocation_metadata = None;
     std::fs::write(&ledger, format!("{row}\n{}\n", serde_json::to_string(&next).unwrap())).unwrap();
     assert_eq!(command(&mut child, &mut reader, json!({"operation":"assert_held"}))["ledger_boundary"]["sequence"], 2);
-    let grant = std::fs::read_dir(&metadata).unwrap().next().unwrap().unwrap().path();
+    let pinned: Value = serde_json::from_str(&row).unwrap();
+    let grant = metadata.join(pinned["invocation_metadata"]["artifact_binding_refs_content"].as_str().unwrap());
     let original = std::fs::read(&grant).unwrap();
     std::fs::write(&grant, vec![b' '; original.len()]).unwrap();
     writeln!(child.stdin.as_mut().unwrap(), "{{\"operation\":\"assert_held\"}}").unwrap();

@@ -1,5 +1,6 @@
 const OPERATOR_CHAT_SUBMIT_RESULT = "octopus.operator-chat.submit.v1";
 const OPERATOR_CHAT_SUBMIT_ERROR_MESSAGE = "Couldn't send your message. Try again.";
+const { nativeStorageFailure, STORAGE_BLOCKED_MESSAGE } = require("./storageHealth.cjs");
 
 function operatorChatSubmitSuccess(value) {
   return {
@@ -11,15 +12,18 @@ function operatorChatSubmitSuccess(value) {
 
 function operatorChatSubmitFailure(error, { submissionStarted = true } = {}) {
   const contractMismatch = error?.code === "operator_chat_client_contract_mismatch";
+  const storageBlocked = nativeStorageFailure(error) || error?.code === "home_storage_blocked";
   return {
     contract: OPERATOR_CHAT_SUBMIT_RESULT,
     ok: false,
     error: {
-      code: contractMismatch ? "chat_package_repair_required" : "message_send_failed",
-      message: contractMismatch
+      code: storageBlocked ? "home_storage_blocked" : contractMismatch ? "chat_package_repair_required" : "message_send_failed",
+      message: storageBlocked
+        ? nativeStorageFailure(error) ? STORAGE_BLOCKED_MESSAGE : error.message
+        : contractMismatch
         ? "Octopus Home chat package needs repair before sending."
         : OPERATOR_CHAT_SUBMIT_ERROR_MESSAGE,
-      retryable: !contractMismatch,
+      retryable: !contractMismatch && !storageBlocked,
       deliveryState: !submissionStarted || error?.deliveryState === "not_sent" ? "not_sent" : "unknown",
     },
   };

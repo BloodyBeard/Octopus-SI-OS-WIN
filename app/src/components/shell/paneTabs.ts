@@ -49,20 +49,28 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
   options: PaneTabModelOptions = {},
 ) {
   const allowEmptySelection = options.allowEmptySelection === true;
-  const [state, setState] = useState<PaneTabState<Tab>>(() => (
+  const state = useState<PaneTabState<Tab>>(() => (
     normalizePaneTabState(initialState.tabs, initialState.activeTabId, allowEmptySelection)
   ));
+  return usePaneTabModel(state, options);
+}
+
+export function usePaneTabModel<Tab extends PaneTabIdentity>(
+  [state, setState]: [PaneTabState<Tab>, Dispatch<SetStateAction<PaneTabState<Tab>>>],
+  options: PaneTabModelOptions = {},
+) {
+  const allowEmptySelection = options.allowEmptySelection === true;
 
   const replaceState = useCallback((next: PaneTabState<Tab>) => {
     setState(normalizePaneTabState(next.tabs, next.activeTabId, allowEmptySelection));
-  }, [allowEmptySelection]);
+  }, [allowEmptySelection, setState]);
 
   const setTabs: Dispatch<SetStateAction<Tab[]>> = useCallback((update) => {
     setState((current) => {
       const tabs = typeof update === "function" ? update(current.tabs) : update;
       return normalizePaneTabState(tabs, current.activeTabId, allowEmptySelection);
     });
-  }, [allowEmptySelection]);
+  }, [allowEmptySelection, setState]);
 
   const reconcileTabs = useCallback((update: Tab[] | ((tabs: Tab[]) => Tab[])) => {
     setState((current) => {
@@ -70,7 +78,7 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
       const next = normalizePaneTabState(tabs, current.activeTabId, allowEmptySelection);
       return samePaneTabState(current, next) ? current : next;
     });
-  }, [allowEmptySelection]);
+  }, [allowEmptySelection, setState]);
 
   const selectTab = useCallback((tabId: string) => {
     setState((current) => {
@@ -78,7 +86,7 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
       if (!current.tabs.some((tab) => tab.id === tabId) || current.activeTabId === tabId) return current;
       return { ...current, activeTabId: tabId };
     });
-  }, [allowEmptySelection]);
+  }, [allowEmptySelection, setState]);
 
   const openTab = useCallback((tab: Tab, replaceTabId?: string) => {
     setState((current) => {
@@ -92,7 +100,7 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
           : [...current.tabs, tab];
       return { activeTabId: tab.id, tabs };
     });
-  }, []);
+  }, [setState]);
 
   const replaceTab = useCallback((tabId: string, tab: Tab) => {
     setState((current) => {
@@ -107,18 +115,18 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
         tabs,
       };
     });
-  }, []);
+  }, [setState]);
 
   const closeTab = useCallback((tabId: string) => {
     setState((current) => closePaneTab(current, tabId, allowEmptySelection));
-  }, [allowEmptySelection]);
+  }, [allowEmptySelection, setState]);
 
   const closeOtherTabs = useCallback((tabId: string) => {
     setState((current) => {
       const tab = current.tabs.find((candidate) => candidate.id === tabId);
       return tab ? { activeTabId: tab.id, tabs: [tab] } : current;
     });
-  }, []);
+  }, [setState]);
 
   const closeTabsToRight = useCallback((tabId: string) => {
     setState((current) => {
@@ -130,7 +138,7 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
         tabs,
       };
     });
-  }, []);
+  }, [setState]);
 
   const reorderTabs = useCallback((activeTabId: string, overTabId: string) => {
     setState((current) => {
@@ -143,7 +151,7 @@ export function usePaneTabs<Tab extends PaneTabIdentity>(
       tabs.splice(to, 0, moved);
       return { ...current, tabs };
     });
-  }, []);
+  }, [setState]);
 
   return {
     activeTabId: state.activeTabId,

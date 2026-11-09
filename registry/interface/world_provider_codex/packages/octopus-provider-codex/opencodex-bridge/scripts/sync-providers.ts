@@ -15,13 +15,18 @@ type ProviderSpec = {
   description: string;
   icon?: string;
   icon_dark?: string[];
+  logo?: string;
   local?: boolean;
+  default_context_window?: number;
+  input_modalities?: string[];
   allow_private_network?: boolean;
   headers?: Record<string, string>;
   key?: { env: string; label: string; header?: string; prefix?: string };
   base_url?: { env: string; label: string };
-  model?: { env: string; label: string; slug: string; display_name: string };
+  model?: { env: string; label: string; slug: string; display_name: string; efforts?: Effort[] };
   cli?: { commands: string[]; env: string[]; home_read: string[]; home_write: string[] };
+  endpoint?: string;
+  models?: Array<{ slug: string; display_name: string; context_window?: number; efforts: Effort[]; default_effort?: Effort }>;
 };
 
 type Spec = { schema_version: 1; template_interface: string; providers: ProviderSpec[] };
@@ -33,6 +38,7 @@ type ModelRow = {
   input_modalities: string[];
   efforts: Effort[];
   default_effort?: Effort;
+  thinking_toggle?: true;
 };
 
 const EFFORT_ORDER: Effort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -45,13 +51,15 @@ const EFFORT_DESCRIPTIONS: Record<Effort, string> = {
   xhigh: "Extra high reasoning depth for complex problems",
   max: "Maximum reasoning depth for the hardest problems",
 };
-const ADAPTERS = new Set(["anthropic", "azure", "claude-cli", "google", "openai-chat", "openai-responses"]);
+const THINKING_TOGGLE_DESCRIPTIONS: Partial<Record<Effort, string>> = { none: "Thinking off", high: "Thinking on" };
+const ADAPTERS = new Set(["anthropic", "azure", "claude-cli", "google", "grok-cli", "openai-chat", "openai-responses"]);
 const CODEX_ONLY_PRIVATE_CONFIG = ["provider_operations", "web_search", "client_metadata"];
 const CODEX_NATIVE_SEARCH_TOOLS = ["web.search", "web.extract"];
 const CODEX_ONLY_OVERRIDES = [/^model_context_window=/, /^model_auto_compact_token_limit=/];
+const DEFAULT_CONTEXT_WINDOW = 400000;
 const LIFE_BIN = "interface://world_provider_codex/packages/octopus-provider-codex/life-bin/octopus-provider-opencodex-life";
 const BRIDGE_SUBPATH = "world_provider_codex/packages/octopus-provider-codex/opencodex-bridge/bin/octopus-opencodex-bridge";
-const MACHINE_AUTH_ENV = "OCTOPUS_MACHINE_CODEX_AUTH_FILE";
+const MACHINE_AUTH_ENVS = ["OCTOPUS_MACHINE_CODEX_AUTH_FILE", "OCTOPUS_MACHINE_CODEX_AUTH_LOCK_FILE"];
 const ACRONYMS = new Map([["gpt", "GPT"], ["glm", "GLM"], ["oss", "OSS"], ["ai", "AI"], ["mimo", "MiMo"], ["cn", "CN"], ["vl", "VL"]]);
 
 const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,29 +106,66 @@ function efforts(values: unknown): Effort[] {
   return EFFORT_ORDER.filter((effort) => known.has(effort) && effort !== "none");
 }
 
+function declaredCapabilities(seed: any, slug: string): Record<string, unknown> {
+  const rows: Record<string, Record<string, unknown>> = seed.modelCapabilities ?? {};
+  return rows[slug] ?? Object.entries(rows).find(([id]) => id.toLowerCase() === slug.toLowerCase())?.[1] ?? {};
+}
+
+function reasoning(seed: any, slug: string): Pick<ModelRow, "efforts" | "default_effort" | "thinking_toggle"> {
+  const declared = declaredCapabilities(seed, slug);
+  if ((seed.noReasoningModels ?? []).includes(slug) || declared.supportsReasoning === false) return { efforts: [] };
+  if (declared.supportsReasoningEffort === false) {
+    if (declared.supportsThinkingToggle !== true) return { efforts: [] };
+    return { efforts: ["none", "high"], default_effort: declared.defaultThinkingEnabled === false ? "none" : "high", thinking_toggle: true };
+  }
+  const strengths = efforts(seed.modelReasoningEfforts?.[slug] ?? seed.reasoningEfforts);
+  const toggle = declared.supportsThinkingToggle === true;
+  const supported: Effort[] = toggle ? ["none", ...(strengths.length ? strengths : ["high" as const])] : strengths;
+  if (!supported.length) return { efforts: [] };
+  const declaredDefault = seed.modelDefaultReasoningEfforts?.[slug];
+  const ladder = supported.filter((effort) => effort !== "none");
+  const fallback = ladder.includes("medium") ? "medium" : ladder[0];
+  const preferred = toggle && declared.defaultThinkingEnabled === false
+    ? "none"
+    : ladder.includes(declaredDefault) ? declaredDefault : fallback;
+  return { efforts: supported, default_effort: preferred };
+}
+
 function registryModels(spec: ProviderSpec, seed: any): ModelRow[] {
   const models: string[] = Array.isArray(seed?.models) ? seed.models : [];
   if (!models.length) throw new Error(`${spec.interface}: registry entry ${spec.registry_entry} has no static models; declare a model setup field`);
-  const noReasoning = new Set<string>(seed.noReasoningModels ?? []);
-  return models.map((slug) => {
-    const supported = noReasoning.has(slug) ? [] : efforts(seed.modelReasoningEfforts?.[slug] ?? seed.reasoningEfforts);
-    const declaredDefault = seed.modelDefaultReasoningEfforts?.[slug];
-    const fallback = supported.includes("medium") ? "medium" : supported[0];
-    return {
-      slug,
-      display_name: seed.modelDisplayNames?.[slug] ?? humanize(slug),
-      ...(Number.isInteger(seed.modelContextWindows?.[slug] ?? seed.contextWindow)
-        ? { context_window: seed.modelContextWindows?.[slug] ?? seed.contextWindow }
-        : {}),
-      input_modalities: seed.modelInputModalities?.[slug] ?? ["text"],
-      efforts: supported,
-      ...(supported.length ? { default_effort: supported.includes(declaredDefault) ? declaredDefault : fallback } : {}),
-    };
-  });
+  return models.map((slug) => ({
+    slug,
+    display_name: seed.modelDisplayNames?.[slug] ?? humanize(slug),
+    ...(Number.isInteger(seed.modelContextWindows?.[slug] ?? seed.contextWindow)
+      ? { context_window: seed.modelContextWindows?.[slug] ?? seed.contextWindow }
+      : {}),
+    input_modalities: spec.input_modalities ?? seed.modelInputModalities?.[slug] ?? ["text"],
+    ...reasoning(seed, slug),
+  }));
+}
+
+function declaredModels(spec: ProviderSpec): ModelRow[] {
+  return spec.models!.map((row) => ({
+    slug: row.slug,
+    display_name: row.display_name,
+    ...(row.context_window ? { context_window: row.context_window } : {}),
+    input_modalities: spec.input_modalities ?? ["text"],
+    efforts: EFFORT_ORDER.filter((effort) => row.efforts.includes(effort)),
+    ...(row.default_effort ? { default_effort: row.default_effort } : {}),
+  }));
 }
 
 function setupModel(spec: ProviderSpec): ModelRow[] {
-  return [{ slug: spec.model!.slug, display_name: spec.model!.display_name, input_modalities: ["text"], efforts: [] }];
+  const declared = spec.model!.efforts ?? [];
+  if (declared.length && !declared.includes("none")) throw new Error(`${spec.interface}: a setup model's efforts must include none, its default`);
+  return [{
+    slug: spec.model!.slug,
+    display_name: spec.model!.display_name,
+    input_modalities: ["text"],
+    efforts: EFFORT_ORDER.filter((effort) => declared.includes(effort)),
+    ...(declared.length ? { default_effort: "none" as const } : {}),
+  }];
 }
 
 function selectableEfforts(row: ModelRow): Effort[] {
@@ -132,10 +177,13 @@ function defaultEffort(row: ModelRow): Effort {
 }
 
 function effortRows(row: ModelRow) {
-  return selectableEfforts(row).map((effort) => ({ effort, description: EFFORT_DESCRIPTIONS[effort] }));
+  return selectableEfforts(row).map((effort) => ({
+    effort,
+    description: (row.thinking_toggle ? THINKING_TOGGLE_DESCRIPTIONS[effort] : undefined) ?? EFFORT_DESCRIPTIONS[effort],
+  }));
 }
 
-function codexModelInfo(row: ModelRow, priority: number, description: string) {
+function codexModelInfo(row: ModelRow, priority: number, description: string, contextWindow: number) {
   return {
     slug: row.slug,
     display_name: row.display_name,
@@ -152,7 +200,8 @@ function codexModelInfo(row: ModelRow, priority: number, description: string) {
     support_verbosity: false,
     truncation_policy: { mode: "tokens", limit: 10000 },
     supports_parallel_tool_calls: false,
-    ...(row.context_window ? { context_window: row.context_window, max_context_window: row.context_window } : {}),
+    context_window: row.context_window ? Math.min(row.context_window, contextWindow) : contextWindow,
+    ...(row.context_window ? { max_context_window: row.context_window } : {}),
     effective_context_window_percent: 95,
     experimental_supported_tools: [],
     input_modalities: row.input_modalities.filter((value) => value === "text" || value === "image"),
@@ -217,7 +266,7 @@ function descriptor(spec: ProviderSpec, template: any, rows: ModelRow[], adapter
       max_translated_call_bytes: 2097152,
       max_translated_turn_bytes: 33554432,
     },
-    model_catalog: { models: rows.map((row, index) => codexModelInfo(row, index, description(row))) },
+    model_catalog: { models: rows.map((row, index) => codexModelInfo(row, index, description(row), spec.default_context_window ?? DEFAULT_CONTEXT_WINDOW)) },
   };
   config.transport = {
     base_url: baseUrl,
@@ -249,11 +298,11 @@ function life(spec: ProviderSpec, template: any) {
   ];
   for (const process of out.processes) {
     process.bin = LIFE_BIN;
-    process.inherit_env = process.inherit_env.filter((name: string) => name !== MACHINE_AUTH_ENV);
+    process.inherit_env = process.inherit_env.filter((name: string) => !MACHINE_AUTH_ENVS.includes(name));
     process.inherit_env_from_interface = pointers;
     const authority = process.authority;
-    authority.read_env_paths = authority.read_env_paths.filter((name: string) => name !== MACHINE_AUTH_ENV);
-    authority.write_env_paths = authority.write_env_paths.filter((name: string) => name !== MACHINE_AUTH_ENV);
+    authority.read_env_paths = authority.read_env_paths.filter((name: string) => !MACHINE_AUTH_ENVS.includes(name));
+    authority.write_env_paths = authority.write_env_paths.filter((name: string) => !MACHINE_AUTH_ENVS.includes(name));
     authority.executable_root_subpaths = [
       ...authority.executable_root_subpaths,
       { root_slot: "registry_interface_root", relative_path: BRIDGE_SUBPATH },
@@ -332,16 +381,24 @@ for (const provider of spec.providers) {
   seen.add(provider.interface);
   const entry = provider.registry_entry ? PROVIDER_REGISTRY.find((row: any) => row.id === provider.registry_entry) : undefined;
   if (provider.registry_entry && !entry) throw new Error(`${provider.interface}: OpenCodex has no registry entry ${provider.registry_entry}`);
+  if (entry?.deprecated) throw new Error(`${provider.interface}: OpenCodex registry entry ${provider.registry_entry} is deprecated: ${entry.deprecated}`);
   const seed = entry ? providerConfigSeed(entry) : undefined;
   const adapter = provider.adapter ?? seed?.adapter;
   if (!ADAPTERS.has(adapter)) throw new Error(`${provider.interface}: adapter ${adapter} is not served by the bridge`);
   if (!provider.key && !provider.local && !provider.cli) throw new Error(`${provider.interface}: a remote provider needs a key field or a signed-in CLI`);
   if (provider.cli && provider.key) throw new Error(`${provider.interface}: a CLI provider keeps its sign-in inside the CLI`);
-  const baseUrl = provider.base_url ? "" : seed?.baseUrl;
+  if (provider.models && (entry || provider.model)) throw new Error(`${provider.interface}: declared models belong to a provider without a registry entry or model setup field`);
+  if (provider.endpoint && entry) throw new Error(`${provider.interface}: a registry entry already names its endpoint`);
+  const baseUrl = provider.base_url ? "" : seed?.baseUrl ?? provider.endpoint;
   if (!provider.base_url && !baseUrl) throw new Error(`${provider.interface}: no base URL`);
-  const rows = provider.model ? setupModel(provider) : registryModels(provider, seed);
+  const rows = provider.model ? setupModel(provider) : provider.models ? declaredModels(provider) : registryModels(provider, seed);
   const folder = path.join(interfaceRoot, provider.interface);
   const logos: { logo?: string; logo_dark?: string } = {};
+  if (provider.icon && provider.logo) throw new Error(`${provider.interface}: a logo comes either from an OpenCodex icon or from the interface folder`);
+  if (provider.logo) {
+    if (!fs.existsSync(path.join(folder, provider.logo))) throw new Error(`${provider.interface}: logo ${provider.logo} is not in the interface folder`);
+    logos.logo = provider.logo;
+  }
   if (provider.icon) {
     const svg = fs.readFileSync(path.join(iconRoot, provider.icon), "utf8");
     outputs.set(path.join(folder, "application-logo.svg"), svg);

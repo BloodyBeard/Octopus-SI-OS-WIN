@@ -311,7 +311,7 @@ fn static_revision_checkpoint<'a>(
     record: &'a RunRecord,
     writer: &CheckedRunWriter,
     next: &BoundRunAuthoringTopology,
-) -> Result<&'a octopus_runtime::run_record::CheckpointRecord, String> {
+) -> Result<&'a octopus_run_record::CheckpointRecord, String> {
     if !static_revision_candidate(record, writer, next)? {
         return Err("active input correction is not a terminal failed-source static revision".into());
     }
@@ -355,7 +355,7 @@ fn static_revision_checkpoint<'a>(
 pub(super) struct FailedSourceStaticContext {
     coordinate: RuntimeCoordinateKey,
     snapshot: ContentHash,
-    checkpoint: octopus_runtime::run_record::CheckpointRecord,
+    checkpoint: octopus_run_record::CheckpointRecord,
     source: IndexedOutboundArtifact,
     added: Vec<ArtifactRef>,
 }
@@ -363,7 +363,7 @@ pub(super) struct FailedSourceStaticContext {
 impl FailedSourceStaticContext {
     pub(super) fn refs_for(
         &self, coordinate: &RuntimeCoordinateKey, source: &IndexedOutboundArtifact,
-        snapshot: &ContentHash, checkpoint: &octopus_runtime::run_record::CheckpointRecord,
+        snapshot: &ContentHash, checkpoint: &octopus_run_record::CheckpointRecord,
     ) -> Result<&[ArtifactRef], String> {
         if &self.coordinate != coordinate || &self.source != source
             || &self.snapshot != snapshot || &self.checkpoint != checkpoint
@@ -686,8 +686,8 @@ struct PayloadHistoryReader<'a, R: ?Sized>(&'a mut R);
 
 impl<R: CheckedRunEvidenceReader + ?Sized> CheckedRunEvidenceReader for PayloadHistoryReader<'_, R> {
     fn max_payload_bytes(&self) -> u64 { self.0.max_payload_bytes() }
-    fn source_context_snapshot(&mut self, record: &RunRecord, config: &RunAuthoringConfig, source: u64) -> Result<(serde_json::Value, Vec<(ArtifactRef, u64)>), String> {
-        self.0.source_context_snapshot(record, config, source)
+    fn source_context_snapshot(&mut self, record: &RunRecord, config: &RunAuthoringConfig, source: u64, rebase: &[ArtifactRef]) -> Result<(serde_json::Value, Vec<(ArtifactRef, u64)>), String> {
+        self.0.source_context_snapshot(record, config, source, rebase)
     }
     fn pending_output_payload(&mut self, provider: &InterfaceId, reference: &ArtifactRef, relative: &Path) -> Result<Vec<u8>, String> {
         self.0.pending_output_payload(provider, reference, relative)
@@ -773,6 +773,7 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         if candidates.contains_key(&next.source_movement_seq) {
             if transition.writer != *writer { return Err("payload readiness completion changed its provider writer".into()); }
             if completed.get(&next.source_movement_seq).is_some_and(|prior|prior.terminal && !publication
+                && !(previous.as_ref() == Some(prior) && source_continuation::follows(prior, &next))
                 && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next) && !rejected_final::follows(prior, &next)) {
                 return Err("payload readiness history repeats a completed input".into());
             }
@@ -1079,7 +1080,7 @@ fn payload_value(
         let future_tool = template.role == RunAuthoringCheckpointRole::ProviderToolOutput
             && pending.as_ref().is_none_or(|handoff| {
                 retains_future_output(template)
-                    && !handoff.items.iter().any(|item| pending_output_matches_template(item, template))
+                    && !handoff.items.iter().any(|item| pending_output_serves_template(item, template))
             });
         if !stable && !authoring && !future_tool {
             continue;

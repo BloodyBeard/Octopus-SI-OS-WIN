@@ -1,21 +1,17 @@
+use octopus_file_storage::metadata::FileStamp;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use octopus_descriptors::ArtifactId;
 use octopus_interfaces::InterfaceArtifactManifest;
 use octopus_ledger::{ContentHash, SharedBlobs};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FileFingerprint {
-    len: u64,
-    modified: Option<Duration>,
-}
-
 #[derive(Clone, Debug)]
 struct CachedArtifact {
-    fingerprint: FileFingerprint,
+    fingerprint: FileStamp,
+    settled: bool,
     content: ContentHash,
 }
 
@@ -78,13 +74,15 @@ impl RegistryContextArtifactCache {
             return Ok(hash);
         }
         let path = artifact_path(&self.artifact_root, id)?;
+        let observed_before_read = SystemTime::now();
         let before = file_fingerprint(&path)?;
+        let settled = before.is_settled(observed_before_read);
         let cached = self
             .entries
             .lock()
             .map_err(|_| "context artifact cache lock is poisoned".to_string())?
             .get(id)
-            .filter(|entry| entry.fingerprint == before)
+            .filter(|entry| entry.settled && settled && entry.fingerprint == before)
             .cloned();
         if let Some(cached) = cached {
             let present = self
@@ -145,6 +143,7 @@ impl RegistryContextArtifactCache {
                 id.clone(),
                 CachedArtifact {
                     fingerprint: after,
+                    settled,
                     content: stored.clone(),
                 },
             );
@@ -209,7 +208,7 @@ fn artifact_path(artifact_root: &Path, id: &ArtifactId) -> Result<PathBuf, Strin
     Ok(path)
 }
 
-fn file_fingerprint(path: &Path) -> Result<FileFingerprint, String> {
+fn file_fingerprint(path: &Path) -> Result<FileStamp, String> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         format!(
             "context artifact file '{}' cannot be inspected: {error}",
@@ -222,13 +221,7 @@ fn file_fingerprint(path: &Path) -> Result<FileFingerprint, String> {
             path.display()
         ));
     }
-    Ok(FileFingerprint {
-        len: metadata.len(),
-        modified: metadata
-            .modified()
-            .ok()
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok()),
-    })
+    Ok(FileStamp::of(&metadata))
 }
 
 #[cfg(test)]
@@ -238,14 +231,7 @@ mod tests {
     use std::sync::Arc;
 
     fn temp_root() -> PathBuf {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock is after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "octopus-context-artifact-cache-{}-{nonce}",
-            std::process::id()
-        ))
+        tempfile::tempdir().expect("unique test directory").keep()
     }
 
     #[test]
@@ -265,8 +251,13 @@ mod tests {
         let repeated = cache.resolve(&id).expect("cached artifact resolves");
         assert_eq!(first, repeated);
 
-        std::fs::write(&path, br#"{"id":"artifact-probe","text":"replacement"}"#)
-            .expect("replacement artifact writes");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, br#"{"id":"artifact-probe","text":"two"}"#)
+            .expect("same-size replacement artifact writes");
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
         let replacement = cache.resolve(&id).expect("replacement artifact resolves");
         assert_ne!(first, replacement);
 

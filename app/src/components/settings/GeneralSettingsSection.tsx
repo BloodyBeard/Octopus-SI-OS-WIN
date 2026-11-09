@@ -1,7 +1,7 @@
 import { settingsTargetProps } from "./settingsCatalog";
 import { useEffect, useMemo, useState } from "react";
 import { useClientPreferences, useSetClientPreferences, type SendShortcut } from "../../clientPreferences";
-import { OcCard, OcGroup, OcSelect, OcSlider, OcSettingsRow, OcStatus, OcSwitch } from "../../design-system/components";
+import { OcButton, OcCard, OcGroup, OcSelect, OcSlider, OcSettingsRow, OcStatus, OcSwitch } from "../../design-system/components";
 import { type GlyphName } from "../IconGlyphs";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { useAppErrorToast } from "../../toasts";
@@ -13,6 +13,9 @@ import { SettingsHeading } from "./SettingsHeading";
 import { MarkActivitySettingsRow, NotificationSoundSettingsRow } from "./NotificationSettingsSection";
 
 import { ProviderSummary, useDeclaredProviders } from "./SettingsProviderState";
+import { readProjection, saveSetupFile } from "../../projectionClient";
+import { serializeSetupFile, setupFileFromHome, setupFileName } from "../../onboarding/setupFile";
+import { useClientExtensions } from "../../extensions/useClientExtensions";
 export function GeneralSection({ accessProfile, surfaces }: { accessProfile: OctopusClientAccessProfile; surfaces: ClientSurfaceDescriptor[] }) {
   const preferences = useClientPreferences();
   const setClientPreferences = useSetClientPreferences();
@@ -36,7 +39,6 @@ export function GeneralSection({ accessProfile, surfaces }: { accessProfile: Oct
     loading: accessProfile === "live",
     error: "",
   });
-  useAppErrorToast(providerState.error || loginItem.error || runtimeSandbox.error);
 
   useEffect(() => {
     if (accessProfile !== "live" || !window.octopusTransport?.runtimeSandboxSettings) return;
@@ -60,6 +62,34 @@ export function GeneralSection({ accessProfile, surfaces }: { accessProfile: Oct
       setRuntimeSandbox({ ...state, loading: false, error: "" });
     } catch (error) {
       setRuntimeSandbox((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+
+  const extensions = useClientExtensions(accessProfile);
+  const [setupExport, setSetupExport] = useState<{ busy: boolean; note: string; error: string }>({ busy: false, note: "", error: "" });
+  useAppErrorToast(providerState.error || loginItem.error || runtimeSandbox.error || setupExport.error);
+
+  async function exportHomeSetup() {
+    setSetupExport({ busy: true, note: "", error: "" });
+    try {
+      const [scope, localPackages, applications, drivers] = await Promise.all([
+        readProjection("projection.operator.os.scope"),
+        readProjection("projection.operator.os.local_packages"),
+        readProjection("projection.operator.os.applications"),
+        readProjection("projection.operator.os.drivers"),
+      ]);
+      const file = setupFileFromHome({
+        scope,
+        localPackages,
+        applications,
+        drivers,
+        installedExtensionIds: new Set(extensions.extensions.filter((extension) => extension.installed).map((extension) => extension.manifest.id)),
+      });
+      const saved = await saveSetupFile({ text: serializeSetupFile(file), suggestedName: setupFileName(file) });
+      setSetupExport({ busy: false, note: saved.saved ? `Saved ${saved.name}.` : "", error: "" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSetupExport({ busy: false, note: "", error: message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") || "Octopus could not export this setup." });
     }
   }
 
@@ -313,6 +343,22 @@ export function GeneralSection({ accessProfile, surfaces }: { accessProfile: Oct
                 label="Status"
               />
             ) : null}
+          </OcCard>
+        </OcGroup>
+      ) : null}
+      {accessProfile === "live" ? (
+        <OcGroup title="Setup" description="Share this Home's structure or start another Octopus from it.">
+          <OcCard>
+            <OcSettingsRow {...settingsTargetProps("general.export-setup")}
+              control={(
+                <OcButton busy={setupExport.busy} disabled={setupExport.busy || extensions.loading} onClick={() => void exportHomeSetup()}>
+                  Export setup…
+                </OcButton>
+              )}
+              description="Save the space, its projects and the capabilities each project uses as a file. Another Octopus imports it on the first step of setup. Keys, accounts, tasks and history stay here."
+              label="Setup file"
+              meta={setupExport.note || undefined}
+            />
           </OcCard>
         </OcGroup>
       ) : null}

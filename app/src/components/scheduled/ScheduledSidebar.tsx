@@ -167,7 +167,7 @@ function TriggerListItem({ now, onNavigate, onOpenRun, task }: {
   return (
     <div className="flex flex-col gap-px" data-selected-scheduled-task={selected || undefined} role="listitem">
       <ScheduledTaskRow
-        actions={[
+        actions={task.eventSource ? [] : [
           { glyph: "edit", label: "Edit", disabled: !workspace.canEdit || !task.valid || workspace.pending, onSelect: () => workspace.startEdit(task) },
           ...(scheduledRowStatus(task) === "completed" ? [] : [{ glyph: paused ? "play" as const : "pause" as const, label: paused ? "Resume" : "Pause", disabled: !workspace.canEdit || !task.valid || workspace.pending, onSelect: () => workspace.toggleTask(task) }]),
           { glyph: "trash", label: "Delete", disabled: !workspace.canEdit || workspace.pending, tone: "danger", onSelect: () => workspace.requestDelete(task) },

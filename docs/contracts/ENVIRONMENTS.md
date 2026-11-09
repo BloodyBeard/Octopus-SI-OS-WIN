@@ -20,19 +20,26 @@ EEs it can act in.
   goal class, the interface allowance (which includes worker pins), allowed
   room kinds, optional tool narrowing and hard blocks, the child templates that
   may be created beneath it, and the host slots its rooms may be given.
-- **Instance** - a JSON record with its template, its parent, its goal text,
-  and any further narrowing.
+- **Instance** - a JSON record with its stable ID, optional human-readable name,
+  template, parent, goal text, and any further narrowing.
 
 ```json
 {
   "ee_id": "ee_project_df8954674cf6fca310f23412",
+  "name": "Life",
   "template_name": "project",
   "parent_ee_id": "ee_existence",
-  "goal": "Life",
+  "goal": "Manage personal work and commitments",
   "config": {},
   "policy_narrowing": {}
 }
 ```
+
+`name`, when present, must be nonblank. It is EE metadata, independent of the
+goal, template and policy; `ee_id` remains the stable identity. The client writes
+the Project name into this field when creating or explicitly renaming a Project.
+Topology and Project lists read the EE record's name directly. An unnamed EE is
+shown by its ID, without borrowing a goal, template or presentation alias.
 
 **Environments form a hierarchy.** An instance may have a parent, and policy narrows
 inward along that chain. A parentless instance starts an independent chain. The
@@ -149,7 +156,14 @@ within the declared cleanup timeout;
 a deadline or permission failure never synthesizes an exit. A successful retry
 clears the current termination failure only after closure, while earlier call
 receipts remain unchanged. Replacing a package does not change the sandbox of
-an already running keeper.
+an already running keeper. A keeper creates only its own record directories
+inside a process registry that still exists; once the Home that owned it is
+gone, retiring a closed command fails instead of recreating the tree.
+
+A path outside the formed roots is refused as a boundary violation. A
+filesystem failure inside them (a missing file, a permission the operating
+system denies) names its operation and path instead, so it never reads as a
+policy refusal.
 
 On macOS, the executor observes root exit without reaping its PID until the owned
 group has finished. Signals and reaping share that ownership; after it is

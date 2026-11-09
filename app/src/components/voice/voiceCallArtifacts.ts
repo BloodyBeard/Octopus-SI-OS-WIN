@@ -273,7 +273,7 @@ export async function updateVoiceClientContext(call: VoiceCall, clientContext: O
 
 export async function waitForVoiceProviderReady(call: VoiceCall, signal: AbortSignal): Promise<void> {
   const state = await waitForArtifact(call, "realtime.session.state", payload => payload.call_id === call.callId
-    && (payload.state === "failed" || payload.provider_event === "session.started" || payload.provider_event === "session.updated"), signal);
+    && (payload.state === "failed" || payload.sideband_connected === true || payload.provider_event === "session.started" || payload.provider_event === "session.updated"), signal);
   if (state.state !== "attached") throw new Error(typeof state.reason === "string" ? state.reason : "Voice provider did not become ready.");
 }
 

@@ -35,6 +35,7 @@ type Props = {
   startedAtMs: number;
   toolPresentations: ChatToolPresentationIndex;
   turnInProgress?: boolean;
+  blockingReason?: string;
 };
 
 type ActivityFamily =
@@ -90,7 +91,7 @@ type CompletedGroupSegment = {
   leading: string;
 };
 
-export function TurnActivity({ activityWindow = "all", activities, finalStartedAtMs, presentation, renderActivity, response, statusBoundaryVisible = true, startedAtMs, toolPresentations, turnInProgress }: Props) {
+export function TurnActivity({ activityWindow = "all", activities, finalStartedAtMs, presentation, renderActivity, response, statusBoundaryVisible = true, startedAtMs, toolPresentations, turnInProgress, blockingReason = "" }: Props) {
   const reducedMotion = useShouldReduceMotion();
   const syntheticSubmitting = activities.some((message) => message.eventData?.work_status === "submitting");
   const syntheticWorking = activities.some((message) => message.eventData?.work_status === "working");
@@ -113,14 +114,15 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
   const failed = Boolean(terminalTraceError) && !stopped;
   const turnCompleted = activities.some(turnWasCompleted);
   const turnFinished = finalStarted || failed || stopped || turnCompleted;
-  const working = !finalStarted && !failed && !stopped && !turnCompleted && Boolean(
+  const blocked = Boolean(blockingReason) && !turnFinished;
+  const working = !blocked && !finalStarted && !failed && !stopped && !turnCompleted && Boolean(
     turnInProgress ?? (
       syntheticWorking
       || syntheticSubmitting
       || coalesceActivities(visibleActivity).some((entry) => entry.active)
     )
   );
-  const settled = presentation === "ledger"
+  const settled = blocked || presentation === "ledger"
     ? visibleActivity
     : !working
       ? settleOpenTextStreams(visibleActivity, failed ? "failed" : "completed")
@@ -136,17 +138,20 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
         presented,
         toolPresentations,
         presentation === "ledger",
+        working,
       );
       return activityWindow === "latest-context" ? latestContextActivityUnits(projected) : projected;
     },
-    [activityWindow, presentation, presented, toolPresentations],
+    [activityWindow, presentation, presented, toolPresentations, working],
   );
   const hasConversationReasoningWork = presentation === "conversation"
     && visibleActivity.some((message) => activityFamily(message) === "reasoning");
   const thinkingFallbackMessage = presentation === "conversation"
     ? latestReasoningSummaryHeading(presented) || "Thinking"
     : "Thinking";
-  const { activeGroupId, showThinkingFallback } = activityProgressSurface(units, working);
+  const progress = activityProgressSurface(units, working);
+  const activeGroupId = blocked ? null : progress.activeGroupId;
+  const showThinkingFallback = !blocked && progress.showThinkingFallback;
   const [historyDisclosureState, setHistoryDisclosureState] = useState<DisclosureState>("collapsed");
   const [, setClock] = useState(0);
   const historyOpeningFrameRef = useRef<number | null>(null);
@@ -191,6 +196,7 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
 
   const hasWork = units.length > 0;
   const startingTask = syntheticSubmitting
+    && !blocked
     && !hasWork
     && !response
     && !failed
@@ -200,7 +206,7 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
     && !stopped
     && !hasWork
     && hasConversationReasoningWork;
-  const showWorkedForBoundary = statusBoundaryVisible
+  const showWorkedForBoundary = !blocked && statusBoundaryVisible
     && (hasWork || failed || stopped || showStandaloneWorkedBoundary);
   if (startingTask) {
     return (
@@ -215,7 +221,7 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
       </section>
     );
   }
-  if (!hasWork && !working && !failed && !stopped && !showStandaloneWorkedBoundary) return null;
+  if (!hasWork && !working && !failed && !stopped && !blocked && !showStandaloneWorkedBoundary) return null;
 
   const observedStartedAtMs = positiveTimestamp(startedAtMs)
     ?? activityStartedAtMs(activities)
@@ -254,13 +260,14 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
   return (
     <section
       className="octopus-turn-activity flex min-h-0 min-w-0 flex-col text-token-text-secondary"
-      data-state={working ? "working" : stopped ? "stopped" : failed ? "failed" : "complete"}
+      data-state={blocked ? "blocked" : working ? "working" : stopped ? "stopped" : failed ? "failed" : "complete"}
       onClickCapture={(event) => {
         const target = event.target;
         const toggle = target instanceof Element ? target.closest("button[aria-expanded]") : null;
         if (!turnFinished && toggle?.getAttribute("aria-expanded") === "false") setHistoryDisclosureState("expanded");
       }}
     >
+      {blocked ? <div className="composer-storage-warning" role="status">{blockingReason}</div> : null}
       {collapsibleHistory ? (
         <>
           <WorkedForToggle elapsed={elapsed} expanded={historyExpanded} onToggle={toggleHistory} />
@@ -1026,6 +1033,7 @@ function buildActivityUnits(
   messages: ChatRenderMessage[],
   toolPresentations: ChatToolPresentationIndex,
   preserveMovements = false,
+  working = false,
 ): ActivityUnit[] {
   const entries = coalesceActivities(messages, preserveMovements).filter((entry) => (
     preserveMovements || conversationActivityEntryVisible(entry)
@@ -1069,7 +1077,7 @@ function buildActivityUnits(
 
   for (const entry of entries) {
     if (!preserveMovements) {
-      if (entry.family === "reasoning") {
+      if (entry.family === "reasoning" && (entry.active || (working && entry === entries.at(-1)))) {
         if (explorationOpen) grouped.push(entry);
         continue;
       }
@@ -1157,13 +1165,13 @@ function conversationActivityMessages(
         eventData: reasoningSummaryEventData(data, summaryIndex),
       }];
     }
-    const summaries = reasoningSummaryTexts(data.summary);
+    const summaries = conversationReasoningTexts(data);
     if (!summaries.length) return [];
     return [{
       ...message,
       id: `${message.id}:summary`,
       text: reasoningSummaryContent(summaries),
-      eventData: reasoningSummaryEventData(data),
+      eventData: { ...reasoningSummaryEventData(data), summary: summaries },
       pending: false,
     }];
   });
@@ -1187,7 +1195,12 @@ function reasoningSummaryContent(summaries: string[]): string {
   return [first.startsWith("**") ? first : `**${first}**`, ...rest].join("\n\n");
 }
 
-function reasoningSummaryTexts(value: unknown): string[] {
+function conversationReasoningTexts(data: Record<string, unknown>): string[] {
+  const summaries = reasoningTextParts(data.summary);
+  return summaries.length ? summaries : reasoningTextParts(data.content);
+}
+
+function reasoningTextParts(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => typeof item === "string" ? item.trim() : text(record(item).text))
@@ -1337,7 +1350,7 @@ function activityDetailMessages(entry: ActivityEntry): ChatRenderMessage[] {
   if (entry.family === "reasoning") {
     const completed = lastOf(["reasoning"]);
     if (completed) {
-      const summaries = reasoningSummaryTexts(record(completed.eventData).summary);
+      const summaries = conversationReasoningTexts(record(completed.eventData));
       if (!summaries.length) return [];
       return [{
         ...completed,

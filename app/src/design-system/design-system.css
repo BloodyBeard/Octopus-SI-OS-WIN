@@ -231,15 +231,20 @@
 .oc-dialog[data-oc-dialog-size="narrow"] { width: 380px; }
 .oc-dialog[data-oc-dialog-size="feature"] { width: 400px; }
 .oc-dialog[data-oc-dialog-size="compact"] { width: 420px; }
+.oc-dialog[data-oc-dialog-size="setup"] { width: 480px; }
 .oc-dialog[data-oc-dialog-size="default"] { width: 520px; }
 .oc-dialog[data-oc-dialog-size="wide"] { width: 600px; }
 .oc-dialog[data-oc-dialog-size="xwide"] { width: 680px; }
 .oc-dialog[data-oc-dialog-size="xxwide"] { width: 800px; }
-.oc-dialog-overlay[data-oc-dialog-variant="form"] { background: #00000080; }
+.oc-dialog-overlay[data-oc-dialog-variant="form"] {
+  background: #00000080;
+  -webkit-backdrop-filter: blur(1px);
+  backdrop-filter: blur(1px);
+}
 :root[data-theme="light"] .oc-dialog-overlay[data-oc-dialog-variant="form"] { background: #e3e3e380; }
 
 .oc-dialog[data-oc-dialog-variant="form"] {
-  border-radius: 24px;
+  border-radius: calc(var(--spacing) * 6 * var(--corner-radius-scale));
   box-shadow: 0 0 0 .5px var(--color-border), 0 8px 10px -6px #0000001a, 0 20px 25px -5px #0000001a;
 }
 

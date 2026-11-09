@@ -19,6 +19,8 @@ const PROOF_KIND = {
   workspace: "workspace_receipt",
 };
 const transactionTails = new Map();
+const executionTails = new Map();
+const activeResumes = new Map();
 
 const validators = new Ajv2020({ allErrors: true, strict: true });
 validators.addSchema(operationSchema);
@@ -46,7 +48,7 @@ function createClientSetupStore(options) {
   }
 
   async function begin(request) {
-    return withClientSetupLock(root, async () => {
+    return withClientSetupLock(root, () => withClientSetupLock(root, async () => {
       await ensureRoot();
       const operationId = requiredOperationId(request?.operationId);
       const plan = normalizePlan(request?.plan, operationId);
@@ -80,7 +82,7 @@ function createClientSetupStore(options) {
       await writeJsonAtomic(operationPath(operationId), operation);
       await selectCurrent(operation);
       return projectOperation(operation);
-    });
+    }), executionTails);
   }
 
   async function read(operationIdValue) {
@@ -104,87 +106,95 @@ function createClientSetupStore(options) {
   async function resume(operationIdValue, resumeOptions = {}) {
     const stopBefore = typeof operationIdValue === "object" ? operationIdValue?.stopBefore : undefined;
     if (stopBefore !== undefined && stopBefore !== "provider") throw new Error("Unsupported client setup stop point.");
-    return withClientSetupLock(root, async () => {
+    const operationId = requiredOperationId(operationIdValue?.operationId ?? operationIdValue);
+    return joinClientSetupResume(root, operationId, stopBefore, resumeOptions.onProgress, (onProgress) =>
+      withClientSetupLock(root, () => resumeOperation(operationId, stopBefore, onProgress), executionTails));
+  }
+
+  async function resumeOperation(operationId, stopBefore, onProgress) {
+    let operation = await withClientSetupLock(root, async () => {
       await ensureRoot();
-      const operationId = requiredOperationId(operationIdValue?.operationId ?? operationIdValue);
       const completed = await readReceipt(operationId);
       if (completed) return projectReceipt(completed);
-      let operation = await readOperation(operationId);
-      if (!operation) throw new Error(`Client setup operation '${operationId}' does not exist.`);
-      const onProgress = typeof resumeOptions.onProgress === "function" ? resumeOptions.onProgress : () => {};
+      const current = await readOperation(operationId);
+      if (!current) throw new Error(`Client setup operation '${operationId}' does not exist.`);
+      return current;
+    });
+    if (operation.status === "complete") return operation;
 
-      for (const [index, step] of STEPS.entries()) {
-        if (step === stopBefore) {
-          return projectOperation(operation);
-        }
-        reportProgress(onProgress, operationId, step, "verifying", Math.round(index * 90 / STEPS.length));
-        let proof;
-        const previousProof = operation.steps.find((entry) => entry.step === step)?.proof ?? null;
+    for (const [index, step] of STEPS.entries()) {
+      if (step === stopBefore) {
+        return projectOperation(operation);
+      }
+      reportProgress(onProgress, operationId, step, "verifying", Math.round(index * 90 / STEPS.length));
+      let proof;
+      const previousProof = operation.steps.find((entry) => entry.step === step)?.proof ?? null;
+      try {
+        proof = await probeStep(owners[step], step, operation.plan, operationId, { previousProof });
+      } catch (error) {
+        operation = await recordFailure(operation, step, error);
+        throw error;
+      }
+      if (!proof) {
+        reportProgress(onProgress, operationId, step, "applying", Math.round((index + 0.35) * 90 / STEPS.length));
+        let candidateEvidence;
         try {
-          proof = await probeStep(owners[step], step, operation.plan, operationId, { previousProof });
+          candidateEvidence = await owners[step].apply(operation.plan, { operationId, step });
+        } catch (error) {
+          operation = await recordFailure(operation, step, error);
+          throw error;
+        }
+        try {
+          reportProgress(onProgress, operationId, step, "verifying", Math.round((index + 0.7) * 90 / STEPS.length));
+          proof = await probeStep(owners[step], step, operation.plan, operationId, { candidateEvidence });
         } catch (error) {
           operation = await recordFailure(operation, step, error);
           throw error;
         }
         if (!proof) {
-          reportProgress(onProgress, operationId, step, "applying", Math.round((index + 0.35) * 90 / STEPS.length));
-          let candidateEvidence;
-          try {
-            candidateEvidence = await owners[step].apply(operation.plan, { operationId, step });
-          } catch (error) {
-            operation = await recordFailure(operation, step, error);
-            throw error;
-          }
-          try {
-            reportProgress(onProgress, operationId, step, "verifying", Math.round((index + 0.7) * 90 / STEPS.length));
-            proof = await probeStep(owners[step], step, operation.plan, operationId, { candidateEvidence });
-          } catch (error) {
-            operation = await recordFailure(operation, step, error);
-            throw error;
-          }
-          if (!proof) {
-            const error = new Error(`Client setup step '${step}' completed without verifiable owner evidence.`);
-            operation = await recordFailure(operation, step, error);
-            throw error;
-          }
+          const error = new Error(`Client setup step '${step}' completed without verifiable owner evidence.`);
+          operation = await recordFailure(operation, step, error);
+          throw error;
         }
-        operation = await checkpoint(operation, step, proof);
-        reportProgress(onProgress, operationId, step, "complete", Math.round((index + 1) * 90 / STEPS.length));
       }
+      operation = await checkpoint(operation, step, proof);
+      reportProgress(onProgress, operationId, step, "complete", Math.round((index + 1) * 90 / STEPS.length));
+    }
 
-      const finalProofs = [];
-      for (const [index, step] of STEPS.entries()) {
-        reportProgress(onProgress, operationId, step, "verifying", 90 + index * 2);
-        let proof;
-        const previousProof = operation.steps.find((entry) => entry.step === step)?.proof ?? null;
-        try {
-          proof = await probeStep(owners[step], step, operation.plan, operationId, { previousProof });
-        } catch (error) {
-          operation = await recordFailure(operation, step, error, true);
-          throw error;
-        }
-        if (!proof) {
-          const error = new Error(`Client setup cannot seal because '${step}' evidence is no longer valid.`);
-          operation = await recordFailure(operation, step, error, true);
-          throw error;
-        }
-        finalProofs.push(proof);
+    const finalProofs = [];
+    for (const [index, step] of STEPS.entries()) {
+      reportProgress(onProgress, operationId, step, "verifying", 90 + index * 2);
+      let proof;
+      const previousProof = operation.steps.find((entry) => entry.step === step)?.proof ?? null;
+      try {
+        proof = await probeStep(owners[step], step, operation.plan, operationId, { previousProof });
+      } catch (error) {
+        operation = await recordFailure(operation, step, error, true);
+        throw error;
       }
-      const receipt = parseReceipt({
-        schema: "octopus.client_setup_receipt",
-        schema_version: 1,
-        operation_id: operation.operation_id,
-        plan_digest: operation.plan_digest,
-        plan: operation.plan,
-        proof_semantics: "sequential_owner_observations",
-        proofs: finalProofs,
-        completed_at: timestamp(),
-      });
+      if (!proof) {
+        const error = new Error(`Client setup cannot seal because '${step}' evidence is no longer valid.`);
+        operation = await recordFailure(operation, step, error, true);
+        throw error;
+      }
+      finalProofs.push(proof);
+    }
+    const receipt = parseReceipt({
+      schema: "octopus.client_setup_receipt",
+      schema_version: 1,
+      operation_id: operation.operation_id,
+      plan_digest: operation.plan_digest,
+      plan: operation.plan,
+      proof_semantics: "sequential_owner_observations",
+      proofs: finalProofs,
+      completed_at: timestamp(),
+    });
+    await withClientSetupLock(root, async () => {
       await writeReceipt(receipt);
       await selectCurrent(receipt);
-      reportProgress(onProgress, operationId, "workspace", "sealed", 100);
-      return projectReceipt(receipt);
     });
+    reportProgress(onProgress, operationId, "workspace", "sealed", 100);
+    return projectReceipt(receipt);
   }
 
   async function checkpoint(operation, step, proof) {
@@ -198,7 +208,7 @@ function createClientSetupStore(options) {
       last_error: undefined,
     });
     delete next.last_error;
-    await writeJsonAtomic(operationPath(operation.operation_id), next);
+    await withClientSetupLock(root, () => writeJsonAtomic(operationPath(operation.operation_id), next));
     return next;
   }
 
@@ -216,7 +226,7 @@ function createClientSetupStore(options) {
         observed_at: timestamp(),
       },
     });
-    await writeJsonAtomic(operationPath(operation.operation_id), next);
+    await withClientSetupLock(root, () => writeJsonAtomic(operationPath(operation.operation_id), next));
     return next;
   }
 
@@ -659,17 +669,37 @@ async function syncDirectory(directory) {
   }
 }
 
-function withClientSetupLock(root, operation) {
+function withClientSetupLock(root, operation, tails = transactionTails) {
   const key = path.resolve(root);
-  const previous = transactionTails.get(key) ?? Promise.resolve();
+  const previous = tails.get(key) ?? Promise.resolve();
   let release;
   const current = new Promise((resolve) => { release = resolve; });
   const tail = previous.then(() => current);
-  transactionTails.set(key, tail);
+  tails.set(key, tail);
   return previous.then(operation).finally(() => {
     release();
-    if (transactionTails.get(key) === tail) transactionTails.delete(key);
+    if (tails.get(key) === tail) tails.delete(key);
   });
+}
+
+function joinClientSetupResume(root, operationId, stopBefore, listener, execute) {
+  const key = JSON.stringify([root, operationId, stopBefore ?? null]);
+  let active = activeResumes.get(key);
+  if (!active) {
+    active = { listeners: new Set(), progress: null, promise: null };
+    activeResumes.set(key, active);
+    active.promise = Promise.resolve().then(() => execute((progress) => {
+      active.progress = progress;
+      for (const notify of active.listeners) {
+        try { notify(progress); } catch {}
+      }
+    })).finally(() => activeResumes.delete(key));
+  }
+  if (typeof listener === "function") {
+    active.listeners.add(listener);
+    if (active.progress) { try { listener(active.progress); } catch {} }
+  }
+  return active.promise;
 }
 
 function reportProgress(listener, operationId, step, phase, percent) {

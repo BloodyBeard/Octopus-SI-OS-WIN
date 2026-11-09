@@ -274,6 +274,9 @@ pub fn verify_selected_source_input(
         .interface_binding
         .as_ref()
         .ok_or("source input binding absent")?;
+    if !routes.iter().any(|route| route.interface_binding == *inbound && route.interface_binding.admits(&entry.label)) {
+        return Err(format!("selected input arrived through '{}', outside the declared source input routes", inbound.interface));
+    }
     let topology: BoundRunAuthoringTopology = serde_json::from_value(
         record
             .interface_state
@@ -287,9 +290,6 @@ pub fn verify_selected_source_input(
         || topology.run != record.id
         || topology.worker != record.worker
         || topology.provider_interface.as_str() != scope.provider
-        || !routes.iter().any(|route| {
-            route.interface_binding == *inbound && route.interface_binding.admits(&entry.label)
-        })
         || !topology.checkpoints.iter().any(|template| {
             template.role.is_provider_input()
                 && checkpoint_record_matches_template(cp, template, &record.id)

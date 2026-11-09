@@ -1,12 +1,12 @@
 import { useRef, useState } from "react";
-import { OcMenuItem } from "../../design-system/components";
+import { OcButton, OcMenuItem } from "../../design-system/components";
 import { OcDropdown } from "../../design-system/OcDropdown";
 import { Glyph } from "../IconGlyphs";
 import { describeInactivityState, describeSchedule, formatEvidenceTime, formatSchedule, nextScheduledRunAtMs, resolvedTimezone } from "./scheduleModel";
 import { scheduledRowStatus } from "./ScheduledRows";
 import type { ScheduledInterfaceProjection, ScheduledScopeOption } from "./types";
 
-export function ScheduledDetail({ task, pending, canEdit, scopeOptions, onDelete, onEdit, onToggle }: {
+export function ScheduledDetail({ task, pending, canEdit, scopeOptions, onDelete, onEdit, onToggle, onSelectChat }: {
   task: ScheduledInterfaceProjection;
   pending: boolean;
   canEdit: boolean;
@@ -14,8 +14,27 @@ export function ScheduledDetail({ task, pending, canEdit, scopeOptions, onDelete
   onDelete: () => void;
   onEdit: () => void;
   onToggle: () => void;
+  onSelectChat?: (runId: string) => void;
 }) {
   const status = scheduledRowStatus(task);
+  if (task.eventSource) return (
+    <section aria-label={task.displayName} className="flex h-full min-h-0 flex-col overflow-y-auto" data-scheduled-detail="">
+      <div className="mx-auto flex w-full max-w-(--thread-content-max-width) flex-col gap-4 px-toolbar pt-panel pb-8">
+        <h2 className="m-0 text-xl font-semibold">{task.displayName}</h2>
+        <p className="m-0 text-secondary">Runs when this source delivers an event.</p>
+        {task.eventSource.sources.length ? <p className="m-0 break-words text-sm text-secondary select-text">{task.eventSource.sources.join(", ")}</p> : null}
+        <div className="flex flex-col gap-3 rounded-2xl border border-default p-4">
+          {task.eventSource.targets.map((target) => (
+            <div className="flex min-w-0 items-center gap-3" key={target.runId}>
+              <span className="min-w-0 flex-1 truncate">{target.title}</span>
+              {onSelectChat && target.chatInterfaceId ? <OcButton onClick={() => onSelectChat(target.runId)} size="sm" variant="secondary">Open task</OcButton> : null}
+            </div>
+          ))}
+        </div>
+        <p className="m-0 text-sm text-tertiary">{task.lastRunAtMs ? `Last event received ${formatEvidenceTime(task.lastRunAtMs)}.` : "No events received yet."}</p>
+      </div>
+    </section>
+  );
   return (
     <section aria-label={task.displayName} className="flex h-full min-h-0 flex-col" data-scheduled-detail="">
       <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">

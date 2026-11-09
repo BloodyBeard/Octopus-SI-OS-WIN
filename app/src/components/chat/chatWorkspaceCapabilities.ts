@@ -164,9 +164,11 @@ export function providerForExistingRun(
   run: ChatRun | undefined,
   selection: { runId: string; eeId: string; workerInterfaceId: string },
 ): OctopusProviderInterface | null {
+  const workerChoiceInterfaceId = run?.workerChoiceInterfaceId || run?.workerInterfaceId;
   if (!run || !run.writable || run.archived || !run.providerBoundInterfaceId
     || run.runId !== selection.runId || run.eeId !== selection.eeId
-    || (run.workerChoiceInterfaceId || run.workerInterfaceId) !== selection.workerInterfaceId
+    || !selection.workerInterfaceId
+    || (selection.workerInterfaceId !== workerChoiceInterfaceId && selection.workerInterfaceId !== run.workerInterfaceId)
     || run.providerInterfaceId !== provider.id) return null;
   return provider;
 }

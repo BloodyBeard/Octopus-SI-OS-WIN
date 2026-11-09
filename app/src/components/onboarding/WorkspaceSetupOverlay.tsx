@@ -16,6 +16,13 @@ import {
 import { OcCheckbox } from "../../design-system/components";
 import { Glyph, type GlyphName } from "../IconGlyphs";
 import { OctopusLoadingLogo } from "../OctopusLoadingLogo";
+import {
+  draftFromSetupFile,
+  parseSetupFile,
+  serializeSetupFile,
+  setupFileFromDraft,
+  setupFileName,
+} from "../../onboarding/setupFile";
 
 export type WorkspaceSetupCatalogCapability = {
   id: string;
@@ -67,6 +74,12 @@ type Props = {
   onProviderConfigured: (updates: Record<string, string>) => Promise<void>;
   onChange: (draft: WorkspaceSetupDraft) => void;
   onRetryCatalog: () => void;
+  setupFiles: WorkspaceSetupFiles;
+};
+
+export type WorkspaceSetupFiles = {
+  open: () => Promise<{ opened: false } | { opened: true; name: string; text: string }>;
+  save: (request: { text: string; suggestedName: string }) => Promise<{ saved: false } | { saved: true; name: string }>;
 };
 
 const STEPS: Array<{ id: Exclude<WorkspaceSetupStep, "applying">; tag: string; title: string; body: string }> = [
@@ -110,6 +123,7 @@ export function WorkspaceSetupOverlay({
   onProviderConfigured,
   onChange,
   onRetryCatalog,
+  setupFiles,
 }: Props) {
   const activeStep = draft.step === "applying" ? "review" : draft.step;
   const activeIndex = Math.max(0, STEPS.findIndex((step) => step.id === activeStep));
@@ -118,6 +132,30 @@ export function WorkspaceSetupOverlay({
   const model = provider?.models.find((candidate) => candidate.model === draft.providerModel && candidate.showInPicker);
   const canContinue = stepIsComplete(draft, activeStep, catalogLoading, catalog.length)
     && (!["capabilities", "review"].includes(activeStep) || Boolean(model && provider && providerServiceTierAvailable(provider, model.model, draft.serviceTier ?? "default")));
+  const [fileNotice, setFileNotice] = useState<SetupFileNotice | null>(null);
+
+  async function importSetup() {
+    setFileNotice(null);
+    try {
+      const picked = await setupFiles.open();
+      if (!picked.opened) return;
+      onChange(draftFromSetupFile(parseSetupFile(picked.text), draft, catalog, provider));
+      setFileNotice({ tone: "info", text: `Imported ${picked.name}. Check each step before setting up.` });
+    } catch (error) {
+      setFileNotice({ tone: "error", text: setupFileMessage(error) });
+    }
+  }
+
+  async function exportSetup() {
+    setFileNotice(null);
+    try {
+      const file = setupFileFromDraft(draft);
+      const saved = await setupFiles.save({ text: serializeSetupFile(file), suggestedName: setupFileName(file) });
+      if (saved.saved) setFileNotice({ tone: "info", text: `Saved ${saved.name}.` });
+    } catch (error) {
+      setFileNotice({ tone: "error", text: setupFileMessage(error) });
+    }
+  }
 
   useEffect(() => {
     if (draft.step === "applying" || !provider) return;
@@ -133,6 +171,7 @@ export function WorkspaceSetupOverlay({
   }, [catalog, draft, onChange]);
 
   function move(next: WorkspaceSetupStep) {
+    setFileNotice(null);
     onChange({ ...draft, step: next, updatedAt: new Date().toISOString() });
   }
 
@@ -161,23 +200,27 @@ export function WorkspaceSetupOverlay({
 
   return (
     <main className="welcome" aria-labelledby="welcome-title">
-      <header className="welcome-top">
-        <div className="welcome-brand">
-          <img className="welcome-brand-mark" src="./octopus-logo.png" alt="" />
-          <span className="welcome-brand-name">Octopus&nbsp;OS</span>
-        </div>
-      </header>
+      <SetupHeader />
 
-      <div className="welcome-stage setup-stage" key={applying ? "applying" : activeStep}>
+      <div className="welcome-stage setup-stage" data-applying={applying || undefined} key={applying ? "applying" : activeStep}>
         {applying ? (
-          <ApplyingStep applyState={applyState} draft={draft} onProviderConfigured={onProviderConfigured} />
+          <ApplyingStep applyState={applyState} onProviderConfigured={onProviderConfigured} />
         ) : (
           <section className="setup-step">
             <span className="welcome-tag">{step.tag}</span>
             <h1 id="welcome-title" className="welcome-title">{step.title}</h1>
             <p className="welcome-body welcome-body-wide">{step.body}</p>
             {activeStep === "space" ? (
-              <SpaceStep draft={draft} onChange={onChange} />
+              <>
+                <SpaceStep draft={draft} onChange={onChange} />
+                <SetupFileAction
+                  disabled={catalogLoading || !catalog.length}
+                  glyph="file"
+                  label="Import setup…"
+                  notice={fileNotice}
+                  onClick={() => void importSetup()}
+                />
+              </>
             ) : activeStep === "projects" ? (
               <ProjectsStep draft={draft} onChange={onChange} />
             ) : activeStep === "capabilities" ? (
@@ -192,7 +235,16 @@ export function WorkspaceSetupOverlay({
                 providers={providers}
               />
             ) : (
-              <ReviewStep agentPresets={agentPresets} catalog={catalog} draft={draft} />
+              <>
+                <ReviewStep agentPresets={agentPresets} catalog={catalog} draft={draft} />
+                <SetupFileAction
+                  disabled={false}
+                  glyph="download"
+                  label="Export setup…"
+                  notice={fileNotice}
+                  onClick={() => void exportSetup()}
+                />
+              </>
             )}
           </section>
         )}
@@ -233,6 +285,41 @@ export function WorkspaceSetupOverlay({
       </footer>
     </main>
   );
+}
+
+type SetupFileNotice = { tone: "info" | "error"; text: string };
+
+function SetupFileAction({
+  disabled,
+  glyph,
+  label,
+  notice,
+  onClick,
+}: {
+  disabled: boolean;
+  glyph: GlyphName;
+  label: string;
+  notice: SetupFileNotice | null;
+  onClick: () => void;
+}) {
+  return (
+    <div className="setup-file-actions">
+      <button className="welcome-pill" disabled={disabled} onClick={onClick} type="button">
+        <Glyph name={glyph} size={14} />
+        {label}
+      </button>
+      {notice ? (
+        <span className="setup-file-note" data-tone={notice.tone} role={notice.tone === "error" ? "alert" : "status"}>
+          {notice.text}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function setupFileMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") || "Octopus could not read or write the setup file.";
 }
 
 function SpaceStep({ draft, onChange }: { draft: WorkspaceSetupDraft; onChange: (draft: WorkspaceSetupDraft) => void }) {
@@ -540,10 +627,34 @@ function ReviewStep({ catalog, draft, agentPresets }: { catalog: WorkspaceSetupC
   );
 }
 
-function ApplyingStep({ applyState, draft, onProviderConfigured }: {
+export function WorkspaceSetupProgress({ applyState, onProviderConfigured }: {
   applyState: WorkspaceSetupApplyState;
-  draft: WorkspaceSetupDraft;
-  onProviderConfigured: (updates: Record<string, string>) => Promise<void>;
+  onProviderConfigured?: (updates: Record<string, string>) => Promise<void>;
+}) {
+  return <main className="welcome" aria-labelledby="welcome-title">
+    <SetupHeader />
+    <div className="welcome-stage setup-stage" data-applying><ApplyingStep applyState={applyState} onProviderConfigured={onProviderConfigured} /></div>
+    <footer className="welcome-footer">
+      <div className="welcome-footer-side welcome-footer-left" />
+      <div className="welcome-footer-side welcome-footer-right">
+        <button className="welcome-next" type="button" disabled>Working…</button>
+      </div>
+    </footer>
+  </main>;
+}
+
+function SetupHeader() {
+  return <header className="welcome-top">
+    <div className="welcome-brand">
+      <img className="welcome-brand-mark" src="./octopus-logo.png" alt="" />
+      <span className="welcome-brand-name">Octopus&nbsp;OS</span>
+    </div>
+  </header>;
+}
+
+function ApplyingStep({ applyState, onProviderConfigured }: {
+  applyState: WorkspaceSetupApplyState;
+  onProviderConfigured?: (updates: Record<string, string>) => Promise<void>;
 }) {
   const failed = applyState.state === "failed";
   const running = applyState.state === "running";
@@ -563,7 +674,7 @@ function ApplyingStep({ applyState, draft, onProviderConfigured }: {
         <span className="welcome-tag">{failed ? "Needs attention" : "Account"}</span>
       )}
       <h1 id="welcome-title" className="welcome-title">
-        {failed ? "Setup needs attention" : applyState.label || `Creating ${draft.spaceName}`}
+        {failed ? "Setup needs attention" : applyState.label || "Preparing your space"}
       </h1>
       <p className="welcome-body" data-tone={failed ? "danger" : undefined}>
         {failed ? applyState.error : applyState.detail || "Your choices are being verified and applied. You can safely reopen Octopus if this window closes."}
@@ -575,7 +686,7 @@ function ApplyingStep({ applyState, draft, onProviderConfigured }: {
         </div>
       ) : null}
       {waiting && running ? <p className="mt-4 text-sm text-token-description-foreground">Still waiting for this step. You can collect diagnostics from Help → Report a Problem.</p> : null}
-      {applyState.state === "awaiting_provider" && applyState.providerConfiguration ? (
+      {applyState.state === "awaiting_provider" && applyState.providerConfiguration && onProviderConfigured ? (
         <ProviderSetupForm configuration={applyState.providerConfiguration} onSubmit={onProviderConfigured} />
       ) : null}
     </section>

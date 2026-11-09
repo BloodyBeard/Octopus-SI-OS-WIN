@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const { scheduledInterfacesProjection } = require('../electron/projection/scheduledInterfaces.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,6 +23,73 @@ function projectionFixture(fields = {}) {
     structureMemo: new Map(), ledgerMemo: new Map(), ...fields };
 }
 
+test('durable metadata resolves exact binding refs and rejects ambiguous or changed content', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'octopus-metadata-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'metadata'));
+  const refs = [{ id: 'bound', content: Array(32).fill(1) }];
+  const bytes = Buffer.from(JSON.stringify(refs));
+  const hash = Buffer.from(blake3(bytes)).toString('hex');
+  const contentFile = path.join(root, 'metadata', hash);
+  fs.writeFileSync(contentFile, bytes);
+  const row = { seq: 0, lamport: 1, recorded_at_unix_ms: 1, trace: 'metadata', kind: 'InterfaceOutbound',
+    from: { Interface: 'provider' }, to: { Interface: 'worker' }, artifact: null,
+    invocation_metadata: { grant: {}, artifact_binding_refs_content: hash } };
+  const store = projectionStore();
+  const read = (value = row) => store.parseCanonicalMovement(JSON.stringify(value), path.join(root, 'movements.jsonl'), 1);
+  assert.deepEqual(read().invocation_metadata.artifact_binding_refs, refs);
+  assert.deepEqual(read().invocation_metadata.artifact_binding_refs, refs);
+  assert.throws(() => read({ ...row, invocation_metadata: { ...row.invocation_metadata, artifact_binding_refs: refs } }), /both inline and content-addressed/);
+  fs.writeFileSync(contentFile, Buffer.alloc(bytes.length, 32));
+  assert.throws(() => read(), /integrity mismatch/);
+  fs.rmSync(contentFile);
+  assert.throws(() => read(), /content is invalid/);
+});
+
+test('Triggers includes bound event sensors without treating them as cron activations', async (t) => {
+  const sensor = (id) => ({ id, interface_type: 'world', role: 'sensor', direction: 'inbound', source_names: ['issue.opened'] });
+  const projection = projectionFixture({
+    descriptors: { interface: [sensor('world_events'), sensor('world_unused'),
+      { ...sensor('world_provider'), role: 'provider' },
+      { ...sensor('world_mail'), role: 'service', direction: 'bidirectional', source_names: ['mail'],
+        interface_driver_config: { private_config: { task_input_labels: ['mail.event'] } } },
+      { ...sensor('world_drive'), role: 'service' }], ee_template: [] },
+    runRecords: [
+      { run_id: 'task', checkpoints: [{ status: 'projected', interface: 'world_events' }, { status: 'projected', interface: 'world_mail' },
+        { status: 'projected', interface: 'world_drive' }] },
+      { run_id: 'old', checkpoints: [{ status: 'made', interface: 'world_unused' }] },
+    ],
+  });
+  const event = { ...movement(5, 'issue.opened', {}, { from: 'world_events', kind: 'InterfaceArrival' }),
+    invocation_metadata: { runtime: { run: 'task' } } };
+  const entry = { runId: 'task', chatInterfaceId: 'chat', surfaceRole: 'task' };
+  const store = projectionStore({
+    operatorOsScope: () => ({ client_runs: [{ run_id: 'task', interface_id: 'chat' }] }),
+    operatorChatRunIndex: async () => [entry], operatorChatTitle: async () => 'Review new issues',
+    readIndexedInterfaceArtifactRows: async (_projection, run, id, labels) => {
+      assert.equal(run, '');
+      if (id === 'world_mail') {
+        assert.deepEqual([...labels], ['mail.event']);
+        return [{ ...movement(7, 'mail.event', {}, { from: 'world_mail', kind: 'InterfaceArrival' }), invocation_metadata: { runtime: { run: 'task' } } },
+          { ...movement(8, 'mail.result', {}, { from: 'world_mail', kind: 'InterfaceArrival' }), invocation_metadata: { runtime: { run: 'task' } } }];
+      }
+      assert.equal(id, 'world_events'); assert.equal(labels.size, 0);
+      return [event, { ...event, seq: 6, kind: 'DeliveryRefused' }];
+    },
+  });
+  t.after(() => store.close());
+  const rows = await store.scheduledInterfaceRows(projection);
+  assert.deepEqual(rows.map((row) => row.interface_id), ['world_events', 'world_mail']);
+  assert.equal(rows[1].last_movement_seq, 7);
+  assert.deepEqual(rows[1].event_source.sources, ['mail']);
+  assert.equal(rows[0].valid, true);
+  assert.equal(rows[0].schedule, undefined);
+  assert.equal(rows[0].last_movement_seq, 5);
+  assert.deepEqual(rows[0].event_source, { sources: ['issue.opened'], targets: [
+    { run_id: 'task', chat_interface_id: 'chat', title: 'Review new issues' },
+  ] });
+});
+
 test('trigger history groups delivery edges and uses the same task title as All tasks', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oct-trigger-history-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -31,22 +100,73 @@ test('trigger history groups delivery edges and uses the same task title as All 
   t.after(() => store.close());
   const edge = (seq, run, kind, artifact = 'firing') => ({ ...movement(seq, 'cron.current_time', {}, { from: 'trigger', kind }),
     artifact: { id: `cron.current_time:${artifact}` }, invocation_metadata: { runtime: { run } } });
-  const edges = [edge(1, 'controller', 'InterfaceArrival'), edge(2, 'task', 'InterfaceArrival'), edge(3, 'task', 'InterfaceOutbound')];
+  const edges = [edge(1, 'observer', 'InterfaceArrival'), edge(2, 'task', 'InterfaceArrival'), edge(3, 'task', 'InterfaceOutbound')];
   entry.activity = [edges[1]];
-  projection.descriptorIndexes.interface.set('trigger', { activation_sidecars: [{ activations: [{ activation_driver_ref: 'cron_life', config: { run_template: { id: 'run_review' } } }] }] });
+  projection.descriptorIndexes.interface.set('trigger', { activation_sidecars: [{ activations: [{ activation_driver_ref: 'cron_life', config: { schedule: {} } }] }] });
   const title = () => store.operatorChatTitle(projection, entry, new Map(), protocol);
   const read = (rows = edges) => store.scheduledInterfaceEvidence(projection, 'trigger', { schedule: {} }, rows);
-  assert.equal(await title(), 'Review');
-  assert.deepEqual((await read()).deliveries.map(row => [row.run_id, row.chat_interface_id, row.title]), [['task', 'chat', 'Review']]);
-  const directory = path.join(root, 'state/change-journals/task'); fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(path.join(directory, 'journal.json'), JSON.stringify({ schema_version: 1, run: 'task', outcome: 'unchanged', summary: 'Reviewed the activity window', changes: [] }));
-  assert.equal((await read()).deliveries[0].title, await title());
-  assert.equal(await title(), 'Reviewed the activity window');
+  assert.equal(await title(), 'Trigger');
+  assert.deepEqual((await read()).deliveries.map(row => [row.run_id, row.chat_interface_id, row.title]), [['task', 'chat', 'Trigger']]);
   assert.equal((await read([...edges, edge(4, 'other', 'InterfaceArrival'), edge(5, 'other', 'InterfaceOutbound')])).deliveries.length, 2);
   assert.equal((await read([...edges, edge(6, 'task', 'InterfaceArrival', 'second')])).deliveries.length, 2);
   assert.equal((await read([edges[0]])).deliveries[0].chat_interface_id, '');
-  assert.equal(require('../electron/projection/registryRows.cjs').projectionTruthChange('state/change-journals/task/journal.json'), 'runs');
+  assert.equal(require('../electron/projection/registryRows.cjs').projectionTruthChange('state/change-journals/task/1790000000000/journal.json'), 'runs');
 });
+const cronOwner = path.resolve(__dirname, "../../registry/interface/world_cron");
+const cronDueMs = 1_800_000_000_000;
+const prepareCronState = `
+import importlib.util, json, os, pathlib, sys
+root, cronOwner, due = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3])
+os.environ.update(
+    OCTOPUS_INTERFACE_ID="world_cron", OCTOPUS_INTERFACE_DIR=str(root / "registry/interface/world_cron"),
+    OCTOPUS_VAR_DIR=str(root / "interfaces/world_cron"),
+    OCTOPUS_INTERFACE_DESCRIPTOR_JSON=(root / "registry/interface/world_cron/interface.json").read_text(),
+    OCTOPUS_INTERFACE_HOST_IO_LIMITS=json.dumps({key: 1048576 for key in
+        ("max_control_frame_bytes", "max_manifest_bytes", "max_payload_bytes", "max_stderr_bytes")}),
+)
+spec = importlib.util.spec_from_file_location("cron_projection_test", cronOwner / "cron_life.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+schedule = module.load_schedule()
+module.commit_interval_state(schedule, "waiting", due * 1_000_000)
+print(schedule["fingerprint"])
+`;
+
+test("Triggers projects owner-written interval state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "oct-cron-projection-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const directory = path.join(root, "registry/interface/world_cron");
+  fs.mkdirSync(directory, { recursive: true });
+  const descriptor = JSON.parse(fs.readFileSync(path.join(cronOwner, "interface.json")));
+  const activation = JSON.parse(fs.readFileSync(path.join(cronOwner, "activation.json")));
+  activation.activations[0].enabled = true;
+  const config = activation.activations[0].config;
+  config.schedule = { interval_seconds: 7200, fire_on_start: false, timezone: "UTC",
+    reminder_env: "", reminder_default: "Review café / проверка 🐙\u007f" };
+  const activationPath = path.join(directory, "activation.json");
+  fs.writeFileSync(activationPath, JSON.stringify(activation));
+  fs.writeFileSync(path.join(directory, "interface.json"), JSON.stringify(descriptor));
+  const result = spawnSync("python3", ["-B", "-c", prepareCronState, root, cronOwner, String(cronDueMs)], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const store = scheduledInterfacesProjection({
+    indexedArtifactLabelRows: async () => [], operatorOsScope: () => ({ client_runs: [] }), operatorChatRunIndex: async () => [],
+  });
+  const projection = { octopusHome: root, structureMemo: new Map(), descriptors: { interface: [
+    { ...descriptor, activation_sidecars: [{ ...activation, descriptor_path: activationPath }] },
+  ] }, runRecords: [{ run_id: "run_task", checkpoints: [{ status: "projected", interface: "world_cron" }] }] };
+  const read = async () => { projection.structureMemo.clear(); return (await store.scheduledInterfaceRows(projection))[0]; };
+  const current = await read();
+  assert.equal(current.valid, true, current.error);
+  assert.deepEqual(current.targets.map((target) => target.run_id), ["run_task"]);
+  assert.equal(current.next_run_at_ms, cronDueMs);
+  assert.equal(current.next_run_source, "driver_state");
+  config.schedule.cron = null;
+  const explicitNull = await read();
+  assert.equal(explicitNull.next_run_at_ms, cronDueMs, "omitted cron and null are the same owner configuration");
+  config.schedule.reminder_default = "Changed assignment";
+  assert.equal((await read()).next_run_at_ms, null, "different assignment must not validate old state");
+});
+
 function movement(seq, label, payload, { from = 'provider', to = 'chat', kind = 'InterfaceOutbound' } = {}) {
   const hex = seq.toString(16).padStart(64, '0');
   return { seq, recorded_at_unix_ms: seq * 100, kind, from: { Interface: from }, to: { Interface: to },

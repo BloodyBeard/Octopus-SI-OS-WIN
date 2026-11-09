@@ -40,6 +40,7 @@ import {
 } from "./catalog";
 import { Glyph, type GlyphName } from "./IconGlyphs";
 import { OctopusLoadingState } from "./OctopusLoadingLogo";
+import { PackageInstallReviewDialog } from "./applications/PackageInstallReviewDialog";
 import { SetupDialogShell } from "./SetupDialogShell";
 import { useAppErrorToast } from "../toasts";
 
@@ -66,6 +67,7 @@ type DriverRecord = {
   name: string;
   display_name?: string;
   description?: string;
+  icon?: string;
   package_id?: string;
   installed: boolean;
   materialized?: boolean;
@@ -133,6 +135,7 @@ type DriverLifecycleOperation = {
   phase: OctopusApplicationLifecycleProgress["phase"] | "failed";
   percent: number;
   error: string;
+  settlesAfterRead: number | null;
 };
 
 export function DriversView({
@@ -159,7 +162,7 @@ export function DriversView({
   const browseCardRefs = useRef(new Map<string, HTMLDivElement>());
   const manageCardRefs = useRef(new Map<string, HTMLDivElement>());
   const [home, setHome] = useState("");
-  const [installReview, setInstallReview] = useState<DriverRecord | null>(null);
+  const [installReviewName, setInstallReviewName] = useState("");
   const [addingPreset, setAddingPreset] = useState<{ preset: DriverAgentPreset; scope: AgentPresetScope; home: string; operationId: string } | null>(null);
   const [presetProviders, setPresetProviders] = useState<OctopusProviderInterface[]>([]);
   const [presetProject, setPresetProject] = useState("");
@@ -187,6 +190,7 @@ export function DriversView({
   const [reloadTick, setReloadTick] = useState(0);
   const [removeName, setRemoveName] = useState("");
   const [lifecycleOperations, setLifecycleOperations] = useState<Record<string, DriverLifecycleOperation>>({});
+  const driversReadSequence = useRef(0);
   useAppErrorToast(error);
 
   useEffect(() => {
@@ -195,6 +199,7 @@ export function DriversView({
       return;
     }
     let cancelled = false;
+    const sequence = ++driversReadSequence.current;
     setLoaded(false);
     readProjection<DriversProjection>("projection.operator.os.drivers")
       .then((response) => {
@@ -207,6 +212,12 @@ export function DriversView({
         setHostManifestReady(response.host_manifest_ready === true);
         setError(arrayStrings(response.errors).join("\n"));
         setLoaded(true);
+        setLifecycleOperations((current) => {
+          const remaining = Object.entries(current).filter(([, operation]) => (
+            operation.phase !== "complete" || operation.settlesAfterRead === null || operation.settlesAfterRead >= sequence
+          ));
+          return remaining.length === Object.keys(current).length ? current : Object.fromEntries(remaining);
+        });
       })
       .catch((failure) => {
         if (cancelled) return;
@@ -253,8 +264,13 @@ export function DriversView({
   const selected = drivers.find((driver) => driver.name === selectedName) ?? null;
   const setupDriver = drivers.find((driver) => driver.name === setupName) ?? null;
   const removeDriver = drivers.find((driver) => driver.name === removeName) ?? null;
+  const installReview = drivers.find((driver) => driver.name === installReviewName && !driver.installed) ?? null;
   const keyboardNames = (catalogView === "manage" ? visibleInstalled : visible).map((driver) => driver.name);
   const keyboardCardRefs = catalogView === "manage" ? manageCardRefs : browseCardRefs;
+
+  useEffect(() => {
+    if (installReviewName && !installReview) setInstallReviewName("");
+  }, [installReview, installReviewName]);
 
   useEffect(() => {
     if (!loaded || !selectedName || selected) return;
@@ -508,7 +524,8 @@ export function DriversView({
   }
 
   function requestDriverInstall(driver: DriverRecord) {
-    if ((driver.install_packages?.length ?? 0) > 1) setInstallReview(driver);
+    if (driverLifecycleBusy(lifecycleOperations[driverPackageId(driver)])) return;
+    if ((driver.install_packages?.length ?? 0) > 1) setInstallReviewName(driver.name);
     else void installDriver(driver);
   }
 
@@ -558,12 +575,13 @@ export function DriversView({
       || driver.source_available !== true
       || !driver.source_digest
       || driver.install_block_reason
+      || driverLifecycleBusy(lifecycleOperations[driverPackageId(driver)])
     ) return;
     const packageId = driverPackageId(driver);
     const operationId = crypto.randomUUID();
     setLifecycleOperations((current) => ({
       ...current,
-      [packageId]: { operationId, operation: "install", phase: "preflight", percent: 0, error: "" },
+      [packageId]: { operationId, operation: "install", phase: "preflight", percent: 0, error: "", settlesAfterRead: null },
     }));
     try {
       await mutateOctopusOsWorkspace({
@@ -574,7 +592,7 @@ export function DriversView({
       });
       setLifecycleOperations((current) => ({
         ...current,
-        [packageId]: { operationId, operation: "install", phase: "complete", percent: 100, error: "" },
+        [packageId]: { operationId, operation: "install", phase: "complete", percent: 100, error: "", settlesAfterRead: driversReadSequence.current },
       }));
       setReloadTick((current) => current + 1);
     } catch (failure) {
@@ -586,6 +604,7 @@ export function DriversView({
           phase: "failed",
           percent: current[packageId]?.percent ?? 0,
           error: formatProjectionError(failure),
+          settlesAfterRead: null,
         },
       }));
     }
@@ -597,13 +616,14 @@ export function DriversView({
       || !driver.installed
       || !driver.installed_digest
       || driver.removal_allowed !== true
+      || driverLifecycleBusy(lifecycleOperations[driverPackageId(driver)])
     ) return;
     const packageId = driverPackageId(driver);
     const operationId = crypto.randomUUID();
     setRemoveName("");
     setLifecycleOperations((current) => ({
       ...current,
-      [packageId]: { operationId, operation: "remove", phase: "preflight", percent: 0, error: "" },
+      [packageId]: { operationId, operation: "remove", phase: "preflight", percent: 0, error: "", settlesAfterRead: null },
     }));
     try {
       await mutateOctopusOsWorkspace({
@@ -614,7 +634,7 @@ export function DriversView({
       });
       setLifecycleOperations((current) => ({
         ...current,
-        [packageId]: { operationId, operation: "remove", phase: "complete", percent: 100, error: "" },
+        [packageId]: { operationId, operation: "remove", phase: "complete", percent: 100, error: "", settlesAfterRead: driversReadSequence.current },
       }));
       if (selectedName === driver.name) {
         setSelectedName("");
@@ -632,6 +652,7 @@ export function DriversView({
           phase: "failed",
           percent: current[packageId]?.percent ?? 0,
           error: formatProjectionError(failure),
+          settlesAfterRead: null,
         },
       }));
     }
@@ -643,12 +664,19 @@ export function DriversView({
 
   return (
     <>
-      <SetupDialogShell open={Boolean(installReview)} busy={false} onClose={() => setInstallReview(null)} ariaLabel="Install driver and required packages" panelClassName="max-w-md">
-        <div className="flex flex-col gap-3 p-5"><h2 className="text-lg font-medium">Install driver</h2><p className="text-sm text-token-text-secondary">The following packages are required:</p>
-          {installReview?.install_packages?.map((entry) => <div key={entry.id} className="text-sm">{entry.name}{entry.installed ? " · Installed" : ""}</div>)}
-          <OcDialogFooter><OcButton variant="secondary" onClick={() => setInstallReview(null)}>Cancel</OcButton><OcButton onClick={() => { if (installReview) void installDriver(installReview); setInstallReview(null); }}>Install</OcButton></OcDialogFooter>
-        </div>
-      </SetupDialogShell>
+      <PackageInstallReviewDialog
+        onCancel={() => setInstallReviewName("")}
+        onConfirm={() => {
+          if (installReview) void installDriver(installReview);
+          setInstallReviewName("");
+        }}
+        review={installReview ? {
+          logo: <DriverVisual driver={installReview} size="detail" />,
+          name: installReview.name,
+          note: "After installation, choose where it is available.",
+          packages: installReview.install_packages ?? [],
+        } : null}
+      />
       <SetupDialogShell open={Boolean(addingPreset)} busy={presetSaving} onClose={() => setAddingPreset(null)} ariaLabel="Add Agent preset" panelClassName="max-w-md">
         <div className="flex flex-col gap-4 p-5"><h2 className="text-lg font-medium">Add {addingPreset?.preset.name} Agent</h2>
           <OcSelect label="Project" value={presetProject} placeholder="Choose a Project" options={projects.filter((project) => addingPreset?.preset.project_ee_ids.includes(project.ee_id)).map((project) => ({ value: project.ee_id, label: project.name }))} onChange={setPresetProject} />
@@ -836,7 +864,6 @@ function DriverBrowseView({
                 ) : null}
                 <CatalogSection
                   batchSize={12}
-                  description="Install a local package, then choose the projects where it may be used."
                   getItemKey={driverKey}
                   getItemLabel={driverName}
                   items={visible}
@@ -944,7 +971,6 @@ function DriverManageView({
               <div className="[&_.oc-catalog-grid]:!grid-cols-1">
                 <CatalogSection
                   batchSize={12}
-                  description="Open a driver to review project access, current activity, or removal requirements."
                   getItemKey={driverKey}
                   getItemLabel={driverName}
                   items={visible}
@@ -1095,18 +1121,7 @@ function DriverCardMeta({ driver }: { driver: DriverRecord }) {
   ].filter(Boolean).join(" + ");
   return (
     <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs leading-4 text-token-description-foreground">
-      <i aria-hidden="true" className={cx(
-        "size-1.5 shrink-0 rounded-full",
-        status.tone === "success" ? "bg-token-charts-green"
-          : status.tone === "warning" ? "bg-token-charts-orange"
-            : status.tone === "danger" ? "bg-token-charts-red"
-              : "bg-token-description-foreground",
-      )} />
-      <span className={cx(
-        "shrink-0",
-        status.tone === "warning" && "text-token-charts-orange",
-        status.tone === "danger" && "text-token-charts-red",
-      )}>{status.label}</span>
+      <OcStatus className="shrink-0" label={status.label} tone={status.tone} />
       {scope ? <><span aria-hidden="true">·</span><span className="truncate">{scope}</span></> : null}
       {activeInstances ? <><span aria-hidden="true">·</span><span className="truncate text-token-charts-green">In use {activeInstances}</span></> : null}
     </span>
@@ -1454,16 +1469,24 @@ function DriverDetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+const DRIVER_GLYPHS = new Set<GlyphName>([
+  "artifact",
+  "browser",
+  "code",
+  "desktop",
+  "folderOpen",
+  "layers",
+  "microphone",
+  "plugins",
+  "search",
+  "sites",
+  "terminal",
+  "worktree",
+]);
+
 function driverGlyph(driver: DriverRecord): GlyphName {
-  const capabilities = new Set(driver.capabilities);
-  if (capabilities.has("browser_session")) return "browser";
-  if (capabilities.has("desktop_session") || capabilities.has("computer_use")) return "desktop";
-  if (capabilities.has("audio_capture") || capabilities.has("audio_playback")) return "microphone";
-  if (capabilities.has("git") || capabilities.has("script_exec")) return "code";
-  if (capabilities.has("container_session")) return "layers";
-  if (capabilities.has("remote_machine") || capabilities.has("web_search")) return "globe";
-  if (capabilities.has("mcp_stdio_session")) return "plugins";
-  return "terminal";
+  const icon = driver.icon as GlyphName;
+  return DRIVER_GLYPHS.has(icon) ? icon : "environment";
 }
 
 function driverSummary(driver: DriverRecord): string {
@@ -1503,7 +1526,7 @@ function driverAvailableScopeCount(driver: DriverRecord): number {
 }
 
 function driverLifecycleBusy(operation: DriverLifecycleOperation | undefined): boolean {
-  return Boolean(operation && operation.phase !== "failed" && operation.phase !== "complete");
+  return Boolean(operation && operation.phase !== "failed");
 }
 
 function driverPackageId(driver: DriverRecord): string {

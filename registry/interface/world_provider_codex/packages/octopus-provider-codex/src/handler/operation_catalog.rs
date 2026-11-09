@@ -7,6 +7,10 @@ pub(crate) struct InterfaceOperationCatalogArtifact {
     pub(crate) label: String,
     pub(crate) interface: InterfaceId,
     pub(crate) request_label: String,
+    #[serde(default)]
+    pub(crate) task_input_labels: BTreeSet<String>,
+    #[serde(default)]
+    pub(crate) operator_approval: bool,
     pub(crate) operations: Vec<InterfaceOperationCatalogEntry>,
 }
 
@@ -110,6 +114,14 @@ pub(crate) fn extract_interface_operation_affordances(
                     )));
                 }
             }
+            if catalog.task_input_labels.contains(&operation.output_label)
+                || catalog.task_input_labels.iter().any(|label| label.trim().is_empty() || label.trim() != label)
+            {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "bound interface operation catalog '{}' declares a malformed task input label or one that is also an operation result",
+                    bound.artifact.id.as_str()
+                )));
+            }
             if operation.request_label != catalog.request_label {
                 return Err(InterfaceDriverError::Protocol(format!(
                     "bound interface operation '{}' request label '{}' differs from catalog label '{}'",
@@ -143,6 +155,8 @@ pub(crate) fn extract_interface_operation_affordances(
                         interface: catalog.interface.clone(),
                         request_label: operation.request_label,
                         output_label: operation.output_label,
+                        input_labels: catalog.task_input_labels.clone(),
+                        operator_approval: catalog.operator_approval,
                     },
                 )
                 .is_some()
@@ -210,6 +224,7 @@ pub(crate) fn apply_model_tool_names(
         let DynamicToolSpec::Function(function) = spec else {
             return Err(InterfaceDriverError::Protocol("model names must be formed before namespaces".into()));
         };
+        tool_schema::make_literal_types_explicit(&mut function.input_schema);
         let exact = decode_tool_name(&function.name)?;
         if let Some(name) = aliases.get(&exact) {
             function.name = name.clone();

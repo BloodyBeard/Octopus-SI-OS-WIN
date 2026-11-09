@@ -26,7 +26,10 @@ function fixture(count = 2) {
   };
 }
 
-test('client observation keeps exact arbitrary inventory rows, hidden state and bounded whole-row omissions', async () => {
+test('client observation keeps exact arbitrary inventory rows, hidden state and bounded whole-row omissions', async t => {
+  const previousTransport = window.octopusTransport;
+  window.octopusTransport = { projectionRead: async () => ({ generation: 1, root: 'artifact://ledger', documents: [], errors: [] }) };
+  t.after(() => { window.octopusTransport = previousTransport; });
   window.localStorage.clear(); const options = fixture();
   let snapshot = clientObservationContext(options), data = JSON.parse(snapshot[0].text);
   assert.deepEqual(data.widgets, readHomeWidgetInventory(options));

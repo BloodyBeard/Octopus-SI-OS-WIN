@@ -6,7 +6,8 @@ import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import { AppearanceSection } from "./AppearanceSection";
 import { AccountSettingsSection } from "./AccountSettingsSection";
 import { ComputerUseSettingsSection } from "./ComputerUseSettingsSection";
-import { ExtensionsSection } from "./ExtensionsSection";
+import { ExperimentsSection } from "./ExperimentsSection";
+import { ExtensionsSection, type ClientExtensionDestination } from "./ExtensionsSection";
 import {
   AboutSection,
   AccessSection,
@@ -23,11 +24,14 @@ import type { SettingsSectionId } from "./settingsCatalog";
 import { settingsTargetProps } from "./settingsCatalog";
 
 export type SettingsSectionContext = {
+  dictationRecordingId?: string;
+  onShowAllRecordings?: () => void;
   accessProfile: OctopusClientAccessProfile;
   documentRoot: string;
   documentVerdicts: ClientSurfaceAdmissionVerdict[];
   documents: AdmittedClientSurfaceDocument[];
   extensions: ClientExtensionRegistryState;
+  onOpenExtensionDestination: (destination: ClientExtensionDestination) => void;
   surfaceErrors: string[];
   surfaces: ClientSurfaceDescriptor[];
 };
@@ -36,16 +40,17 @@ const SETTINGS_SECTION_CONTENT: Record<SettingsSectionId, (context: SettingsSect
   general: ({ accessProfile, surfaces }) => <GeneralSection accessProfile={accessProfile} surfaces={surfaces} />,
   account: () => <AccountSettingsSection />,
   appearance: () => <div {...settingsTargetProps("appearance.theme")}><AppearanceSection /></div>,
-  "voice-audio": ({ accessProfile }) => <VoiceAudioSection accessProfile={accessProfile} />,
+  "voice-audio": ({ accessProfile, dictationRecordingId, onShowAllRecordings }) => <VoiceAudioSection accessProfile={accessProfile} recordingId={dictationRecordingId} onShowAllRecordings={onShowAllRecordings} />,
   "computer-use": () => <ComputerUseSettingsSection />,
   gestures: ({ accessProfile }) => <GesturesSection accessProfile={accessProfile} />,
   shortcuts: ({ accessProfile }) => <ShortcutsSection accessProfile={accessProfile} />,
   access: ({ accessProfile }) => <AccessSection accessProfile={accessProfile} />,
-  extensions: ({ accessProfile, extensions }) => (
+  extensions: ({ accessProfile, extensions, onOpenExtensionDestination }) => (
     <div {...settingsTargetProps("extensions.catalog")}>
-      <ExtensionsSection accessProfile={accessProfile} registry={extensions} />
+      <ExtensionsSection accessProfile={accessProfile} onOpenDestination={onOpenExtensionDestination} registry={extensions} />
     </div>
   ),
+  experiments: ({ accessProfile }) => <ExperimentsSection accessProfile={accessProfile} />,
   connections: () => <ConnectionsSection />,
   surfaces: ({ accessProfile, documentRoot, documents, surfaceErrors, surfaces }) => (
     <div {...settingsTargetProps("surfaces.sidebar")}>

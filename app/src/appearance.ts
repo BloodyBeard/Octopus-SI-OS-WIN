@@ -553,7 +553,7 @@ function resolveOctopusTheme(theme: "light" | "dark", palette: OctopusPalette, l
     "--color-background-control": values.controlBackground,
     "--color-background-control-opaque": values.controlBackgroundOpaque,
     "--color-background-callout-surface": values.elevatedPrimary,
-    "--color-background-composer-action-bar": theme === "light" ? surfaceUnder : values.elevatedSecondary,
+    "--color-background-composer-action-bar": theme === "light" ? surfaceUnder : values.elevatedSecondaryOpaque,
     "--color-token-composer-utility-background": rgbString(composerUtilityBackground),
     "--color-background-editor-opaque": rgbString(editorBackground),
     "--color-background-elevated-primary": values.elevatedPrimary,

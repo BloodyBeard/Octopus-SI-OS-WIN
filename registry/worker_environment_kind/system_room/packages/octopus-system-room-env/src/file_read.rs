@@ -3,7 +3,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use octopus_descriptors::InterfaceId;
 use octopus_interfaces::InterfaceArtifactFile;
 use octopus_ledger::ContentHash;
 use octopus_tool_door_runtime::{
@@ -15,7 +14,6 @@ use octopus_worker_env::WorkerEnvironmentLifecycle;
 use serde::Deserialize;
 
 struct FileReadProcess {
-    interface: InterfaceId,
     roots: BTreeMap<String, PathBuf>,
 }
 
@@ -41,6 +39,10 @@ struct ListArgs {
 }
 
 impl ToolProcessHandler for FileReadProcess {
+    fn substrate_family(&self) -> &str {
+        super::SUBSTRATE_FAMILY
+    }
+
     fn execute<'a>(
         &'a self,
         invocation: ToolProcessInvocation,
@@ -53,12 +55,8 @@ impl ToolProcessHandler for FileReadProcess {
         >,
     > {
         Box::pin(async move {
-            let call = super::decode_invocation(
-                &self.interface,
-                &invocation.descriptor,
-                &invocation.envelope,
-            )
-            .map_err(super::capability)?;
+            let call = super::decode_invocation(&invocation.descriptor, &invocation.envelope)
+                .map_err(super::capability)?;
             let formation = invocation.worker_environment.as_ref().ok_or_else(|| {
                 super::capability("file read requires a formed worker environment")
             })?;
@@ -79,7 +77,7 @@ impl ToolProcessHandler for FileReadProcess {
             let result = execute(
                 &invocation.descriptor.handler_config,
                 &call.arguments,
-                &self.roots,
+                &super::read_roots(&invocation.descriptor.process.authority, &self.roots),
             );
             let (lifecycle, response) = match result {
                 Ok(body) => (
@@ -110,7 +108,6 @@ impl ToolProcessHandler for FileReadProcess {
 pub async fn run_file_read_tool_process() -> Result<(), String> {
     let environment = ToolProcessEnvironment::from_env()?;
     octopus_tool_door_runtime::run_tool_process(Arc::new(FileReadProcess {
-        interface: environment.interface,
         roots: environment.root_slots,
     }))
     .await
@@ -123,21 +120,26 @@ fn admitted_path(path: &Path, roots: &BTreeMap<String, PathBuf>) -> Result<PathB
     let canonical = path
         .canonicalize()
         .map_err(|error| format!("cannot resolve '{}': {error}", path.display()))?;
-    for root in roots.values() {
-        if !root.is_absolute() {
-            return Err("file read room root is not absolute".into());
-        }
-        let resolved = root.canonicalize().map_err(|error| {
-            format!("cannot resolve granted root '{}': {error}", root.display())
-        })?;
-        if canonical.starts_with(resolved) {
-            return Ok(canonical);
+    if roots.values().any(|root| !root.is_absolute()) {
+        return Err("file read room root is not absolute".into());
+    }
+    let mut unresolved = Vec::new();
+    for (slot, root) in roots {
+        match root.canonicalize() {
+            Ok(resolved) if canonical.starts_with(&resolved) => return Ok(canonical),
+            Ok(_) => {}
+            Err(error) => unresolved.push(format!("{slot}: {error}")),
         }
     }
-    Err(format!(
-        "path '{}' is outside this room's granted roots",
-        path.display()
-    ))
+    Err(if unresolved.is_empty() {
+        format!("path '{}' is outside this room's granted roots", path.display())
+    } else {
+        format!(
+            "path '{}' is outside this room's granted roots; unresolved roots: {}",
+            path.display(),
+            unresolved.join("; ")
+        )
+    })
 }
 
 fn execute(

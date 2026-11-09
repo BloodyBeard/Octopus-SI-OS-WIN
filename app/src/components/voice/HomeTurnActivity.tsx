@@ -75,19 +75,21 @@ export function homeTurnAwaitsFinalReply(activities: ChatRenderMessage[]): boole
   return false;
 }
 
-export function HomeTurnActivity({ activities, startedAtMs, toolPresentations, turnInProgress, terminalNotice }: {
+export function HomeTurnActivity({ activities, blockingReason = "", startedAtMs, toolPresentations, turnInProgress, terminalNotice }: {
   activities: ChatRenderMessage[];
   startedAtMs: number;
   toolPresentations: ChatToolPresentationIndex;
   turnInProgress: boolean;
   terminalNotice: string | null;
+  blockingReason?: string;
 }) {
   const hasActivity = activities.some((message) => conversationTraceAdmission(message, toolPresentations) === "visible");
-  if (!hasActivity && turnInProgress) return <span role="status"><CadencedShimmerText active>Octopus is working</CadencedShimmerText></span>;
+  if (!hasActivity && turnInProgress && !blockingReason) return <span role="status"><CadencedShimmerText active>Octopus is working</CadencedShimmerText></span>;
   return (
     <section aria-label="Current run activity" className="home-live-activity">
-      {hasActivity ? <TurnActivity
+      {hasActivity || blockingReason ? <TurnActivity
         activities={activities}
+        blockingReason={blockingReason}
         activityWindow="latest-context"
         presentation="conversation"
         renderActivity={(message) => <HomeActivityDetail message={message} toolPresentations={toolPresentations} turnInProgress={turnInProgress} />}

@@ -84,11 +84,13 @@ if(process.argv[2]==='project-ee-policies'){console.log(JSON.stringify({environm
 if(process.argv[2]!=='up')process.exit(64);
 const home=process.env.OCTOPUS_HOME, state=path.join(home,'state/runtime-instance'), now=Date.now();
 fs.mkdirSync(state,{recursive:true});fs.appendFileSync(path.join(home,'starts'),'start\\n');
-fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({schema_version:3,pid:process.pid,phase:'starting',started_at_unix_ms:now,updated_at_unix_ms:now,launch_owner:null}));
+let phase='starting';function writeState(){fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({schema_version:3,pid:process.pid,phase,started_at_unix_ms:now,updated_at_unix_ms:Date.now(),launch_owner:null}))}writeState();
 const folder=path.join(home,'app-server-control');fs.mkdirSync(folder,{recursive:true});
 const endpoint=path.join(folder,crypto.createHash('sha256').update('fixture_home').digest('hex').slice(0,24)+'.sock');
-const server=net.createServer(socket=>socket.end());server.listen(endpoint,()=>setTimeout(()=>fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({schema_version:3,pid:process.pid,phase:'ready',started_at_unix_ms:now,updated_at_unix_ms:Date.now(),launch_owner:null})),100));
-process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force:true});process.exit(0)}));
+const server=net.createServer(socket=>socket.end());
+const control=net.createServer(socket=>{let input='';socket.on('data',bytes=>{input+=bytes;if(!input.includes('\\n'))return;let response;try{const request=JSON.parse(input);if(Object.keys(request).join(',')!=='request'||request.request!=='status')throw new Error('Fixture accepts only a strict status request');response={outcome:'status',pid:process.pid,phase,started_at_unix_ms:now,stopping:null,interface_failures:[]}}catch(error){response={outcome:'refused',error:error.message}}socket.end(JSON.stringify(response)+'\\n')})});
+control.listen(path.join(state,'control.sock'),()=>server.listen(endpoint,()=>setTimeout(()=>{phase='ready';writeState()},100)));
+process.on('SIGTERM',()=>{let closed=0;const finish=()=>{if(++closed===2){fs.rmSync(state,{recursive:true,force:true});process.exit(0)}};server.close(finish);control.close(finish)});
 `, { mode: 0o700 });
   const options = { home, installationRoot, env: { PATH: process.env.PATH } };
   const blank = createEnvironment({ ...options, home: path.join(root, "blank") });

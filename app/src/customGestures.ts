@@ -13,7 +13,7 @@ export type CustomGesture = Readonly<{
   curls: FingerCurls;
 }>;
 
-const STORAGE_KEY = "octopus.custom-gestures.v1";
+const STORAGE_KEY = "octopus.custom-gestures.v2";
 const MATCH_THRESHOLD = 0.34;
 const HOLD_MS = 260;
 const RELEASE_DISTANCE = 0.5;
@@ -63,29 +63,35 @@ export function useCustomGestureDispatch(profile: OctopusClientAccessProfile, en
   const store = customGestureStore(profile);
   useEffect(() => {
     if (!enabled) return;
-    let candidateId: string | null = null;
-    let candidateSince = 0;
-    let firedId: string | null = null;
+    const holds = new Map<number, { candidateId: string | null; candidateSince: number; firedId: string | null }>();
     const unsubscribe = subscribeGestureState((state) => {
-      if (!state.curls || state.pose === "aim" || state.pose === "left_click" || state.pose === "pinch") {
-        candidateId = null;
-        firedId = null;
-        return;
-      }
-      const best = bestMatch(store.current, state.curls);
-      if (!best || best.distance > MATCH_THRESHOLD) {
-        candidateId = null;
-        if (firedId && (!best || best.distance > RELEASE_DISTANCE)) firedId = null;
-        return;
-      }
       const now = performance.now();
-      if (candidateId !== best.gesture.id) {
-        candidateId = best.gesture.id;
-        candidateSince = now;
+      for (const id of [...holds.keys()]) {
+        if (!state.hands.some((hand) => hand.id === id)) holds.delete(id);
       }
-      if (firedId === best.gesture.id || now - candidateSince < HOLD_MS) return;
-      firedId = best.gesture.id;
-      if (best.gesture.command !== "none" && !clientDialogOwnsCommands()) dispatchClientCommand(best.gesture.command, "gesture");
+      for (const hand of state.hands) {
+        const hold = holds.get(hand.id) ?? { candidateId: null, candidateSince: 0, firedId: null };
+        holds.set(hand.id, hold);
+        if (hand.coasting) continue;
+        if (hand.engaged || hand.pose === "point" || hand.pose === "pinch") {
+          hold.candidateId = null;
+          hold.firedId = null;
+          continue;
+        }
+        const best = bestMatch(store.current, hand.curls);
+        if (!best || best.distance > MATCH_THRESHOLD) {
+          hold.candidateId = null;
+          if (hold.firedId && (!best || best.distance > RELEASE_DISTANCE)) hold.firedId = null;
+          continue;
+        }
+        if (hold.candidateId !== best.gesture.id) {
+          hold.candidateId = best.gesture.id;
+          hold.candidateSince = now;
+        }
+        if (hold.firedId === best.gesture.id || now - hold.candidateSince < HOLD_MS) continue;
+        hold.firedId = best.gesture.id;
+        if (best.gesture.command !== "none" && !clientDialogOwnsCommands()) dispatchClientCommand(best.gesture.command, "gesture");
+      }
     });
     return unsubscribe;
   }, [enabled, store]);

@@ -11,8 +11,9 @@ use octopus_ledger::{
     MovementLog, MovementMetadata, TraceId,
 };
 use octopus_runtime::{
-    GrantEpoch, InterfaceArrivalTarget, InterfaceOutboundArtifactTransfer, RunId, RuntimeError,
+    InterfaceArrivalTarget, InterfaceOutboundArtifactTransfer, RunId, RuntimeError,
 };
+use octopus_run_record::GrantEpoch;
 
 mod retained;
 
@@ -73,7 +74,7 @@ pub async fn recover_runtime_relay_arrivals(
 fn pin_run_record_snapshot(
     blobs: &mut dyn BlobStore,
     run: &RunId,
-    snapshot: &octopus_runtime::RunRecordSnapshot,
+    snapshot: &octopus_run_record::RunRecordSnapshot,
 ) -> Result<(), ArrivalError> {
     let actual = ContentHash::of_bytes(snapshot.bytes.as_ref());
     if actual != snapshot.hash {
@@ -1965,5 +1966,34 @@ mod tests {
         let error = recover_durable_checkpoint_outbound_tail(&mut ambiguous_log, &ambiguous)
             .expect_err("one mark cannot prove two pending arrival snapshots");
         assert!(error.to_string().contains("exact mark proof is ambiguous"));
+
+        for failed in [[true, true], [true, false], [false, true]] {
+            let mut rows = ambiguous.clone();
+            for (row, rejected) in rows.iter_mut().zip(failed) {
+                if rejected {
+                    let Some(MovementMetadata::Invocation(metadata)) = &mut row.invocation_metadata
+                        else { panic!("arrival must carry invocation metadata") };
+                    metadata.verification_failure = Some(serde_json::from_value(
+                        serde_json::json!({"error": "verifier rejected the artifact"}),
+                    ).unwrap());
+                }
+            }
+            let proofs = octopus_ledger::InterfaceArrivalMarkProofIndex::from_movements(&rows)
+                .expect("rejected arrivals cannot compete for mark proof");
+            for (row, rejected) in rows.iter().zip(failed) {
+                assert_eq!(proofs.proof_lamport(row).is_some(), !rejected);
+                assert_eq!(octopus_ledger::mark_outcome_proves_interface_arrival(row, &rows[2]), !rejected);
+            }
+            if failed == [true, true] {
+                let mut probe = InMemoryLog::new();
+                assert!(recover_durable_checkpoint_outbound_tail(&mut probe, &rows).unwrap().is_empty());
+                assert_eq!(probe.len(), 0);
+                let Some(MovementMetadata::Invocation(metadata)) = &mut rows[1].invocation_metadata
+                    else { unreachable!() };
+                metadata.replaces_arrival_seq = Some(ambiguous[0].seq.0);
+                assert!(matches!(octopus_ledger::InterfaceArrivalMarkProofIndex::from_movements(&rows),
+                    Err(octopus_ledger::LedgerError::InvalidInterfaceArrivalReplacement { .. })));
+            }
+        }
     }
 }

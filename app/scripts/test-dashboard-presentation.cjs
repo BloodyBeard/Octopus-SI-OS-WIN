@@ -266,5 +266,23 @@ test("bounded System and World labels preserve full grapheme-safe identities and
     assert.ok(document.querySelector('[role="tooltip"]').classList.contains("is-shell"));
     assert.ok(document.querySelector('[role="tooltip"] .dashboard-tooltip-label'));
     assert.ok(document.querySelector('[role="tooltip"]').closest("svg") === null);
+    const { WorldProjection } = load("src/components/WorldProjection.tsx", {
+      "./DashboardLabel": labels,
+      "./ArtifactTransferAnimation": { useArtifactTransferList: () => [], ArtifactTransferSegments: () => null },
+    });
+    const world = "world_provider_test_" + "abcdef1234567890".repeat(2);
+    await React.act(async () => root.render(React.createElement(WorldProjection, {
+      environments: [{ id: "ee", name: "Environment", accent: "blue", worldInterfaces: [world], runs: [{ id: "run-not-an-interface", worker: full, interfaces: [{ name: world }] }] }],
+      registeredWorldInterfaces: [{ id: world, descriptor: {} }], interfaceIndex: {}, transferFeed: {}, mode: "instances", selected: null, onSelect() {},
+    })));
+    const route = document.querySelector(".wp-route-target");
+    assert.equal(route.hasAttribute("tabindex"), false);
+    assert.equal(route.getAttribute("aria-label"), `System: ${full}\nWorld: ${world}`);
+    route.getBoundingClientRect = window.HTMLElement.prototype.getBoundingClientRect;
+    await React.act(async () => { route.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true })); await new Promise(resolve => setTimeout(resolve, 220)); });
+    const pair = document.querySelector('[role="tooltip"] .is-compact').textContent.split("\n");
+    assert.equal(pair.length, 2);
+    assert.ok(pair.every(line => line.length < 45));
+    assert.ok(!pair.join().includes("run-not-an-interface"));
   } finally { await React.act(async () => root.unmount()); dom.window.close(); }
 });

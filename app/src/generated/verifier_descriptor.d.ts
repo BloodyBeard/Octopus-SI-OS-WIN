@@ -21,6 +21,7 @@ export interface ProcessAuthoritySpec {
   allow_application_launch?: boolean;
   allow_local_ipc: boolean;
   allow_network: boolean;
+  allow_process_signals?: boolean;
   allow_sandbox_delegation?: boolean;
   executable_argument_paths?: ProcessArgumentPathSpec[];
   executable_commands: string[];
@@ -37,6 +38,7 @@ export interface ProcessAuthoritySpec {
   read_argument_paths?: ProcessArgumentPathSpec[];
   read_env_paths: string[];
   read_env_subpaths?: ProcessEnvironmentSubpathSpec[];
+  read_executable_relative_paths?: ProcessExecutableRelativePathSpec[];
   read_paths: string[];
   read_root_slots: string[];
   sandbox_mode?: ProcessSandboxMode & string;
@@ -58,4 +60,8 @@ export interface ProcessEnvironmentSubpathSpec {
 export interface ProcessRootSubpathSpec {
   relative_path: string;
   root_slot: string;
+}
+export interface ProcessExecutableRelativePathSpec {
+  executable: string;
+  relative_path: string;
 }

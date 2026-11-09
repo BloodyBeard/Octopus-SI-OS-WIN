@@ -10,11 +10,16 @@ import { liftListItem, sinkListItem } from "prosemirror-schema-list";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
 import { createPortal } from "react-dom";
 import { composerSuggestionKey, composerSuggestionPlugin, visibleComposerSuggestion, type ComposerSuggestion } from "./composerSuggestion";
+import { cancelComposerDictation, composerDictationKey, composerDictationPlugin, finishComposerDictation, startComposerDictation, updateComposerDictation } from "./composerDictation";
 
 export type RichComposerEditorHandle = {
   dom: () => HTMLElement | null;
   focus: () => void;
   insertText: (value: string) => void;
+  startDictation: () => void;
+  updateDictation: (value: string) => void;
+  cancelDictation: () => void;
+  finishDictation: (value: string) => string;
 };
 
 type Props = {
@@ -86,6 +91,15 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
       if (!view || !value) return;
       view.dispatch(view.state.tr.insertText(value).scrollIntoView());
       view.focus();
+    },
+    startDictation: () => { const view = viewRef.current; if (view) startComposerDictation(view); },
+    updateDictation: (value) => { const view = viewRef.current; if (view) updateComposerDictation(view, value); },
+    cancelDictation: () => { const view = viewRef.current; if (view) cancelComposerDictation(view); },
+    finishDictation: (value) => {
+      const view = viewRef.current;
+      if (!view) return "";
+      finishComposerDictation(view, value);
+      return serializePrompt(view.state);
     },
   }), []);
 
@@ -310,6 +324,7 @@ function composerPlugins(
   activateLinkRef: RefObject<(anchor: HTMLAnchorElement, view: EditorView) => void>,
 ): Plugin[] {
   return [
+    composerDictationPlugin(),
     composerSuggestionPlugin(parsePrompt),
     history(),
     inputRules({
@@ -330,6 +345,7 @@ function composerPlugins(
       ],
     }),
     keymap({
+      "Shift-Enter": baseKeymap.Enter,
       "Mod-b": toggleMark(schema.marks.strong),
       "Mod-i": toggleMark(schema.marks.em),
       "Mod-z": undo,
@@ -347,7 +363,7 @@ function composerPlugins(
           return defaultMarkdownSerializer.serialize(schema.topNodeType.create(null, content.content));
         },
         decorations(state) {
-          if (visibleComposerSuggestion(state)) return null;
+          if (visibleComposerSuggestion(state) || composerDictationKey.getState(state)?.text) return null;
           const first = state.doc.firstChild;
           if (state.doc.childCount !== 1 || !first?.isTextblock || first.content.size !== 0) return null;
           return DecorationSet.create(state.doc, [Decoration.node(0, first.nodeSize, {

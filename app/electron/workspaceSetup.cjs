@@ -768,13 +768,15 @@ function parseProjectMutationRequest(value) {
       const project = exactObject(
         value,
         ["eeId", "name", "icon", "color", "sourceFolders", "expectedProjectDigest"],
-        ["eeId", "name", "icon", "color"],
+        ["eeId", "icon", "color"],
         `Workspace Project presentation ${index + 1}`,
       );
       return {
         eeId: requiredId(project.eeId, `Workspace Project presentation ${index + 1} EE`),
-        ...(project.sourceFolders === undefined ? {} : { sourceFolders: parseProjectSourceFolders(project.sourceFolders), expectedProjectDigest: requiredDigest(project.expectedProjectDigest, "Project digest") }),
-        name: requiredHumanText(project.name, `Workspace Project presentation ${index + 1} name`, 80),
+        ...(project.sourceFolders === undefined ? {} : { sourceFolders: parseProjectSourceFolders(project.sourceFolders) }),
+        ...(project.name === undefined ? {} : { name: requiredHumanText(project.name, `Workspace Project presentation ${index + 1} name`, 80) }),
+        ...(project.expectedProjectDigest === undefined && project.name === undefined && project.sourceFolders === undefined
+          ? {} : { expectedProjectDigest: requiredDigest(project.expectedProjectDigest, "Project digest") }),
         icon: requiredHumanText(project.icon, `Workspace Project presentation ${index + 1} icon`, 64),
         color: requiredHumanText(project.color, `Workspace Project presentation ${index + 1} color`, 64),
       };
@@ -942,6 +944,7 @@ async function planProjectCreate(roots, scope, request, planOperatorSurface) {
   parseClientAgentCatalog(nextAgentCatalog, agentCatalog.file);
   const projectEe = {
     eeId,
+    name: request.name,
     templateName: request.templateName,
     parentEeId: parent.eeId,
     goal: request.goal,
@@ -1065,31 +1068,40 @@ async function planProjectPresentationUpdate(roots, scope, request) {
   if (stableJson(profileIds) !== stableJson(projectIds) || stableJson(existingPresentationIds) !== stableJson(projectIds)) {
     throw new Error("Workspace Project presentation cannot update an incomplete Home topology");
   }
-  const folderWrites = [];
-  for (const project of request.projects.filter((project) => project.sourceFolders !== undefined)) {
-    await validateProjectSourceFolders(project.sourceFolders);
+  const eeWrites = [];
+  const names = new Map();
+  for (const project of request.projects) {
     const file = path.join(roots.eeInstancesRoot, `${project.eeId}.json`);
     const current = await readJson(file, `Project '${project.eeId}'`);
-    if (current.digest !== project.expectedProjectDigest || current.value.ee_id !== project.eeId) {
-      throw new Error("Project changed before its source folders could be saved. Try again.");
+    const observed = scope.byId.get(project.eeId);
+    if (current.digest !== observed.recordDigest || current.value.ee_id !== project.eeId
+      || (project.expectedProjectDigest !== undefined && current.digest !== project.expectedProjectDigest)) {
+      throw new Error("Project changed before it could be saved. Try again.");
     }
     const next = structuredClone(current.value);
-    next.config ??= {};
-    next.config.octopus_os ??= {};
-    next.config.octopus_os.source_folders = project.sourceFolders;
-    folderWrites.push(projectWrite(file, current.digest, `${JSON.stringify(next, null, 2)}\n`, `ee:${project.eeId}`, false));
+    if (project.name !== undefined) next.name = project.name;
+    if (project.sourceFolders !== undefined) {
+      await validateProjectSourceFolders(project.sourceFolders);
+      next.config ??= {};
+      next.config.octopus_os ??= {};
+      next.config.octopus_os.source_folders = project.sourceFolders;
+    }
+    names.set(project.eeId, next.name || project.eeId);
+    if (stableJson(next) !== stableJson(current.value)) {
+      eeWrites.push(projectWrite(file, current.digest, `${JSON.stringify(next, null, 2)}\n`, `ee:${project.eeId}`, false));
+    }
   }
   const nextSidecar = structuredClone(sidecar.value);
   nextSidecar.presentation.projects = request.projects.map((project) => ({
     ee_id: project.eeId,
-    name: project.name,
+    name: names.get(project.eeId),
     icon: project.icon,
     color: project.color,
   }));
   return {
     outcome: { action: "update_project_presentation", projectEeIds: request.projects.map((project) => project.eeId) },
     writes: [
-      ...folderWrites,
+      ...eeWrites,
       projectWrite(
         sidecar.path,
         sidecar.digest,
@@ -1420,13 +1432,15 @@ function materializeWorkspaceIntent(request, bootstrap, existingRoot) {
   ]));
   const eeWrites = [...(existingRoot ? [] : [{
     eeId: rootEeId,
+    name: request.root.name,
     templateName: request.root.templateName,
     parentEeId: null,
     goal: request.root.goal,
-    document: { ...bootstrap.document.value, goal: request.root.goal },
+    document: { ...bootstrap.document.value, name: request.root.name, goal: request.root.goal },
     expectedBeforeDigest: bootstrap.document.digest,
   }]), ...request.projects.map((project) => ({
     eeId: requiredMapValue(projectEeIds, project.key),
+    name: project.name,
     templateName: project.templateName,
     parentEeId: project.parentKey === "root" ? rootEeId : requiredMapValue(projectEeIds, project.parentKey),
     goal: project.goal,
@@ -2234,6 +2248,7 @@ function workspaceHomeSidecar(content, request, materialized, plan, projectProfi
 function eeDocument(write) {
   const record = write.document ?? {
     ee_id: write.eeId,
+    ...(write.name === undefined ? {} : { name: write.name }),
     template_name: write.templateName,
     parent_ee_id: write.parentEeId,
     goal: write.goal,

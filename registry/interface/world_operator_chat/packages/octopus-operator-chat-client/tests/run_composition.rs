@@ -2,7 +2,7 @@
 #![cfg(unix)]
 
 use octopus_operator_chat_client::run_composition::*;
-use octopus_runtime::run_record::RunRecord;
+use octopus_run_record::RunRecord;
 use serde_json::{Value, json};
 
 #[path = "support/composition_fixture.rs"]
@@ -10,9 +10,15 @@ mod support;
 use support::{fixture, write};
 
 #[test]
-fn authored_run_rejects_outputs_missing_from_the_provider_contract_before_publication() {
+fn authored_run_checks_provider_frontiers_without_treating_other_writers_as_providers() {
     let temp = tempfile::tempdir().unwrap();
     let request = fixture(temp.path());
+    let room_path = "registry/interface/system_room/interface.json";
+    let mut room: Value = serde_json::from_slice(&std::fs::read(temp.path().join(room_path)).unwrap()).unwrap();
+    room["interface_driver_config"]["private_config"]["run_authoring_profile"] = json!({
+        "file_write_tool":"file.write", "file_write_label":"tool.call", "file_write_result_label":"file.write.result", "result_timeout_ms":30000
+    });
+    write(temp.path(), room_path, room);
     let plan = plan_run_composition(&request).unwrap();
     let mut authored = AuthoredRunComposition {
         run_id: plan.run_id.clone(), writes: composition_candidate_writes(&plan),
@@ -88,7 +94,7 @@ fn current_amendment_checks_future_routes_before_they_can_disable_control() {
         expected_before_hash:Some(ContentHash::of_bytes(&caller_before).to_hex()) };
     let door = composition.authoring.capability_doors["system_room"].clone();
     let reader = composition.authoring.capability_tools["file.write"].clone();
-    let error = plan_current_run_amendment(&request.roots, &current, &provider.into(), CurrentRunRequest {
+    let error = plan_current_run_amendment(&request.roots, &current, &provider.into(), CurrentRunRequest { change: None,
         amendment_key:"missing-future-role".into(), publications:vec![], selection:None,
         authored:Some(AuthoredCurrentRun { expected_before_hash:ContentHash::of_bytes(pending.as_bytes()).to_hex(),
             expected_before:json!(current), run_record:after, writes:vec![activation] }),
@@ -96,6 +102,141 @@ fn current_amendment_checks_future_routes_before_they_can_disable_control() {
         arguments_hash:ContentHash::of_bytes(b"{}").to_hex(), return_interface:door.clone().into() }, &[(reader,door.into())]).err().expect("an unbound future role must reject the amendment");
     assert!(error.contains("role-future-peer"), "{error}");
     assert_eq!(std::fs::read(&composition.run_write.path).unwrap(), pending.as_bytes());
+}
+
+#[test]
+fn current_selection_amends_a_run_whose_turn_waits_on_a_tool_result() {
+    use octopus_operator_chat_client::{ExternalInputSeed, run_composition::current_run::*};
+    use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
+    use octopus_ledger::ContentHash;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let request = support::client_fixture(&root);
+    enable_native_profile(&root);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry/interface/world_cron/interface.json");
+    let mut trigger: Value = serde_json::from_slice(&std::fs::read(source).unwrap()).unwrap();
+    trigger["id"] = json!("world_test_pulse");
+    write(&root, "registry/interface/world_test_pulse/interface.json", trigger);
+    for (file, pointer) in [("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"), ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces")] {
+        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("world_test_pulse"));
+        write(&root, file, value);
+    }
+    let composition = plan_run_composition(&request).unwrap();
+    for file in composition_candidate_writes(&composition) {
+        std::fs::create_dir_all(file.path.parent().unwrap()).unwrap();
+        std::fs::write(file.path, file.content).unwrap();
+    }
+    let initial: Value = serde_json::from_str(&composition.run_write.content).unwrap();
+    let pending = pending_tool_handoff(&request, &composition, &initial).to_string();
+    std::fs::write(&composition.run_write.path, &pending).unwrap();
+    let current = RunRecord::from_bytes(pending.as_bytes()).unwrap();
+    let provider: octopus_descriptors::InterfaceId = composition.provider_interface_id.clone().into();
+    let mut selection = current_selection(&request.roots, &current, &provider).unwrap().unwrap();
+    selection.external_inputs.push(ExternalInputSeed { checkpoint_id: "amended_trigger".into(), interface_id: "world_test_pulse".into(),
+        artifact_names: vec!["cron.current_time".into()], required_verified_artifacts: Vec::new() });
+    let door = composition.authoring.capability_doors["system_room"].clone();
+    let writer = composition.authoring.capability_tools["file.write"].clone();
+    let bridge = ProviderCapabilityBridge { tool: writer.clone(), correlation_id: "readback".into(),
+        arguments_hash: ContentHash::of_bytes(b"{}").to_hex(), return_interface: door.clone().into() };
+    let plan = plan_current_run_amendment(&request.roots, &current, &provider, CurrentRunRequest { change: None,
+        amendment_key: "mid-turn".into(), publications: vec![], selection: Some(selection), authored: None },
+        bridge, &[(writer, door.into())]).unwrap();
+    assert!(plan.validation.safe_to_apply, "{:?}", plan.validation.regressions);
+    let after = json!(plan.amendment.after);
+    assert_eq!(after["interface_state"][provider.as_str()]["pending_handoff"], json!(current)["interface_state"][provider.as_str()]["pending_handoff"]);
+    assert!(after["checkpoints"].as_array().unwrap().iter().any(|cp| cp["interface_binding"]["interface"] == "world_test_pulse"));
+}
+
+#[test]
+fn current_change_retires_a_standing_external_input() {
+    use octopus_operator_chat_client::{ExternalInputSeed, run_composition::current_run::*};
+    use octopus_run_authoring::capability_amendment::ProviderCapabilityBridge;
+    use octopus_ledger::ContentHash;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut request = support::client_fixture(&root);
+    enable_native_profile(&root);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry/interface/world_cron/interface.json");
+    let mut trigger: Value = serde_json::from_slice(&std::fs::read(source).unwrap()).unwrap();
+    trigger["id"] = json!("world_test_pulse");
+    write(&root, "registry/interface/world_test_pulse/interface.json", trigger);
+    for (file, pointer) in [("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"), ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces")] {
+        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("world_test_pulse"));
+        write(&root, file, value);
+    }
+    let pulse = ExternalInputSeed { checkpoint_id: "pulse".into(), interface_id: "world_test_pulse".into(),
+        artifact_names: vec!["cron.current_time".into()], required_verified_artifacts: Vec::new() };
+    request.external_inputs.push(pulse.clone());
+    let composition = plan_run_composition(&request).unwrap();
+    for file in composition_candidate_writes(&composition) {
+        std::fs::create_dir_all(file.path.parent().unwrap()).unwrap();
+        std::fs::write(file.path, file.content).unwrap();
+    }
+    let initial: Value = serde_json::from_str(&composition.run_write.content).unwrap();
+    let waiting = pending_tool_handoff(&request, &composition, &initial).to_string();
+    std::fs::write(&composition.run_write.path, &waiting).unwrap();
+    let current = RunRecord::from_bytes(waiting.as_bytes()).unwrap();
+    let provider: octopus_descriptors::InterfaceId = composition.provider_interface_id.clone().into();
+    let pinned = |record: &Value| record["checkpoints"].as_array().unwrap().iter().any(|cp| cp["interface_binding"]["interface"] == "world_test_pulse");
+    assert!(pinned(&json!(current)));
+    let door = composition.authoring.capability_doors["system_room"].clone();
+    let writer = composition.authoring.capability_tools["file.write"].clone();
+    let bridge = ProviderCapabilityBridge { tool: writer.clone(), correlation_id: "readback".into(),
+        arguments_hash: ContentHash::of_bytes(b"{}").to_hex(), return_interface: door.clone().into() };
+    let state = json!(current)["interface_state"].clone();
+    let client = state.as_object().unwrap().iter().find(|(_, value)| value.get("client_surface_role").is_some()).unwrap().0.clone();
+    let templates = state[provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array().unwrap().clone();
+    let own_routes = templates.iter().filter(|cp| cp["interface_binding"]["interface"] == json!(client)
+        && (cp["role"] == "stable" || cp["role"] == "independent_input")).collect::<Vec<_>>();
+    assert!(own_routes.len() >= 2);
+    for own in own_routes {
+        let mut future = json!(current);
+        let rows = future["checkpoints"].as_array().unwrap().iter().filter(|cp| cp["interface_binding"] == own["interface_binding"]
+            && cp["outbound_interface_bindings"] == own["outbound_interface_bindings"]).map(|cp| cp["id"].clone()).collect::<Vec<_>>();
+        future["checkpoints"].as_array_mut().unwrap().retain(|cp| !rows.contains(&cp["id"]));
+        future["active_checkpoints"].as_array_mut().unwrap().retain(|id| !rows.contains(id));
+        future["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array_mut().unwrap().retain(|cp| cp["name"] != own["name"]);
+        let error = plan_current_run_amendment(&request.roots, &current, &provider, CurrentRunRequest { change: None,
+            amendment_key: "drop-own-route".into(), publications: vec![], selection: None,
+            authored: Some(AuthoredCurrentRun { expected_before_hash: ContentHash::of_bytes(waiting.as_bytes()).to_hex(),
+                expected_before: json!(current), run_record: future, writes: vec![] }) },
+            bridge.clone(), &[(writer.clone(), door.clone().into())]).err().expect("the run's own client route must stay");
+        assert!(error.contains("removes or duplicates retained template"), "{error}");
+    }
+    write(&root, "registry/artifact/pulse-notes/artifact.json", json!({"id":"pulse-notes","label":"context.reference","text":"Pulse notes"}));
+    let mut add = CurrentRunSelectionEntries::default();
+    add.context_artifact_bindings.push(octopus_operator_chat_client::ArtifactBindingSeed { id: "pulse-notes".into() });
+    let mut remove = CurrentRunSelectionEntries::default();
+    remove.external_inputs.push(pulse);
+    let plan = plan_current_run_amendment(&request.roots, &current, &provider, CurrentRunRequest {
+        change: Some(CurrentRunChange { add, remove }),
+        amendment_key: "retire-pulse".into(), publications: vec![], selection: None, authored: None },
+        bridge, &[(writer, door.into())]).unwrap();
+    assert!(plan.validation.safe_to_apply, "{:?}", plan.validation.regressions);
+    let after = json!(plan.amendment.after);
+    assert!(!pinned(&after));
+    let retired = json!(current)["checkpoints"].as_array().unwrap().iter()
+        .find(|cp| cp["interface_binding"]["interface"] == "world_test_pulse").unwrap()["id"].clone();
+    let provider_state = &after["interface_state"][provider.as_str()];
+    assert!(!provider_state["frontier_checkpoint_ids"].as_array().unwrap().contains(&retired));
+    assert!(!after["active_checkpoints"].as_array().unwrap().contains(&retired));
+    assert!(!provider_state["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter()
+        .any(|cp| cp["interface_binding"]["interface"] == "world_test_pulse"));
+    assert_eq!(provider_state["pending_handoff"], json!(current)["interface_state"][provider.as_str()]["pending_handoff"]);
+    let control = templates.iter().find(|cp| cp["interface_binding"]["interface"] == json!(client) && cp["role"] == "independent_input").unwrap();
+    let control_rows = |record: &Value| record["checkpoints"].as_array().unwrap().iter().filter(|cp| cp["interface_binding"] == control["interface_binding"]).cloned().collect::<Vec<_>>();
+    assert_eq!(control_rows(&after), control_rows(&json!(current)));
+    assert!(after["checkpoints"].as_array().unwrap().iter().any(|cp| after["active_checkpoints"].as_array().unwrap().contains(&cp["id"])
+        && cp["interface_binding"]["interface"] == json!(client)
+        && cp["artifact_bindings"].as_array().unwrap().iter().any(|binding| binding["id"] == "pulse-notes")));
+    let sidecar: Value = serde_json::from_str(&plan.activation_writes.iter().find(|write|
+        write.path.ends_with(format!("{client}/octopus_os.json"))).unwrap().content).unwrap();
+    assert!(sidecar["authoring_profile"]["context_artifact_bindings"].as_array().unwrap().iter().any(|binding| binding["id"] == "pulse-notes"));
+    assert!(!sidecar["authoring_profile"]["external_inputs"].as_array().into_iter().flatten().any(|input| input["interface_id"] == "world_test_pulse"));
 }
 
 fn pending_tool_handoff(request: &RunCompositionRequest, plan: &RunCompositionPlan, before: &Value) -> Value {
@@ -199,10 +340,10 @@ fn current_default_tool_selection_preserves_provider_life_while_attaching() {
             if blocked {value["ceiling"]["hard_blocked_tools"]=json!(["file.peek"]);}
             else {value["ceiling"]["tools"].as_array_mut().unwrap().retain(|tool|tool!="file.peek");}
         });
-        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {publications:vec![],amendment_key:"denied".into(),selection:Some(selection.clone()),authored:None},bridge.clone(),&retained).unwrap_err().contains("outside the formed worker/EE grant"));
+        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest { change: None,publications:vec![],amendment_key:"denied".into(),selection:Some(selection.clone()),authored:None},bridge.clone(),&retained).unwrap_err().contains("outside the formed worker/EE grant"));
         std::fs::write(root.join(&worker_policy),&allowed).unwrap();
     }
-    let plan=plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {publications:vec![],amendment_key:"attach".into(),selection:Some(selection),authored:None},bridge.clone(),&retained).unwrap();
+    let plan=plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest { change: None,publications:vec![],amendment_key:"attach".into(),selection:Some(selection),authored:None},bridge.clone(),&retained).unwrap();
     assert!(plan.validation.safe_to_apply,"{:?}",plan.validation.regressions);
     let owner=request.roots.registry_root.join("interface").join(provider.as_str());
     assert!(plan.dependency_writes.iter().chain(&plan.activation_writes).all(|write|!write.path.starts_with(&owner)));
@@ -221,7 +362,7 @@ fn current_default_tool_selection_preserves_provider_life_while_attaching() {
     for new_file in [false,true] {
         if new_file {writes=vec![RegistryCandidateWrite {path:owner.join("new.json"),content:"{}".into(),expected_before_hash:None}];}
         let authored=AuthoredCurrentRun {expected_before_hash:ContentHash::of_bytes(composition.run_write.content.as_bytes()).to_hex(),expected_before:json!(current),run_record:json!(current),writes:writes.clone()};
-        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {publications:vec![],amendment_key:"unsafe".into(),selection:None,authored:Some(authored)},bridge.clone(),&retained).unwrap_err().contains("in-flight provider"));
+        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest { change: None,publications:vec![],amendment_key:"unsafe".into(),selection:None,authored:Some(authored)},bridge.clone(),&retained).unwrap_err().contains("in-flight provider"));
     }
     assert_eq!(std::fs::read(&composition.run_write.path).unwrap(),composition.run_write.content.as_bytes());
     for write in plan.dependency_writes.iter().chain(&plan.activation_writes) {
@@ -232,7 +373,7 @@ fn current_default_tool_selection_preserves_provider_life_while_attaching() {
     let next_selection=current_selection(&request.roots,&next,&provider).unwrap().unwrap();
     assert_eq!(next_selection.selected_tools.len(),4);
     assert!(next_selection.selected_tools.iter().any(|tool|tool.tool=="file.peek" && tool.interface=="system_extra_room"));
-    let repeated=plan_current_run_amendment(&request.roots,&next,&provider,CurrentRunRequest {publications:vec![],amendment_key:"repeat".into(),selection:Some(next_selection.clone()),authored:None},bridge,&retained).unwrap();
+    let repeated=plan_current_run_amendment(&request.roots,&next,&provider,CurrentRunRequest { change: None,publications:vec![],amendment_key:"repeat".into(),selection:Some(next_selection.clone()),authored:None},bridge,&retained).unwrap();
     assert!(repeated.validation.safe_to_apply,"{:?}",repeated.validation.regressions);
     assert!(repeated.dependency_writes.is_empty(),"existing private IDs must be reused");
     let owner=&composition.authoring.capability_doors["system_room"];
@@ -470,11 +611,11 @@ fn private_system_composition_is_fresh_exact_and_checked_under_policy() {
         std::fs::create_dir_all(write.path.parent().unwrap()).unwrap();
         std::fs::write(&write.path, &write.content).unwrap();
     }
-    let topology = octopus_world_terminal_client::form_capability_topology(
+    let topology = octopus_operator_chat_client::capability_formation::form_capability_topology(
         &request.roots.registry_root,
-        &octopus_world_terminal_client::CapabilityFormationRequest::from_live_chain(
+        &octopus_operator_chat_client::capability_formation::CapabilityFormationRequest::from_live_chain(
             plan.worker_interface_id.clone(),
-            octopus_world_terminal_client::resolve_live_ee_policy_chain(
+            octopus_operator_chat_client::capability_formation::resolve_live_ee_policy_chain(
                 &request.roots.ee_instances_root,
                 &request.ee_id.clone().into(),
             )
@@ -569,6 +710,21 @@ fn selected_external_routes_preserve_checkpoints_profiles_and_scoped_dependencie
         required_verified_artifact: serde_json::from_value(json!({"mark":"tool.call.allowed", "artifact_label":"selected.result",
             "verifier":"artifact_exists", "params":{"selected":"exact"}})).unwrap(),
     }];
+    assert!(plan_run_composition(&request).unwrap_err().contains("model outputs require an output selection"));
+    let provider_path = request.roots.registry_root.join("interface/world_provider_fixture/interface.json");
+    let mut provider: Value = serde_json::from_slice(&std::fs::read(&provider_path).unwrap()).unwrap();
+    provider["interface_driver_config"]["private_config"]["client_projection_output_labels"] =
+        json!(["interface.artifact.output", "turn.stream", "selected.result"]);
+    std::fs::write(provider_path, serde_json::to_vec(&provider).unwrap()).unwrap();
+    request.communication.output_selection = Some(CompositionOutputSelection {
+        return_labels: vec!["selected.result".into()],
+        record_labels: vec!["turn.stream".into()],
+    });
+    assert!(plan_run_composition(&request).unwrap_err().contains("another provider output already owns"));
+    request.communication.output_selection = Some(CompositionOutputSelection {
+        return_labels: vec!["interface.artifact.output".into()],
+        record_labels: vec!["turn.stream".into()],
+    });
     let plan = plan_run_composition(&request).unwrap();
     let record = RunRecord::from_bytes(plan.run_write.content.as_bytes()).unwrap();
     for (checkpoint, source, targets) in [
@@ -1119,4 +1275,32 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         let call_count = b.log.read_from(Seq(0)).iter().filter(|row| row.kind == MovementKind::InterfaceOutbound && row.from == Endpoint::Interface(b.author.clone()) && row.to == Endpoint::Interface(door.clone())).count();
         assert_eq!(call_count,b.writes);
     }
+}
+
+#[test]
+fn current_run_change_adds_and_removes_exact_entries_and_refuses_what_it_cannot_apply() {
+    use octopus_operator_chat_client::run_composition::current_run::{CurrentRunChange, CurrentRunSelection, apply_current_run_change};
+    use octopus_operator_chat_client::SelectedToolSeed;
+    let tool = |name: &str| SelectedToolSeed { tool: name.into(), interface: "system_room".into(), worker_environment_kind: "system_room".into() };
+    let current: CurrentRunSelection = serde_json::from_value(json!({
+        "selected_tools": [tool("file.read")],
+        "selected_worker_environment_kinds": ["system_room"],
+        "door_host_slots": {"system_room": {"workspace_root": "/work"}},
+        "external_inputs": [], "external_relays": [], "model_outputs": [],
+        "context_artifact_bindings": [], "payload_artifact_bindings": []
+    })).unwrap();
+    let change: CurrentRunChange = serde_json::from_value(json!({
+        "add": {"selected_tools": [tool("file.write")], "door_host_slots": {"system_room": {"repo_root": "/repo"}}},
+        "remove": {"selected_tools": [tool("file.read")]}
+    })).unwrap();
+    let changed = apply_current_run_change(current.clone(), change).unwrap();
+    assert_eq!(changed.selected_tools, vec![tool("file.write")]);
+    assert_eq!(changed.selected_worker_environment_kinds, current.selected_worker_environment_kinds);
+    assert_eq!(changed.door_host_slots["system_room"].len(), 2);
+
+    let absent: CurrentRunChange = serde_json::from_value(json!({"remove": {"selected_tools": [tool("browser.click")]}})).unwrap();
+    assert!(apply_current_run_change(current.clone(), absent).unwrap_err().contains("does not hold"));
+    let present: CurrentRunChange = serde_json::from_value(json!({"add": {"selected_worker_environment_kinds": ["system_room"]}})).unwrap();
+    assert!(apply_current_run_change(current.clone(), present).unwrap_err().contains("already holds"));
+    assert!(apply_current_run_change(current, CurrentRunChange::default()).unwrap_err().contains("nothing"));
 }

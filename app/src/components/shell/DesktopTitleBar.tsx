@@ -35,6 +35,7 @@ type Props = {
 };
 
 const TITLEBAR_CLUSTER_GAP = 8;
+const TITLEBAR_END_INSET = 6;
 const SETTINGS_CONTEXT: TitlebarSurfaceContext = { glyph: "settings", title: "Settings" };
 
 export type TitlebarSurfaceAction = {
@@ -88,7 +89,7 @@ export function DesktopTitleBar({
   const secondaryPaneCollapsedRef = useRef(secondaryPaneCollapsed);
   const controlsRef = useRef<HTMLDivElement>(null);
   const paneActionsRef = useRef<HTMLDivElement>(null);
-  const paneActionsRight = useTransform(secondaryPaneWidth, (width) => width + 8);
+  const paneActionsRight = useTransform(secondaryPaneWidth, (width) => width + TITLEBAR_END_INSET);
   const context = settingsOpen ? SETTINGS_CONTEXT : primaryPaneBlocked ? undefined : surfaceContext;
   const contextTransfer = settingsOpen ? undefined : onSurfaceContextPointerDown;
 
@@ -136,7 +137,7 @@ export function DesktopTitleBar({
       const paneActionsRect = paneActions.getBoundingClientRect();
       onSlotWidthsChange({
         left: Math.ceil(controlsRect.right) + TITLEBAR_CLUSTER_GAP,
-        right: Math.ceil(paneActionsRect.width + 8),
+        right: Math.ceil(paneActionsRect.width + TITLEBAR_END_INSET),
       });
     };
 

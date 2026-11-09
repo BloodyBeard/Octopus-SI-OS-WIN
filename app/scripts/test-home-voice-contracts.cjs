@@ -41,6 +41,24 @@ test('Home voice resolves its exact independent Run and refuses crossed ownershi
   assert.throws(() => parseHomeVoiceContext({ ...declaration, provider_id: declaration.control_interface_id }), /separate/);
 });
 
+test('joining an existing voice call needs its own connected sideband, not a new-session event', async () => {
+  const current = call(); current.callId = 'rtc_exact';
+  const payloads = [
+    { correlation_id: 'another', call_id: 'rtc_exact', state: 'attached', sideband_connected: true },
+    { correlation_id: current.correlationId, call_id: 'rtc_wrong', state: 'attached', sideband_connected: true },
+    { correlation_id: current.correlationId, call_id: current.callId, state: 'created', sideband_connected: false },
+    { correlation_id: current.correlationId, call_id: current.callId, state: 'attached', sideband_connected: true },
+  ];
+  let reads = 0;
+  const api = host(async () => ({ artifacts: [{ seq: ++reads, payload: payloads[reads - 1] }] }));
+  await api.waitForVoiceProviderReady(current, new AbortController().signal);
+  assert.equal(reads, 4);
+  const failed = host(async () => ({ artifacts: [{ seq: 1, payload: {
+    correlation_id: current.correlationId, call_id: current.callId, state: 'failed', reason: 'sideband refused',
+  } }] }));
+  await assert.rejects(failed.waitForVoiceProviderReady(current, new AbortController().signal), /sideband refused/);
+});
+
 test('cancelling startup waits for the late answer and closes exactly that call once', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let allowAnswer = false;

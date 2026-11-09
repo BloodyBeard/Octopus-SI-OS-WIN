@@ -820,6 +820,33 @@ impl LedgerSqliteReader {
         })
     }
 
+    pub fn outbound_rows_on_edge(
+        &self,
+        from: &str,
+        to: &str,
+        after_seq: u64,
+        before_seq: u64,
+    ) -> Result<Vec<IndexedMovementRowRange>, SqliteIndexError> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT seq, start_offset, end_offset FROM movements
+             WHERE from_kind = 'interface' AND from_id = ?1
+               AND to_kind = 'interface' AND to_id = ?2
+               AND kind = 'InterfaceOutbound' AND seq >= ?3 AND seq < ?4
+             ORDER BY seq ASC",
+        )?;
+        let rows = statement.query_map(
+            params![from, to, sqlite_u64("after sequence", after_seq)?, sqlite_u64("before sequence", before_seq)?],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )?;
+        rows.map(|row| {
+            let (seq, start, end) = row?;
+            if seq < 0 {
+                return Err(SqliteIndexError::InconsistentSnapshot { message: "negative outbound sequence".into() });
+            }
+            checked_indexed_row_range(seq as u64, start, end)
+        }).collect()
+    }
+
     pub fn movement_rows_touching_run(
         &self,
         run: &str,
@@ -1166,7 +1193,7 @@ mod tests {
             trace: TraceId("t1".into()),
             kind: MovementKind::InterfaceOutbound,
             from: Endpoint::Interface(InterfaceId::new("world_provider_codex")),
-            to: Endpoint::Interface(InterfaceId::new("world_terminal")),
+            to: Endpoint::Interface(InterfaceId::new("world_operator_chat")),
             artifact: Some(ArtifactRef {
                 id: ArtifactId::new(format!(
                     "interface.output:{}",
@@ -1174,7 +1201,7 @@ mod tests {
                 )),
                 content: ContentHash::of_bytes(b"two"),
             }),
-            invocation_metadata: Some(metadata("run_alpha", "c2", "world_terminal")),
+            invocation_metadata: Some(metadata("run_alpha", "c2", "world_operator_chat")),
             causal_floor: None,
         });
         log.append(MovementDraft {
@@ -1306,7 +1333,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(by_artifact.len(), 1);
-        assert_eq!(by_artifact[0].to_id, "world_terminal");
+        assert_eq!(by_artifact[0].to_id, "world_operator_chat");
     }
 
     #[test]
@@ -1330,7 +1357,7 @@ mod tests {
         );
         assert_eq!(
             reader
-                .bounded_interface_delivery_candidate("world_terminal", 0, 3)
+                .bounded_interface_delivery_candidate("world_operator_chat", 0, 3)
                 .unwrap()
                 .unwrap()
                 .seq,
@@ -1458,7 +1485,7 @@ mod tests {
         let reader = LedgerSqliteReader::open(&path).unwrap();
         assert_eq!(
             reader
-                .bounded_interface_delivery_candidate("world_terminal", 0, 3)
+                .bounded_interface_delivery_candidate("world_operator_chat", 0, 3)
                 .unwrap(),
             Some(IndexedMovementRowRange {
                 seq: 1,
@@ -1593,7 +1620,7 @@ mod tests {
             trace: TraceId("legacy".into()),
             kind: MovementKind::InterfaceOutbound,
             from: Endpoint::Interface(InterfaceId::new("system_worker_test")),
-            to: Endpoint::Interface(InterfaceId::new("world_terminal")),
+            to: Endpoint::Interface(InterfaceId::new("world_operator_chat")),
             artifact: None,
             invocation_metadata: Some(metadata("run_alpha", "c1", "world_other")),
         };

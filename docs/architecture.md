@@ -480,6 +480,14 @@ operator's terminal, or a run whose room grants it. A room cannot signal the
 runtime's processes, and a command started from a room cannot launch a second
 runtime, because it would inherit the room's sandbox.
 
+Control status includes the lifecycle manager's current `interface_failures`,
+including a life that stops after declaring readiness. This observation is held
+in memory and remains available when the ledger cannot be written. A ready root
+does not imply every interface life is available. Failure of one life leaves
+healthy siblings running; successful readiness clears its failure. The client
+shows the exact bound provider as unavailable without inventing a terminal
+ledger movement.
+
 There is no recovery subsystem. This follows from intent, obligation, and
 memory living in files rather than in a running loop.
 
@@ -514,10 +522,11 @@ feature. Two things get that name, and they are different:
 - **Descriptor-level.** A run with the grant writes a new interface folder, a
   new worker pin, a new EE template. Plain file edits. The system now listens
   to something it did not listen to before, or has a worker it did not have.
-- **Source-level.** When genuinely new executable behavior is needed, a coder
-  worker edits code inside a git-worktree room, on its own branch, and the
-  change counts only when the required marks land. Branch isolation and
-  rollback are behaviors of that room.
+- **Source-level.** A run edits the framework's packages and, where necessary,
+  its kernel through a granted workspace, following the development rules and
+  preserving the kernel's generic contracts. A git-worktree room supplies branch
+  isolation when requested. Verification belongs to the affected owner;
+  checkpoints may require marks where proof is useful.
 
 Drivers and packages may be written in any language. Only an artifact crosses
 into the runtime, so the kernel does not know the difference. The registry

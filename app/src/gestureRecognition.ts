@@ -1,7 +1,8 @@
-import type { HandLandmarker, HandLandmarkerResult, NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { useSyncExternalStore } from "react";
-import { AirHandGestureEngine, type AirHandPoint, type AirHandPose, type FingerCurls } from "./airHandEngine";
-import { emitAirHandGesture, type GestureSensitivity } from "./gestureShortcuts";
+import { AirHandGestureEngine, type AirHandFrame, type GestureInteraction, type HandObservation, type HandPose, type TrackedHand } from "./airHandEngine";
+import { emitAirHandGesture, emitGestureInteraction, type GestureSensitivity } from "./gestureShortcuts";
+import { GESTURE_TRACE_FORMAT, GESTURE_TRACE_VERSION, traceFrame, type GestureTrace, type TraceFrame } from "./gestureTrace";
+import type { HandLandmarkReply, HandLandmarkRequest } from "./handLandmarkWorker";
 
 export type GestureCamera = {
   deviceId: string;
@@ -12,15 +13,10 @@ export type GestureRecognitionPhase = "off" | "requesting" | "loading" | "runnin
 
 export type GestureRecognitionState = Readonly<{
   activeDeviceId: string;
-  confidence: number;
   devices: readonly GestureCamera[];
   error: string;
   phase: GestureRecognitionPhase;
-  point: AirHandPoint | null;
-  palmPoint: AirHandPoint | null;
-  pinchRatio: number | null;
-  curls: FingerCurls | null;
-  pose: AirHandPose;
+  hands: readonly TrackedHand[];
   cameraFps: number | null;
 }>;
 
@@ -31,29 +27,42 @@ export type GestureDevicesView = Readonly<{
   activeDeviceId: string;
 }>;
 
+export type GestureTraceRecording = Readonly<{ done: Promise<GestureTrace>; cancel: () => void }>;
+
+type ActiveTrace = {
+  startedAt: number;
+  until: number;
+  recordedAt: string;
+  label: string;
+  options: GestureRecognitionOptions;
+  camera: { width: number; height: number };
+  frames: TraceFrame[];
+  resolve: (trace: GestureTrace) => void;
+  reject: (error: Error) => void;
+};
+
 export type GestureRecognitionOptions = {
   cameraDeviceId: string;
   mirrorX: boolean;
   sensitivity: GestureSensitivity;
 };
 
+const NO_HANDS: readonly TrackedHand[] = Object.freeze([]);
+
 const INITIAL_STATE: GestureRecognitionState = Object.freeze({
   activeDeviceId: "",
-  confidence: 0,
   devices: [],
   error: "",
   phase: "off",
-  point: null,
-  palmPoint: null,
-  pinchRatio: null,
-  curls: null,
-  pose: "none",
+  hands: NO_HANDS,
   cameraFps: null,
 });
 
-const IDLE_HAND = Object.freeze({ point: null, palmPoint: null, pinchRatio: null, curls: null, pose: "none", confidence: 0 }) satisfies Partial<GestureRecognitionState>;
-const STALE_FRAME_MS = 1_200;
+const IDLE_HANDS = Object.freeze({ hands: NO_HANDS }) satisfies Partial<GestureRecognitionState>;
+const STALE_FRAME_MS = 400;
+const DETECTION_TIMEOUT_MS = 2_000;
 const CAMERA_RATE_WINDOW = 24;
+const HAND_TINT: Record<TrackedHand["side"], string> = { left: "rgb(125 211 252)", right: "rgb(252 196 98)" };
 
 const HAND_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -72,17 +81,20 @@ class GestureRecognitionController {
   private frame = 0;
   private generation = 0;
   private configKey = "";
-  private landmarkerPromise: Promise<HandLandmarker> | null = null;
+  private worker: Worker | null = null;
+  private workerReady: Promise<Worker> | null = null;
+  private pending: { generation: number; timestamp: number; options: GestureRecognitionOptions } | null = null;
   private engine = new AirHandGestureEngine();
   private lastVideoTime = -1;
   private lastPublishedAt = 0;
   private preview: HTMLCanvasElement | null = null;
-  private lastLandmarks: NormalizedLandmark[] | null = null;
   private lastOptions: GestureRecognitionOptions | null = null;
+  private aspect = 16 / 9;
   private wanted: GestureRecognitionOptions | null = null;
   private lastFrameAt = 0;
   private frameTimes: number[] = [];
   private watching = false;
+  private trace: ActiveTrace | null = null;
 
   attachPreview = (canvas: HTMLCanvasElement | null): void => {
     this.preview = canvas;
@@ -91,6 +103,7 @@ class GestureRecognitionController {
 
   private coarse: GestureRecognitionState = INITIAL_STATE;
   private coarseAt = 0;
+  private coarseHands = "";
   private devicesView: GestureDevicesView = {
     devices: INITIAL_STATE.devices,
     phase: INITIAL_STATE.phase,
@@ -126,10 +139,10 @@ class GestureRecognitionController {
     }
     if (document.hidden) {
       this.configKey = "";
-      this.publish({ ...IDLE_HAND, phase: "off", error: "" });
+      this.publish({ ...IDLE_HANDS, phase: "off", error: "" });
       return;
     }
-    this.publish({ phase: "requesting", error: "", point: null, pose: "none", confidence: 0, cameraFps: null });
+    this.publish({ ...IDLE_HANDS, phase: "requesting", error: "", cameraFps: null });
     try {
       const nativePermission = await window.octopusTransport?.cameraAccessStatus?.();
       if (generation !== this.generation) return;
@@ -147,7 +160,7 @@ class GestureRecognitionController {
         if (generation !== this.generation || this.stream !== stream) return;
         this.configKey = "";
         this.stopCapture();
-        this.publish({ ...IDLE_HAND, phase: "off", error: "" });
+        this.publish({ ...IDLE_HANDS, phase: "off", error: "" });
         if (this.wanted) void this.start(this.wanted);
       }, { once: true });
       const video = document.createElement("video");
@@ -159,19 +172,19 @@ class GestureRecognitionController {
       await video.play();
       if (generation !== this.generation) return;
       this.publish({ phase: "loading" });
-      const landmarker = await this.landmarker();
+      const worker = await this.landmarkWorker();
       if (generation !== this.generation) return;
       await this.refreshDevices();
       const activeDeviceId = stream.getVideoTracks()[0]?.getSettings().deviceId ?? options.cameraDeviceId;
       this.publish({ activeDeviceId, phase: "running", error: "" });
-      this.tick(generation, landmarker, options);
+      this.tick(generation, worker, options);
     } catch (error) {
       if (generation !== this.generation) return;
-      this.landmarkerPromise = null;
+      this.discardWorker();
       this.stopCapture();
       const message = error instanceof Error ? error.message : String(error);
       const denied = error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "SecurityError");
-      this.publish({ phase: denied ? "denied" : "error", error: message, point: null, pose: "none", confidence: 0 });
+      this.publish({ ...IDLE_HANDS, phase: denied ? "denied" : "error", error: message });
     }
   }
 
@@ -180,6 +193,7 @@ class GestureRecognitionController {
     this.configKey = "";
     this.wanted = null;
     this.stopCapture();
+    this.discardWorker();
     this.publish({ ...INITIAL_STATE, devices: this.state.devices });
   }
 
@@ -208,75 +222,143 @@ class GestureRecognitionController {
       this.generation += 1;
       this.configKey = "";
       this.stopCapture();
-      this.publish({ ...IDLE_HAND, phase: "off", error: "" });
+      this.publish({ ...IDLE_HANDS, phase: "off", error: "" });
     });
     navigator.mediaDevices?.addEventListener?.("devicechange", () => {
       if (this.wanted) void this.refreshDevices();
     });
   }
 
-  private tick(generation: number, landmarker: HandLandmarker, options: GestureRecognitionOptions): void {
+  private tick(generation: number, worker: Worker, options: GestureRecognitionOptions): void {
     if (generation !== this.generation || !this.video) return;
     const now = performance.now();
-    if (this.lastFrameAt > 0 && now - this.lastFrameAt > STALE_FRAME_MS && (this.state.pose !== "none" || this.state.point || this.state.palmPoint)) {
-      this.lastLandmarks = null;
-      this.engine.reset();
-      this.publish(IDLE_HAND);
+    const video = this.video;
+    if (this.pending && now - this.pending.timestamp > DETECTION_TIMEOUT_MS) {
+      this.fail("Hand tracking stopped answering camera frames.");
+      return;
     }
-    if (this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && this.video.currentTime !== this.lastVideoTime) {
-      this.lastVideoTime = this.video.currentTime;
+    if (!this.pending && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentTime !== this.lastVideoTime && video.videoWidth > 0 && video.videoHeight > 0) {
+      this.lastVideoTime = video.currentTime;
       this.lastFrameAt = now;
+      this.aspect = video.videoWidth / video.videoHeight;
       this.frameTimes.push(now);
       if (this.frameTimes.length > CAMERA_RATE_WINDOW) this.frameTimes.shift();
       const cameraFps = this.frameTimes.length >= CAMERA_RATE_WINDOW / 2
-        ? Math.round((this.frameTimes.length - 1) * 1000 / (now - this.frameTimes[0]))
+        ? Math.round((this.frameTimes.length - 1) * 1000 / (now - (this.frameTimes[0] ?? now)))
         : null;
       if (cameraFps !== this.state.cameraFps) this.publish({ cameraFps });
-      let result: HandLandmarkerResult;
+      let frame: VideoFrame;
       try {
-        result = landmarker.detectForVideo(this.video, now);
+        frame = new VideoFrame(video, { timestamp: Math.round(now * 1000) });
       } catch (error) {
-        this.stopCapture();
-        this.publish({
-          phase: "error",
-          error: error instanceof Error ? error.message : String(error),
-          point: null,
-          pose: "none",
-          confidence: 0,
-        });
+        this.fail(`The camera frame could not be read: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
-      const landmarks = result.landmarks[0];
-      this.lastLandmarks = landmarks ?? null;
-      if (landmarks) {
-        const recognition = this.engine.process(landmarks, now, options);
-        const confidence = result.handedness[0]?.[0]?.score ?? 0;
-        if (recognition.event) emitAirHandGesture(recognition.event, "camera");
-        if (
-          recognition.pose !== this.state.pose
-          || recognition.point || this.state.point
-          || recognition.palmPoint || this.state.palmPoint
-          || recognition.pinchRatio != null || this.state.pinchRatio != null
-          || now - this.lastPublishedAt >= 100
-        ) {
-          this.lastPublishedAt = now;
-          this.publish({
-            point: recognition.point,
-            palmPoint: recognition.palmPoint,
-            pinchRatio: recognition.pinchRatio,
-            curls: recognition.curls,
-            pose: recognition.pose,
-            confidence,
-          });
-        }
-      } else {
-        const event = this.engine.lost(now, options);
-        if (event) emitAirHandGesture(event, "camera");
-        if (this.state.pose !== "none" || this.state.point || this.state.palmPoint) this.publish(IDLE_HAND);
-      }
+      this.pending = { generation, timestamp: now, options };
+      const request: HandLandmarkRequest = { type: "frame", frame, timestamp: now };
+      worker.postMessage(request, [frame]);
+    } else if (!this.pending && this.lastFrameAt > 0 && now - this.lastFrameAt > STALE_FRAME_MS && this.state.hands.length > 0) {
+      const frame = this.engine.process([], now, this.engineOptions(options));
+      this.capture(now, [], frame);
+      this.consume(frame, now);
     }
+    this.finishTrace(now);
     this.drawPreview();
-    this.frame = window.requestAnimationFrame(() => this.tick(generation, landmarker, options));
+    this.frame = window.requestAnimationFrame(() => this.tick(generation, worker, options));
+  }
+
+  private receive(reply: HandLandmarkReply): void {
+    if (reply.type === "ready") return;
+    if (reply.type === "error") {
+      this.fail(reply.message);
+      return;
+    }
+    const pending = this.pending;
+    if (!pending || pending.timestamp !== reply.timestamp) return;
+    this.pending = null;
+    if (pending.generation !== this.generation) return;
+    const frame = this.engine.process(reply.hands, reply.timestamp, this.engineOptions(pending.options));
+    this.capture(reply.timestamp, reply.hands, frame);
+    this.consume(frame, reply.timestamp);
+  }
+
+  private fail(message: string): void {
+    this.generation += 1;
+    this.configKey = "";
+    this.stopCapture();
+    this.discardWorker();
+    this.publish({ ...IDLE_HANDS, phase: "error", error: message });
+  }
+
+  recordTrace(durationMs: number, label: string): GestureTraceRecording {
+    const video = this.video;
+    const options = this.lastOptions;
+    if (this.state.phase !== "running" || !video || !options) {
+      return { done: Promise.reject(new Error("Start the camera in Settings → Gestures before recording a gesture trace.")), cancel: () => undefined };
+    }
+    if (this.trace) return { done: Promise.reject(new Error("A gesture trace is already recording.")), cancel: () => undefined };
+    if (!Number.isFinite(durationMs) || durationMs <= 0) return { done: Promise.reject(new Error("Gesture trace duration must be positive.")), cancel: () => undefined };
+    const startedAt = performance.now();
+    let resolveTrace: (trace: GestureTrace) => void = () => undefined;
+    let rejectTrace: (error: Error) => void = () => undefined;
+    const done = new Promise<GestureTrace>((resolve, reject) => {
+      resolveTrace = resolve;
+      rejectTrace = reject;
+    });
+    const trace: ActiveTrace = {
+      startedAt,
+      until: startedAt + durationMs,
+      recordedAt: new Date().toISOString(),
+      label,
+      options,
+      camera: { width: video.videoWidth, height: video.videoHeight },
+      frames: [],
+      resolve: resolveTrace,
+      reject: rejectTrace,
+    };
+    this.trace = trace;
+    return {
+      done,
+      cancel: () => {
+        if (this.trace !== trace) return;
+        this.trace = null;
+        trace.reject(new Error("Gesture trace recording was cancelled."));
+      },
+    };
+  }
+
+  private capture(now: number, observations: readonly HandObservation[], frame: AirHandFrame): void {
+    const trace = this.trace;
+    if (!trace || now > trace.until) return;
+    trace.frames.push(traceFrame(now - trace.startedAt, this.aspect, observations, frame));
+  }
+
+  private finishTrace(now: number): void {
+    const trace = this.trace;
+    if (!trace || now < trace.until) return;
+    this.trace = null;
+    trace.resolve({
+      format: GESTURE_TRACE_FORMAT,
+      version: GESTURE_TRACE_VERSION,
+      recordedAt: trace.recordedAt,
+      label: trace.label,
+      options: { mirrorX: trace.options.mirrorX, sensitivity: trace.options.sensitivity },
+      camera: trace.camera,
+      frames: trace.frames,
+    });
+  }
+
+  private engineOptions(options: GestureRecognitionOptions) {
+    return { aspect: this.aspect, mirrorX: options.mirrorX, sensitivity: options.sensitivity };
+  }
+
+  private consume(frame: AirHandFrame, now: number): void {
+    for (const command of frame.commands) emitAirHandGesture(command, "camera");
+    emitInteractions(frame.interactions);
+    if (frame.hands.length > 0 || this.state.hands.length > 0 || now - this.lastPublishedAt >= 100) {
+      this.lastPublishedAt = now;
+      this.publish({ hands: frame.hands.length > 0 ? frame.hands : NO_HANDS });
+    }
   }
 
   private drawPreview(): void {
@@ -314,14 +396,21 @@ class GestureRecognitionController {
       context.scale(-1, 1);
     }
     context.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
-    const landmarks = this.lastLandmarks;
-    if (landmarks) {
+    context.restore();
+    const place = (x: number, y: number) => {
+      const px = offsetX + x * drawWidth;
+      return { x: mirror ? canvas.width - px : px, y: offsetY + y * drawHeight };
+    };
+    context.lineCap = "round";
+    for (const hand of this.state.hands) {
+      const landmarks = hand.landmarks;
       const pointFor = (index: number) => {
         const mark = landmarks[index];
-        return mark ? { x: offsetX + mark.x * drawWidth, y: offsetY + mark.y * drawHeight } : null;
+        return mark ? place(mark.x, mark.y) : null;
       };
+      const tint = HAND_TINT[hand.side];
+      context.globalAlpha = hand.coasting ? 0.45 : 1;
       context.lineWidth = 2 * ratio;
-      context.lineCap = "round";
       context.strokeStyle = "rgb(255 255 255 / 82%)";
       for (const [from, to] of HAND_CONNECTIONS) {
         const start = pointFor(from);
@@ -332,47 +421,99 @@ class GestureRecognitionController {
         context.lineTo(end.x, end.y);
         context.stroke();
       }
-      context.fillStyle = "#fff";
+      context.fillStyle = tint;
       landmarks.forEach((_, index) => {
         const point = pointFor(index);
         if (!point) return;
-        const radius = (index === 4 || index === 8 ? 3.2 : 2.1) * ratio;
         context.beginPath();
-        context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        context.arc(point.x, point.y, (index === 4 || index === 8 ? 3.4 : 2.1) * ratio, 0, Math.PI * 2);
         context.fill();
       });
+      const thumb = pointFor(4);
+      const index = pointFor(8);
+      if (thumb && index && hand.pinch > 0.35) {
+        context.strokeStyle = tint;
+        context.lineWidth = (hand.pose === "pinch" ? 3.5 : 1.5) * ratio;
+        context.beginPath();
+        context.moveTo(thumb.x, thumb.y);
+        context.lineTo(index.x, index.y);
+        context.stroke();
+      }
+      const wrist = pointFor(0);
+      if (wrist) {
+        const label = `${hand.side === "left" ? "Left" : "Right"} · ${previewPoseLabel(hand.pose)}`;
+        context.font = `${11 * ratio}px system-ui, sans-serif`;
+        const textWidth = context.measureText(label).width;
+        const padX = 6 * ratio;
+        const boxHeight = 18 * ratio;
+        const boxX = Math.min(Math.max(wrist.x - textWidth / 2 - padX, 0), canvas.width - textWidth - padX * 2);
+        const boxY = Math.min(wrist.y + 8 * ratio, canvas.height - boxHeight);
+        context.fillStyle = "rgb(0 0 0 / 62%)";
+        context.beginPath();
+        context.roundRect(boxX, boxY, textWidth + padX * 2, boxHeight, 9 * ratio);
+        context.fill();
+        context.fillStyle = tint;
+        context.textBaseline = "middle";
+        context.fillText(label, boxX + padX, boxY + boxHeight / 2);
+      }
     }
-    context.restore();
+    context.globalAlpha = 1;
   }
 
-  private async landmarker(): Promise<HandLandmarker> {
-    if (!this.landmarkerPromise) {
-      const wasmRoot = new URL("mediapipe/wasm", document.baseURI).toString().replace(/\/$/, "");
-      const modelPath = new URL("models/hand_landmarker.task", document.baseURI).toString();
-      this.landmarkerPromise = import("@mediapipe/tasks-vision").then(async ({ FilesetResolver, HandLandmarker }) => {
-        const vision = await FilesetResolver.forVisionTasks(wasmRoot);
-        return HandLandmarker.createFromOptions(vision, {
-          baseOptions: { delegate: "CPU", modelAssetPath: modelPath },
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.4,
-          minTrackingConfidence: 0.3,
-          numHands: 1,
-          runningMode: "VIDEO",
-        });
+  private landmarkWorker(): Promise<Worker> {
+    if (this.workerReady) return this.workerReady;
+    const worker = new Worker(new URL("./handLandmarkWorker.ts", import.meta.url), { type: "module", name: "hand-landmarks" });
+    this.worker = worker;
+    const ready = new Promise<Worker>((resolve, reject) => {
+      const settle = (event: MessageEvent<HandLandmarkReply>) => {
+        if (event.data.type === "result") return;
+        worker.removeEventListener("message", settle);
+        if (event.data.type === "ready") {
+          worker.addEventListener("message", (message: MessageEvent<HandLandmarkReply>) => this.receive(message.data));
+          resolve(worker);
+        } else {
+          reject(new Error(event.data.message));
+        }
+      };
+      worker.addEventListener("message", settle);
+      worker.addEventListener("error", (event) => {
+        const message = event.message || "The hand tracking worker stopped.";
+        if (this.worker === worker && this.state.phase === "running") this.fail(message);
+        reject(new Error(message));
       });
-    }
-    return this.landmarkerPromise;
+    });
+    this.workerReady = ready;
+    const start: HandLandmarkRequest = {
+      type: "start",
+      wasmRoot: new URL("mediapipe/wasm", document.baseURI).toString().replace(/\/$/, ""),
+      modelPath: new URL("models/hand_landmarker.task", document.baseURI).toString(),
+    };
+    worker.postMessage(start);
+    return ready;
+  }
+
+  private discardWorker(): void {
+    this.worker?.terminate();
+    this.worker = null;
+    this.workerReady = null;
+    this.pending = null;
   }
 
   private stopCapture(): void {
     if (this.frame) window.cancelAnimationFrame(this.frame);
     this.frame = 0;
+    this.pending = null;
     this.lastVideoTime = -1;
     this.lastFrameAt = 0;
     this.lastPublishedAt = 0;
-    this.lastLandmarks = null;
     this.frameTimes = [];
-    this.engine.reset();
+    if (this.trace) {
+      const trace = this.trace;
+      this.trace = null;
+      trace.reject(new Error("Gesture recognition stopped before the trace finished."));
+    }
+    emitInteractions(this.engine.reset());
+    if (this.state.hands.length > 0) this.publish(IDLE_HANDS);
     if (this.video) {
       this.video.pause();
       this.video.srcObject = null;
@@ -396,8 +537,9 @@ class GestureRecognitionController {
   private updateCoarse(): void {
     const state = this.state;
     const cached = this.coarse;
+    const hands = state.hands.map((hand) => `${hand.id}:${hand.side}:${hand.pose}:${hand.engaged}`).join("|");
     const structural = state.phase !== cached.phase
-      || state.pose !== cached.pose
+      || hands !== this.coarseHands
       || state.cameraFps !== cached.cameraFps
       || state.error !== cached.error
       || state.devices !== cached.devices
@@ -406,6 +548,7 @@ class GestureRecognitionController {
     if (structural || now - this.coarseAt >= 150) {
       this.coarse = state;
       this.coarseAt = now;
+      this.coarseHands = hands;
     }
   }
 
@@ -432,10 +575,6 @@ import.meta.hot?.dispose(() => {
   controller.stop();
   window.location.reload();
 });
-
-export function useGestureRecognitionState(): GestureRecognitionState {
-  return useSyncExternalStore(controller.subscribe, controller.snapshot, () => INITIAL_STATE);
-}
 
 export function useGestureRecognitionCoarseState(): GestureRecognitionState {
   return useSyncExternalStore(controller.subscribe, controller.coarseSnapshot, () => INITIAL_STATE);
@@ -466,6 +605,10 @@ export function startGestureRecognition(options: GestureRecognitionOptions): Pro
 
 export function stopGestureRecognition(): void {
   controller.stop();
+}
+
+export function recordGestureTrace(durationMs: number, label: string): GestureTraceRecording {
+  return controller.recordTrace(durationMs, label);
 }
 
 export function refreshGestureCameras(): Promise<void> {
@@ -512,4 +655,17 @@ async function openCamera(deviceId: string): Promise<MediaStream> {
 
 function stopStream(stream: MediaStream): void {
   for (const track of stream.getTracks()) track.stop();
+}
+
+function emitInteractions(interactions: readonly GestureInteraction[]): void {
+  for (const interaction of interactions) emitGestureInteraction(interaction, "camera");
+}
+
+function previewPoseLabel(pose: HandPose): string {
+  if (pose === "point") return "Point";
+  if (pose === "pinch") return "Pinch";
+  if (pose === "open") return "Open";
+  if (pose === "two") return "Two fingers";
+  if (pose === "fist") return "Fist";
+  return "Hand";
 }

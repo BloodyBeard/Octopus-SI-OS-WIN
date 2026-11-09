@@ -5,11 +5,11 @@ import { OcButton, OcCard, OcGroup, OcSelect, OcSettingsRow, OcStatus, OcSwitch,
 import { Glyph } from "../IconGlyphs";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { appToast, useAppErrorToast } from "../../toasts";
-import { copyText } from "../../runtimeFormat";
 import { SettingsHeading } from "./SettingsHeading";
 import { formatKeyboardShortcuts, useKeyboardShortcuts } from "../../keyboardShortcuts";
+import { DictationRecordings } from "../chat/DictationRecordings";
 
-export function VoiceAudioSection({ accessProfile }: { accessProfile: OctopusClientAccessProfile }) {
+export function VoiceAudioSection({ accessProfile, recordingId, onShowAllRecordings }: { accessProfile: OctopusClientAccessProfile; recordingId?: string; onShowAllRecordings?: () => void }) {
   const preferences = useClientPreferences();
   const setClientPreferences = useSetClientPreferences();
   const keyboardShortcuts = useKeyboardShortcuts(accessProfile);
@@ -17,10 +17,8 @@ export function VoiceAudioSection({ accessProfile }: { accessProfile: OctopusCli
   const [audioOutputs, setAudioOutputs] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [deviceError, setDeviceError] = useState("");
   const [deviceLoading, setDeviceLoading] = useState(true);
-  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [dictionaryExpanded, setDictionaryExpanded] = useState(false);
   const [dictionaryDraft, setDictionaryDraft] = useState<{ id: string; phrase: string; replacement: string } | null>(null);
-  const [copiedDictationId, setCopiedDictationId] = useState("");
   useAppErrorToast(deviceError);
 
   useEffect(() => {
@@ -108,7 +106,7 @@ export function VoiceAudioSection({ accessProfile }: { accessProfile: OctopusCli
     <section className="settings-section">
       <SettingsHeading
         description="Microphone, dictation, and how calls behave across the app."
-        title="Voice & Audio"
+        title="Voice"
       />
 
       <OcGroup title="Devices" description="Capture and playback devices used by voice surfaces.">
@@ -147,7 +145,7 @@ export function VoiceAudioSection({ accessProfile }: { accessProfile: OctopusCli
         </OcCard>
       </OcGroup>
 
-      <OcGroup title="Dictation" description="Composer dictation is a local client convenience and does not enter the Octopus runtime.">
+      <OcGroup title="Dictation">
         <OcCard>
           <OcSettingsRow {...settingsTargetProps("voice.transcription-provider")}
             control={(
@@ -275,59 +273,9 @@ export function VoiceAudioSection({ accessProfile }: { accessProfile: OctopusCli
               )}
             </div>
           ) : null}
-          <OcSettingsRow {...settingsTargetProps("voice.history")}
-            control={(
-              <div className="settings-inline-actions">
-                <OcStatus
-                  label={preferences.dictationHistory.length ? `${preferences.dictationHistory.length} saved` : "No recent dictations"}
-                  tone={preferences.dictationHistory.length ? "neutral" : "muted"}
-                />
-                {preferences.dictationHistory.length ? (
-                  <>
-                    <OcButton onClick={() => setHistoryExpanded((expanded) => !expanded)}>
-                      {historyExpanded ? "Hide" : "View"}
-                    </OcButton>
-                    <OcButton onClick={() => {
-                      const previous = preferences.dictationHistory;
-                      setClientPreferences({ dictationHistory: [] });
-                      setHistoryExpanded(false);
-                      appToast.info("Recent dictations cleared", 8, {
-                        action: { label: "Undo", onSelect: () => setClientPreferences({ dictationHistory: previous }) },
-                        dedupeKey: `dictation-history-clear:${accessProfile}`,
-                      });
-                    }}>Clear</OcButton>
-                  </>
-                ) : null}
-              </div>
-            )}
-            description="Recent dictations appear here for copying."
-            label="Recent dictations"
-          />
-          {historyExpanded && preferences.dictationHistory.length ? (
-            <div className="mx-3 mb-3 grid gap-1 rounded-xl bg-token-foreground/3 p-1.5">
-              {preferences.dictationHistory.map((entry) => (
-                <div className="group flex min-w-0 items-start gap-3 rounded-lg px-2 py-2 hover:bg-token-list-hover-background" key={entry.id}>
-                  <button
-                    className="min-w-0 flex-1 cursor-interaction text-left"
-                    onClick={() => {
-                      void copyText(entry.text).then((copied) => {
-                        if (!copied) return;
-                        setCopiedDictationId(entry.id);
-                        window.setTimeout(() => setCopiedDictationId((current) => current === entry.id ? "" : current), 1_200);
-                      });
-                    }}
-                    type="button"
-                  >
-                    <span className="line-clamp-2 block text-sm leading-5 text-token-foreground">{entry.text}</span>
-                    <span className="mt-0.5 block text-xs text-token-description-foreground">{new Date(entry.createdAtMs).toLocaleString()}</span>
-                  </button>
-                  <span className="flex size-7 shrink-0 items-center justify-center text-token-description-foreground">
-                    <Glyph name={copiedDictationId === entry.id ? "check" : "copy"} size={14} />
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
+          <div {...settingsTargetProps("voice.recordings")}>
+            <DictationRecordings recordingId={recordingId} onShowAll={onShowAllRecordings} />
+          </div>
         </OcCard>
       </OcGroup>
 
@@ -363,20 +311,7 @@ export function VoiceAudioSection({ accessProfile }: { accessProfile: OctopusCli
         </OcCard>
       </OcGroup>
 
-      <OcGroup title="Storage" description="Recordings and transcripts stay on this device.">
-        <OcCard>
-          <OcSettingsRow {...settingsTargetProps("voice.recordings")}
-            control={<OcStatus label="Artifact governed" tone="neutral" />}
-            description="Captured audio follows admitted voice artifact files. The client has no separate retention contract to pretend to configure."
-            label="Recordings"
-          />
-          <OcSettingsRow {...settingsTargetProps("voice.transcripts")}
-            control={<OcStatus label="Projected + local history" tone="neutral" />}
-            description="Call transcripts are projected run messages; dictation history is bounded profile-local client state."
-            label="Transcripts"
-          />
-        </OcCard>
-      </OcGroup>
+
     </section>
   );
 }

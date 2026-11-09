@@ -6,6 +6,7 @@ import { WorldProjection } from "./WorldProjection";
 import { SystemArtifactTransfers, useArtifactTransferFeed } from "./ArtifactTransferAnimation";
 import { DashboardLabel, DashboardTooltip } from "./DashboardLabel";
 import { useAppErrorToast } from "../toasts";
+import { OctopusLoadingState } from "./OctopusLoadingLogo";
 
 // Two scopes, two honest pictures (owner):
 //   System — zone cards, one level at a time (drill into child environments instead of
@@ -457,6 +458,10 @@ export const TopologyStage = memo(function TopologyStage({ snapshot, query, scop
       : snapshot.summaryStats;
   }, [hasRuntimeRows, scope, snapshot.environments.length, snapshot.summaryStats, viewMode, visibleEnvironments.length, zonedEnvironments.length]);
   const breadcrumb = useMemo(() => breadcrumbChain(levelId, environmentsById), [levelId, environmentsById]);
+
+  if (snapshot.projection.mode === "connecting") {
+    return <OctopusLoadingState className="surface-content-loading-state" label="Loading topology" />;
+  }
 
   if (scope === "World") {
     return (

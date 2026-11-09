@@ -13,6 +13,7 @@ import type {
   WorkerEnvironmentProjection,
 } from "../data/topology";
 import { Glyph } from "./IconGlyphs";
+import { OctopusLoadingState } from "./OctopusLoadingLogo";
 import { JsonPanel } from "./JsonPanel";
 import { WorkerEnvironmentPreview } from "./worker-environment/WorkerEnvironmentPreview";
 import { defaultWorkerEnvironmentPaneTarget, dispatchOpenWorkerEnvironmentPane } from "./worker-environment/workerEnvironmentPane";
@@ -68,6 +69,8 @@ export function Inspector({ snapshot, selection, onSelect, onClose, surfaces = [
           </>
           )}
         </>
+      ) : snapshot.projection.mode === "connecting" ? (
+        <OctopusLoadingState className="surface-content-loading-state" label="Loading topology" />
       ) : (
         <EmptyInspector projectionLabel={snapshot.projection.label} projectionDetail={snapshot.projection.detail} />
       )}

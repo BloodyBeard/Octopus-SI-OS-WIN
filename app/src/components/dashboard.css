@@ -31,6 +31,13 @@
   overflow-wrap: anywhere;
 }
 
+.dashboard-tooltip-label.is-compact {
+  display: block;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .topology-shell .env-head strong,
 .topology-shell .env-run-main strong,
 .topology-shell .env-checkpoint-required-row strong {

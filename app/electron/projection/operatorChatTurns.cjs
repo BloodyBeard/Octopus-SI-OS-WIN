@@ -92,7 +92,7 @@ function operatorChatTurnsProjection(store) {
       let providerPayload;
       if (providerMovement && label === "turn.stream") {
         const payloads = new Map([[row, await readPayload(row)]]);
-        const expanded = operatorChatExpandedStreamRows([row], payloads, entry.runId,
+        const expanded = await operatorChatExpandedStreamRows([row], payloads, entry.runId,
           (header) => observeNative(header, header.opened_source_movement_seq));
         for (const event of expanded) {
           if (event.__stream.event_kind !== "input_recorded") continue;

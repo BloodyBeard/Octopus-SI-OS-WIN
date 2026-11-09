@@ -15,7 +15,7 @@ w.matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListene
 const React = require("react");
 const { createRoot } = require("react-dom/client");
 const compiled = build({
-  entryPoints: [path.join(__dirname, "../src/components/chat/TaskSummaryPanel.tsx")],
+  stdin: { contents: 'export { TaskSummaryPanel } from "./src/components/chat/TaskSummaryPanel"; export { FilesPaneNavigationProvider } from "./src/components/files/FilesPaneNavigation";', resolveDir: path.join(__dirname, ".."), loader: "ts" },
   bundle: true, platform: "node", format: "cjs", write: false, logLevel: "silent",
   loader: { ".css": "empty", ".svg": "dataurl", ".png": "dataurl" },
   external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime", "motion/react", "@pierre/diffs", "@pierre/diffs/*", "shiki", "@shikijs/*", "mermaid", "katex"],
@@ -23,7 +23,7 @@ const compiled = build({
   const module = { exports: {} };
   const diffs = new Proxy({}, { get: (_, name) => name === "__esModule" ? true : name === "preloadHighlighter" ? async () => {} : () => null });
   Function("require", "module", "exports", result.outputFiles[0].text)((id) => /^(@pierre\/diffs|shiki|@shikijs|mermaid|katex)/.test(id) ? diffs : require(id), module, module.exports);
-  return module.exports.TaskSummaryPanel;
+  return module.exports;
 });
 
 const root = createRoot(document.getElementById("root"));
@@ -31,16 +31,24 @@ after(() => { root.unmount(); w.close(); });
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 const message = (id, eventKind, text, eventData = {}) => ({ id, role: "assistant", text, createdAtMs: 1, eventKind, eventData });
 async function show(messages, props = {}) {
-  const TaskSummaryPanel = await compiled;
-  const events = { revealed: [], shown: [], opened: [] };
-  root.render(React.createElement(TaskSummaryPanel, {
+  const { TaskSummaryPanel, FilesPaneNavigationProvider } = await compiled;
+  const events = { revealed: [], shown: [], opened: [], files: [] };
+  root.render(React.createElement(FilesPaneNavigationProvider, { onOpen: (target) => events.files.push(target) }, React.createElement(TaskSummaryPanel, {
     messages, runProjection: null, onOpenEnvironment: (...args) => events.opened.push(args),
     onRevealMessage: (id) => events.revealed.push(id), onShowAllSources: (sources) => events.shown.push(sources), ...props,
-  }));
+  })));
   await settle();
   return events;
 }
 const section = (title) => [...document.querySelectorAll(".task-summary-section")].find((element) => element.querySelector(".task-summary-section-heading")?.textContent.trim() === title);
+
+test("a source opens in the originating Files pane without a preview dialog", async () => {
+  const artifactId = `context.skill:${"a".repeat(64)}`;
+  const events = await show([{ ...message("read", "dynamic_tool", "", { source_artifacts: [{ artifact_id: artifactId, interface_id: "provider", run_id: "run" }] }), runId: "run" }]);
+  section("Sources").querySelector("button.task-summary-row").click();
+  assert.deepEqual(events.files, [{ kind: "artifact", artifactId, interfaceId: "provider", label: "context.skill", runId: "run", createdAtMs: 1 }]);
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+});
 
 test("related agents merge every report about one agent into its latest working or finished state", async () => {
   const events = await show([

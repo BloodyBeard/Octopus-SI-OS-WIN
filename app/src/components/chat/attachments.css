@@ -23,8 +23,8 @@
   border: 1px solid var(--color-border);
   border-radius: 9999px;
   background: var(--color-surface-elevated-secondary);
-  font-size: 12px;
-  line-height: calc(12px * 1.25 / .875);
+  font-size: var(--text-sm);
+  line-height: calc(1.25 / .875);
 }
 .is-file-pill .chat-attachment-file-button:hover { background: var(--color-background-elevated-primary); }
 .chat-attachment-file-icon { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; color: var(--color-text-tertiary); }
@@ -36,24 +36,28 @@
 .is-file-card .chat-attachment-file-button {
   position: relative;
   gap: 10px;
-  padding: 6px 40px 6px 6px;
-  border-radius: 8px;
-  background: color-mix(in oklab, var(--color-surface-elevated-secondary) 50%, transparent);
+  padding: 6px 24px 6px 6px;
+  border-radius: var(--radius-lg);
+  background: var(--color-background-primary-soft);
   box-shadow: var(--elevation-stroke);
   font-family: var(--font-sans);
 }
 .is-file-card .chat-attachment-file-button::before { position: absolute; inset: 0; border-radius: inherit; background: color-mix(in oklab, var(--color-background-primary-ghost-hover) 30%, transparent); content: ""; opacity: 0; }
 .is-file-card .chat-attachment-file-button:hover::before { opacity: 1; }
 .is-file-card .chat-attachment-file-button > span { position: relative; z-index: 1; }
-.is-file-card .chat-attachment-file-icon { width: 40px; height: 40px; border-radius: 8px; background: color-mix(in oklab, var(--color-surface-secondary) 92%, transparent); color: var(--color-text-secondary); }
-.is-file-card .chat-attachment-file-copy strong { max-width: 128px; font-size: var(--chat-font-size, 14px); }
+.is-file-card .chat-attachment-file-icon { width: 40px; height: 40px; border-radius: var(--radius-lg); background: color-mix(in oklab, var(--color-surface-secondary) 92%, transparent); color: var(--color-text-secondary); }
+.is-file-card .chat-attachment-file-copy strong { max-width: 144px; font-size: var(--chat-font-size, 14px); }
 .is-file-card .chat-attachment-file-copy small { color: var(--color-text-secondary); font-size: calc(var(--chat-font-size, 14px) - 1px); font-weight: 400; }
 .chat-attachment-card.is-image { width: 80px; height: 80px; }
 .chat-attachment-card.is-image.is-compact { width: 54px; height: 54px; }
+.chat-attachment-card.is-image.is-composer { width: 122px; height: 122px; }
 .chat-attachment-image-button,
-.chat-attachment-image-placeholder { width: 100%; height: 100%; border: 1px solid var(--color-border-strong); border-radius: 8px; }
+.chat-attachment-image-placeholder { width: 100%; height: 100%; border: 1px solid var(--color-border-strong); border-radius: var(--radius-lg); }
 .chat-attachment-image-button { display: block; overflow: hidden; cursor: var(--cursor-interaction); }
-.chat-attachment-image-button img { display: block; width: 100%; height: 100%; border-radius: 6px; object-fit: cover; }
+.chat-attachment-image-button img { display: block; width: 100%; height: 100%; border-radius: var(--radius-md); object-fit: cover; }
+.is-composer .chat-attachment-image-button { position: relative; border: 0; background: var(--color-surface-secondary); }
+.is-composer .chat-attachment-image-button::after { position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--color-border); content: ""; pointer-events: none; }
+.is-composer:is(:hover, :focus-within) .chat-attachment-image-button::after { background: color-mix(in oklab, var(--color-text) 5%, transparent); box-shadow: inset 0 0 0 1px var(--color-border-strong); }
 .is-composer .chat-attachment-image-button img { border-radius: inherit; }
 .chat-attachment-image-placeholder { display: flex; align-items: center; justify-content: center; text-align: center; }
 .chat-attachment-card.is-message[data-preview-state="failed"] { width: 64px; height: 64px; }

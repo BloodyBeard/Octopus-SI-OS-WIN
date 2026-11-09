@@ -19,9 +19,10 @@ use octopus_policy::{
     form_policy_with_lineage,
 };
 use octopus_runtime::{
-    GrantEpoch, InterfaceClass, RunGrantQuery, RunGrantResolution, RunGrantResolver, Runtime,
+    InterfaceClass, RunGrantQuery, RunGrantResolution, RunGrantResolver, Runtime,
     RuntimeInterfaceCatalog, RuntimeServices,
 };
+use octopus_run_record::GrantEpoch;
 use octopus_tool_registry::ToolDescriptor;
 use octopus_verifiers::{
     VerifierDescriptor, VerifierPackageContext, pin_verifier_package, run_pinned_verifier_process,
@@ -97,6 +98,16 @@ struct RegistryDescriptorFingerprint {
     digest: u128,
 }
 
+#[derive(Default)]
+struct RegistryFileCache(BTreeMap<PathBuf, RegistryFileObservation>);
+
+struct RegistryFileObservation {
+    stamp: octopus_file_storage::metadata::FileStamp,
+    settled: bool,
+    digest: u64,
+    observed: bool,
+}
+
 const REGISTRY_OBSERVATION_ATTEMPTS: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -154,6 +165,7 @@ const REGISTRY_DESCRIPTOR_KINDS: [&str; 7] = [
 fn registry_descriptor_fingerprint(
     registry_root: &Path,
     ee_instances_dir: &Path,
+    files: &mut RegistryFileCache,
 ) -> std::io::Result<RegistryDescriptorFingerprint> {
     use std::hash::{Hash, Hasher};
     let mut file_count: u64 = 0;
@@ -162,12 +174,30 @@ fn registry_descriptor_fingerprint(
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             return Ok(());
         }
+        let observed_before_read = std::time::SystemTime::now();
         let metadata = std::fs::metadata(&path)?;
         if !metadata.is_file() {
             return Ok(());
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hasher);
+        let stamp = octopus_file_storage::metadata::FileStamp::of(&metadata);
+        let settled = stamp.is_settled(observed_before_read);
+        let content = if let Some(cached) = files.0.get_mut(&path)
+            .filter(|cached| cached.stamp == stamp && cached.settled && settled)
+        {
+            cached.observed = true;
+            cached.digest
+        } else {
+            let mut content = std::collections::hash_map::DefaultHasher::new();
+            std::fs::read(&path)?.hash(&mut content);
+            let digest = content.finish();
+            files.0.insert(path.clone(), RegistryFileObservation {
+                stamp, settled, digest, observed: true,
+            });
+            digest
+        };
+        content.hash(&mut hasher);
         metadata.len().hash(&mut hasher);
         metadata.modified()?.hash(&mut hasher);
         #[cfg(unix)]
@@ -217,6 +247,7 @@ fn registry_descriptor_fingerprint(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    files.0.retain(|_, entry| std::mem::take(&mut entry.observed));
     Ok(RegistryDescriptorFingerprint { file_count, digest })
 }
 
@@ -314,6 +345,7 @@ struct RegistryRunGrantResolver {
     registry_root: PathBuf,
     ee_instances_root: PathBuf,
     fingerprint: Arc<Mutex<Option<RegistryDescriptorFingerprint>>>,
+    files: Arc<Mutex<RegistryFileCache>>,
 }
 
 /// The prospective run uses the same descriptor snapshot and policy formation
@@ -323,14 +355,14 @@ struct RegistryRunGrantResolver {
 pub fn inspect_registry_run_grant(
     registry_root: &Path,
     ee_instances_root: &Path,
-    record: &octopus_runtime::run_record::RunRecord,
+    record: &octopus_run_record::RunRecord,
     checkpoint: &octopus_descriptors::CheckpointId,
 ) -> Result<octopus_interfaces::GrantProjection, String> {
     prospective_run_grant(record, checkpoint, || LoadedRegistrySnapshot::load(registry_root, ee_instances_root))
 }
 
 pub(crate) fn prospective_run_grant<S: std::borrow::Borrow<LoadedRegistrySnapshot>>(
-    record: &octopus_runtime::run_record::RunRecord,
+    record: &octopus_run_record::RunRecord,
     checkpoint: &octopus_descriptors::CheckpointId,
     snapshot: impl FnOnce() -> Result<S, String>,
 ) -> Result<octopus_interfaces::GrantProjection, String> {
@@ -350,7 +382,7 @@ pub(crate) fn validate_registry_run_contracts(
     snapshot: &LoadedRegistrySnapshot,
     registry_root: &Path,
     ee_instances_root: &Path,
-    records: &[octopus_runtime::run_record::RunRecord],
+    records: &[octopus_run_record::RunRecord],
 ) -> Result<
     (
         Vec<crate::RegistryValidationIssue>,
@@ -561,7 +593,7 @@ fn insert_formation_source(
 }
 
 impl RunGrantResolver for RegistryRunGrantResolver {
-    fn acquire_commit_guard(&self, record: &octopus_runtime::run_record::RunRecord, marks: &[Mark]) -> Result<Option<Box<dyn octopus_runtime::AdmissionSourceGuard>>, String> {
+    fn acquire_commit_guard(&self, record: &octopus_run_record::RunRecord, marks: &[Mark]) -> Result<Option<Box<dyn octopus_runtime::AdmissionSourceGuard>>, String> {
         commit::acquire(self, record, marks).map(|guard| Some(Box::new(guard) as Box<dyn octopus_runtime::AdmissionSourceGuard>))
     }
 
@@ -1554,6 +1586,7 @@ pub struct EmbeddedRuntime {
     pub tool_descriptors_loaded: Vec<(octopus_descriptors::DescriptorName, ToolDescriptor)>,
     live_registry: Arc<RwLock<LoadedRegistrySnapshot>>,
     registry_fingerprint: Arc<Mutex<Option<RegistryDescriptorFingerprint>>>,
+    registry_files: Arc<Mutex<RegistryFileCache>>,
     pub ee_tree: EeTree,
     pub existence_ee_id: EeId,
     pub formation_source_hashes: BTreeMap<DescriptorName, DescriptorHash>,
@@ -1614,9 +1647,11 @@ impl EmbeddedRuntime {
             .registry_fingerprint
             .lock()
             .map_err(|_| "registry fingerprint lock is poisoned".to_string())?;
+        let mut files = self.registry_files.lock()
+            .map_err(|_| "registry file cache lock is poisoned".to_string())?;
         if let Some((fingerprint, snapshot)) = observe_stable_registry(
             *current,
-            || registry_descriptor_fingerprint(&self.registry_root, &self.ee_instances_root),
+            || registry_descriptor_fingerprint(&self.registry_root, &self.ee_instances_root, &mut files),
             || LoadedRegistrySnapshot::load(&self.registry_root, &self.ee_instances_root),
         )? {
             self.install_registry_snapshot(snapshot)?;
@@ -1868,8 +1903,9 @@ pub async fn build_embedded_spine(
         );
     }
     let mut persisted_ee_instances = load_persisted_ee_instances(&config.ee_instances_root)?;
+    let mut registry_files = RegistryFileCache::default();
     let boot_fingerprint =
-        registry_descriptor_fingerprint(&config.registry_root, &config.ee_instances_root).ok();
+        registry_descriptor_fingerprint(&config.registry_root, &config.ee_instances_root, &mut registry_files).ok();
     let (ee_tree, bootstrap_ee, mut topology_issues) = registry_ee_state(
         &packages.ee_templates,
         &packages.graph,
@@ -1930,12 +1966,14 @@ pub async fn build_embedded_spine(
 
     let runtime = Runtime::open(services)?;
     let registry_fingerprint = Arc::new(Mutex::new(boot_fingerprint));
+    let registry_files = Arc::new(Mutex::new(registry_files));
     runtime.set_run_grant_resolver(Arc::new(RegistryRunGrantResolver {
         live_registry: live_registry.clone(),
         blobs: config.blobs.clone(),
         registry_root: config.registry_root.clone(),
         ee_instances_root: config.ee_instances_root.clone(),
         fingerprint: registry_fingerprint.clone(),
+        files: registry_files.clone(),
     }));
     let repository_root = config
         .registry_root
@@ -1977,6 +2015,7 @@ pub async fn build_embedded_spine(
         tool_descriptors_loaded,
         live_registry,
         registry_fingerprint,
+        registry_files,
         ee_tree,
         existence_ee_id: bootstrap_ee,
         formation_source_hashes,
@@ -2029,6 +2068,7 @@ mod required_artifact_verification_tests {
         std::fs::write(
             ee_instances_root.join("ee_existence.json"),
             serde_json::to_vec_pretty(&EeInstance {
+                name: None,
                 ee_id: EeId::new("ee_existence"),
                 template: octopus_descriptors::EeTemplateId::new("existence"),
                 parent_ee: None,
@@ -2460,50 +2500,10 @@ description: ""
     }
 
     #[test]
-    fn context_artifact_resolver_materializes_activation_role_artifacts_on_demand() {
+    fn context_artifact_resolver_materializes_role_artifacts_on_demand() {
         let scratch = tempfile::tempdir().expect("scratch registry opens");
         let registry_root = scratch.path().to_path_buf();
-        let interface = InterfaceId::new("world_probe_trigger");
         let role_id = "artifact-probe-role";
-        let interface_dir = registry_root.join("interface").join(interface.as_str());
-        std::fs::create_dir_all(&interface_dir).expect("probe interface folder writes");
-        let checkpoint = serde_json::json!({
-            "id": "cp_probe_in",
-            "run": "run_probe",
-            "epoch": 0,
-            "interface_binding": {
-                "interface": interface.as_str(),
-                "config": {"artifact_policy": {"mode": "all"}}
-            },
-            "outbound_interface_bindings": [],
-            "artifact_bindings": [{"id": role_id}],
-            "required_verified_artifacts": [],
-            "trace": "trace:run_probe:cp_probe_in"
-        });
-        std::fs::write(
-            interface_dir.join("activation.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema_version": 1,
-                "interface": interface.as_str(),
-                "activations": [{
-                    "enabled": false,
-                    "activation_driver_ref": "probe_life",
-                    "config": {
-                        "run_template": {
-                            "id": "run_probe",
-                            "ee": "ee_probe",
-                            "worker": "system_worker_probe",
-                            "trace": "trace:run_probe",
-                            "status": "idle",
-                            "checkpoints": [checkpoint],
-                            "active_checkpoints": ["cp_probe_in"]
-                        }
-                    }
-                }]
-            }))
-            .expect("probe activation encodes"),
-        )
-        .expect("probe activation writes");
         let role_dir = registry_root.join("artifact").join(role_id);
         std::fs::create_dir_all(&role_dir).expect("probe role folder writes");
         std::fs::write(
@@ -2516,30 +2516,6 @@ description: ""
             .expect("probe role encodes"),
         )
         .expect("probe role writes");
-        let activation = octopus_interface_projection::interface_activation::load_interface_activation_file_for_interface(
-            &registry_root,
-            &interface,
-        )
-        .expect("probe activation loads");
-        let mut ids: BTreeSet<String> = BTreeSet::new();
-        for entry in &activation.descriptor.activations {
-            let Some(value) = entry.config.get("run_template") else {
-                continue;
-            };
-            let bytes = serde_json::to_vec(value).expect("interface-owned run template encodes");
-            let record = octopus_runtime::run_record::RunRecord::from_bytes(&bytes)
-                .expect("interface-owned run template parses through the canonical run contract");
-            for checkpoint in &record.checkpoints {
-                for binding in &checkpoint.artifact_bindings {
-                    ids.insert(binding.id.as_str().to_string());
-                }
-            }
-        }
-        assert!(
-            ids.contains(role_id),
-            "the activation run template must bind its role artifact; got {ids:?}"
-        );
-
         let blobs: SharedBlobs = Arc::new(Mutex::new(InMemoryBlobs::new()));
         let resolver = RegistryContextArtifactCache::new(registry_root.clone(), blobs.clone())
             .expect("context artifact cache opens");
@@ -2551,7 +2527,7 @@ description: ""
         assert_eq!(
             resolver
                 .resolve(&ArtifactId::new(role_id))
-                .expect("activation role artifact resolves on demand"),
+                .expect("role artifact resolves on demand"),
             hash
         );
         assert!(

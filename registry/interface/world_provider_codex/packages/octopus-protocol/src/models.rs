@@ -15,6 +15,10 @@ use schemars::JsonSchema;
 
 use crate::mcp::CallToolResult;
 
+mod configuration_update;
+
+pub use configuration_update::ConfigurationReasoning;
+
 pub use octopus_substrate_contract::permission_profile::ActivePermissionProfile;
 pub use octopus_substrate_contract::permission_profile::AdditionalPermissionProfile;
 pub use octopus_substrate_contract::permission_profile::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
@@ -135,6 +139,17 @@ pub struct ResponseItemMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseItem {
+    AdditionalTools {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        id: Option<String>,
+        role: String,
+        #[ts(type = "unknown[]")]
+        tools: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        metadata: Option<ResponseItemMetadata>,
+    },
     Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -216,7 +231,15 @@ pub enum ResponseItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         id: Option<String>,
-        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        namespace: Option<String>,
         #[ts(as = "FunctionCallOutputBody")]
         #[schemars(with = "FunctionCallOutputBody")]
         output: FunctionCallOutputPayload,
@@ -304,6 +327,12 @@ pub enum ResponseItem {
         #[ts(optional)]
         metadata: Option<ResponseItemMetadata>,
     },
+    ConfigurationUpdate {
+        reasoning: ConfigurationReasoning,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        metadata: Option<ResponseItemMetadata>,
+    },
     CompactionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -331,7 +360,8 @@ impl ResponseItem {
 
     pub fn id(&self) -> Option<&str> {
         match self {
-            Self::Message { id, .. }
+            Self::AdditionalTools { id, .. }
+            | Self::Message { id, .. }
             | Self::AgentMessage { id, .. }
             | Self::LocalShellCall { id, .. }
             | Self::FunctionCall { id, .. }
@@ -345,13 +375,14 @@ impl ResponseItem {
             | Self::ImageGenerationCall { id, .. }
             | Self::Compaction { id, .. }
             | Self::ContextCompaction { id, .. } => id.as_deref().filter(|id| !id.is_empty()),
-            Self::CompactionTrigger { .. } | Self::Other => None,
+            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => None,
         }
     }
 
     pub fn set_id(&mut self, new_id: Option<String>) {
         match self {
-            Self::Message { id, .. }
+            Self::AdditionalTools { id, .. }
+            | Self::Message { id, .. }
             | Self::AgentMessage { id, .. }
             | Self::LocalShellCall { id, .. }
             | Self::FunctionCall { id, .. }
@@ -365,7 +396,7 @@ impl ResponseItem {
             | Self::ImageGenerationCall { id, .. }
             | Self::Compaction { id, .. }
             | Self::ContextCompaction { id, .. } => *id = new_id,
-            Self::CompactionTrigger { .. } | Self::Other => {}
+            Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => {}
         }
     }
 
@@ -395,7 +426,8 @@ impl ResponseItem {
 
     fn metadata(&self) -> Option<&ResponseItemMetadata> {
         match self {
-            Self::Message { metadata, .. }
+            Self::AdditionalTools { metadata, .. }
+            | Self::Message { metadata, .. }
             | Self::AgentMessage { metadata, .. }
             | Self::Reasoning { metadata, .. }
             | Self::LocalShellCall { metadata, .. }
@@ -408,6 +440,7 @@ impl ResponseItem {
             | Self::WebSearchCall { metadata, .. }
             | Self::ImageGenerationCall { metadata, .. }
             | Self::Compaction { metadata, .. }
+            | Self::ConfigurationUpdate { metadata, .. }
             | Self::CompactionTrigger { metadata, .. }
             | Self::ContextCompaction { metadata, .. } => metadata.as_ref(),
             Self::Other => None,
@@ -416,7 +449,8 @@ impl ResponseItem {
 
     fn metadata_mut(&mut self) -> Option<&mut Option<ResponseItemMetadata>> {
         match self {
-            Self::Message { metadata, .. }
+            Self::AdditionalTools { metadata, .. }
+            | Self::Message { metadata, .. }
             | Self::AgentMessage { metadata, .. }
             | Self::Reasoning { metadata, .. }
             | Self::LocalShellCall { metadata, .. }
@@ -429,6 +463,7 @@ impl ResponseItem {
             | Self::WebSearchCall { metadata, .. }
             | Self::ImageGenerationCall { metadata, .. }
             | Self::Compaction { metadata, .. }
+            | Self::ConfigurationUpdate { metadata, .. }
             | Self::CompactionTrigger { metadata, .. }
             | Self::ContextCompaction { metadata, .. } => Some(metadata),
             Self::Other => None,
@@ -674,7 +709,9 @@ impl From<ResponseInputItem> for ResponseItem {
             },
             ResponseInputItem::FunctionCallOutput { call_id, output } => Self::FunctionCallOutput {
                 id: None,
-                call_id,
+                call_id: Some(call_id),
+                name: None,
+                namespace: None,
                 output,
                 metadata: None,
             },
@@ -682,7 +719,9 @@ impl From<ResponseInputItem> for ResponseItem {
                 let output = output.into_function_call_output_payload();
                 Self::FunctionCallOutput {
                     id: None,
-                    call_id,
+                    call_id: Some(call_id),
+                    name: None,
+                    namespace: None,
                     output,
                     metadata: None,
                 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type PointerEvent, type RefObject } from "react";
+import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import type { OctopusClientAccessProfile, OctopusClientAttachmentStageHandle, OctopusProviderInterface } from "../../electron";
 import { Glyph } from "../IconGlyphs";
 import { cubicCirclePath, threeQuarterRingPath } from "../icon-glyphs/geometric-primitives";
@@ -7,6 +7,7 @@ import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import type { ContextUsage } from "./contextUsage";
 import type { ChatAttachment } from "./types";
 import { useLocalDictation } from "./useLocalDictation";
+import { DictationIcon } from "./DictationIcon";
 import { appToast } from "../../toasts";
 import { OCTOPUS_COMPACT_SURFACE_CLASS, OcMenuItem, OcButton, OcDialog, OcDialogFooter, OcDialogHeader } from "../../design-system/components";
 import { clientCommands, dispatchClientCommand, subscribeClientCommands, type ClientCommandId } from "../../clientActions";
@@ -63,6 +64,7 @@ type Props = {
   hasQueuedMessages?: boolean;
   onCancelQueuedEdit?: () => void;
   submitBlockReason?: string;
+  blockingReason?: string;
   interruptPending?: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
   onTextChange: (value: string) => void;
@@ -137,6 +139,7 @@ export function ChatComposer({
   hasQueuedMessages = false,
   onCancelQueuedEdit,
   submitBlockReason = "",
+  blockingReason = "",
   interruptPending = false,
   fileInputRef,
   onTextChange,
@@ -192,19 +195,24 @@ export function ChatComposer({
   const slashMenuOpen = slashEntries.length > 0;
   const dictation = useLocalDictation({
     accessProfile,
-    getSurroundingText: () => text,
-    onError: (message) => appToast.danger(message),
-    onTranscriptInsert: (transcript) => onTextChange(appendTranscript(text, transcript)),
+    composerId: `${runtimeHome}\0${runId ?? ""}`,
+    onTranscriptStart: () => editorRef.current?.startDictation(),
+    onTranscriptUpdate: (transcript) => editorRef.current?.updateDictation(transcript),
+    onTranscriptCancel: () => editorRef.current?.cancelDictation(),
+    onTranscriptInsert: (transcript) => editorRef.current?.finishDictation(transcript),
     onTranscriptSend: (transcript) => {
-      const next = appendTranscript(text, transcript);
-      onTextChange(next);
-      onSubmit(undefined, next);
+      const message = editorRef.current?.finishDictation(transcript);
+      if (message != null) onSubmit(undefined, message);
     },
   });
-  const voiceLayoutActive = dictation.isDictating || dictation.isTranscribing;
+  useEffect(() => {
+    const message = dictation.error || dictation.storageWarning;
+    if (message) appToast.danger(message, undefined, { dedupeKey: "composer-dictation" });
+  }, [dictation.error, dictation.storageWarning]);
+  const voiceLayoutActive = dictation.isStarting || dictation.isDictating || dictation.isTranscribing;
   const suggestion = useComposerSuggestion(runId ?? "", suggestionSourceSequence, accessProfile === "live"
     && activeProvider?.runtimeHandlerRef === "codex_app_server" && !turnOpen && !isSubmitting
-    && !editingQueuedTurn && !voiceLayoutActive, runtimeHome);
+    && !editingQueuedTurn && !voiceLayoutActive && !blockingReason, runtimeHome);
   const hasSubmissionPayload = Boolean(text.trim() || attachments.length);
   const stopAvailable = turnOpen && !hasSubmissionPayload && !editingQueuedTurn && Boolean(onInterrupt);
   const resumeActionAvailable = !stopAvailable
@@ -229,13 +237,13 @@ export function ChatComposer({
     : !stopAvailable && !resumeActionAvailable && !canSubmit && submitBlockReason
       ? submitBlockReason
       : submitActionLabel;
-  const submitPending = stopAvailable || resumeActionAvailable
+  const submitPending = !blockingReason && (stopAvailable || resumeActionAvailable
     ? Boolean(interruptPending)
-    : Boolean(isSubmitting && variant !== "home");
+    : Boolean(isSubmitting && variant !== "home"));
   const queueMenuAvailable = Boolean(onQueue && canQueue && turnOpen && !editingQueuedTurn);
   const submitDisabled = stopAvailable || resumeActionAvailable
     ? Boolean(interruptPending || resumeActionBlocked)
-    : Boolean(isSubmitting || !canSubmit);
+    : Boolean(blockingReason || isSubmitting || !canSubmit);
   const projectedFileSource = availableProjectedFileSources.find((source) => projectedSourceKey(source) === projectedFileSourceKey) ?? null;
 
   async function pickFilesAndFolders() {
@@ -289,7 +297,7 @@ export function ChatComposer({
     }
     if (id !== "start_dictation" || dictation.isTranscribing) return;
     if (dictation.isDictating) {
-      dictation.stopDictation("insert");
+      dictation.stopDictation();
       return;
     }
     void dictation.startDictation();
@@ -336,10 +344,16 @@ export function ChatComposer({
   return (
     <>
     <div
-      aria-busy={isSubmitting || interruptPending || undefined}
+      aria-busy={!blockingReason && (isSubmitting || interruptPending) || undefined}
       className="flex flex-col"
       data-composer-variant={variant}
       data-thread-find-composer="true"
+      onKeyDownCapture={(event) => {
+        if (event.key !== "Escape" || !voiceLayoutActive || event.nativeEvent.isComposing || event.target instanceof Element && event.target.closest('[role="dialog"]')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        dictation.abortDictation();
+      }}
       ref={composerRef}
     >
       <input
@@ -351,6 +365,7 @@ export function ChatComposer({
         type="file"
       />
       <div className="flex flex-col gap-2">
+        {blockingReason ? <div className="composer-storage-warning" role="alert">{blockingReason}</div> : null}
         <div className="min-w-0" data-octopus-composer-root="">
           <div className="relative">
           {projectedFilePickerOpen && projectedFileSource ? (
@@ -487,51 +502,14 @@ export function ChatComposer({
                   />
                 </div>
 
-                {voiceLayoutActive ? (
-                  <div className="composer-voice-footer flex items-center gap-2 px-2 py-1">
-                    <ShellTooltip label="Cancel dictation">
-                      <button
-                        aria-label="Cancel dictation"
-                        className="no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-foreground bg-token-foreground/5 enabled:hover:bg-token-foreground/10 border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
-                        disabled={dictation.isTranscribing}
-                        onClick={dictation.abortDictation}
-                        type="button"
-                      >
-                        <Glyph className="icon-xs" name="close" size={16} />
-                      </button>
-                    </ShellTooltip>
-                    <div
-                      className="composer-waveform-wrap justify-center text-base text-token-text-tertiary select-none"
-                      role={dictation.isTranscribing ? "status" : undefined}
-                    >
-                      {dictation.isTranscribing
-                        ? <span>Transcribing</span>
-                        : <canvas className="composer-waveform" ref={dictation.waveformCanvasRef} />}
-                    </div>
-                    <ShellTooltip label="Stop dictation">
-                      <button
-                        aria-label="Stop dictation"
-                        className="no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-foreground bg-token-foreground/5 enabled:hover:bg-token-foreground/10 border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
-                        disabled={dictation.isTranscribing}
-                        onClick={() => dictation.stopDictation("insert")}
-                        type="button"
-                      >
-                        <Glyph className="icon-xs" name="stop" size={16} />
-                      </button>
-                    </ShellTooltip>
-                    <ShellTooltip label="Transcribe and send">
-                      <button
-                        aria-label="Transcribe and send"
-                        className={`bg-token-foreground focus-visible:outline-token-button-background cursor-interaction size-token-button-composer flex items-center justify-center rounded-full p-0.5 transition-opacity focus-visible:outline-2${dictation.isTranscribing ? " cursor-default opacity-50" : ""}`}
-                        disabled={dictation.isTranscribing}
-                        onClick={() => dictation.stopDictation("send")}
-                        type="button"
-                      >
-                        <Glyph className="icon-xs text-token-dropdown-background" name="send" size={16} />
-                      </button>
-                    </ShellTooltip>
+                {dictation.error && dictation.canRetryDictation ? (
+                  <div className="composer-voice-recovery" role="status" aria-live="polite">
+                    <span>Dictation stopped</span>
+                    {dictation.canRetryDictation && !dictation.isTranscribing ? <OcButton onClick={dictation.retryDictation} size="sm">Retry</OcButton> : null}
+                    {dictation.lastRecordingId ? <OcButton onClick={() => dispatchClientCommand("open_settings", "surface", { sectionId: "voice-audio", dictationRecordingId: dictation.lastRecordingId! })} size="sm">View recording</OcButton> : null}
+                    <button aria-label="Dismiss" className="composer-round-button" onClick={dictation.abortDictation} type="button"><Glyph name="close" size={16} /></button>
                   </div>
-                ) : (
+                ) : null}
                 <div className="composer-footer grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1 select-none">
                   <div className="flex min-w-0 items-center gap-2">
                     <div className="composer-context-anchor">
@@ -578,25 +556,35 @@ export function ChatComposer({
                         ) : null}
                         <DictationButton
                           canRetry={dictation.canRetryDictation}
+                          isStarting={dictation.isStarting}
+                          isDictating={dictation.isDictating}
                           isTranscribing={dictation.isTranscribing}
+                          waveformCanvasRef={dictation.waveformCanvasRef}
+                          onCancel={dictation.abortDictation}
                           onRetry={dictation.retryDictation}
                           onStart={dictation.startDictation}
-                          onStop={() => dictation.stopDictation("insert")}
+                          onStop={() => dictation.stopDictation()}
                         />
                         {editingQueuedTurn ? <button className="composer-queue-action" type="button" onClick={onCancelQueuedEdit}>Cancel edit</button> : null}
-                        {turnOpen && hasSubmissionPayload && onInterrupt ? (
+                        {!voiceLayoutActive && turnOpen && hasSubmissionPayload && onInterrupt ? (
                           <ShellTooltip label="Stop">
                             <button aria-label="Stop" className="composer-queue-action is-icon" disabled={interruptPending} onClick={onInterrupt} type="button">
                               <Glyph name="stop" size={16} />
                             </button>
                           </ShellTooltip>
                         ) : null}
-                        {variant === "home" && !isSubmitting && !stopAvailable && !resumeActionAvailable && !hasSubmissionPayload ? (
+                        {voiceLayoutActive ? (
+                          <ShellTooltip label="Send">
+                            <button aria-label="Send" className="composer-dictation-send composer-primary-action cursor-interaction size-token-button-composer flex items-center justify-center rounded-full p-0.5 transition-opacity focus-visible:outline-2 disabled:cursor-default disabled:opacity-50"
+                              disabled={!dictation.isDictating || isSubmitting || Boolean(submitBlockReason && submitBlockReason !== "Type a message or attach a file.")}
+                              onClick={() => dictation.stopDictation("send")} type="button"><Glyph className="icon-xs" name="send" size={16} /></button>
+                          </ShellTooltip>
+                        ) : variant === "home" && !isSubmitting && !stopAvailable && !resumeActionAvailable && !hasSubmissionPayload ? (
                           <ShellTooltip label="Open Voice">
                             <button
                               aria-label="Open Voice"
                               className="focus-visible:outline-token-button-background cursor-interaction size-token-button-composer flex items-center justify-center rounded-full bg-token-foreground p-0.5 transition-opacity focus-visible:outline-2 disabled:cursor-default disabled:opacity-50"
-                              disabled={voiceStartDisabled || !onVoiceStart}
+                              disabled={Boolean(blockingReason) || voiceStartDisabled || !onVoiceStart}
                               onClick={onVoiceStart}
                               type="button"
                             >
@@ -641,7 +629,6 @@ export function ChatComposer({
                     </div>
                   </div>
                 </div>
-                )}
               </div>
             </div>
           </div>
@@ -688,10 +675,18 @@ export function ChatComposer({
         return;
       }
     }
-    if (event.key === "Escape" && dictation.isDictating) {
+    if (event.key === "Escape" && voiceLayoutActive) {
       event.preventDefault();
       event.stopPropagation();
       dictation.abortDictation();
+      return;
+    }
+    const dictationSubmit = event.key === "Enter" && !event.shiftKey && !event.altKey
+      && (clientPreferences.sendShortcut === "enter" || event.metaKey || event.ctrlKey);
+    if (voiceLayoutActive && dictationSubmit) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (dictation.isDictating && !event.repeat) dictation.stopDictation("send");
       return;
     }
     const queueShortcut = event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.altKey
@@ -788,81 +783,27 @@ function ComposerSubmitSpinner() {
   );
 }
 
-function DictationButton({
-  canRetry,
-  isTranscribing,
-  onRetry,
-  onStart,
-  onStop,
-}: {
+function DictationButton({ canRetry, isStarting, isDictating, isTranscribing, waveformCanvasRef, onCancel, onRetry, onStart, onStop }: {
   canRetry: boolean;
+  isStarting: boolean;
+  isDictating: boolean;
   isTranscribing: boolean;
+  waveformCanvasRef: RefObject<HTMLCanvasElement | null>;
+  onCancel: () => void;
   onRetry: () => void;
   onStart: () => Promise<void>;
   onStop: () => void;
 }) {
-  const holdTimerRef = useRef<number | null>(null);
-  const holdStartedRef = useRef(false);
-  const suppressClickRef = useRef(false);
-  const startPromiseRef = useRef<Promise<void> | null>(null);
-  const releaseRequestedRef = useRef(false);
-
-  useEffect(() => () => {
-    if (holdTimerRef.current != null) window.clearTimeout(holdTimerRef.current);
-  }, []);
-
-  const releaseHold = (event: PointerEvent<HTMLButtonElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    if (holdTimerRef.current != null) {
-      window.clearTimeout(holdTimerRef.current);
-      holdTimerRef.current = null;
-      return;
-    }
-    if (holdStartedRef.current) {
-      holdStartedRef.current = false;
-      suppressClickRef.current = true;
-      if (startPromiseRef.current) releaseRequestedRef.current = true;
-      else onStop();
-    }
-  };
-
+  const label = isTranscribing ? "Finishing dictation" : isStarting ? "Starting dictation; click to cancel" : isDictating ? "Stop dictation" : canRetry ? "Retry dictation" : "Dictate";
   return (
-    <ShellTooltip label={canRetry ? "Retry dictation" : "Click to dictate or hold"} disabled={isTranscribing}>
-      <button
-        aria-label={canRetry ? "Retry dictation" : "Dictate"}
-        className="composer-round-button"
+    <ShellTooltip label={label}>
+      <button aria-label={label} aria-busy={isStarting || isTranscribing || undefined}
+        className={`composer-dictation-button composer-round-button${isDictating || isTranscribing ? " is-active" : ""}`}
         disabled={isTranscribing}
-        onClick={() => {
-          if (suppressClickRef.current) {
-            suppressClickRef.current = false;
-            return;
-          }
-          if (canRetry) onRetry();
-          else void onStart();
-        }}
-        onPointerCancel={releaseHold}
-        onPointerDown={(event) => {
-          if (event.button !== 0 || canRetry || isTranscribing) return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          holdTimerRef.current = window.setTimeout(() => {
-            holdTimerRef.current = null;
-            holdStartedRef.current = true;
-            releaseRequestedRef.current = false;
-            const start = onStart();
-            startPromiseRef.current = start;
-            void start.finally(() => {
-              startPromiseRef.current = null;
-              if (releaseRequestedRef.current) {
-                releaseRequestedRef.current = false;
-                onStop();
-              }
-            });
-          }, 150);
-        }}
-        onPointerUp={releaseHold}
-        type="button"
-      >
-        {isTranscribing ? <span className="composer-spinner" /> : <Glyph className="icon-xs text-token-text-primary" name={canRetry ? "retry" : "microphone"} size={16} />}
+        onClick={() => isStarting ? onCancel() : isDictating ? onStop() : canRetry ? onRetry() : void onStart()}
+        type="button">
+        {isDictating ? <span className="composer-dictation-waveform"><canvas aria-hidden="true" data-mode="text" ref={waveformCanvasRef} /></span> : null}
+        <span className="composer-dictation-icon">{isStarting || isTranscribing ? <span className="composer-spinner" /> : <DictationIcon name={isDictating ? "stop" : canRetry ? "retry" : "microphone"} />}</span>
       </button>
     </ShellTooltip>
   );
@@ -870,14 +811,6 @@ function DictationButton({
 
 function projectedSourceKey(source: ProjectedFileSource): string {
   return `${source.workerEnvironmentId}\0${source.surfaceId}`;
-}
-
-function appendTranscript(current: string, transcript: string): string {
-  const clean = transcript.trim();
-  if (!clean) return current;
-  if (!current.trim()) return clean;
-  const separator = /\s$/.test(current) ? "" : " ";
-  return `${current}${separator}${clean}`;
 }
 
 function removeComposerSlashQuery(value: string): string {

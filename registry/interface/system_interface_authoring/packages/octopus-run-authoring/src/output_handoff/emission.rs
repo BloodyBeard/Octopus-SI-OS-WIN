@@ -272,7 +272,7 @@ impl ProviderOutputHandoff {
         let batch_count = batches.len();
         let mut outcomes = Vec::new();
         for (index, batch) in batches.into_iter().enumerate() {
-            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None, None, !terminal)
+            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None, None, !terminal, false)
                 .await?;
             let failed = delivered.iter().any(|outcome| matches!(outcome, ProviderHandoffOutcome::TerminalFailure { .. }));
             outcomes.extend(delivered);
@@ -294,10 +294,21 @@ impl ProviderOutputHandoff {
         settlement_of: Option<(&ArtifactRef, u64)>,
         withdrawal: Option<&source_withdrawal::Withdrawal>,
         standing: bool,
+        continuation: bool,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
+        if continuation && (!terminal || !bindings.is_empty() || consume_input || independent_source.is_some()
+            || amendment.is_some() || settlement_of.is_some() || withdrawal.is_some() || standing)
+        {
+            return Err("a source continuation hands only one terminal batch of ordinary calls".into());
+        }
         let mut state = self.state.lock().await;
         let withdrawal_guard = if withdrawal.is_some() { Some(self.dispatch_ownership().await?) } else { None };
         self.reconcile_checked_run_state(&mut state).await?;
+        if continuation && (state.consumed_input || state.consumed_verified_input || state.deferred_context_generations > 0
+            || state.consumed_context_free_independent_input.is_some())
+        {
+            return Err("a source continuation requires its recovered completed source handoff".into());
+        }
         let mut active = self.clone();
         let record = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
         if let Some((predecessor, _)) = settlement_of {
@@ -376,12 +387,13 @@ impl ProviderOutputHandoff {
                     &next_session_context,
                 )?);
             }
-            let output_checkpoint = active.config.output_checkpoint(
+            let mut output_checkpoint = active.config.output_checkpoint(
                 &route,
                 &active.granted_tools,
                 &active.granted_interfaces,
                 &manifest.label,
             )?;
+            result_inputs::select_call_result(&mut output_checkpoint, &route)?;
             let verified_inputs = active.config.verified_input_checkpoints(
                 &route,
                 &output_checkpoint,
@@ -407,7 +419,7 @@ impl ProviderOutputHandoff {
         }
         let independent_input = additional_input.as_ref().or(state.consumed_context_free_independent_input.as_ref());
         let context_changed = next_context != state.context_artifacts;
-        let own_refresh = (consume_input && state.consumed_input) || context_changed || amendment.is_some();
+        let own_refresh = !continuation && ((consume_input && state.consumed_input) || context_changed || amendment.is_some());
         let standing_checkpoints = if standing
             && !terminal
             && bindings.is_empty()
@@ -464,19 +476,24 @@ impl ProviderOutputHandoff {
             return Ok(outcomes);
         }
         let refresh_context = own_refresh || state.deferred_context_generations > 0;
-        let standing_since_write = active.standing_items_since_write(&record)?;
-        let mut authored = active.author_run_with_generations(
-            &state.run_record_bytes,
-            &next_context,
-            &prepared,
-            refresh_context,
-            u64::from(own_refresh) + state.deferred_context_generations,
-            independent_input,
-            consume_input && state.consumed_verified_input,
-            terminal,
-            bindings,
-            standing_since_write,
-        )?;
+        let mut authored = if continuation {
+            active.author_completed_source_continuation(&state.run_record_bytes, &next_context, &prepared)?
+        } else {
+            let standing_since_write = active.standing_items_since_write(&record)?;
+            active.author_run_with_generations(
+                &state.run_record_bytes,
+                &next_context,
+                &prepared,
+                refresh_context,
+                u64::from(own_refresh) + state.deferred_context_generations,
+                independent_input,
+                consume_input && state.consumed_verified_input,
+                terminal,
+                bindings,
+                standing_since_write,
+                None,
+            )?
+        };
         if let Some(amendment) = amendment {
             let topology = capability_amendment::apply_to_authored_run(
                 &state.run_record_bytes, &mut authored, amendment, &active.config, &active.var_dir,
@@ -496,6 +513,7 @@ impl ProviderOutputHandoff {
             active.attach_source_withdrawal(&state.run_record_bytes, &mut authored, proof)?;
             state.validated_withdrawal_output = Some(source_withdrawal::closure_ref(&authored.pending_handoff)?);
         }
+        active.seal_authored_run(&state.run_record_bytes, &mut authored, Some(state.result_rebase.as_deref().unwrap_or_default()))?;
         let pending = authored.pending_handoff.clone();
         match active.install_authored_run(&mut state, &authored).await? {
             AuthoredRunInstallOutcome::Installed => {}
@@ -524,7 +542,7 @@ impl ProviderOutputHandoff {
         state.session_context = next_session_context;
         state.session_snapshot_head = next_session_snapshot_head;
         active.publish_admitted_context(&mut state).await?;
-        if refresh_context {
+        if refresh_context || continuation {
             state.context_artifacts = active.published_context_artifacts(
                 &RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?, &active.config,
             )?;
@@ -533,63 +551,123 @@ impl ProviderOutputHandoff {
     }
 
     pub(crate) async fn reconcile_checked_run_state(&self, state: &mut HandoffState) -> Result<(), String> {
+        let limit = self.ctx.required_host_io_limits()?.max_payload_bytes;
         let has_owner = self
             .config
             .checkpoints
             .iter()
             .any(|cp| cp.owner_authoring.is_some());
         if !has_owner && self.config.payload_artifact_bindings.is_empty() && !result_inputs::enabled(&self.config) {
-            let current = octopus_interfaces::read_artifact_carrier_file_bounded(
-                &self.run_path, self.ctx.required_host_io_limits()?.max_payload_bytes,
-            ).map_err(|error| error.to_string())?;
-            let current = RunRecord::from_bytes(&current).map_err(|error| error.to_string())?;
-            if payload_artifact_bindings(&current, &self.config.provider_interface)?.is_empty() {
+            let current = octopus_interfaces::read_artifact_carrier_file_bounded(&self.run_path, limit)
+                .map_err(|error| error.to_string())?;
+            if current == state.run_record_bytes
+                && payload_artifact_bindings(&RunRecord::from_bytes(&current).map_err(|error| error.to_string())?, &self.config.provider_interface)?.is_empty()
+            {
                 return Ok(());
             }
         }
-        {
-            let after_seq = state
-                .run_record_evidence_seq
-                .ok_or("selected provider lost its admitted run snapshot provenance")?;
-            let (current, chain) =
-                await_checked_evidence(&self.ctx, self.config.result_timeout_ms, || {
-                    checked_live_run_advance(
-                        &self.ctx,
-                        &self.run_path,
-                        &state.run_record_bytes,
-                        after_seq,
-                        &self.config,
-                    )
-                })
-                .await?;
-            if current != state.run_record_bytes {
-                let record = RunRecord::from_bytes(&current).map_err(|error| error.to_string())?;
-                let mut advanced = state.clone();
-                let before = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
-                result_inputs::validate_source_advance(self, &before, &record, &current)?;
-                let selected = payload_artifact_bindings(&record, &self.config.provider_interface)?;
-                let classified = payload_artifact_bindings(&before, &self.config.provider_interface)?.into_iter()
-                    .chain(selected.iter().cloned())
-                    .map(|reference| reference.id).collect::<BTreeSet<_>>();
-                if !classified.is_empty() {
-                    let readable = provider_context_bindings(&record, &self.config.provider_interface)?.into_iter()
-                        .filter(|binding| binding.access.read).map(|binding| binding.id).collect::<BTreeSet<_>>();
-                    // Attachment classification is not a future read grant. Keep
-                    // non-payload static sources and the original invocation intact.
-                    advanced.static_context_artifacts.retain(|id| !classified.contains(id) || readable.contains(id));
-                    advanced.context_artifacts.retain(|id| !classified.contains(id) || readable.contains(id));
-                    for reference in selected.iter().filter(|reference| readable.contains(&reference.id)) {
-                        append_artifact(&mut advanced.static_context_artifacts, reference.id.clone());
-                        append_artifact(&mut advanced.context_artifacts, reference.id.clone());
-                    }
-                }
-                if let Some(last) = chain.last() {
-                    advanced.run_record_evidence_seq = Some(last.call.seq.0);
-                }
-                advanced.run_record_bytes = current;
-                self.restore_checked_context(&mut advanced, &record, &chain)?;
-                *state = advanced;
+        let after_seq = state
+            .run_record_evidence_seq
+            .ok_or("selected provider lost its admitted run snapshot provenance")?;
+        let observed: &HandoffState = state;
+        let advanced = await_checked_evidence(&self.ctx, self.config.result_timeout_ms, || {
+            let (current, chain) = checked_live_run_advance(
+                &self.ctx,
+                &self.run_path,
+                &observed.run_record_bytes,
+                after_seq,
+                &self.config,
+            )?;
+            if current == observed.run_record_bytes {
+                return Ok(None);
             }
+            stable_run_observation(&self.run_path, &current, limit, || {
+                self.advanced_checked_state(observed, &current, &chain).map(Some).map_err(CheckedRunError::from)
+            })
+        })
+        .await?;
+        if let Some(advanced) = advanced {
+            *state = advanced;
+        }
+        Ok(())
+    }
+
+    fn advanced_checked_state(
+        &self,
+        state: &HandoffState,
+        current: &[u8],
+        chain: &[CheckedRunTransition],
+    ) -> Result<HandoffState, String> {
+        let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+        let mut advanced = state.clone();
+        let before = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+        result_inputs::validate_source_advance(self, &before, &record)?;
+        let selected = payload_artifact_bindings(&record, &self.config.provider_interface)?;
+        let classified = payload_artifact_bindings(&before, &self.config.provider_interface)?.into_iter()
+            .chain(selected.iter().cloned())
+            .map(|reference| reference.id).collect::<BTreeSet<_>>();
+        if !classified.is_empty() {
+            let readable = provider_context_bindings(&record, &self.config.provider_interface)?.into_iter()
+                .filter(|binding| binding.access.read).map(|binding| binding.id).collect::<BTreeSet<_>>();
+            // Attachment classification is not a future read grant. Keep
+            // non-payload static sources and the original invocation intact.
+            advanced.static_context_artifacts.retain(|id| !classified.contains(id) || readable.contains(id));
+            advanced.context_artifacts.retain(|id| !classified.contains(id) || readable.contains(id));
+            for reference in selected.iter().filter(|reference| readable.contains(&reference.id)) {
+                append_artifact(&mut advanced.static_context_artifacts, reference.id.clone());
+                append_artifact(&mut advanced.context_artifacts, reference.id.clone());
+            }
+        }
+        if let Some(last) = chain.last() {
+            advanced.run_record_evidence_seq = Some(last.call.seq.0);
+        }
+        advanced.run_record_bytes = current.to_vec();
+        self.restore_checked_context(&mut advanced, &record, chain)?;
+        Ok(advanced)
+    }
+
+    pub(crate) async fn observe_live_record<T>(
+        &self,
+        mut observe: impl FnMut(&Self, &mut HandoffState) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut state = self.state.lock().await;
+        let deadline = self.live_record_deadline()?;
+        loop {
+            let retained = (*state).clone();
+            match observe(self, &mut state) {
+                Ok(value) => return Ok(value),
+                Err(error) => self.adopt_live_record(&mut state, retained, error, deadline).await?,
+            }
+        }
+    }
+
+    pub(crate) fn live_record_deadline(&self) -> Result<Instant, String> {
+        Instant::now()
+            .checked_add(Duration::from_millis(self.config.result_timeout_ms))
+            .ok_or_else(|| "checked run observation deadline overflow".to_string())
+    }
+
+    pub(crate) async fn adopt_live_record(
+        &self,
+        state: &mut HandoffState,
+        retained: HandoffState,
+        error: String,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let live = octopus_interfaces::read_artifact_carrier_file_bounded(
+            &self.run_path, self.ctx.required_host_io_limits()?.max_payload_bytes,
+        ).map_err(|read| format!("{error}; current run record cannot be read: {read}"))?;
+        if live == state.run_record_bytes || self.ctx.cancel.is_cancelled() || Instant::now() >= deadline {
+            return Err(error);
+        }
+        *state = retained;
+        let observed = state.run_record_bytes.clone();
+        tokio::time::timeout_at(deadline.into(), self.reconcile_checked_run_state(state))
+            .await
+            .map_err(|_| format!("{error}; the run was still advancing at its result timeout"))?
+            .map_err(|reconcile| format!("{error}; the run advanced without checked evidence: {reconcile}"))?;
+        if state.run_record_bytes == observed {
+            return Err(error);
         }
         Ok(())
     }

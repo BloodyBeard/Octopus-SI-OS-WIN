@@ -18,6 +18,7 @@ export type ChangeJournalEntry = {
 
 export type ChangeJournal = {
   digest: string;
+  firing: string;
   outcome: "changed" | "unchanged";
   summary: string;
   checks: Array<{ check: string; result: string; evidence: string }>;
@@ -52,6 +53,10 @@ export type ScheduledInterfaceProjection = {
   activationDigest: string;
   activationPath: string;
   descriptorPath: string;
+  eventSource?: {
+    sources: string[];
+    targets: Array<{ runId: string; chatInterfaceId: string; title: string }>;
+  } | null;
   schedule: {
     type: "interval";
     intervalSeconds: number;
@@ -72,14 +77,7 @@ export type ScheduledInterfaceProjection = {
   fireOnStart: boolean;
   instructions: string;
   reminderEnv: string;
-  runTemplate: {
-    runId: string;
-    eeId: string;
-    workerInterfaceId: string;
-    checkpointCount: number;
-    outboundInterfaceIds: string[];
-    artifactBindingCount: number;
-  } | null;
+  targets: Array<{ runId: string; chatInterfaceId: string; title: string }>;
   cloneEligible: boolean;
   template: boolean;
   inactivityState: InactivityState | null;

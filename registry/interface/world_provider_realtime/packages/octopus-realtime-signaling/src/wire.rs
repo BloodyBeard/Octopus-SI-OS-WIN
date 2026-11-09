@@ -548,6 +548,13 @@ impl LiveClient {
         mut commands: mpsc::Receiver<SidebandCommand>,
         events: mpsc::Sender<SidebandEvent>,
     ) {
+        if events.send(SidebandEvent {
+            call_id: call_id.clone(),
+            event: json!({"type":"octopus.transport.connected"}),
+        }).await.is_err() {
+            let _ = tokio::time::timeout(self.timeout, socket.close(None)).await;
+            return;
+        }
         let mut attempts = 0_u32;
         let mut auth_changes = tokio::time::interval(Duration::from_secs(1));
         auth_changes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
