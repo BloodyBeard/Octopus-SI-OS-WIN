@@ -332,6 +332,9 @@ mod tests {
         .is_err());
     }
 
+    // Unix permissions and flock: the desktop device lock is the macOS
+    // driver's, and its root's access is checked by mode bits.
+    #[cfg(unix)]
     #[test]
     fn device_locks_stay_inside_their_declared_roots_and_refuse_missing_or_unusable_roots() {
         use std::os::fd::AsRawFd;

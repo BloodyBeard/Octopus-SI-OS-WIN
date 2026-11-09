@@ -201,6 +201,7 @@ fn run_up() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(unix)]
 const OPEN_FILE_LIMIT: u64 = 10240;
 
 #[cfg(unix)]

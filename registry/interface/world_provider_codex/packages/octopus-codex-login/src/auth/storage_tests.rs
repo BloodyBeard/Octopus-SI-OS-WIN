@@ -7,7 +7,6 @@ fn api_key_auth(key: &str) -> AuthDotJson {
         .expect("api-key auth.json must parse")
 }
 
-#[cfg(unix)]
 #[test]
 fn writers_through_a_linked_home_serialize_on_the_store_auth_lock() {
     let root = tempfile::tempdir().expect("tempdir");

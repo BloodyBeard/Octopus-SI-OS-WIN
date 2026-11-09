@@ -276,6 +276,7 @@ pub(crate) fn create_auth_storage(
     }
 }
 
-#[cfg(test)]
+// Every test here needs Unix symlinks or file locks.
+#[cfg(all(test, unix))]
 #[path = "storage_tests.rs"]
 mod tests;

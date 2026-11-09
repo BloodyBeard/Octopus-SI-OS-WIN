@@ -1403,6 +1403,7 @@ impl ImportedExecutableVerification {
                 path.display()
             )
         };
+        #[cfg(unix)]
         let observed_before_read = SystemTime::now();
         let mut options = std::fs::OpenOptions::new();
         options.read(true);

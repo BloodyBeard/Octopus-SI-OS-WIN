@@ -470,6 +470,7 @@ fn anchor_rel(anchor: &AbsPath, rel: &Path) -> Result<AbsPath, WorkerEnvError> {
     AbsPath::new(&anchor.as_path().join(rel))
 }
 
-#[cfg(test)]
+// Every test here needs Unix symlinks or file locks.
+#[cfg(all(test, unix))]
 #[path = "workspace_driver_tests.rs"]
 mod tests;

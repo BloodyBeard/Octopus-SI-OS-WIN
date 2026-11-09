@@ -124,11 +124,11 @@ fn opencodex_reads_the_interface_local_store_for_owner_and_task_interfaces() {
 
 #[test]
 fn opencodex_task_copy_reads_setup_values_from_its_credential_owner() {
-    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let owner = root.path().join("world_provider_custom");
-    std::fs::create_dir(&owner).unwrap();
-    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Owner-only: mode 0700, or on Windows a protected access list that the
+    // environment file below inherits.
+    octopus_private_fs::create_private_dir(&owner).unwrap();
     let document = serde_json::json!({
         "schema_version": 1,
         "interface": "world_provider_custom",
@@ -140,7 +140,11 @@ fn opencodex_task_copy_reads_setup_values_from_its_credential_owner() {
     });
     let environment = owner.join("environment.json");
     std::fs::write(&environment, serde_json::to_vec(&document).unwrap()).unwrap();
-    std::fs::set_permissions(&environment, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&environment, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let mut descriptor: InterfaceDescriptor = serde_json::from_str(include_str!(
         "../../../../../world_provider_custom/interface.json"
     ))
@@ -183,8 +187,12 @@ fn opencodex_task_copy_reads_setup_values_from_its_credential_owner() {
             .as_deref(),
         Some("test-custom-key")
     );
-    std::fs::set_permissions(&environment, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(PrivateValues::resolve(&ctx, &descriptor, &transport, &config).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&environment, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(PrivateValues::resolve(&ctx, &descriptor, &transport, &config).is_err());
+    }
 }
 
 #[test]

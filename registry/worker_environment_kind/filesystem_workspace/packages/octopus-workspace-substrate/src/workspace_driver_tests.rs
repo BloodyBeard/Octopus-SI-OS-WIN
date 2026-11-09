@@ -30,7 +30,6 @@ fn workspace_wek_json() -> Vec<u8> {
     .unwrap()
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn direct_workspace_room_supports_non_git_roots_and_refuses_symlink_escape() {
     use std::os::unix::fs::symlink;
@@ -108,7 +107,6 @@ async fn direct_workspace_room_supports_non_git_roots_and_refuses_symlink_escape
     assert!(!outside_root.join("created.txt").exists());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn direct_workspace_room_admits_an_explicit_additional_filesystem_root() {
     use std::os::unix::fs::symlink;

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -381,21 +380,23 @@ fn create_record<T: Serialize>(path: &Path, record: &T) -> Result<bool, String> 
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("operator approval store is not a private directory".into());
     }
-    if metadata.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    #[cfg(windows)]
+    if !octopus_private_fs::is_owner_only(parent).map_err(|error| error.to_string())? {
+        octopus_private_fs::windows::make_dir_owner_only(parent).map_err(|error| error.to_string())?;
     }
     let bytes = serde_json::to_vec(record).map_err(|error| error.to_string())?;
     if bytes.len() as u64 > RECORD_LIMIT {
         return Err("operator approval record exceeds its byte bound".into());
     }
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    {
+    let mut file = match octopus_private_fs::create_private_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(format!("operator approval record cannot be created: {error}")),
@@ -403,20 +404,21 @@ fn create_record<T: Serialize>(path: &Path, record: &T) -> Result<bool, String> 
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
         .map_err(|error| error.to_string())?;
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| error.to_string())?;
+    octopus_private_fs::sync_directory(parent).map_err(|error| error.to_string())?;
     Ok(true)
 }
 
 fn read_record<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+    let mut file = octopus_private_fs::open_read_no_follow(path)
         .map_err(|error| format!("operator approval record is unavailable: {error}"))?;
     let metadata = file.metadata().map_err(|error| error.to_string())?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > RECORD_LIMIT {
+    #[cfg(unix)]
+    let single_link = std::os::unix::fs::MetadataExt::nlink(&metadata) == 1;
+    // Windows reports no link count in `Metadata`; records are created
+    // owner-only, so the private single-link check reads it from the handle.
+    #[cfg(windows)]
+    let single_link = octopus_private_fs::is_private_single_link_file(&file).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || !single_link || metadata.len() > RECORD_LIMIT {
         return Err("operator approval record must be a bounded single-link file".into());
     }
     let mut bytes = Vec::new();
